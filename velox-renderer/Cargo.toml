@@ -1,0 +1,9 @@
+[package]
+name = "velox-renderer"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+winit       = "0.28"
+wgpu        = "0.16"
+skia-safe   = { version = "0.52", features = ["gl", "egl"] }

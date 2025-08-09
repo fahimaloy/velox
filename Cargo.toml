@@ -1,0 +1,12 @@
+[workspace]
+resolver = "3"
+members = [
+    "velox-core",
+    "velox-sfc",
+    "velox-dom",
+    "velox-renderer",
+    "velox-style",
+    "velox-cli",
+    "examples/todo",
+    "examples/gallery",
+]

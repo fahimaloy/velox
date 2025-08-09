@@ -1,0 +1,8 @@
+[package]
+name = "velox-style"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+cssparser = "0.29"
+selectors = "0.23"
