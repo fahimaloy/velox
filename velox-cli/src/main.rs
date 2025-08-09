@@ -1,7 +1,13 @@
 use anyhow::{Context, Result};
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use std::fs;
 use std::path::{Path, PathBuf};
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum EmitMode {
+    Stub,
+    Render,
+}
 
 #[derive(Parser)]
 #[command(name = "velox", version, about = "Velox CLI")]
@@ -12,29 +18,35 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Build a .vue-like Single File Component into a Rust stub.
+    /// Build a .vx/.vue Single File Component into Rust.
     Build {
-        /// Path to .vue file
+        /// Path to .vx/.vue file
         input: PathBuf,
         /// Output directory (default: target/velox-gen)
         #[arg(long)]
         out_dir: Option<PathBuf>,
+        /// What to emit: stub constants or a render() function
+        #[arg(long, value_enum, default_value_t = EmitMode::Stub)]
+        emit: EmitMode,
     },
 }
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.command {
-        Commands::Build { input, out_dir } => build_cmd(&input, out_dir.as_deref())?,
+        Commands::Build {
+            input,
+            out_dir,
+            emit,
+        } => build_cmd(&input, out_dir.as_deref(), emit)?,
     }
     Ok(())
 }
 
-fn build_cmd(input: &Path, out_dir: Option<&Path>) -> Result<()> {
+fn build_cmd(input: &Path, out_dir: Option<&Path>, emit: EmitMode) -> Result<()> {
     let src =
         fs::read_to_string(input).with_context(|| format!("failed to read {}", input.display()))?;
 
-    // parse_sfc returns Result<_, String>; map it into anyhow::Error
     let sfc = velox_sfc::parse_sfc(&src).map_err(|e| anyhow::anyhow!(e))?;
 
     let name = input
@@ -42,7 +54,27 @@ fn build_cmd(input: &Path, out_dir: Option<&Path>) -> Result<()> {
         .and_then(|s| s.to_str())
         .unwrap_or("component");
 
-    let code = velox_sfc::to_stub_rs(&sfc, name);
+    let mut code = String::new();
+
+    match emit {
+        EmitMode::Stub => {
+            code.push_str(&velox_sfc::to_stub_rs(&sfc, name));
+        }
+        EmitMode::Render => {
+            let tpl_src = sfc
+                .template
+                .as_ref()
+                .map(|t| t.content.as_str())
+                .unwrap_or("");
+            let render_fn =
+                velox_sfc::compile_template_to_rs(tpl_src, name).map_err(|e| anyhow::anyhow!(e))?;
+            // Emit both stub constants and render() in one file
+            code.push_str(&velox_sfc::to_stub_rs(&sfc, name));
+            code.push_str("\n");
+            code.push_str(&render_fn);
+            code.push_str("\n");
+        }
+    }
 
     let out_dir = out_dir
         .map(|p| p.to_path_buf())
