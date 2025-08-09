@@ -1,9 +1,20 @@
+
 [package]
 name = "velox-renderer"
 version = "0.1.0"
-edition = "2024"
+edition = "2021"
+publish = false
+
+[features]
+# Build nothing by default. Opt in when you’re ready.
+default = []
+
+# Optional backends
+wgpu = ["dep:winit", "dep:wgpu"]
+skia = ["dep:skia-safe"]
 
 [dependencies]
-winit       = "0.28"
-wgpu        = "0.16"
-skia-safe   = { version = "0.52", features = ["gl", "egl"] }
+# Optional backends (do NOT compile unless feature enabled)
+winit = { version = "0.28", optional = true }
+wgpu = { version = "0.16", optional = true }
+skia-safe = { version = "0.52", features = ["gl", "egl"], optional = true }

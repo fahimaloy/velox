@@ -1,0 +1,11 @@
+<template id="root">
+  <div class="app">{{ count }}</div>
+</template>
+
+<script setup>
+  // rust (setup) goes here later
+</script>
+
+<style scoped>
+  .app { color: red; }
+</style>
