@@ -1,14 +1,27 @@
-pub fn add(left: u64, right: u64) -> u64 {
-    left + right
+//! Renderer crate with optional backends.
+//! No features enabled => stub, compiles fast.
+
+#[cfg(feature = "wgpu")]
+pub mod wgpu_backend {
+    use wgpu as _wgpu;
+    use winit as _winit;
+
+    pub fn init() {
+        // TODO: implement Wayland (winit) + wgpu surface setup
+    }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+#[cfg(feature = "skia")]
+pub mod skia_backend {
+    use skia_safe as _sk;
 
-    #[test]
-    fn it_works() {
-        let result = add(2, 2);
-        assert_eq!(result, 4);
+    pub fn init() {
+        // TODO: implement Skia GPU surface creation (GL/EGL)
     }
+}
+
+/// Stub init used when no backend features are enabled.
+#[cfg(not(any(feature = "wgpu", feature = "skia")))]
+pub fn init() {
+    // Intentionally empty
 }
