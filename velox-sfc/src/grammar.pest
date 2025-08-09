@@ -1,0 +1,26 @@
+// We DO NOT use the special WHITESPACE rule, so there is no auto skipping.
+// Handle spaces explicitly via WS in the rules that need it.
+
+WS = _{ " " | "\t" | "\r" | "\n" }
+
+ident  = @{ (ASCII_ALPHANUMERIC | "_" | "-")+ }
+dq     = @{ "\"" ~ (!"\"" ~ ANY)* ~ "\"" }
+sq     = @{ "'" ~ (!"'" ~ ANY)* ~ "'" }
+quoted =  { dq | sq }
+
+attribute = { ident ~ (WS* ~ "=" ~ WS* ~ quoted)? }
+
+template_open = { "<template" ~ (WS+ ~ attribute)* ~ WS* ~ ">" }
+script_open   = { "<script" ~ (WS+ ~ attribute)* ~ WS* ~ ">" }
+style_open    = { "<style" ~ (WS+ ~ attribute)* ~ WS* ~ ">" }
+
+template_body = @{ (!"</template>" ~ ANY)* }
+script_body   = @{ (!"</script>" ~ ANY)* }
+style_body    = @{ (!"</style>" ~ ANY)* }
+
+template = { template_open ~ template_body ~ "</template>" }
+script   = { script_open ~ script_body ~ "</script>" }
+style    = { style_open ~ style_body ~ "</style>" }
+
+block = { template | script | style }
+file  = { SOI ~ WS* ~ (block ~ WS*)* ~ EOI }
