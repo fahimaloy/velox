@@ -154,25 +154,26 @@ pub use events::Runtime as EventRuntime;
 #[cfg(feature = "wgpu")]
 pub fn run_window(title: &str) {
     use winit::event::{Event, WindowEvent};
-    use winit::event_loop::EventLoop;
+    use winit::event_loop::{ControlFlow, EventLoop};
     use winit::window::WindowBuilder;
 
+    println!("[window] launching '{}'", title);
     let event_loop = EventLoop::new();
-    let _window = WindowBuilder::new()
-        .with_title(title)
-        .build(&event_loop)
-        .expect("create window");
-
-    use winit::event_loop::ControlFlow;
-    let _ = event_loop.run(move |event, _, control_flow| match event {
-        Event::WindowEvent { event: WindowEvent::CloseRequested, .. } => {
-            *control_flow = ControlFlow::Exit;
+    match WindowBuilder::new().with_title(title).build(&event_loop) {
+        Ok(window) => {
+            println!("[window] opened: {}", window.title());
+            let _ = event_loop.run(move |event, _, control_flow| match event {
+                Event::WindowEvent { event: WindowEvent::CloseRequested, .. } => {
+                    *control_flow = ControlFlow::Exit;
+                }
+                Event::MainEventsCleared => {}
+                _ => {}
+            });
         }
-        Event::MainEventsCleared => {
-            // request a redraw; no rendering yet
+        Err(e) => {
+            eprintln!("[window] failed to create window: {}", e);
         }
-        _ => {}
-    });
+    }
 }
 
 #[cfg(feature = "wgpu")]

@@ -9,4 +9,6 @@ members = [
     "velox-cli",
     "examples/todo",
     "examples/gallery",
+
+    "examples/myapp",
 ]
