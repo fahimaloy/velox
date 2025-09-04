@@ -613,11 +613,45 @@ where
             let frame = match surface.get_current_texture() { Ok(f)=>f, Err(wgpu::SurfaceError::Lost)=>{ surface.configure(&device, &config); return; }, Err(_) => return };
             let view = frame.texture.create_view(&wgpu::TextureViewDescriptor::default());
             let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("velox-enc") });
+            // Build and draw quads for all clickable buttons
+            // Compute vnode + layout once for this frame
+            let (frame_vnode_raw, frame_sheet) = make_view(config.width, config.height);
+            let frame_vnode = apply_styles_with_hover(&frame_vnode_raw, &frame_sheet, &|tag, props| hovered && (props.attrs.contains_key("on:click") || tag == "button" || has_class(props, "btn")));
+            fn collect_click_nodes<'a>(vnode: &'a velox_dom::VNode, layout: &velox_dom::layout::LayoutNode, out: &mut Vec<(velox_dom::layout::Rect, &'a velox_dom::Props, &'a [velox_dom::VNode])>) {
+                match vnode {
+                    velox_dom::VNode::Text(_) => {}
+                    velox_dom::VNode::Element { props, children, .. } => {
+                        if props.attrs.contains_key("on:click") { out.push((layout.rect, props, children.as_slice())); }
+                        for (i, ch) in children.iter().enumerate() { if let Some(lc) = layout.children.get(i) { collect_click_nodes(ch, lc, out); } }
+                    }
+                }
+            }
+            let layout2 = velox_dom::layout::compute_layout(&frame_vnode, config.width as i32, config.height as i32);
+            let mut buttons: Vec<(velox_dom::layout::Rect, &velox_dom::Props, &[velox_dom::VNode])> = Vec::new();
+            collect_click_nodes(&frame_vnode, &layout2, &mut buttons);
+            let mut verts_all: Vec<Vertex> = Vec::with_capacity(buttons.len() * 6);
+            for (rect, props, _) in &buttons {
+                let style_str = props.attrs.get("style").map(|s| s.as_str());
+                let color = parse_color(style_str, "background", [0.2,0.5,0.8,1.0]);
+                let (x0,y0,x1,y1) = (rect.x as f32, rect.y as f32, (rect.x+rect.w) as f32, (rect.y+rect.h) as f32);
+                let to = |x: f32, y: f32| -> [f32;2] { [ (x / config.width as f32) * 2.0 - 1.0, 1.0 - (y / config.height as f32) * 2.0 ] };
+                let (r,g,b) = (color[0], color[1], color[2]);
+                verts_all.push(Vertex{pos:to(x0,y0),color:[r,g,b]});
+                verts_all.push(Vertex{pos:to(x1,y0),color:[r,g,b]});
+                verts_all.push(Vertex{pos:to(x1,y1),color:[r,g,b]});
+                verts_all.push(Vertex{pos:to(x0,y0),color:[r,g,b]});
+                verts_all.push(Vertex{pos:to(x1,y1),color:[r,g,b]});
+                verts_all.push(Vertex{pos:to(x0,y1),color:[r,g,b]});
+            }
             {
                 let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor { label: Some("velox-pass"), color_attachments: &[Some(wgpu::RenderPassColorAttachment { view: &view, resolve_target: None, ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color { r: bg_color[0] as f64, g: bg_color[1] as f64, b: bg_color[2] as f64, a: bg_color[3] as f64 }), store: true } })], depth_stencil_attachment: None });
                 rpass.set_pipeline(&pipeline);
-                rpass.set_vertex_buffer(0, vbuf.slice(..));
-                rpass.draw(0..6, 0..1);
+                if !verts_all.is_empty() {
+                    let quad_buf = device.create_buffer(&wgpu::BufferDescriptor { label: Some("velox-quads"), size: (verts_all.len()*std::mem::size_of::<Vertex>()) as u64, usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
+                    queue.write_buffer(&quad_buf, 0, bytemuck::cast_slice(&verts_all));
+                    rpass.set_vertex_buffer(0, quad_buf.slice(..));
+                    rpass.draw(0..(verts_all.len() as u32), 0..1);
+                }
             }
             // draw texts from vnode: button label and count using their own styles
             if let Some((ref mut glyph_brush, ref mut staging_belt)) = glyph {
