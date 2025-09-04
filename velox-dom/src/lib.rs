@@ -54,6 +54,8 @@ pub fn text(t: impl Into<String>) -> VNode {
     VNode::Text(t.into())
 }
 
+pub mod diff;
+
 #[cfg(test)]
 mod tests {
     use super::*;
