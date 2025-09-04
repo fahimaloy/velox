@@ -147,3 +147,58 @@ pub fn new_selected_renderer() -> SelectedRenderer {
         StubRenderer
     }
 }
+
+// Minimal window runner using winit when `wgpu` feature is enabled.
+#[cfg(feature = "wgpu")]
+pub fn run_window(title: &str) {
+    use winit::event::{Event, WindowEvent};
+    use winit::event_loop::EventLoop;
+    use winit::window::WindowBuilder;
+
+    let event_loop = EventLoop::new();
+    let _window = WindowBuilder::new()
+        .with_title(title)
+        .build(&event_loop)
+        .expect("create window");
+
+    use winit::event_loop::ControlFlow;
+    let _ = event_loop.run(move |event, _, control_flow| match event {
+        Event::WindowEvent { event: WindowEvent::CloseRequested, .. } => {
+            *control_flow = ControlFlow::Exit;
+        }
+        Event::MainEventsCleared => {
+            // request a redraw; no rendering yet
+        }
+        _ => {}
+    });
+}
+
+#[cfg(feature = "wgpu")]
+pub fn run_counter_window() {
+    use winit::event::{ElementState, Event, MouseButton, WindowEvent};
+    use winit::event_loop::{ControlFlow, EventLoop};
+    use winit::window::WindowBuilder;
+
+    let event_loop = EventLoop::new();
+    let window = WindowBuilder::new()
+        .with_title("Velox - Count: 0 (click to increment)")
+        .build(&event_loop)
+        .expect("create window");
+
+    let mut count: i32 = 0;
+    let mut update_title = move |c: i32| {
+        window.set_title(&format!("Velox - Count: {} (click to increment)", c));
+    };
+
+    let _ = event_loop.run(move |event, _, control_flow| match event {
+        Event::WindowEvent { event: WindowEvent::CloseRequested, .. } => {
+            *control_flow = ControlFlow::Exit;
+        }
+        Event::WindowEvent { event: WindowEvent::MouseInput { state: ElementState::Pressed, button: MouseButton::Left, .. }, .. } => {
+            count += 1;
+            update_title(count);
+        }
+        Event::MainEventsCleared => {}
+        _ => {}
+    });
+}

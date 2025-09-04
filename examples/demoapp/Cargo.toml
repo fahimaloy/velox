@@ -1,0 +1,10 @@
+[package]
+name = "demoapp"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+velox-core = { path = "../../velox-core" }
+velox-dom = { path = "../../velox-dom" }
+velox-style = { path = "../../velox-style" }
+velox-renderer = { path = "../../velox-renderer", features = ["wgpu"] }
