@@ -583,37 +583,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "demoapp2"
-version = "0.1.0"
-dependencies = [
- "velox-core",
- "velox-dom",
- "velox-renderer",
- "velox-style",
-]
-
-[[package]]
-name = "demoapp3"
-version = "0.1.0"
-dependencies = [
- "velox-core",
- "velox-dom",
- "velox-renderer",
- "velox-style",
-]
-
-[[package]]
-name = "demoapp4"
-version = "0.1.0"
-dependencies = [
- "velox-cli",
- "velox-core",
- "velox-dom",
- "velox-renderer",
- "velox-style",
-]
-
-[[package]]
 name = "derive_more"
 version = "0.99.20"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1341,16 +1310,6 @@ dependencies = [
  "log",
  "wasi 0.11.1+wasi-snapshot-preview1",
  "windows-sys 0.48.0",
-]
-
-[[package]]
-name = "myapp"
-version = "0.1.0"
-dependencies = [
- "velox-core",
- "velox-dom",
- "velox-renderer",
- "velox-style",
 ]
 
 [[package]]

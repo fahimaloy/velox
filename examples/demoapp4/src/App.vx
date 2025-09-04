@@ -1,6 +1,0 @@
-<template>
-  <div class="app">0</div>
-</template>
-<style>
-  .app { font-weight: bold; }
-</style>

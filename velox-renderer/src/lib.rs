@@ -148,6 +148,8 @@ pub fn new_selected_renderer() -> SelectedRenderer {
     }
 }
 
+pub use events::Runtime as EventRuntime;
+
 // Minimal window runner using winit when `wgpu` feature is enabled.
 #[cfg(feature = "wgpu")]
 pub fn run_window(title: &str) {
