@@ -4,6 +4,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 use std::process::{Command, Stdio, Child};
+use std::io::{self, Read};
+use std::sync::mpsc;
 use std::thread;
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
@@ -168,6 +170,25 @@ pub fn dev_app(pkg: &str, watch_dir: &Path) -> Result<()> {
     }
 
     let mut child: Option<Child> = None;
+    // command channel: 'r' => full reload, 'q' => quit
+    let (tx, rx) = mpsc::channel::<char>();
+    thread::spawn(move || {
+        // Read single chars from stdin
+        let mut buf = [0u8; 1];
+        let stdin = io::stdin();
+        let mut handle = stdin.lock();
+        loop {
+            if let Ok(n) = handle.read(&mut buf) {
+                if n == 0 { break; }
+                let ch = buf[0] as char;
+                if ch == 'r' || ch == 'R' || ch == 'q' || ch == 'Q' {
+                    let _ = tx.send(ch.to_ascii_lowercase());
+                }
+            } else {
+                break;
+            }
+        }
+    });
     let mut last = latest_mtime(watch_dir);
 
     let mut spawn = || -> std::io::Result<Child> {
@@ -179,14 +200,44 @@ pub fn dev_app(pkg: &str, watch_dir: &Path) -> Result<()> {
             .spawn()
     };
 
+    println!("[dev] Watching {} (press 'r' to reload, 'q' to quit)", watch_dir.display());
     child = Some(spawn()?);
     loop {
-        thread::sleep(Duration::from_millis(800));
+        // poll filesystem change
+        thread::sleep(Duration::from_millis(300));
         let now = latest_mtime(watch_dir);
+        // handle stdin commands non-blocking
+        if let Ok(cmd) = rx.try_recv() {
+            match cmd {
+                'r' => {
+                    println!("[dev] Manual reload triggered (r)");
+                    if let Some(mut c) = child.take() { let _ = c.kill(); let _ = c.wait(); }
+                    print!("[dev] Reloading");
+                    io::Write::flush(&mut io::stdout())?;
+                    // simple progress dots
+                    for _ in 0..5 { print!("."); io::Write::flush(&mut io::stdout())?; thread::sleep(Duration::from_millis(120)); }
+                    println!("");
+                    child = Some(spawn()?);
+                    println!("[dev] Reloaded");
+                }
+                'q' => {
+                    println!("[dev] Quit requested");
+                    if let Some(mut c) = child.take() { let _ = c.kill(); let _ = c.wait(); }
+                    break;
+                }
+                _ => {}
+            }
+        }
         if now > last {
+            println!("[dev] Change detected — reloading");
             last = now;
             if let Some(mut c) = child.take() { let _ = c.kill(); let _ = c.wait(); }
+            print!("[dev] Rebuilding");
+            io::Write::flush(&mut io::stdout())?;
+            for _ in 0..5 { print!("."); io::Write::flush(&mut io::stdout())?; thread::sleep(Duration::from_millis(120)); }
+            println!("");
             child = Some(spawn()?);
+            println!("[dev] Restarted");
         }
         if let Some(c) = &mut child {
             if let Some(status) = c.try_wait()? {
