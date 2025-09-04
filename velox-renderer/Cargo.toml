@@ -21,6 +21,7 @@ winit = { version = "0.28", optional = true }
 wgpu = { version = "0.16", optional = true }
 skia-safe = { version = "0.52", features = ["gl", "egl"], optional = true }
 velox-dom = { path = "../velox-dom" }
+velox-style = { path = "../velox-style" }
 pollster = "0.3"
 bytemuck = { version = "1", features = ["derive"] }
 wgpu_glyph = "0.20"

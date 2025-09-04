@@ -89,22 +89,24 @@ velox-cli = {{ path = "../../velox-cli" }}
     let app_vx = r#"<template>
   <div class="app">
     <button class="btn" @click="inc">Increment</button>
+    <button class="btn" @click="dec">Decrement</button>
     <div class="count">{{ count }}</div>
   </div>
 </template>
 <script setup>
-use std::cell::Cell;
-pub struct State { pub count: Cell<i32>, pub title: Cell<String> }
+use std::cell::{Cell, RefCell};
+pub struct State { pub count: Cell<i32>, pub title: RefCell<String> }
 impl State {
-  pub fn new() -> Self { Self { count: Cell::new(0), title: Cell::new("Velox App".into()) } }
-  pub fn inc(&self) { let v = self.count.get()+1; self.count.set(v); self.title.set(format!("Velox App — {}", v)); }
+  pub fn new() -> Self { Self { count: Cell::new(0), title: RefCell::new("Velox App".into()) } }
+  pub fn inc(&self) { let v = self.count.get()+1; self.count.set(v); *self.title.borrow_mut() = format!("Velox App — {}", v); }
+  pub fn dec(&self) { let v = self.count.get()-1; self.count.set(v); *self.title.borrow_mut() = format!("Velox App — {}", v); }
 }
 </script>
 <style>
   .app { width: 100%; height: 100%; display: block; background: #101216; color: #e6edf3; font-size: 18px; }
-  .btn { width: 200px; height: 80px; background: #3478f6; color: white; }
+  .btn { width: 200px; height: 80px; background: #3478f6; color: #ffffff; font-size: 18px; font-weight: bold; line-height: 80px; }
   .btn:hover { background: #4a8df8; }
-  .count { margin-top: 12px; }
+  .count { margin-top: 12px; font-size: 16px; text-decoration: underline; line-height: 20px; }
 </style>
 "#;
     fs::write(src.join("App.vx"), app_vx).context("write App.vx")?;
@@ -119,25 +121,23 @@ impl State {
 
     // main.rs includes generated file and calls render(); applies styles and mounts
     let main_rs = r#"use velox_dom::VNode;
-use velox_style::{Stylesheet, apply_styles};
+use velox_style::Stylesheet;
 use velox_renderer::Renderer;
 
 include!(concat!(env!("OUT_DIR"), "/App.rs"));
 
 fn main() {
-    use std::cell::Cell;
-    use std::rc::Rc;
-    let count = Rc::new(Cell::new(0));
-    // view factory uses current count value
-    let make_view = { let count = count.clone(); move |w: u32, _h: u32| -> VNode {
-        let c = count.clone();
-        let vnode = render_with(|name| if name == "count" { c.get().to_string() } else { String::new() });
+    // Create component state from script section
+    let state = app::script_rs::State::new();
+    let state_ref = std::sync::Arc::new(state);
+    let make_view = { let state = state_ref.clone(); move |_w: u32, _h: u32| -> (VNode, Stylesheet) {
+        let vnode = render_with(|name| if name == "count" { state.count.get().to_string() } else { String::new() });
         let sheet = Stylesheet::parse(app::STYLE);
-        apply_styles(&vnode, &sheet)
+        (vnode, sheet)
     }};
-    // on_click increments count and triggers re-render through the window loop
-    let on_click = { let count = count.clone(); move || { count.set(count.get() + 1); } };
-    velox_renderer::run_window_vnode("Velox App", make_view, on_click);
+    let on_event = { let state = state_ref.clone(); move |name: &str| { match name { "inc" => state.inc(), "dec" => state.dec(), _ => {} } } };
+    let get_title = { let state = state_ref.clone(); move || state.title.borrow().to_string() };
+    velox_renderer::run_window_vnode("Velox App", make_view, on_event, get_title);
 }
 "#;
     fs::write(src.join("main.rs"), main_rs).context("write main.rs")?;
