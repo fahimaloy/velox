@@ -86,20 +86,54 @@ pub fn compute_layout(node: &VNode, viewport_w: i32, viewport_h: i32) -> LayoutN
                 let content_y_start = elem_y + pt;
                 let content_w = (rect_w - pl - pr).max(0);
 
+                // Layout strategy: block (default) or flex
+                let display = props.attrs.get("style").and_then(|s| {
+                    for decl in s.split(';') { let d=decl.trim(); if d.is_empty(){continue;} if let Some((k,v))=d.split_once(':'){ if k.trim()=="display" { return Some(v.trim()); } } }
+                    None
+                }).unwrap_or("block");
+
                 let mut laid_children = Vec::new();
-                let mut cur_y = content_y_start;
-                for c in children {
-                    let child_ln = at(c, content_x, cur_y, content_w, (avail_h - pt - pb).max(0));
-                    // increment cur_y by child's own outer height (we approximate bottom margin via its style)
-                    let child_style = match c { VNode::Element { props, .. } => props.attrs.get("style").map(|s| s.as_str()), _ => None };
-                    let (_cml, _cmr, _cmt, cmb) = style_box_sides(child_style, "margin");
-                    cur_y = child_ln.rect.y + child_ln.rect.h + cmb;
-                    laid_children.push(child_ln);
+                if display == "flex" {
+                    // Minimal flexbox: direction (row|column), gap, align-items (start|center|end), justify-content (flex-start|center|space-between)
+                    let flex_dir = props.attrs.get("style").and_then(|s| {
+                        for decl in s.split(';') { let d=decl.trim(); if d.is_empty(){continue;} if let Some((k,v))=d.split_once(':'){ if k.trim()=="flex-direction" { return Some(v.trim()); } } }
+                        None
+                    }).unwrap_or("row");
+                    let gap = style_lookup_len(style, "gap", 0).unwrap_or(0);
+                    let mut cursor_x = content_x;
+                    let mut cursor_y = content_y_start;
+                    let mut line_max_h = 0;
+                    if flex_dir == "column" {
+                        for c in children {
+                            let child_ln = at(c, content_x, cursor_y, content_w, (avail_h - pt - pb).max(0));
+                            cursor_y = child_ln.rect.y + child_ln.rect.h + gap;
+                            laid_children.push(child_ln);
+                        }
+                    } else { // row
+                        for c in children {
+                            let child_ln = at(c, cursor_x, content_y_start, content_w, (avail_h - pt - pb).max(0));
+                            cursor_x = child_ln.rect.x + child_ln.rect.w + gap;
+                            if child_ln.rect.h > line_max_h { line_max_h = child_ln.rect.h; }
+                            laid_children.push(child_ln);
+                        }
+                        // set all y to top for now (no align-items support beyond start)
+                        for ln in &mut laid_children { ln.rect.y = content_y_start; }
+                    }
+                } else { // block
+                    let mut cur_y = content_y_start;
+                    for c in children {
+                        let child_ln = at(c, content_x, cur_y, content_w, (avail_h - pt - pb).max(0));
+                        // increment cur_y by child's own outer height (we approximate bottom margin via its style)
+                        let child_style = match c { VNode::Element { props, .. } => props.attrs.get("style").map(|s| s.as_str()), _ => None };
+                        let (_cml, _cmr, _cmt, cmb) = style_box_sides(child_style, "margin");
+                        cur_y = child_ln.rect.y + child_ln.rect.h + cmb;
+                        laid_children.push(child_ln);
+                    }
                 }
 
                 // Height: declared or content height + paddings
                 let declared_h = style_lookup_len(style, "height", avail_h);
-                let content_h = (cur_y - content_y_start).max(0);
+                let content_h = if let Some(last) = laid_children.last() { (last.rect.y + last.rect.h - content_y_start).max(0) } else { 0 };
                 let rect_h = declared_h.unwrap_or(content_h + pb);
 
                 LayoutNode { rect: Rect { x: elem_x, y: elem_y, w: rect_w, h: rect_h }, children: laid_children }
