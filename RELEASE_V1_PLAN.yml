@@ -22,7 +22,7 @@ milestones:
   - id: styles-layout-basic-v1
     desc: Basic CSS (tag/class/.hover) and block layout semantics
     accept: "apply_styles supports :hover state; simple block flow"
-    status: pending
+    status: done
 
   - id: sfc-pipeline-v1
     desc: Use compiled render() from App.vx in app main
