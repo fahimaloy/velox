@@ -1,7 +1,6 @@
-use anyhow::{Context, Result};
+use anyhow::Result;
 use clap::{Parser, Subcommand};
-use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 #[derive(Parser)]
 #[command(name = "velox", version, about = "Velox CLI")]
@@ -12,48 +11,45 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Build a .vue-like Single File Component into a Rust stub.
+    /// Build a .vx/.vue Single File Component into Rust.
     Build {
-        /// Path to .vue file
+        /// Path to .vx/.vue file
         input: PathBuf,
         /// Output directory (default: target/velox-gen)
         #[arg(long)]
         out_dir: Option<PathBuf>,
+        /// What to emit: stub constants or a render() function
+        #[arg(long, value_enum, default_value_t = velox_cli::EmitMode::Stub)]
+        emit: velox_cli::EmitMode,
     },
+    /// Initialize a new Velox app under examples/<name>
+    Init { name: String },
+    /// Run an app package (cargo run -p <pkg>)
+    Run { package: String },
+    /// Build an app package (cargo build -p <pkg>)
+    BuildApp { package: String, #[arg(long)] release: bool },
+    /// Dev server: restart app on file changes (polling)
+    Dev { package: String, #[arg(long)] watch: Option<PathBuf> },
 }
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.command {
-        Commands::Build { input, out_dir } => build_cmd(&input, out_dir.as_deref())?,
+        Commands::Build {
+            input,
+            out_dir,
+            emit,
+        } => velox_cli::build_cmd(&input, out_dir.as_deref(), emit)?,
+        Commands::Init { name } => {
+            let path = velox_cli::init_app(&name)?;
+            println!("Initialized app at {}", path.display());
+        }
+        Commands::Run { package } => velox_cli::run_app(&package)?,
+        Commands::BuildApp { package, release } => velox_cli::build_app(&package, release)?,
+        Commands::Dev { package, watch } => {
+            let dir = watch.unwrap_or_else(|| PathBuf::from(format!("examples/{}", package)));
+            velox_cli::dev_app(&package, &dir)?;
+        }
     }
-    Ok(())
-}
-
-fn build_cmd(input: &Path, out_dir: Option<&Path>) -> Result<()> {
-    let src =
-        fs::read_to_string(input).with_context(|| format!("failed to read {}", input.display()))?;
-
-    // parse_sfc returns Result<_, String>; map it into anyhow::Error
-    let sfc = velox_sfc::parse_sfc(&src).map_err(|e| anyhow::anyhow!(e))?;
-
-    let name = input
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or("component");
-
-    let code = velox_sfc::to_stub_rs(&sfc, name);
-
-    let out_dir = out_dir
-        .map(|p| p.to_path_buf())
-        .unwrap_or_else(|| PathBuf::from("target/velox-gen"));
-    fs::create_dir_all(&out_dir)
-        .with_context(|| format!("failed to create {}", out_dir.display()))?;
-
-    let out_path = out_dir.join(format!("{}.rs", name));
-    fs::write(&out_path, code)
-        .with_context(|| format!("failed to write {}", out_path.display()))?;
-
-    println!("Generated: {}", out_path.display());
     Ok(())
 }

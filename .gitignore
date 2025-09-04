@@ -36,3 +36,8 @@ dist/
 coverage/
 *.profraw
 *.profdata
+
+# Local planning file (not for VCS)
+PROJECT_TODOS.yml
+RELEASE_V1_PLAN.yml
+AGENTS.md

@@ -1,0 +1,8 @@
+#!/usr/bin/env sh
+# Reject commit messages containing prohibited terms.
+MSG_FILE="$1"
+if grep -Eiq '\b(AI|Codex)\b' "$MSG_FILE"; then
+  echo "Error: Commit message contains prohibited terms ('AI' or 'Codex')." 1>&2
+  exit 1
+fi
+exit 0
