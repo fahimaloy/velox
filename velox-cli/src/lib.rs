@@ -101,19 +101,27 @@ velox-cli = {{ path = "../../velox-cli" }}
 "#;
     fs::write(root.join("build.rs"), build_rs).context("write build.rs")?;
 
-    // main.rs includes generated file and calls render(); also opens a window
+    // main.rs includes generated file and calls render(); applies styles and mounts
     let main_rs = r#"use velox_dom::VNode;
+use velox_style::{Stylesheet, apply_styles};
+use velox_renderer::Renderer;
 
 include!(concat!(env!("OUT_DIR"), "/App.rs"));
 
 fn main() {
-    std::thread::spawn(|| velox_renderer::run_counter_window());
-    let v = render();
-    if let VNode::Element { children, .. } = &v {
-        if let VNode::Text(t) = &children[0] {
-            println!("rendered: {}", t);
-        }
-    }
+    // Open a basic window
+    std::thread::spawn(|| velox_renderer::run_window("Velox App"));
+
+    // Render VNode from compiled template
+    let vnode = render();
+    // Apply styles from the SFC style block
+    let sheet = Stylesheet::parse(STYLE);
+    let styled = apply_styles(&vnode, &sheet);
+
+    // Mount using the selected renderer
+    let renderer = velox_renderer::new_selected_renderer();
+    let tree = renderer.mount(&styled);
+    println!("mounted nodes={}, texts={}", tree.node_count, tree.text_count);
 }
 "#;
     fs::write(src.join("main.rs"), main_rs).context("write main.rs")?;
