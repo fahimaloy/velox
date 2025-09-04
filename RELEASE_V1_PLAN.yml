@@ -7,7 +7,7 @@ milestones:
   - id: cli-init-scaffold-v1
     desc: CLI scaffolds runnable app with build.rs compiling App.vx
     accept: "cargo run -p <app> opens a window; build.rs compiles App.vx; render() callable"
-    status: pending
+    status: done
 
   - id: renderer-window-v1
     desc: Open GUI window and handle close (winit)
@@ -17,7 +17,7 @@ milestones:
   - id: events-basic-v1
     desc: Map click/dblclick/hover from winit to event registry
     accept: "dispatch called on click/dblclick; hover enter/leave tracked"
-    status: pending
+    status: done
 
   - id: styles-layout-basic-v1
     desc: Basic CSS (tag/class/.hover) and block layout semantics
