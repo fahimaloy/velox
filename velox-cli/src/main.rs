@@ -25,11 +25,11 @@ enum Commands {
     /// Initialize a new Velox app under examples/<name>
     Init { name: String },
     /// Run an app package (cargo run -p <pkg>)
-    Run { #[arg(short, long)] package: String },
+    Run { package: String },
     /// Build an app package (cargo build -p <pkg>)
-    BuildApp { #[arg(short, long)] package: String, #[arg(long)] release: bool },
+    BuildApp { package: String, #[arg(long)] release: bool },
     /// Dev server: restart app on file changes (polling)
-    Dev { #[arg(short, long)] package: String, #[arg(long)] watch: Option<PathBuf> },
+    Dev { package: String, #[arg(long)] watch: Option<PathBuf> },
 }
 
 fn main() -> Result<()> {

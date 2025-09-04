@@ -111,34 +111,61 @@ pub fn apply_styles_with_hover<F>(node: &VNode, sheet: &Stylesheet, is_hovered: 
 where
     F: Fn(&str, &Props) -> bool,
 {
-    match node {
-        VNode::Text(_) => node.clone(),
-        VNode::Element { tag, props, children } => {
-            // Collect matching rules and merge
-            let class_attr = props.attrs.get("class").map(|s| s.as_str());
-            let hovered = is_hovered(tag, props);
-            let mut acc: HashMap<String,String> = HashMap::new();
-            // Class rules override tag rules when same prop appears later here.
-            // We apply in two passes: tag then class, preserving source order within each.
-            for pass in ["tag", "class"] {
-                for rule in &sheet.rules {
-                    let is_tag = matches!(rule.selector.kind, SimpleSelectorKind::Tag);
-                    let pass_tag = (pass == "tag" && is_tag) || (pass == "class" && !is_tag);
-                    if !pass_tag { continue; }
-                    if matches_selector(&rule.selector, tag, class_attr, hovered) {
-                        for (k,v) in &rule.decls {
-                            acc.insert(k.clone(), v.clone());
+    // Cascade and inheritance for a subset of text properties
+    fn filter_inheritable(style: Option<&str>) -> HashMap<String, String> {
+        let mut map = HashMap::new();
+        if let Some(s) = style {
+            for decl in s.split(';') {
+                let d = decl.trim();
+                if d.is_empty() { continue; }
+                if let Some((k, v)) = d.split_once(':') {
+                    let k = k.trim();
+                    let v = v.trim();
+                    match k {
+                        "color" | "font-size" | "font-weight" | "text-decoration" | "line-height" => {
+                            map.insert(k.to_string(), v.to_string());
                         }
+                        _ => {}
                     }
                 }
             }
-            let mut new_props = props.clone();
-            if !acc.is_empty() {
+        }
+        map
+    }
+
+    fn apply_rec<FN>(node: &VNode, sheet: &Stylesheet, is_hovered: &FN, inherited: &HashMap<String, String>) -> VNode
+    where FN: Fn(&str, &Props) -> bool {
+        match node {
+            VNode::Text(_) => node.clone(),
+            VNode::Element { tag, props, children } => {
+                let class_attr = props.attrs.get("class").map(|s| s.as_str());
+                let hovered = is_hovered(tag, props);
+                let mut acc: HashMap<String,String> = inherited.clone();
+                // Apply rules in two passes: tag then class (class overrides tag)
+                for pass in ["tag", "class"] {
+                    for rule in &sheet.rules {
+                        let is_tag = matches!(rule.selector.kind, SimpleSelectorKind::Tag);
+                        let pass_tag = (pass == "tag" && is_tag) || (pass == "class" && !is_tag);
+                        if !pass_tag { continue; }
+                        if matches_selector(&rule.selector, tag, class_attr, hovered) {
+                            for (k, v) in &rule.decls {
+                                acc.insert(k.clone(), v.clone());
+                            }
+                        }
+                    }
+                }
+                // Inline style has highest precedence
+                let mut new_props = props.clone();
                 let merged = merge_styles(new_props.attrs.get("style").map(|s| s.as_str()), &acc);
-                new_props = new_props.set("style", merged);
+                if !merged.is_empty() { new_props = new_props.set("style", merged.clone()); }
+                // Inherit only inheritable props to children
+                let inherit_next = filter_inheritable(Some(&merged));
+                let new_children = children.iter().map(|c| apply_rec(c, sheet, is_hovered, &inherit_next)).collect();
+                VNode::Element { tag: tag.clone(), props: new_props, children: new_children }
             }
-            let new_children = children.iter().map(|c| apply_styles_with_hover(c, sheet, is_hovered)).collect();
-            VNode::Element { tag: tag.clone(), props: new_props, children: new_children }
         }
     }
+
+    let inherited_root: HashMap<String,String> = HashMap::new();
+    apply_rec(node, sheet, is_hovered, &inherited_root)
 }
