@@ -27,7 +27,7 @@ milestones:
   - id: sfc-pipeline-v1
     desc: Use compiled render() from App.vx in app main
     accept: "main calls render() -> VNode; mounts without errors"
-    status: pending
+    status: done
 
   - id: dev-live-reload-v1
     desc: Dev server with live reload (restart on file changes)
