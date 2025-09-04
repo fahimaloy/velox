@@ -1,0 +1,6 @@
+<template>
+  <div class="app">{{ count }}</div>
+</template>
+<style>
+  .app { font-weight: bold; }
+</style>

@@ -22,6 +22,14 @@ enum Commands {
         #[arg(long, value_enum, default_value_t = velox_cli::EmitMode::Stub)]
         emit: velox_cli::EmitMode,
     },
+    /// Initialize a new Velox app under examples/<name>
+    Init { name: String },
+    /// Run an app package (cargo run -p <pkg>)
+    Run { #[arg(short, long)] package: String },
+    /// Build an app package (cargo build -p <pkg>)
+    BuildApp { #[arg(short, long)] package: String, #[arg(long)] release: bool },
+    /// Dev server: restart app on file changes (polling)
+    Dev { #[arg(short, long)] package: String, #[arg(long)] watch: Option<PathBuf> },
 }
 
 fn main() -> Result<()> {
@@ -32,6 +40,16 @@ fn main() -> Result<()> {
             out_dir,
             emit,
         } => velox_cli::build_cmd(&input, out_dir.as_deref(), emit)?,
+        Commands::Init { name } => {
+            let path = velox_cli::init_app(&name)?;
+            println!("Initialized app at {}", path.display());
+        }
+        Commands::Run { package } => velox_cli::run_app(&package)?,
+        Commands::BuildApp { package, release } => velox_cli::build_app(&package, release)?,
+        Commands::Dev { package, watch } => {
+            let dir = watch.unwrap_or_else(|| PathBuf::from(format!("examples/{}", package)));
+            velox_cli::dev_app(&package, &dir)?;
+        }
     }
     Ok(())
 }

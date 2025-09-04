@@ -1,0 +1,51 @@
+version: 1
+title: Velox v1 Release Plan
+status: in_progress
+last_updated: 2025-09-04
+
+milestones:
+  - id: cli-init-scaffold-v1
+    desc: CLI scaffolds runnable app with build.rs compiling App.vx
+    accept: "cargo run -p <app> opens a window; build.rs compiles App.vx; render() callable"
+    status: pending
+
+  - id: renderer-window-v1
+    desc: Open GUI window and handle close (winit)
+    accept: "run_window() opens and closes cleanly"
+    status: done
+
+  - id: events-basic-v1
+    desc: Map click/dblclick/hover from winit to event registry
+    accept: "dispatch called on click/dblclick; hover enter/leave tracked"
+    status: pending
+
+  - id: styles-layout-basic-v1
+    desc: Basic CSS (tag/class/.hover) and block layout semantics
+    accept: "apply_styles supports :hover state; simple block flow"
+    status: pending
+
+  - id: sfc-pipeline-v1
+    desc: Use compiled render() from App.vx in app main
+    accept: "main calls render() -> VNode; mounts without errors"
+    status: pending
+
+  - id: dev-live-reload-v1
+    desc: Dev server with live reload (restart on file changes)
+    accept: "velox dev restarts app on .vx/.rs changes"
+    status: done
+
+  - id: dev-hot-reload-v1
+    desc: Hot reload SFC templates without full restart (if feasible)
+    accept: "template-only change updates view without process restart"
+    status: blocked
+    notes: Requires dynamic code loading or interpreter; plan to iterate post-v1.
+
+  - id: build-app-v1
+    desc: Production build wrapper
+    accept: "velox build-app -p <app> --release succeeds"
+    status: done
+
+  - id: docs-cli-v1
+    desc: Quickstart docs for init/run/dev/build
+    accept: "README snippet added for CLI usage"
+    status: pending
