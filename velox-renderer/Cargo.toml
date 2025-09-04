@@ -11,10 +11,17 @@ default = []
 
 # Optional backends
 wgpu = ["dep:winit", "dep:wgpu"]
-skia = ["dep:skia-safe"]
+# `skia` enables the API surface; `skia-native` pulls the heavy dependency.
+skia = []
+skia-native = ["dep:skia-safe", "skia"]
 
 [dependencies]
 # Optional backends (do NOT compile unless feature enabled)
 winit = { version = "0.28", optional = true }
 wgpu = { version = "0.16", optional = true }
 skia-safe = { version = "0.52", features = ["gl", "egl"], optional = true }
+velox-dom = { path = "../velox-dom" }
+
+[dev-dependencies]
+velox-core = { path = "../velox-core" }
+velox-style = { path = "../velox-style" }

@@ -2565,6 +2565,9 @@ name = "velox-renderer"
 version = "0.1.0"
 dependencies = [
  "skia-safe",
+ "velox-core",
+ "velox-dom",
+ "velox-style",
  "wgpu",
  "winit",
 ]
@@ -2585,6 +2588,7 @@ version = "0.1.0"
 dependencies = [
  "cssparser 0.29.6",
  "selectors",
+ "velox-dom",
 ]
 
 [[package]]
