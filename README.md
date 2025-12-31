@@ -66,3 +66,16 @@ Directive Normalization (SFC templates)
 
 If you want the docs to prefer a canonical style, use `v-if`, `v-else-if`, and `v-else` in examples — these map directly to the normalized directive names used by the compiler.
 
+## Example: `v-if` / `v-else-if` usage
+
+```html
+<template>
+  <div>
+    <p v-if="state == 'a'">Case A</p>
+    <p v-else-if="state == 'b'">Case B</p>
+    <p v-else>Other</p>
+  </div>
+</template>
+
+The parser normalizes `v-elseIf`, `v_elseif`, and other variants to the canonical `else-if` before codegen; codegen emits chained `if { } else if { } else { }` blocks.
+
