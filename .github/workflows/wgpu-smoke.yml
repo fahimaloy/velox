@@ -1,0 +1,46 @@
+name: WGPU Smoke Tests
+
+on:
+  push:
+    branches: [ main, alpha ]
+  pull_request:
+    branches: [ main, alpha ]
+
+jobs:
+  wgpu-smoke:
+    name: Headless WGPU smoke tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libvulkan1 vulkan-utils libwayland-dev libx11-dev libxkbcommon-dev curl ca-certificates
+
+      - name: Download SwiftShader (software Vulkan ICD)
+        run: |
+          SWIFT_URL="https://github.com/google/SwiftShader/releases/download/2024-12-01/SwiftShader-linux-x64-2024-12-01.tar.gz"
+          curl -fsSL "$SWIFT_URL" -o /tmp/swift.tar.gz
+          sudo tar -xzf /tmp/swift.tar.gz -C /opt/swiftshader
+          echo "/opt/swiftshader/lib/libvulkan.so" | sudo tee /etc/ld.so.conf.d/swiftshader.conf
+          sudo ldconfig
+          # expose ICD file for Vulkan loader
+          export SWIFT_ICD="/opt/swiftshader/etc/vulkan/icd.d/10_swiftshader_icd.json"
+          sudo mkdir -p /etc/vulkan/icd.d
+          sudo cp /opt/swiftshader/etc/vulkan/icd.d/10_swiftshader_icd.json /etc/vulkan/icd.d/10_swiftshader_icd.json
+
+      - name: Setup Rust
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+          profile: minimal
+          override: true
+
+      - name: Run velox-renderer wgpu smoke tests
+        env:
+          VK_ICD_FILENAMES: /etc/vulkan/icd.d/10_swiftshader_icd.json
+          WGPU_BACKEND: vulkan
+        run: |
+          cargo test -p velox-renderer --features wgpu -- --ignored --nocapture
