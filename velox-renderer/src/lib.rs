@@ -203,7 +203,7 @@ fn load_system_font() -> Option<ab_glyph::FontArc> {
 pub fn run_window_vnode<F, G, H>(title: &str, mut make_view: F, mut on_event: G, mut get_title: H)
 where
     F: FnMut(u32, u32) -> (velox_dom::VNode, Stylesheet) + 'static,
-    G: FnMut(&str) + 'static,
+    G: FnMut(&str, Option<&str>) + 'static,
     H: FnMut() -> String + 'static,
 {
     use winit::dpi::PhysicalSize;
@@ -378,7 +378,7 @@ where
     let mut btn_handler: Option<String> = None;
     let mut btn_pad_left: f32 = 0.0;
     let mut btn_pad_top: f32 = 0.0;
-    let mut click_targets: Vec<(f32,f32,f32,f32,String)> = Vec::new();
+    let mut click_targets: Vec<(f32,f32,f32,f32,String, Option<String>)> = Vec::new();
 
     let make_vertices = |w: u32, h: u32, r: (f32, f32, f32, f32), color: [f32; 4]| -> [Vertex; 6] {
         let (x0, y0, x1, y1) = r;
@@ -525,7 +525,7 @@ where
         btn_handler: &mut Option<String>,
         btn_pad_left: &mut f32,
         btn_pad_top: &mut f32,
-        click_targets: &mut Vec<(f32,f32,f32,f32,String)>,
+        click_targets: &mut Vec<(f32,f32,f32,f32,String, Option<String>)>,
         queue: &wgpu::Queue,
         vbuf: &wgpu::Buffer,
     ) {
@@ -548,12 +548,14 @@ where
             _ => false,
         };
         // collect all clickable targets for event hit testing
-        fn collect_clicks(vnode: &velox_dom::VNode, layout: &velox_dom::layout::LayoutNode, out: &mut Vec<(f32,f32,f32,f32,String)>) {
+        fn collect_clicks(vnode: &velox_dom::VNode, layout: &velox_dom::layout::LayoutNode, out: &mut Vec<(f32,f32,f32,f32,String, Option<String>)>) {
             match vnode {
                 velox_dom::VNode::Text(_) => {}
                 velox_dom::VNode::Element { props, children, .. } => {
                     if let Some(handler) = props.attrs.get("on:click").cloned() {
-                        let r = layout.rect; out.push((r.x as f32, r.y as f32, (r.x + r.w) as f32, (r.y + r.h) as f32, handler));
+                        let payload = props.attrs.get("on:click-payload").cloned();
+                        let r = layout.rect;
+                        out.push((r.x as f32, r.y as f32, (r.x + r.w) as f32, (r.y + r.h) as f32, handler, payload));
                     }
                     for (i,ch) in children.iter().enumerate() {
                         if let Some(lc) = layout.children.get(i) { collect_clicks(ch, lc, out); }
@@ -628,8 +630,10 @@ where
         }
         Event::WindowEvent { event: WindowEvent::MouseInput { state: ElementState::Pressed, button: MouseButton::Left, .. }, .. } => {
             // dispatch to first matching clickable rect
-            if let Some((_,_,_,_, name)) = click_targets.iter().find(|(x0,y0,x1,y1,_)| mouse.0>=*x0&&mouse.0<=*x1&&mouse.1>=*y0&&mouse.1<=*y1) {
-                on_event(name);
+            if let Some((_,_,_,_, name, payload_opt)) = click_targets.iter().find(|(x0,y0,x1,y1,_,_)| mouse.0>=*x0&&mouse.0<=*x1&&mouse.1>=*y0&&mouse.1<=*y1) {
+                // Prepare payload: prefer explicit payload from attribute, otherwise forward mouse coords as JSON
+                let payload_owned = payload_opt.clone().unwrap_or_else(|| format!("{{\"x\":{},\"y\":{}}}", mouse.0, mouse.1));
+                on_event(name, Some(&payload_owned));
                 let (vnode_raw, sheet) = make_view(config.width, config.height);
                 recompute_from_vnode(&vnode_raw, &sheet, hovered, config.width, config.height, &mut bg_color, &mut text_color, &mut font_size, &mut btn_rect, &mut btn_color, &mut btn_text_color, &mut btn_text, &mut btn_handler, &mut btn_pad_left, &mut btn_pad_top, &mut click_targets, &queue, &vbuf);
                 window.set_title(&get_title());

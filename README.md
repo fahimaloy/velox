@@ -19,6 +19,7 @@ What’s New in 0.1.1
 - Styles: cascaded/inherited text props (font-size, font-weight 100–1000, line-height, text-decoration underline/overline/line-through, italic).
 - Renderer: draws text from VNode + stylesheet (no placeholders); correct text‑decoration placement; clipping inside element boxes; extended vertical bounds for non‑button text; basic text-align and font-family selection.
 - Events: multiple `@click` targets with proper hit testing.
+  - Event payloads: pass explicit string payloads via `on:click-payload` or use inline closures to receive payloads.
 - CLI: init template with hex colors and demo text styles; includes increment/decrement handlers.
 
 Build

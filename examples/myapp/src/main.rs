@@ -1,6 +1,6 @@
 use velox_dom::VNode;
 use velox_style::Stylesheet;
-use velox_renderer::Renderer;
+// Removed unused import: velox_renderer::Renderer
 
 include!(concat!(env!("OUT_DIR"), "/App.rs"));
 
@@ -13,7 +13,7 @@ fn main() {
         let sheet = Stylesheet::parse(app::STYLE);
         (vnode, sheet)
     }};
-    let on_event = { let state = state_ref.clone(); move |name: &str| { match name { "inc" => state.inc(), "dec" => state.dec(), _ => {} } } };
+    let on_event = { let state = state_ref.clone(); move |name: &str, _payload: Option<&str>| { match name { "inc" => state.inc(), "dec" => state.dec(), _ => {} } } };
     let get_title = { let state = state_ref.clone(); move || state.title.borrow().to_string() };
     velox_renderer::run_window_vnode("Velox App", make_view, on_event, get_title);
 }

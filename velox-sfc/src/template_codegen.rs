@@ -29,7 +29,7 @@ pub fn render_with<F>(mut resolve: F) -> velox_dom::VNode where F: FnMut(&str) -
     ))
 }
 
-fn emit_node(n: &Node) -> String {
+pub(crate) fn emit_node(n: &Node) -> String {
     match n {
         Node::Text(t) => format!(r#"text({})"#, string_lit(t)),
         Node::Interpolation(expr) => {
@@ -49,7 +49,7 @@ fn emit_node(n: &Node) -> String {
     }
 }
 
-fn emit_props(attrs: &[TemplateAttr]) -> String {
+pub(crate) fn emit_props(attrs: &[TemplateAttr]) -> String {
     if attrs.is_empty() {
         return "Props::new()".to_string();
     }
@@ -85,7 +85,7 @@ fn emit_props(attrs: &[TemplateAttr]) -> String {
     parts.join("")
 }
 
-fn emit_children(children: &[Node]) -> String {
+pub(crate) fn emit_children(children: &[Node]) -> String {
     if children.is_empty() {
         return "vec![]".to_string();
     }
