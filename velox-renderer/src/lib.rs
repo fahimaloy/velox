@@ -3,6 +3,7 @@
 
 use velox_dom::VNode;
 use velox_style::{Stylesheet, apply_styles_with_hover};
+use std::collections::{HashMap, HashSet};
 
 pub mod events;
 
@@ -32,6 +33,35 @@ fn build_render_tree(v: &VNode) -> RenderTree {
     let mut counts = (0, 0);
     summarize(v, &mut counts);
     RenderTree { root: v.clone(), node_count: counts.0, text_count: counts.1 }
+}
+
+/// Reconcile two VNode children vectors using an optional `key` prop.
+/// This is a simple helper that prefers reusing old nodes when the child's
+/// `Props` contains a `key` attribute matching a new child's `key`.
+pub fn reconcile_keyed_children(old: &mut Vec<VNode>, new: &Vec<VNode>) {
+    let mut key_to_index: HashMap<String, usize> = HashMap::new();
+    for (i, n) in old.iter().enumerate() {
+        if let VNode::Element { props, .. } = n {
+            if let Some(k) = props.attrs.get("key") {
+                key_to_index.insert(k.clone(), i);
+            }
+        }
+    }
+    let mut used: HashSet<usize> = HashSet::new();
+    let mut out: Vec<VNode> = Vec::with_capacity(new.len());
+    for nn in new.iter() {
+        if let VNode::Element { props: nprops, .. } = nn {
+            if let Some(k) = nprops.attrs.get("key") {
+                if let Some(&idx) = key_to_index.get(k) {
+                    out.push(old[idx].clone());
+                    used.insert(idx);
+                    continue;
+                }
+            }
+        }
+        out.push(nn.clone());
+    }
+    *old = out;
 }
 
 /// Minimal renderer trait. Backends implement this to expose a consistent API.
