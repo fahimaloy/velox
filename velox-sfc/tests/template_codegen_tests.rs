@@ -11,9 +11,10 @@ fn codegen_div_with_text() {
 #[test]
 fn codegen_interpolation() {
     let rs = compile_template_to_rs("<p>Hello {{name}}</p>", "App").unwrap();
+    println!("-- GENERATED RS --\n{}\n-- END RS --", rs);
     assert!(rs.contains(r#"h("p""#));
     assert!(rs.contains(r#"text("Hello")"#) || rs.contains(r#"text("Hello ")"#));
-    assert!(rs.contains(r#"format!("{}", name)"#));
+    assert!(rs.contains(r#"resolve("name")"#) || rs.contains(r#"resolve("name")"#));
 }
 
 #[test]
@@ -24,6 +25,6 @@ fn codegen_attrs() {
     )
     .unwrap();
     assert!(rs.contains(r#".set("class", "x")"#));
-    assert!(rs.contains(r#".set("value", &format!("{}", count))"#));
+    assert!(rs.contains(r#".set("value", &resolve("count"))"#));
     assert!(rs.contains(r#".set("on:input", "onInput")"#));
 }

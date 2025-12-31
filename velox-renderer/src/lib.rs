@@ -644,13 +644,16 @@ where
                 verts_all.push(Vertex{pos:to(x0,y1),color:[r,g,b]});
             }
             {
-                let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor { label: Some("velox-pass"), color_attachments: &[Some(wgpu::RenderPassColorAttachment { view: &view, resolve_target: None, ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color { r: bg_color[0] as f64, g: bg_color[1] as f64, b: bg_color[2] as f64, a: bg_color[3] as f64 }), store: true } })], depth_stencil_attachment: None });
-                rpass.set_pipeline(&pipeline);
                 if !verts_all.is_empty() {
                     let quad_buf = device.create_buffer(&wgpu::BufferDescriptor { label: Some("velox-quads"), size: (verts_all.len()*std::mem::size_of::<Vertex>()) as u64, usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
                     queue.write_buffer(&quad_buf, 0, bytemuck::cast_slice(&verts_all));
+                    let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor { label: Some("velox-pass"), color_attachments: &[Some(wgpu::RenderPassColorAttachment { view: &view, resolve_target: None, ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color { r: bg_color[0] as f64, g: bg_color[1] as f64, b: bg_color[2] as f64, a: bg_color[3] as f64 }), store: true } })], depth_stencil_attachment: None });
+                    rpass.set_pipeline(&pipeline);
                     rpass.set_vertex_buffer(0, quad_buf.slice(..));
                     rpass.draw(0..(verts_all.len() as u32), 0..1);
+                } else {
+                    let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor { label: Some("velox-pass"), color_attachments: &[Some(wgpu::RenderPassColorAttachment { view: &view, resolve_target: None, ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color { r: bg_color[0] as f64, g: bg_color[1] as f64, b: bg_color[2] as f64, a: bg_color[3] as f64 }), store: true } })], depth_stencil_attachment: None });
+                    rpass.set_pipeline(&pipeline);
                 }
             }
             // draw texts from vnode: button label and count using their own styles

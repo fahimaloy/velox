@@ -33,7 +33,8 @@ fn emit_node(n: &Node) -> String {
     match n {
         Node::Text(t) => format!(r#"text({})"#, string_lit(t)),
         Node::Interpolation(expr) => {
-            format!(r#"text(&format!("{{}}", {}))"#, expr.trim())
+            let key = string_lit(expr.trim());
+            format!(r#"text(&resolve({}))"#, key)
         }
         Node::Element {
             tag,
@@ -67,6 +68,9 @@ fn emit_props(attrs: &[TemplateAttr]) -> String {
                     expr.trim()
                 ));
             }
+            AttrKind::Directive => {
+                // directives are not emitted as props
+            }
             AttrKind::On => {
                 // Store as a string for now; renderer will wire this later
                 let handler = a.value.clone().unwrap_or_default();
@@ -97,6 +101,18 @@ fn emit_node_with(n: &Node) -> String {
             format!(r#"text(&resolve({}))"#, key)
         }
         Node::Element { tag, attrs, children, .. } => {
+            // handle directive `v-if` (simple implementation)
+            if let Some(pos) = attrs.iter().position(|a| matches!(a.kind, AttrKind::Directive) && a.name == "if") {
+                // clone attrs and remove the directive so it does not become a prop
+                let mut attrs2 = attrs.clone();
+                let dir = attrs2.remove(pos);
+                let expr = dir.value.unwrap_or_default();
+                // construct a temporary element node with remaining attrs
+                let tmp = Node::Element { tag: tag.clone(), attrs: attrs2, children: children.clone(), self_closing: false };
+                let inner = emit_node_with(&tmp);
+                return format!(r#"if ({}) {{ {} }} else {{ text("") }}"#, expr.trim(), inner);
+            }
+
             let props = emit_props_with(attrs);
             let kids = emit_children_with(children);
             format!(r#"h("{}", {props}, {kids})"#, tag)
@@ -117,6 +133,9 @@ fn emit_props_with(attrs: &[TemplateAttr]) -> String {
                 let expr = a.value.clone().unwrap_or_else(|| a.name.clone());
                 let key = string_lit(expr.trim());
                 parts.push(format!(r#".set("{}", &resolve({}))"#, a.name, key));
+            }
+            AttrKind::Directive => {
+                // do not emit directives as props
             }
             AttrKind::On => {
                 let handler = a.value.clone().unwrap_or_default();

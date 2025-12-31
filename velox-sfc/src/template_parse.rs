@@ -199,6 +199,8 @@ fn read_attribute(bytes: &[u8], i: &mut usize) -> Option<TemplateAttr> {
         (AttrKind::Bind, raw_name[1..].to_string())
     } else if raw_name.starts_with('@') {
         (AttrKind::On, raw_name[1..].to_string())
+    } else if raw_name.starts_with("v-") {
+        (AttrKind::Directive, raw_name[2..].to_string())
     } else {
         (AttrKind::Static, raw_name)
     };
