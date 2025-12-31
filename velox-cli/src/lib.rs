@@ -40,11 +40,30 @@ pub fn build_cmd(input: &Path, out_dir: Option<&Path>, emit: EmitMode) -> Result
                 .unwrap_or("");
             let render_fn =
                 velox_sfc::compile_template_to_rs(tpl_src, name).map_err(|e| anyhow::anyhow!(e))?;
-            // Emit both stub constants and render() in one file
-            code.push_str(&velox_sfc::to_stub_rs(&sfc, name));
-            code.push_str("\n");
-            code.push_str(&render_fn);
-            code.push_str("\n");
+            // Emit stub constants then inject the render() and helpers inside the generated module
+            let mut stub = velox_sfc::to_stub_rs(&sfc, name);
+            // indent the generated functions so they live inside the module
+            let indented = render_fn
+                .lines()
+                .map(|l| format!("    {}", l))
+                .collect::<Vec<_>>()
+                .join("\n");
+            if let Some(pos) = stub.rfind("\n}\n") {
+                // insert before the final closing brace of the module
+                let before = &stub[..pos+1];
+                let after = &stub[pos+1..];
+                code.push_str(before);
+                code.push_str("\n");
+                code.push_str(&indented);
+                code.push_str("\n");
+                code.push_str(after);
+            } else {
+                // fallback: append after stub
+                code.push_str(&stub);
+                code.push_str("\n");
+                code.push_str(&render_fn);
+                code.push_str("\n");
+            }
         }
     }
 

@@ -1,4 +1,5 @@
 use crate::template_ast::{AttrKind, Node, TemplateAttr};
+use std::collections::HashSet;
 
 /// Public API: compile `<template>` string to a Rust module body with `render()`.
 pub fn compile_template_to_rs(template_src: &str, _component_name: &str) -> Result<String, String> {
@@ -16,7 +17,7 @@ pub fn compile_template_to_rs(template_src: &str, _component_name: &str) -> Resu
     let root = &nodes[0];
     let body_with = emit_node_with(root);
 
-    Ok(format!(
+    let mut out = format!(
         r#"pub fn render() -> velox_dom::VNode {{
     render_with(|_| String::new())
 }}
@@ -26,7 +27,61 @@ pub fn render_with<F>(mut resolve: F) -> velox_dom::VNode where F: FnMut(&str) -
     {body_with}
 }}"#,
         body_with = body_with
-    ))
+    );
+
+    // Collect event handler names from the template and generate a helper
+    let handlers = collect_handlers(&nodes);
+    if !handlers.is_empty() {
+        out.push_str("\n\n");
+        out.push_str(&generate_make_on_event(&handlers));
+    }
+
+    Ok(out)
+}
+
+fn collect_handlers(nodes: &[Node]) -> Vec<String> {
+    let mut set: HashSet<String> = HashSet::new();
+    fn walk(n: &Node, set: &mut HashSet<String>) {
+        match n {
+            Node::Element { attrs, children, .. } => {
+                for a in attrs {
+                    if let AttrKind::On = a.kind {
+                        if let Some(v) = &a.value {
+                            set.insert(v.clone());
+                        }
+                    }
+                }
+                for c in children {
+                    walk(c, set);
+                }
+            }
+            _ => {}
+        }
+    }
+    for n in nodes { walk(n, &mut set); }
+    let mut v: Vec<String> = set.into_iter().collect();
+    v.sort();
+    v
+}
+
+fn generate_make_on_event(handlers: &[String]) -> String {
+    // Generate a simple dispatch helper that calls methods on `app::script_rs::State`.
+    // This assumes methods are zero-arg; handling payloads or arity will be added later.
+    let mut arms = String::new();
+    for h in handlers {
+        arms.push_str(&format!("        \"{name}\" => {{ state.{name}(); }},\n", name = h));
+    }
+
+    format!(
+        r#"pub fn make_on_event(state: std::sync::Arc<script_rs::State>) -> impl FnMut(&str, Option<&str>) + 'static {{
+    move |name: &str, _payload: Option<&str>| {{
+        match name {{
+{arms}            _ => {{}}
+        }}
+    }}
+}}"#,
+        arms = arms
+    )
 }
 
 pub(crate) fn emit_node(n: &Node) -> String {
