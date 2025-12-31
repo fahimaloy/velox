@@ -41,6 +41,17 @@ mod unix_impl {
         }
     }
 
+    impl Drop for SkiaGlContext {
+        fn drop(&mut self) {
+            // Make no context current and destroy EGL resources. Best-effort cleanup;
+            // errors are ignored because this is a destructor.
+            let _ = egl::make_current(self.egl_display, egl::EGL_NO_SURFACE, egl::EGL_NO_SURFACE, egl::EGL_NO_CONTEXT);
+            egl::destroy_surface(self.egl_display, self.egl_surface);
+            egl::destroy_context(self.egl_display, self.egl_context);
+            egl::terminate(self.egl_display);
+        }
+    }
+
     fn choose_egl_config(dpy: egl::EGLDisplay) -> Option<egl::EGLConfig> {
         let attribs: &[egl::EGLint] = &[
             egl::EGL_RED_SIZE as egl::EGLint, 8,
