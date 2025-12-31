@@ -1,7 +1,11 @@
 FROM ubuntu:24.04
 
 # Install basics
-RUN apt-get update && apt-get install -y build-essential curl ca-certificates libvulkan1 vulkan-utils libwayland-dev libx11-dev libxkbcommon-dev git \
+RUN apt-get update \
+    && apt-get install -y software-properties-common \
+    && add-apt-repository universe \
+    && apt-get update \
+    && apt-get install -y build-essential curl ca-certificates libvulkan1 vulkan-tools mesa-vulkan-drivers libwayland-dev libx11-dev libxkbcommon-dev git \
     && rm -rf /var/lib/apt/lists/*
 
 # Install Rust (via rustup)

@@ -21,6 +21,10 @@ docker build -t velox-wgpu -f docker/wgpu/Dockerfile .
 # run tests (this will run the ignored smoke tests inside container)
 docker run --rm -e VK_ICD_FILENAMES=/opt/swiftshader/etc/vulkan/icd.d/10_swiftshader_icd.json velox-wgpu \
   bash -lc "cargo test -p velox-renderer --features wgpu -- --ignored --nocapture"
+
+Notes:
+- On some Ubuntu releases (including 24.04), the CLI Vulkan package is named `vulkan-tools` instead of `vulkan-utils`.
+- The `docker/wgpu/Dockerfile` enables the `universe` repository and installs `vulkan-tools` and `mesa-vulkan-drivers` to ensure the Vulkan loader and helper tools are available.
 ```
 
 If you prefer to run locally on your host machine, install Vulkan drivers or SwiftShader and set `VK_ICD_FILENAMES` accordingly before running the cargo command above.

@@ -410,6 +410,9 @@ where
     let mut btn_pad_top: f32 = 0.0;
     let mut click_targets: Vec<(f32,f32,f32,f32,String, Option<String>)> = Vec::new();
 
+    // Keep previous vnode around so we can attempt keyed reconciliation between frames.
+    let mut prev_vnode: Option<velox_dom::VNode> = None;
+
     let make_vertices = |w: u32, h: u32, r: (f32, f32, f32, f32), color: [f32; 4]| -> [Vertex; 6] {
         let (x0, y0, x1, y1) = r;
         let (r, g, b) = (color[0], color[1], color[2]);
@@ -677,7 +680,20 @@ where
             // Build and draw quads for all clickable buttons
             // Compute vnode + layout once for this frame
             let (frame_vnode_raw, frame_sheet) = make_view(config.width, config.height);
-            let frame_vnode = apply_styles_with_hover(&frame_vnode_raw, &frame_sheet, &|tag, props| hovered && (props.attrs.contains_key("on:click") || tag == "button" || has_class(props, "btn")));
+            // Attempt keyed reconciliation with prior frame to prefer node reuse when `key` props are present
+            let frame_vnode_reconciled = if let Some(mut old) = prev_vnode.take() {
+                match (&mut old, &frame_vnode_raw) {
+                    (velox_dom::VNode::Element { children: old_ch, .. }, velox_dom::VNode::Element { children: new_ch, .. }) => {
+                        // run keyed reconciliation on children
+                        crate::reconcile_keyed_children(old_ch, new_ch);
+                        old
+                    }
+                    _ => frame_vnode_raw.clone(),
+                }
+            } else {
+                frame_vnode_raw.clone()
+            };
+            let frame_vnode = apply_styles_with_hover(&frame_vnode_reconciled, &frame_sheet, &|tag, props| hovered && (props.attrs.contains_key("on:click") || tag == "button" || has_class(props, "btn")));
             fn collect_click_nodes<'a>(vnode: &'a velox_dom::VNode, layout: &velox_dom::layout::LayoutNode, out: &mut Vec<(velox_dom::layout::Rect, &'a velox_dom::Props, &'a [velox_dom::VNode])>) {
                 match vnode {
                     velox_dom::VNode::Text(_) => {}
@@ -780,6 +796,9 @@ where
                         });
                     }
                 }
+
+                // Save reconciled vnode for next frame
+                prev_vnode = Some(frame_vnode_reconciled);
 
                 // count text placement with its own padding/line-height and bold/decoration
                 let (count_text, count_pos, count_style, count_bounds) = if let Some((rect, props)) = find_rect_for_class(&vnode, &layout2, "count") {
