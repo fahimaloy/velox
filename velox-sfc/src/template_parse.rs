@@ -200,7 +200,10 @@ fn read_attribute(bytes: &[u8], i: &mut usize) -> Option<TemplateAttr> {
     } else if raw_name.starts_with('@') {
         (AttrKind::On, raw_name[1..].to_string())
     } else if raw_name.starts_with("v-") {
-        (AttrKind::Directive, raw_name[2..].to_string())
+        // normalize directive name: strip `v-` and convert camelCase or underscores to kebab-case
+        let raw_dir = raw_name[2..].to_string();
+        let name = normalize_directive_name(&raw_dir);
+        (AttrKind::Directive, name)
     } else {
         (AttrKind::Static, raw_name)
     };
@@ -226,4 +229,27 @@ fn read_quoted(bytes: &[u8], i: &mut usize) -> Option<String> {
         *i += 1;
     } // consume closing quote
     Some(s)
+}
+
+fn normalize_directive_name(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for ch in s.chars() {
+        if ch == '_' {
+            out.push('-');
+        } else if ch.is_ascii_uppercase() {
+            out.push('-');
+            for lc in ch.to_lowercase() { out.push(lc); }
+        } else {
+            out.push(ch.to_ascii_lowercase());
+        }
+    }
+    // collapse any duplicated dashes
+    let mut prev_dash = false;
+    let mut compact = String::with_capacity(out.len());
+    for c in out.chars() {
+        if c == '-' {
+            if !prev_dash { compact.push(c); prev_dash = true; }
+        } else { compact.push(c); prev_dash = false; }
+    }
+    compact.trim_matches('-').to_string()
 }
