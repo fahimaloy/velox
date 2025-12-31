@@ -29,5 +29,7 @@ RUN cargo build --workspace
 
 FROM base AS test
 COPY . .
-RUN cargo test --workspace --all-features --no-fail-fast
+# Don't enable all features in CI tests — `skia-native` pulls large C++ deps
+# that often fail in CI. Run workspace tests without optional native features.
+RUN cargo test --workspace --no-fail-fast
 

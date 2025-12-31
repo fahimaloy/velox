@@ -79,16 +79,28 @@ pub mod wgpu_backend {
         // Attempt headless WGPU initialization to verify adapter/device availability.
         // This is intentionally best-effort and will not panic on failure; it logs to stderr.
         let instance = _wgpu::Instance::new(_wgpu::InstanceDescriptor { backends: _wgpu::Backends::all(), dx12_shader_compiler: Default::default() });
+        // Try to get a real adapter first; if none is found (common in CI),
+        // retry requesting a fallback adapter (software renderer) before giving up.
         let adapter = match pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
             power_preference: _wgpu::PowerPreference::HighPerformance,
             compatible_surface: None,
             force_fallback_adapter: false,
         })) {
-            None => {
-                eprintln!("wgpu backend: no adapter found (init skipped)");
-                return;
-            }
             Some(a) => a,
+            None => {
+                eprintln!("wgpu backend: no adapter found; retrying with fallback adapter...");
+                match pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+                    power_preference: _wgpu::PowerPreference::HighPerformance,
+                    compatible_surface: None,
+                    force_fallback_adapter: true,
+                })) {
+                    Some(a2) => a2,
+                    None => {
+                        eprintln!("wgpu backend: no adapter found even with fallback (init skipped)");
+                        return;
+                    }
+                }
+            }
         };
 
         match pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
