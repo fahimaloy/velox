@@ -7,6 +7,10 @@ use std::collections::{HashMap, HashSet};
 
 pub mod events;
 
+// Native Skia GL helper module (feature-gated)
+#[cfg(feature = "skia-native")]
+mod skia_gl;
+
 /// In-memory representation of a mounted tree (stubbed for now).
 pub struct RenderTree {
     pub root: VNode,
@@ -132,10 +136,20 @@ pub mod wgpu_backend {
 // Real Skia backend only when `skia-native` is enabled.
 #[cfg(feature = "skia-native")]
 pub mod skia_backend {
-    use skia_safe as _sk;
+    use skia_safe as sk;
+    #[cfg(feature = "skia-native")]
+    use crate::skia_gl;
 
     pub fn init() {
-        // TODO: implement Skia GPU surface creation (GL/EGL)
+        match skia_gl::create_context() {
+            Ok(gl_ctx) => {
+                match gl_ctx.into_direct_context() {
+                    Some(_dctx) => eprintln!("skia backend: init OK (DirectContext created)"),
+                    None => eprintln!("skia backend: init failed: couldn't create DirectContext"),
+                }
+            }
+            Err(e) => eprintln!("skia backend: init failed: {}", e),
+        }
     }
 
     pub struct SkiaRenderer;

@@ -2,7 +2,7 @@
 [package]
 name = "velox-renderer"
 version = "0.1.1"
-edition = "2021"
+edition = "2024"
 publish = false
 
 [features]
@@ -15,11 +15,22 @@ wgpu = ["dep:winit", "dep:wgpu"]
 skia = []
 skia-native = ["dep:skia-safe", "skia"]
 
+[target.'cfg(unix)'.dependencies]
+# raw-window-handle helps obtain native window handles from winit
+raw-window-handle = { version = "0.6", optional = true }
+# egl bindings for creating contexts on Linux
+egl = { version = "0.2", optional = true }
+# glow for loading GL function pointers where needed
+glow = { version = "0.12", optional = true }
+
 [dependencies]
 # Optional backends (do NOT compile unless feature enabled)
 winit = { version = "0.28", optional = true }
 wgpu = { version = "0.16", optional = true }
-skia-safe = { version = "0.52", features = ["gl", "egl"], optional = true }
+skia-safe = { version = "0.91.1", features = ["gl", "egl"], optional = true }
+raw-window-handle = { version = "0.6", optional = true }
+egl = { version = "0.2", optional = true }
+glow = { version = "0.12", optional = true }
 velox-dom = { path = "../velox-dom" }
 velox-style = { path = "../velox-style" }
 pollster = "0.3"
