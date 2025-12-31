@@ -46,7 +46,34 @@ pub mod wgpu_backend {
     use winit as _winit;
 
     pub fn init() {
-        // TODO: implement Wayland (winit) + wgpu surface setup
+        // Attempt headless WGPU initialization to verify adapter/device availability.
+        // This is intentionally best-effort and will not panic on failure; it logs to stderr.
+        let instance = _wgpu::Instance::new(_wgpu::InstanceDescriptor { backends: _wgpu::Backends::all(), dx12_shader_compiler: Default::default() });
+        let adapter = match pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+            power_preference: _wgpu::PowerPreference::HighPerformance,
+            compatible_surface: None,
+            force_fallback_adapter: false,
+        })) {
+            None => {
+                eprintln!("wgpu backend: no adapter found (init skipped)");
+                return;
+            }
+            Some(a) => a,
+        };
+
+        match pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+            label: Some("velox-wgpu-device"),
+            features: wgpu::Features::empty(),
+            limits: wgpu::Limits::default(),
+        }, None)) {
+            Ok((_device, _queue)) => {
+                let info = adapter.get_info();
+                eprintln!("wgpu backend: init OK — adapter='{}'", info.name);
+            }
+            Err(e) => {
+                eprintln!("wgpu backend: failed to request device: {:?}", e);
+            }
+        }
     }
 
     pub struct WgpuRenderer;
