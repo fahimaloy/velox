@@ -54,3 +54,15 @@ Contributing
 - Keep changes small and focused; add tests under the crate you modify.
 - Ensure `cargo fmt`, `cargo clippy` (no warnings), and tests pass before opening a PR.
 
+Directive Normalization (SFC templates)
+- Template directive attributes must start with `v-` (for example `v-if`, `v-else`, `v-for`).
+- The parser normalizes directive names by stripping the leading `v-` and converting the remainder to kebab-case before storing it in the AST. That means the following variants are accepted and normalized:
+  - `v-if` -> `if`
+  - `v-else` -> `else`
+  - `v-else-if`, `v-elseIf`, `v_elseif` -> `else-if`
+  - `v-elseif` -> `elseif` (kept as-is after normalization)
+- Normalization rules: underscores become `-`, uppercase letters are converted to lowercase and prefixed with `-` when appropriate, consecutive dashes are collapsed, and any surrounding dashes are trimmed. The AST stores directive names without the `v-` prefix (e.g. `if`, `else-if`).
+- Codegen currently supports `v-if` with chained `v-else-if` and a final `v-else` sibling. Use these variants interchangeably in templates; the parser will normalize them before codegen.
+
+If you want the docs to prefer a canonical style, use `v-if`, `v-else-if`, and `v-else` in examples — these map directly to the normalized directive names used by the compiler.
+
