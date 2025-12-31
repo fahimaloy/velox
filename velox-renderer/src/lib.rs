@@ -234,6 +234,18 @@ pub fn new_selected_renderer() -> SelectedRenderer {
 
 pub use events::Runtime as EventRuntime;
 
+/// Test helper: exercise a small Skia draw path (native-only).
+#[cfg(all(feature = "skia-native", unix))]
+pub fn skia_draw_test_frame() -> Result<(), String> {
+    crate::skia_gl::draw_test_frame()
+}
+
+/// Convenience wrapper to create a Skia `DirectContext` from the crate root.
+#[cfg(all(feature = "skia-native", unix))]
+pub fn create_direct_context() -> Result<skia_safe::gpu::DirectContext, String> {
+    crate::skia_gl::create_direct_context()
+}
+
 #[cfg(feature = "wgpu")]
 fn load_system_font() -> Option<ab_glyph::FontArc> {
     use std::fs;

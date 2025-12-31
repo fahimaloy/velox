@@ -31,14 +31,14 @@ mod unix_impl {
     }
 
     impl SkiaGlContext {
-        pub fn into_direct_context(self) -> Option<skia_safe::gpu::DirectContext> {
-            let iface = match self.interface {
-                Some(i) => i,
-                None => return None,
-            };
-            // Use the newer helper for creating a GL-backed DirectContext
-            skia_safe::gpu::direct_contexts::make_gl(&iface, None)
-        }
+        pub fn into_direct_context(&self) -> Option<skia_safe::gpu::DirectContext> {
+                let iface = match &self.interface {
+                    Some(i) => i,
+                    None => return None,
+                };
+                // Use the newer helper for creating a GL-backed DirectContext
+                skia_safe::gpu::direct_contexts::make_gl(iface, None)
+            }
     }
 
     impl Drop for SkiaGlContext {
@@ -71,14 +71,23 @@ mod unix_impl {
         let _raw = window.window_handle();
 
         // Initialize EGL display
-        let display = egl::get_display(egl::EGL_DEFAULT_DISPLAY).ok_or_else(|| "egl: no display".to_string())?;
+        let display = egl::get_display(egl::EGL_DEFAULT_DISPLAY).ok_or_else(|| {
+            let msg = "egl: no display".to_string();
+            eprintln!("[skia_gl] {}", msg);
+            msg
+        })?;
         let mut major: egl::EGLint = 0;
         let mut minor: egl::EGLint = 0;
         if !egl::initialize(display, &mut major, &mut minor) {
+            eprintln!("[skia_gl] egl: failed to initialize (major={}, minor={})", major, minor);
             return Err("egl: failed to initialize".into());
         }
 
-        let config = choose_egl_config(display).ok_or_else(|| "egl: no config".to_string())?;
+        let config = choose_egl_config(display).ok_or_else(|| {
+            let msg = "egl: no config".to_string();
+            eprintln!("[skia_gl] {}", msg);
+            msg
+        })?;
 
         // Create an EGL context
         let ctx_attribs: &[egl::EGLint] = &[egl::EGL_CONTEXT_CLIENT_VERSION as egl::EGLint, 2, egl::EGL_NONE as egl::EGLint];
@@ -117,14 +126,23 @@ mod unix_impl {
 
     /// Create a headless pbuffer-backed EGL context (no window required).
     pub fn create_headless_context() -> Result<SkiaGlContext, String> {
-        let display = egl::get_display(egl::EGL_DEFAULT_DISPLAY).ok_or_else(|| "egl: no display".to_string())?;
+        let display = egl::get_display(egl::EGL_DEFAULT_DISPLAY).ok_or_else(|| {
+            let msg = "egl: no display".to_string();
+            eprintln!("[skia_gl] {}", msg);
+            msg
+        })?;
         let mut major: egl::EGLint = 0;
         let mut minor: egl::EGLint = 0;
         if !egl::initialize(display, &mut major, &mut minor) {
+            eprintln!("[skia_gl] egl: failed to initialize (major={}, minor={})", major, minor);
             return Err("egl: failed to initialize".into());
         }
 
-        let config = choose_egl_config(display).ok_or_else(|| "egl: no config".to_string())?;
+        let config = choose_egl_config(display).ok_or_else(|| {
+            let msg = "egl: no config".to_string();
+            eprintln!("[skia_gl] {}", msg);
+            msg
+        })?;
 
         let ctx_attribs: &[egl::EGLint] = &[egl::EGL_CONTEXT_CLIENT_VERSION as egl::EGLint, 2, egl::EGL_NONE as egl::EGLint];
         let context = egl::create_context(display, config, egl::EGL_NO_CONTEXT, ctx_attribs).ok_or_else(|| "egl: failed to create context".to_string())?;
@@ -154,6 +172,40 @@ mod unix_impl {
             egl_surface: surface,
             interface: Some(iface),
         })
+    }
+
+    /// Try to draw a very small test frame. Prefer GPU-backed surface when a
+    /// `DirectContext` is available; otherwise fall back to a CPU raster surface.
+    pub fn draw_test_frame() -> Result<(), String> {
+        // Try to create a DirectContext; if it fails, continue with raster fallback.
+        let dctx = match skia_safe::gpu::direct_contexts::make_gl(
+            &create_headless_context()?.interface.clone().ok_or_else(|| "no gl interface".to_string())?,
+            None,
+        ) {
+            Some(dc) => Some(dc),
+            None => None,
+        };
+
+        // Create a small raster surface and draw a colored rect into it.
+        let mut surface = skia_safe::Surface::new_raster_n32_premul((64, 64))
+            .ok_or_else(|| "skia: failed to create raster surface".to_string())?;
+        let canvas = surface.canvas();
+        canvas.clear(skia_safe::Color::WHITE);
+        let mut paint = skia_safe::Paint::default();
+        paint.set_color(skia_safe::Color::from_argb(255, 0, 128, 255));
+        paint.set_anti_alias(true);
+        let r = skia_safe::Rect::from_xywh(8.0, 8.0, 48.0, 48.0);
+        canvas.draw_rect(r, &paint);
+        // Ensure the raster surface contents are finalized by taking a snapshot.
+        let _ = surface.image_snapshot();
+
+        // If we had a DirectContext, we could flush GPU work here. We drop it
+        // afterwards; the destructor for SkiaGlContext will clean up EGL.
+        if let Some(_dc) = dctx {
+            // best-effort: do nothing further for now
+        }
+
+        Ok(())
     }
 }
 

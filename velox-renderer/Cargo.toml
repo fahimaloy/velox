@@ -13,7 +13,10 @@ default = []
 wgpu = ["dep:winit", "dep:wgpu"]
 # `skia` enables the API surface; `skia-native` pulls the heavy dependency.
 skia = []
-skia-native = ["dep:skia-safe", "skia"]
+# Enable platform crates when building the native Skia backend.
+# This ensures `raw-window-handle`, `egl`, and `glow` are available to the
+# `skia_gl` module when the feature is enabled.
+skia-native = ["dep:skia-safe", "skia", "dep:raw-window-handle", "dep:egl", "dep:glow"]
 
 [target.'cfg(unix)'.dependencies]
 # raw-window-handle helps obtain native window handles from winit
