@@ -189,6 +189,14 @@ pub mod skia_backend {
                 Ok(())
             }
         }
+
+        pub fn resize(&mut self, width: i32, height: i32) -> Result<(), String> {
+            if let Some(s) = &mut self.surface {
+                s.resize(width, height)
+            } else {
+                Ok(())
+            }
+        }
     }
 
     impl crate::Renderer for SkiaRenderer {
@@ -317,6 +325,57 @@ where
     use winit::event::{ElementState, Event, MouseButton, WindowEvent};
     use winit::event_loop::{ControlFlow, EventLoop};
     use winit::window::WindowBuilder;
+
+
+    #[cfg(feature = "skia-native")]
+    pub fn run_window_vnode_skia<F, G, H>(title: &str, mut make_view: F, mut on_event: G, mut get_title: H)
+    where
+        F: FnMut(u32, u32) -> (velox_dom::VNode, Stylesheet) + 'static,
+        G: FnMut(&str, Option<&str>) + 'static,
+        H: FnMut() -> String + 'static,
+    {
+        use winit::dpi::PhysicalSize;
+        use winit::event::{Event, WindowEvent};
+        use winit::event_loop::{ControlFlow, EventLoop};
+        use winit::window::WindowBuilder;
+        use skia_safe as sk;
+
+        let event_loop = EventLoop::new();
+        let window = WindowBuilder::new()
+            .with_title(title)
+            .with_inner_size(PhysicalSize::new(800, 600))
+            .build(&event_loop)
+            .expect("failed to create window");
+
+        let size = window.inner_size();
+        let mut renderer = match skia_backend::SkiaRenderer::with_window(&window, size.width as i32, size.height as i32) {
+            Ok(r) => r,
+            Err(e) => panic!("failed to create SkiaRenderer: {}", e),
+        };
+
+        event_loop.run(move |event, _, control_flow| {
+            *control_flow = ControlFlow::Wait;
+            match event {
+                Event::WindowEvent { event: WindowEvent::CloseRequested, .. } => {
+                    *control_flow = ControlFlow::Exit;
+                }
+                Event::WindowEvent { event: WindowEvent::Resized(new_size), .. } => {
+                    let _ = renderer.resize(new_size.width as i32, new_size.height as i32);
+                    window.request_redraw();
+                }
+                Event::RedrawRequested(_) => {
+                    // Simple placeholder render: clear background and present.
+                    if let Some(s) = &mut renderer.surface {
+                        let canvas = s.canvas();
+                        canvas.clear(sk::Color::WHITE);
+                        // Future: call render_vnode_recursive here.
+                        let _ = s.present();
+                    }
+                }
+                _ => {}
+            }
+        });
+    }
 
     // Setup window
     let event_loop = EventLoop::new();

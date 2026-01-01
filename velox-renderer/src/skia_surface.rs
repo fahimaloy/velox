@@ -64,6 +64,28 @@ mod native {
             }
             Ok(())
         }
+
+        /// Resize the surface. Recreate a GPU-backed surface when a `DirectContext`
+        /// is available; otherwise recreate a CPU raster surface.
+        pub fn resize(&mut self, width: i32, height: i32) -> Result<(), String> {
+            self.width = width;
+            self.height = height;
+
+            // If we have a DirectContext, try to create a GPU-backed surface.
+            if let Some(dctx) = &mut self._gpu_ctx {
+                if let Some(new_surf) = create_gpu_surface_from_direct_context(dctx, width, height) {
+                    self.surface = new_surf;
+                    return Ok(());
+                }
+                // If GPU surface recreation failed, fall through to raster fallback.
+            }
+
+            // Raster fallback
+            let surface = sk::surfaces::raster_n32_premul((width, height))
+                .ok_or_else(|| "skia: failed to create raster surface on resize".to_string())?;
+            self.surface = surface;
+            Ok(())
+        }
     }
 
         /// Attempt to create a window-backed Skia surface from a raw-window-handle.
