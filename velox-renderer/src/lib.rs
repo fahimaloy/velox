@@ -10,6 +10,13 @@ pub mod events;
 // Native Skia GL helper module (feature-gated)
 #[cfg(feature = "skia-native")]
 mod skia_gl;
+// Skia surface and renderer helpers (feature-gated)
+#[cfg(feature = "skia-native")]
+mod skia_surface;
+#[cfg(feature = "skia-native")]
+mod skia_render;
+#[cfg(feature = "skia-native")]
+pub use skia_render::render_vnode_to_raster_png;
 
 /// In-memory representation of a mounted tree (stubbed for now).
 pub struct RenderTree {
@@ -128,6 +135,13 @@ pub mod wgpu_backend {
             "wgpu"
         }
         fn mount(&self, vnode: &velox_dom::VNode) -> crate::RenderTree {
+            // Try a GPU-backed present; log errors but do not fail the mount.
+            #[cfg(all(feature = "skia-native", unix))]
+            {
+                if let Err(e) = crate::skia_gl::draw_gpu_test_frame(256, 256) {
+                    eprintln!("skia backend: GPU present failed: {}", e);
+                }
+            }
             crate::build_render_tree(vnode)
         }
     }
@@ -139,6 +153,10 @@ pub mod skia_backend {
     use skia_safe as sk;
     #[cfg(feature = "skia-native")]
     use crate::skia_gl;
+    #[cfg(feature = "skia-native")]
+    use crate::skia_surface;
+    #[cfg(feature = "skia-native")]
+    use raw_window_handle::HasWindowHandle;
 
     pub fn init() {
         match skia_gl::create_context() {
@@ -152,7 +170,27 @@ pub mod skia_backend {
         }
     }
 
-    pub struct SkiaRenderer;
+    pub struct SkiaRenderer {
+        pub surface: Option<skia_surface::SkiaSurface>,
+    }
+
+    impl SkiaRenderer {
+        pub fn with_window(window: &impl HasWindowHandle, width: i32, height: i32) -> Result<Self, String> {
+            match skia_surface::create_window_surface_from_handle(window, width, height) {
+                Ok(s) => Ok(SkiaRenderer { surface: Some(s) }),
+                Err(e) => Err(e),
+            }
+        }
+
+        pub fn present(&mut self) -> Result<(), String> {
+            if let Some(s) = &mut self.surface {
+                s.present()
+            } else {
+                Ok(())
+            }
+        }
+    }
+
     impl crate::Renderer for SkiaRenderer {
         fn backend_name(&self) -> &'static str {
             "skia"
@@ -224,7 +262,8 @@ pub fn new_selected_renderer() -> SelectedRenderer {
     }
     #[cfg(all(not(feature = "wgpu"), feature = "skia"))]
     {
-        skia_backend::SkiaRenderer
+        // Construct SkiaRenderer with no surface for the default selected renderer.
+        skia_backend::SkiaRenderer { surface: None }
     }
     #[cfg(all(not(feature = "wgpu"), not(feature = "skia")))]
     {
