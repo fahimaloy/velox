@@ -364,12 +364,12 @@ where
                     window.request_redraw();
                 }
                 Event::RedrawRequested(_) => {
-                    // Simple placeholder render: clear background and present.
+                    // Render VNode -> Skia frame and present.
                     if let Some(s) = &mut renderer.surface {
-                        let canvas = s.canvas();
-                        canvas.clear(sk::Color::WHITE);
-                        // Future: call render_vnode_recursive here.
-                        let _ = s.present();
+                        let (vnode, sheet) = make_view(s.width as u32, s.height as u32);
+                        if let Err(e) = crate::skia_render::skia_impl::render_frame(s, &vnode, &sheet) {
+                            eprintln!("skia render error: {}", e);
+                        }
                     }
                 }
                 _ => {}

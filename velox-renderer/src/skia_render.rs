@@ -97,6 +97,99 @@ pub mod skia_impl {
             .ok_or_else(|| "skia: failed to encode image".to_string())?;
         Ok(data.as_bytes().to_vec())
     }
+
+    /// Minimal FontCache for mapping sizes to `skia_safe::Font`.
+    pub struct FontCache {}
+
+    impl FontCache {
+        pub fn new() -> Self {
+            FontCache {}
+        }
+
+        pub fn font(&self, size: f32) -> sk::Font {
+            let mut f = sk::Font::default();
+            f.set_size(size);
+            f
+        }
+    }
+
+    /// Render a VNode tree into an existing `SkiaSurface`.
+    pub fn render_frame(
+        surface: &mut crate::skia_surface::SkiaSurface,
+        vnode: &VNode,
+        sheet: &Stylesheet,
+    ) -> Result<(), String> {
+        let w = surface.width as f32;
+        let h = surface.height as f32;
+
+        let canvas = surface.canvas();
+        canvas.clear(sk::Color::WHITE);
+
+        let mut fonts = FontCache::new();
+
+        fn render_vnode_recursive(
+            canvas: &sk::Canvas,
+            node: &VNode,
+            x: f32,
+            y: f32,
+            w: f32,
+            h: f32,
+            fonts: &mut FontCache,
+        ) {
+            match node {
+                VNode::Element { props, children, .. } => {
+                    if let Some(s) = props.attrs.get("style") {
+                        for decl in s.split(';') {
+                            let d = decl.trim();
+                            if d.is_empty() { continue; }
+                            if let Some((k, v)) = d.split_once(':') {
+                                if k.trim() == "background-color" {
+                                    let v = v.trim();
+                                    if let Some(hex) = v.strip_prefix('#') {
+                                        if hex.len() == 6 {
+                                            let r = u8::from_str_radix(&hex[0..2], 16).unwrap_or(0);
+                                            let g = u8::from_str_radix(&hex[2..4], 16).unwrap_or(0);
+                                            let b = u8::from_str_radix(&hex[4..6], 16).unwrap_or(0);
+                                            let mut p = sk::Paint::default();
+                                            p.set_anti_alias(true);
+                                            p.set_color(sk::Color::from_argb(255, r, g, b));
+                                            let rrect = sk::Rect::from_xywh(x, y, w, h);
+                                            canvas.draw_rect(rrect, &p);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // Naive stacking layout for children
+                    let child_count = children.len().max(1);
+                    let child_h = h / (child_count as f32);
+                    for (i, ch) in children.iter().enumerate() {
+                        render_vnode_recursive(canvas, ch, x, y + i as f32 * child_h, w, child_h, fonts);
+                    }
+                }
+                VNode::Text(t) => {
+                    let mut p = sk::Paint::default();
+                    p.set_anti_alias(true);
+                    p.set_color(sk::Color::from_argb(255, 0, 0, 0));
+                    let font = fonts.font(14.0);
+                    let tx = x + 2.0;
+                    let ty = y + 14.0;
+                    #[allow(unused_must_use)]
+                    {
+                        let _ = canvas.draw_str(t.as_str(), (tx, ty), &font, &p);
+                    }
+                }
+            }
+        }
+
+        render_vnode_recursive(canvas, vnode, 0.0, 0.0, w, h, &mut fonts);
+
+        // Present/flush if GPU-backed
+        let _ = surface.present();
+        Ok(())
+    }
 }
 
 #[cfg(not(feature = "skia-native"))]
