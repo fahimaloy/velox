@@ -1,9 +1,9 @@
 <template>
   <div class="app">
+    <p> Hello Velox! </p>
     <button class="btn" @click="inc">Increment</button>
+    <button class="btn" @click="dec">Decrement</button>
     <div class="count">{{ count }}</div>
-
-    <button class="btn2" @click="dec">Decrement</button>
   </div>
 </template>
 <script setup>
@@ -16,9 +16,8 @@ impl State {
 }
 </script>
 <style>
-  .app { margin-left: 40px; width: 100%; height: 100%; display: block; background: #101216; color: #e6edf3; font-size: 18px; }
-  .btn { padding-left: 15px; width: 40px; height: 80px; background: #3478f6; color: #ffffff; font-size: 18px; font-weight: bold; line-height: 80px; }
-  .btn2 { padding-left: 15px; margin-left:30px; width: 200px; height: 80px; background: #3478f6; color: #ffffff; font-size: 18px; font-weight: bold; line-height: 80px; }
+  .app { padding:20px; width: 100%; height: 100%; display: block; background: #101216; color: #e6edf3; font-size: 18px; }
+  .btn { width: 200px; height: 80px; background: #3478f6; color: #ffffff; font-size: 18px; font-weight: bold; line-height: 80px; }
   .btn:hover { background: #4a8df8; }
   .count { margin-top: 12px; font-size: 36px; text-decoration: underline; line-height: 20px; }
 </style>

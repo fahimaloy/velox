@@ -33,7 +33,7 @@ pub fn to_stub_rs(sfc: &Sfc, component_name: &str) -> String {
     out.push_str(&format!("    pub const SCRIPT: &str = r#\"{}\"#;\n", s));
     out.push_str(&format!("    pub const STYLE: &str = r#\"{}\"#;\n", st));
     if !ss.is_empty() {
-        out.push_str("    #[allow(dead_code)]\n    pub mod script_rs {\n        #![allow(unused)]\n");
+        out.push_str("    pub mod script_rs {\n        #![allow(unused_variables, unused_imports, unused_mut, unused_assignments)]\n");
         out.push_str("        use super::*;\n");
         // Insert user code as-is; they are writing Rust.
         for line in ss.lines() {

@@ -7,7 +7,7 @@ edition = "2024"
 velox-core = { path = "../../velox-core" }
 velox-dom = { path = "../../velox-dom" }
 velox-style = { path = "../../velox-style" }
-velox-renderer = { path = "../../velox-renderer", features = ["wgpu"] }
+velox-renderer = { path = "../../velox-renderer", features = ["skia-native"] }
 
 [build-dependencies]
 velox-cli = { path = "../../velox-cli" }

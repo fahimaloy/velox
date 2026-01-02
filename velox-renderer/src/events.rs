@@ -23,6 +23,104 @@ impl EventRegistry {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct ClickTarget {
+    pub rect: velox_dom::layout::Rect,
+    pub handler: String,
+    pub payload: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct HoverTarget {
+    pub rect: velox_dom::layout::Rect,
+    pub id: u32,
+}
+
+pub fn is_hoverable(tag: &str, props: &velox_dom::Props) -> bool {
+    if props.attrs.contains_key("on:click") || tag == "button" {
+        return true;
+    }
+    props
+        .attrs
+        .get("class")
+        .map(|s| s.split_whitespace().any(|c| c == "btn"))
+        .unwrap_or(false)
+}
+
+pub fn collect_click_targets(
+    vnode: &VNode,
+    layout: &velox_dom::layout::LayoutNode,
+    out: &mut Vec<ClickTarget>,
+) {
+    match vnode {
+        VNode::Text(_) => {}
+        VNode::Element { props, children, .. } => {
+            if let Some(handler) = props.attrs.get("on:click").cloned() {
+                let payload = props.attrs.get("on:click-payload").cloned();
+                out.push(ClickTarget { rect: layout.rect, handler, payload });
+            }
+            for (child, child_layout) in children.iter().zip(&layout.children) {
+                collect_click_targets(child, child_layout, out);
+            }
+        }
+    }
+}
+
+pub fn collect_hover_targets(
+    vnode: &VNode,
+    layout: &velox_dom::layout::LayoutNode,
+    out: &mut Vec<HoverTarget>,
+) {
+    match vnode {
+        VNode::Text(_) => {}
+        VNode::Element { tag, props, children, .. } => {
+            if is_hoverable(tag, props) {
+                let id = props
+                    .attrs
+                    .get("data-hover-id")
+                    .and_then(|v| v.parse::<u32>().ok())
+                    .unwrap_or(0);
+                out.push(HoverTarget { rect: layout.rect, id });
+            }
+            for (child, child_layout) in children.iter().zip(&layout.children) {
+                collect_hover_targets(child, child_layout, out);
+            }
+        }
+    }
+}
+
+pub fn hit_test_click<'a>(
+    targets: &'a [ClickTarget],
+    x: f32,
+    y: f32,
+) -> Option<(&'a str, Option<&'a str>)> {
+    for target in targets {
+        let r = target.rect;
+        let x0 = r.x as f32;
+        let y0 = r.y as f32;
+        let x1 = (r.x + r.w) as f32;
+        let y1 = (r.y + r.h) as f32;
+        if x >= x0 && x <= x1 && y >= y0 && y <= y1 {
+            return Some((target.handler.as_str(), target.payload.as_deref()));
+        }
+    }
+    None
+}
+
+pub fn hit_test_hover(targets: &[HoverTarget], x: f32, y: f32) -> Option<u32> {
+    for target in targets {
+        let r = target.rect;
+        let x0 = r.x as f32;
+        let y0 = r.y as f32;
+        let x1 = (r.x + r.w) as f32;
+        let y1 = (r.y + r.h) as f32;
+        if x >= x0 && x <= x1 && y >= y0 && y <= y1 {
+            return Some(target.id);
+        }
+    }
+    None
+}
+
 /// Dispatches an event by scanning the VNode tree for props of the form
 /// `on:<event>` and invoking registered callbacks with the string value.
 /// Returns the number of callbacks invoked.
@@ -96,4 +194,3 @@ impl Runtime {
     /// Reset hover state (useful for tests or leaving the window).
     pub fn reset_hover(&mut self) { self.hover_sent = false; }
 }
-
