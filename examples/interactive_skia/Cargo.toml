@@ -1,13 +1,10 @@
 [package]
-name = "myapp"
+name = "interactive_skia"
 version = "0.1.0"
 edition = "2024"
+publish = false
 
 [dependencies]
-velox-core = { path = "../../velox-core" }
 velox-dom = { path = "../../velox-dom" }
 velox-style = { path = "../../velox-style" }
 velox-renderer = { path = "../../velox-renderer", features = ["skia-native"] }
-
-[build-dependencies]
-velox-cli = { path = "../../velox-cli" }

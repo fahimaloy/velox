@@ -10,7 +10,7 @@ Workspace
 - velox-sfc: SFC parsing + template/codegen
 - velox-dom: VNode tree + diffing + layout
 - velox-style: CSS parsing, cascading, selectors, inline style synthesis
-- velox-renderer: render VNode trees; backends: `wgpu` (and a stub)
+- velox-renderer: render VNode trees; backends: `wgpu`, `skia` (API stub), `skia-native` (native Skia)
 - velox-cli: CLI for compiling SFCs and scaffolding/running apps
 - examples/: example apps scaffolded via CLI
 
@@ -25,6 +25,7 @@ What’s New in 0.1.1
 Build
 - Build workspace: `cargo build --workspace`
 - Enable GPU renderer: `cargo build -p velox-renderer --features wgpu`
+- Enable Skia renderer (native): `cargo build -p velox-renderer --features skia-native`
 - Lint/format: `cargo clippy --workspace -- -D warnings`, `cargo fmt`
 
 Tests
@@ -45,6 +46,12 @@ Example Run
 - After `init myapp`:
   - `cargo run -p velox-cli -- dev myapp`
   - Edit `examples/myapp/src/App.vx` to experiment with styles (`font-size`, `text-decoration`, `line-height`, `:hover`), and events (`@click`).
+
+Skia Backend Notes
+- `skia` enables the API surface; `skia-native` builds Skia and enables windowed rendering.
+- Current window path uses a raster Skia surface and presents via `softbuffer` for Wayland/X11 compatibility.
+- GPU-backed Skia surfaces are experimental; expect raster fallback on most Linux setups.
+- Example: `cargo run -p interactive_skia` (set `WINIT_UNIX_BACKEND=wayland` to force Wayland).
 
 Design Notes
 - SFC `<template>` becomes a VNode tree; `<style>` is parsed and cascaded into inline styles during render (with hover predicate support); `<script setup>` holds Rust state/logic.
@@ -79,4 +86,3 @@ If you want the docs to prefer a canonical style, use `v-if`, `v-else-if`, and `
 </template>
 
 The parser normalizes `v-elseIf`, `v_elseif`, and other variants to the canonical `else-if` before codegen; codegen emits chained `if { } else if { } else { }` blocks.
-

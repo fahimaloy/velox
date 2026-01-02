@@ -16,13 +16,27 @@ mod skia_surface;
 #[cfg(feature = "skia-native")]
 mod skia_render;
 #[cfg(feature = "skia-native")]
-pub use skia_render::render_vnode_to_raster_png;
+pub use skia_render::{render_vnode_to_raster_png, render_vnode_to_raster_png_with_scale};
 
 /// In-memory representation of a mounted tree (stubbed for now).
 pub struct RenderTree {
     pub root: VNode,
     pub node_count: usize,
     pub text_count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct A11yNode {
+    pub id: usize,
+    pub role: String,
+    pub name: String,
+    pub rect: velox_dom::layout::Rect,
+    pub children: Vec<A11yNode>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct A11yTree {
+    pub root: A11yNode,
 }
 
 fn summarize(v: &VNode, counts: &mut (usize, usize)) {
@@ -44,6 +58,94 @@ fn build_render_tree(v: &VNode) -> RenderTree {
     let mut counts = (0, 0);
     summarize(v, &mut counts);
     RenderTree { root: v.clone(), node_count: counts.0, text_count: counts.1 }
+}
+
+fn vnode_text_content(node: &VNode) -> String {
+    match node {
+        VNode::Text(t) => t.clone(),
+        VNode::Element { children, .. } => {
+            let mut out = String::new();
+            for ch in children {
+                let s = vnode_text_content(ch);
+                if !s.is_empty() {
+                    if !out.is_empty() {
+                        out.push(' ');
+                    }
+                    out.push_str(&s);
+                }
+            }
+            out
+        }
+    }
+}
+
+fn a11y_role_for(tag: &str, props: &velox_dom::Props) -> String {
+    if let Some(role) = props.attrs.get("role") {
+        return role.clone();
+    }
+    match tag {
+        "button" => "button",
+        "img" => "image",
+        "input" => "textbox",
+        "label" => "label",
+        "a" => "link",
+        _ => "group",
+    }
+    .to_string()
+}
+
+fn a11y_name_for(tag: &str, props: &velox_dom::Props, node: &VNode) -> String {
+    if let Some(label) = props.attrs.get("aria-label") {
+        return label.clone();
+    }
+    if tag == "img" {
+        if let Some(alt) = props.attrs.get("alt") {
+            return alt.clone();
+        }
+    }
+    vnode_text_content(node)
+}
+
+fn build_a11y_tree_with_layout(
+    vnode: &VNode,
+    layout: &velox_dom::layout::LayoutNode,
+    next_id: &mut usize,
+) -> A11yNode {
+    let id = *next_id;
+    *next_id += 1;
+    match vnode {
+        VNode::Text(t) => A11yNode {
+            id,
+            role: "text".to_string(),
+            name: t.clone(),
+            rect: layout.rect,
+            children: Vec::new(),
+        },
+        VNode::Element { tag, props, children, .. } => {
+            let mut child_nodes = Vec::new();
+            for (ch, ch_layout) in children.iter().zip(&layout.children) {
+                child_nodes.push(build_a11y_tree_with_layout(ch, ch_layout, next_id));
+            }
+            A11yNode {
+                id,
+                role: a11y_role_for(tag, props),
+                name: a11y_name_for(tag, props, vnode),
+                rect: layout.rect,
+                children: child_nodes,
+            }
+        }
+    }
+}
+
+pub fn build_a11y_tree(
+    vnode: &VNode,
+    width: i32,
+    height: i32,
+) -> A11yTree {
+    let layout = velox_dom::layout::compute_layout(vnode, width, height);
+    let mut next_id = 1;
+    let root = build_a11y_tree_with_layout(vnode, &layout, &mut next_id);
+    A11yTree { root }
 }
 
 /// Reconcile two VNode children vectors using an optional `key` prop.
@@ -150,13 +252,12 @@ pub mod wgpu_backend {
 // Real Skia backend only when `skia-native` is enabled.
 #[cfg(feature = "skia-native")]
 pub mod skia_backend {
-    use skia_safe as sk;
     #[cfg(feature = "skia-native")]
     use crate::skia_gl;
     #[cfg(feature = "skia-native")]
     use crate::skia_surface;
     #[cfg(feature = "skia-native")]
-    use raw_window_handle::HasWindowHandle;
+    use raw_window_handle::HasRawWindowHandle;
 
     pub fn init() {
         match skia_gl::create_context() {
@@ -175,7 +276,7 @@ pub mod skia_backend {
     }
 
     impl SkiaRenderer {
-        pub fn with_window(window: &impl HasWindowHandle, width: i32, height: i32) -> Result<Self, String> {
+        pub fn with_window(window: &impl HasRawWindowHandle, width: i32, height: i32) -> Result<Self, String> {
             match skia_surface::create_window_surface_from_handle(window, width, height) {
                 Ok(s) => Ok(SkiaRenderer { surface: Some(s) }),
                 Err(e) => Err(e),
@@ -284,13 +385,324 @@ pub use events::Runtime as EventRuntime;
 /// Test helper: exercise a small Skia draw path (native-only).
 #[cfg(all(feature = "skia-native", unix))]
 pub fn skia_draw_test_frame() -> Result<(), String> {
-    crate::skia_gl::draw_test_frame()
+    crate::skia_gl::draw_gpu_test_frame(256, 256)
 }
 
 /// Convenience wrapper to create a Skia `DirectContext` from the crate root.
 #[cfg(all(feature = "skia-native", unix))]
 pub fn create_direct_context() -> Result<skia_safe::gpu::DirectContext, String> {
     crate::skia_gl::create_direct_context()
+}
+
+#[cfg(feature = "skia-native")]
+pub fn run_window_vnode_skia<F, G, H>(title: &str, mut make_view: F, mut on_event: G, mut get_title: H)
+where
+    F: FnMut(u32, u32) -> (velox_dom::VNode, Stylesheet) + 'static,
+    G: FnMut(&str, Option<&str>) + 'static,
+    H: FnMut() -> String + 'static,
+{
+    use winit::dpi::PhysicalSize;
+    use winit::event::{ElementState, Event, MouseButton, StartCause, WindowEvent};
+    use winit::event_loop::{ControlFlow, EventLoop};
+    use winit::window::WindowBuilder;
+
+    struct SoftbufferPresenter {
+        _context: softbuffer::Context,
+        surface: softbuffer::Surface,
+        width: u32,
+        height: u32,
+        rgba: Vec<u8>,
+    }
+
+    impl SoftbufferPresenter {
+        fn new(window: &winit::window::Window, width: u32, height: u32) -> Result<Self, String> {
+            let context = unsafe {
+                softbuffer::Context::new(window)
+                    .map_err(|e| format!("softbuffer context failed: {}", e))?
+            };
+            let mut surface = unsafe {
+                softbuffer::Surface::new(&context, window)
+                    .map_err(|e| format!("softbuffer surface failed: {}", e))?
+            };
+            let w = width.max(1);
+            let h = height.max(1);
+            surface
+                .resize(std::num::NonZeroU32::new(w).unwrap(), std::num::NonZeroU32::new(h).unwrap())
+                .map_err(|e| format!("softbuffer resize failed: {}", e))?;
+            Ok(Self {
+                _context: context,
+                surface,
+                width: w,
+                height: h,
+                rgba: vec![0u8; (w as usize) * (h as usize) * 4],
+            })
+        }
+
+        fn resize(&mut self, width: u32, height: u32) -> Result<(), String> {
+            let w = width.max(1);
+            let h = height.max(1);
+            if w == self.width && h == self.height {
+                return Ok(());
+            }
+            self.surface
+                .resize(std::num::NonZeroU32::new(w).unwrap(), std::num::NonZeroU32::new(h).unwrap())
+                .map_err(|e| format!("softbuffer resize failed: {}", e))?;
+            self.width = w;
+            self.height = h;
+            self.rgba.resize((w as usize) * (h as usize) * 4, 0);
+            Ok(())
+        }
+
+        fn present(&mut self, skia_surface: &mut crate::skia_surface::SkiaSurface) -> Result<(), String> {
+            let width = skia_surface.width.max(1) as u32;
+            let height = skia_surface.height.max(1) as u32;
+            self.resize(width, height)?;
+
+            let info = skia_safe::ImageInfo::new(
+                (self.width as i32, self.height as i32),
+                skia_safe::ColorType::RGBA8888,
+                skia_safe::AlphaType::Premul,
+                None,
+            );
+            let row_bytes = (self.width * 4) as usize;
+            if !skia_surface.read_pixels(&info, &mut self.rgba, row_bytes, (0, 0)) {
+                return Err("skia: read_pixels failed".to_string());
+            }
+
+            let mut buffer = self
+                .surface
+                .buffer_mut()
+                .map_err(|e| format!("softbuffer buffer_mut failed: {}", e))?;
+            let pixels: &mut [u32] = &mut buffer;
+            let pixel_count = (self.width as usize) * (self.height as usize);
+            if pixels.len() < pixel_count {
+                return Err("softbuffer: buffer smaller than expected".to_string());
+            }
+            for (i, pixel) in pixels.iter_mut().take(pixel_count).enumerate() {
+                let base = i * 4;
+                let r = self.rgba[base] as u32;
+                let g = self.rgba[base + 1] as u32;
+                let b = self.rgba[base + 2] as u32;
+                *pixel = (r << 16) | (g << 8) | b;
+            }
+            buffer
+                .present()
+                .map_err(|e| format!("softbuffer present failed: {}", e))?;
+            Ok(())
+        }
+    }
+
+    let event_loop = EventLoop::new();
+    let window = WindowBuilder::new()
+        .with_title(title)
+        .with_inner_size(PhysicalSize::new(800, 600))
+        .build(&event_loop)
+        .expect("failed to create window");
+
+    let size = window.inner_size();
+    let mut renderer = match crate::skia_surface::SkiaSurface::new_raster(size.width as i32, size.height as i32) {
+        Ok(surface) => skia_backend::SkiaRenderer { surface: Some(surface) },
+        Err(e) => panic!("failed to create SkiaSurface: {}", e),
+    };
+    let mut presenter = match SoftbufferPresenter::new(&window, size.width, size.height) {
+        Ok(p) => p,
+        Err(e) => panic!("failed to create softbuffer presenter: {}", e),
+    };
+    let mut scale_factor = window.scale_factor() as f32;
+    let mut mouse_pos = (0.0f32, 0.0f32);
+    let mut hovered_id: Option<u32> = None;
+    let mut click_targets: Vec<crate::events::ClickTarget> = Vec::new();
+    let mut hover_targets: Vec<crate::events::HoverTarget> = Vec::new();
+
+    fn logical_size(width: i32, height: i32, scale_factor: f32) -> (u32, u32) {
+        let w = ((width as f32) / scale_factor).round().max(1.0) as u32;
+        let h = ((height as f32) / scale_factor).round().max(1.0) as u32;
+        (w, h)
+    }
+
+    fn recompute_targets(
+        vnode: &velox_dom::VNode,
+        width: u32,
+        height: u32,
+        click_targets: &mut Vec<crate::events::ClickTarget>,
+        hover_targets: &mut Vec<crate::events::HoverTarget>,
+    ) {
+        let layout = velox_dom::layout::compute_layout(vnode, width as i32, height as i32);
+        click_targets.clear();
+        crate::events::collect_click_targets(vnode, &layout, click_targets);
+        hover_targets.clear();
+        crate::events::collect_hover_targets(vnode, &layout, hover_targets);
+    }
+
+    fn with_hover_ids(vnode: &velox_dom::VNode, next_id: &mut u32) -> velox_dom::VNode {
+        match vnode {
+            velox_dom::VNode::Text(_) => vnode.clone(),
+            velox_dom::VNode::Element { tag, props, children } => {
+                let mut new_props = props.clone();
+                if crate::events::is_hoverable(tag, props) {
+                    let id = *next_id;
+                    *next_id += 1;
+                    new_props = new_props.set("data-hover-id", id.to_string());
+                }
+                let new_children = children.iter().map(|c| with_hover_ids(c, next_id)).collect();
+                velox_dom::VNode::Element { tag: tag.clone(), props: new_props, children: new_children }
+            }
+        }
+    }
+
+    if let Some(s) = &mut renderer.surface {
+        s.set_scale_factor(scale_factor);
+        let (vw, vh) = logical_size(s.width, s.height, scale_factor);
+        let (vnode_raw, sheet) = make_view(vw, vh);
+        let mut next_id = 1u32;
+        let vnode_tagged = with_hover_ids(&vnode_raw, &mut next_id);
+        let vnode = apply_styles_with_hover(
+            &vnode_tagged,
+            &sheet,
+            &|_tag, props| {
+                props
+                    .attrs
+                    .get("data-hover-id")
+                    .and_then(|v| v.parse::<u32>().ok())
+                    .map(|id| Some(id) == hovered_id)
+                    .unwrap_or(false)
+            },
+        );
+        recompute_targets(&vnode, vw, vh, &mut click_targets, &mut hover_targets);
+    }
+
+    event_loop.run(move |event, _, control_flow| {
+        *control_flow = ControlFlow::Wait;
+        match event {
+            Event::NewEvents(StartCause::Init) => {
+                window.request_redraw();
+            }
+            Event::WindowEvent { event: WindowEvent::CloseRequested, .. } => {
+                *control_flow = ControlFlow::Exit;
+            }
+            Event::WindowEvent { event: WindowEvent::Resized(new_size), .. } => {
+                let _ = renderer.resize(new_size.width as i32, new_size.height as i32);
+                let _ = presenter.resize(new_size.width, new_size.height);
+                if let Some(s) = &mut renderer.surface {
+                    s.set_scale_factor(scale_factor);
+                    let (vw, vh) = logical_size(s.width, s.height, scale_factor);
+                    let (vnode_raw, sheet) = make_view(vw, vh);
+                    let mut next_id = 1u32;
+                    let vnode_tagged = with_hover_ids(&vnode_raw, &mut next_id);
+                    let vnode = apply_styles_with_hover(
+                        &vnode_tagged,
+                        &sheet,
+                        &|_tag, props| {
+                            props
+                                .attrs
+                                .get("data-hover-id")
+                                .and_then(|v| v.parse::<u32>().ok())
+                                .map(|id| Some(id) == hovered_id)
+                                .unwrap_or(false)
+                        },
+                    );
+                    recompute_targets(&vnode, vw, vh, &mut click_targets, &mut hover_targets);
+                }
+                window.request_redraw();
+            }
+            Event::WindowEvent { event: WindowEvent::ScaleFactorChanged { scale_factor: new_scale, new_inner_size, .. }, .. } => {
+                scale_factor = new_scale as f32;
+                let _ = renderer.resize(new_inner_size.width as i32, new_inner_size.height as i32);
+                let _ = presenter.resize(new_inner_size.width, new_inner_size.height);
+                if let Some(s) = &mut renderer.surface {
+                    s.set_scale_factor(scale_factor);
+                    let (vw, vh) = logical_size(s.width, s.height, scale_factor);
+                    let (vnode_raw, sheet) = make_view(vw, vh);
+                    let mut next_id = 1u32;
+                    let vnode_tagged = with_hover_ids(&vnode_raw, &mut next_id);
+                    let vnode = apply_styles_with_hover(
+                        &vnode_tagged,
+                        &sheet,
+                        &|_tag, props| {
+                            props
+                                .attrs
+                                .get("data-hover-id")
+                                .and_then(|v| v.parse::<u32>().ok())
+                                .map(|id| Some(id) == hovered_id)
+                                .unwrap_or(false)
+                        },
+                    );
+                    recompute_targets(&vnode, vw, vh, &mut click_targets, &mut hover_targets);
+                }
+                window.request_redraw();
+            }
+            Event::WindowEvent { event: WindowEvent::CursorMoved { position, .. }, .. } => {
+                mouse_pos = (
+                    position.x as f32 / scale_factor,
+                    position.y as f32 / scale_factor,
+                );
+                let now_hovered = crate::events::hit_test_hover(&hover_targets, mouse_pos.0, mouse_pos.1);
+                if now_hovered != hovered_id {
+                    hovered_id = now_hovered;
+                    window.request_redraw();
+                }
+            }
+            Event::WindowEvent { event: WindowEvent::MouseInput { state: ElementState::Pressed, button: MouseButton::Left, .. }, .. } => {
+                if let Some((handler, payload_opt)) = crate::events::hit_test_click(&click_targets, mouse_pos.0, mouse_pos.1) {
+                    let payload_owned = payload_opt
+                        .map(|p| p.to_string())
+                        .unwrap_or_else(|| format!("{{\"x\":{},\"y\":{}}}", mouse_pos.0, mouse_pos.1));
+                    on_event(handler, Some(&payload_owned));
+                    if let Some(s) = &mut renderer.surface {
+                        let (vw, vh) = logical_size(s.width, s.height, scale_factor);
+                        let (vnode_raw, sheet) = make_view(vw, vh);
+                        let mut next_id = 1u32;
+                        let vnode_tagged = with_hover_ids(&vnode_raw, &mut next_id);
+                        let vnode = apply_styles_with_hover(
+                            &vnode_tagged,
+                            &sheet,
+                            &|_tag, props| {
+                                props
+                                    .attrs
+                                    .get("data-hover-id")
+                                    .and_then(|v| v.parse::<u32>().ok())
+                                    .map(|id| Some(id) == hovered_id)
+                                    .unwrap_or(false)
+                            },
+                        );
+                        recompute_targets(&vnode, vw, vh, &mut click_targets, &mut hover_targets);
+                    }
+                    window.set_title(&get_title());
+                    window.request_redraw();
+                }
+            }
+            Event::RedrawRequested(_) => {
+                // Render VNode -> Skia frame and present.
+                if let Some(s) = &mut renderer.surface {
+                    s.set_scale_factor(scale_factor);
+                    let (vw, vh) = logical_size(s.width, s.height, scale_factor);
+                    let (vnode_raw, sheet) = make_view(vw, vh);
+                    let mut next_id = 1u32;
+                    let vnode_tagged = with_hover_ids(&vnode_raw, &mut next_id);
+                    let vnode = apply_styles_with_hover(
+                        &vnode_tagged,
+                        &sheet,
+                        &|_tag, props| {
+                            props
+                                .attrs
+                                .get("data-hover-id")
+                                .and_then(|v| v.parse::<u32>().ok())
+                                .map(|id| Some(id) == hovered_id)
+                                .unwrap_or(false)
+                        },
+                    );
+                    recompute_targets(&vnode, vw, vh, &mut click_targets, &mut hover_targets);
+                    if let Err(e) = crate::skia_render::skia_impl::render_frame(s, &vnode, &sheet) {
+                        eprintln!("skia render error: {}", e);
+                    }
+                    if let Err(e) = presenter.present(s) {
+                        eprintln!("skia present error: {}", e);
+                    }
+                }
+            }
+            _ => {}
+        }
+    });
 }
 
 #[cfg(feature = "wgpu")]
@@ -325,57 +737,6 @@ where
     use winit::event::{ElementState, Event, MouseButton, WindowEvent};
     use winit::event_loop::{ControlFlow, EventLoop};
     use winit::window::WindowBuilder;
-
-
-    #[cfg(feature = "skia-native")]
-    pub fn run_window_vnode_skia<F, G, H>(title: &str, mut make_view: F, mut on_event: G, mut get_title: H)
-    where
-        F: FnMut(u32, u32) -> (velox_dom::VNode, Stylesheet) + 'static,
-        G: FnMut(&str, Option<&str>) + 'static,
-        H: FnMut() -> String + 'static,
-    {
-        use winit::dpi::PhysicalSize;
-        use winit::event::{Event, WindowEvent};
-        use winit::event_loop::{ControlFlow, EventLoop};
-        use winit::window::WindowBuilder;
-        use skia_safe as sk;
-
-        let event_loop = EventLoop::new();
-        let window = WindowBuilder::new()
-            .with_title(title)
-            .with_inner_size(PhysicalSize::new(800, 600))
-            .build(&event_loop)
-            .expect("failed to create window");
-
-        let size = window.inner_size();
-        let mut renderer = match skia_backend::SkiaRenderer::with_window(&window, size.width as i32, size.height as i32) {
-            Ok(r) => r,
-            Err(e) => panic!("failed to create SkiaRenderer: {}", e),
-        };
-
-        event_loop.run(move |event, _, control_flow| {
-            *control_flow = ControlFlow::Wait;
-            match event {
-                Event::WindowEvent { event: WindowEvent::CloseRequested, .. } => {
-                    *control_flow = ControlFlow::Exit;
-                }
-                Event::WindowEvent { event: WindowEvent::Resized(new_size), .. } => {
-                    let _ = renderer.resize(new_size.width as i32, new_size.height as i32);
-                    window.request_redraw();
-                }
-                Event::RedrawRequested(_) => {
-                    // Render VNode -> Skia frame and present.
-                    if let Some(s) = &mut renderer.surface {
-                        let (vnode, sheet) = make_view(s.width as u32, s.height as u32);
-                        if let Err(e) = crate::skia_render::skia_impl::render_frame(s, &vnode, &sheet) {
-                            eprintln!("skia render error: {}", e);
-                        }
-                    }
-                }
-                _ => {}
-            }
-        });
-    }
 
     // Setup window
     let event_loop = EventLoop::new();

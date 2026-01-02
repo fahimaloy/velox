@@ -8,13 +8,13 @@
 mod native {
     use skia_safe as sk;
     use std::path::Path;
-    use glow;
     use glow::HasContext;
 
     pub struct SkiaSurface {
         surface: sk::Surface,
         pub width: i32,
         pub height: i32,
+        scale_factor: f32,
         // Optional GPU context if available (kept for future extension)
         pub _gpu_ctx: Option<sk::gpu::DirectContext>,
         // Keep the native GL/EGL context alive while the Skia surface exists.
@@ -27,7 +27,15 @@ mod native {
         pub fn new_raster(width: i32, height: i32) -> Result<Self, String> {
             let surface = sk::surfaces::raster_n32_premul((width, height))
                 .ok_or_else(|| "skia: failed to create raster surface".to_string())?;
-            Ok(SkiaSurface { surface, width, height, _gpu_ctx: None, #[cfg(all(feature = "skia-native", unix))] _gl_ctx: None })
+            Ok(SkiaSurface {
+                surface,
+                width,
+                height,
+                scale_factor: 1.0,
+                _gpu_ctx: None,
+                #[cfg(all(feature = "skia-native", unix))]
+                _gl_ctx: None,
+            })
         }
 
         /// Return a reference to the canvas.
@@ -40,6 +48,10 @@ mod native {
                 if false {
                     // no-op to keep fallback logic clear
                 }
+            }
+            #[cfg(all(feature = "skia-native", unix))]
+            if let Some(gl_ctx) = &self._gl_ctx {
+                let _ = gl_ctx.make_current();
             }
             self.surface.canvas()
         }
@@ -54,15 +66,52 @@ mod native {
             std::fs::write(path, data.as_bytes()).map_err(|e| format!("write failed: {}", e))
         }
 
+        /// Encode the current surface snapshot as PNG bytes.
+        pub fn encode_png(&mut self) -> Result<Vec<u8>, String> {
+            let img = self.surface.image_snapshot();
+            #[allow(deprecated)]
+            let data = img
+                .encode_to_data(skia_safe::EncodedImageFormat::PNG)
+                .ok_or_else(|| "skia: failed to encode image".to_string())?;
+            Ok(data.as_bytes().to_vec())
+        }
+
         /// Present or flush any GPU work for this surface.
         ///
         /// For GPU-backed surfaces this will flush and submit the `DirectContext`.
         /// For raster surfaces this is a no-op.
         pub fn present(&mut self) -> Result<(), String> {
+            #[cfg(all(feature = "skia-native", unix))]
+            if let Some(gl_ctx) = &self._gl_ctx {
+                let _ = gl_ctx.make_current();
+            }
             if let Some(dctx) = &mut self._gpu_ctx {
                 dctx.flush_and_submit();
             }
             Ok(())
+        }
+
+        /// Read RGBA pixels from the surface into the provided buffer.
+        pub fn read_pixels(
+            &mut self,
+            info: &sk::ImageInfo,
+            dst: &mut [u8],
+            row_bytes: usize,
+            src: (i32, i32),
+        ) -> bool {
+            self.surface.read_pixels(info, dst, row_bytes, src)
+        }
+
+        /// Update the scale factor used for logical-to-physical mapping.
+        pub fn set_scale_factor(&mut self, scale_factor: f32) {
+            if scale_factor > 0.0 {
+                self.scale_factor = scale_factor;
+            }
+        }
+
+        /// Current scale factor for logical-to-physical mapping.
+        pub fn scale_factor(&self) -> f32 {
+            self.scale_factor
         }
 
         /// Resize the surface. Recreate a GPU-backed surface when a `DirectContext`
@@ -73,6 +122,10 @@ mod native {
 
             // If we have a DirectContext, try to create a GPU-backed surface.
             if let Some(dctx) = &mut self._gpu_ctx {
+                #[cfg(all(feature = "skia-native", unix))]
+                if let Some(gl_ctx) = &self._gl_ctx {
+                    let _ = gl_ctx.make_current();
+                }
                 if let Some(new_surf) = create_gpu_surface_from_direct_context(dctx, width, height) {
                     self.surface = new_surf;
                     return Ok(());
@@ -95,7 +148,7 @@ mod native {
         /// `DirectContext`. For Phase 1 we return a raster surface if creating a
         /// GPU-backed surface is not yet supported.
         pub fn create_window_surface_from_handle(
-            window: &impl raw_window_handle::HasWindowHandle,
+            window: &impl raw_window_handle::HasRawWindowHandle,
             width: i32,
             height: i32,
         ) -> Result<SkiaSurface, String> {
@@ -110,12 +163,28 @@ mod native {
                         // and the native GL context so they are kept alive for the lifetime
                         // of the surface.
                         if let Some(gpu_surf) = create_gpu_surface_from_direct_context(&mut dctx, width, height) {
-                            return Ok(SkiaSurface { surface: gpu_surf, width, height, _gpu_ctx: Some(dctx), #[cfg(all(feature = "skia-native", unix))] _gl_ctx: Some(gl_ctx) });
+                            return Ok(SkiaSurface {
+                                surface: gpu_surf,
+                                width,
+                                height,
+                                scale_factor: 1.0,
+                                _gpu_ctx: Some(dctx),
+                                #[cfg(all(feature = "skia-native", unix))]
+                                _gl_ctx: Some(gl_ctx),
+                            });
                         }
                         // Fallback to raster until the platform-specific path is implemented.
                         let surface = sk::surfaces::raster_n32_premul((width, height))
                             .ok_or_else(|| "skia: failed to create raster fallback surface".to_string())?;
-                        return Ok(SkiaSurface { surface, width, height, _gpu_ctx: Some(dctx), #[cfg(all(feature = "skia-native", unix))] _gl_ctx: Some(gl_ctx) });
+                        return Ok(SkiaSurface {
+                            surface,
+                            width,
+                            height,
+                            scale_factor: 1.0,
+                            _gpu_ctx: Some(dctx),
+                            #[cfg(all(feature = "skia-native", unix))]
+                            _gl_ctx: Some(gl_ctx),
+                        });
                     } else {
                         eprintln!("[skia_surface] Could not make DirectContext; falling back to raster");
                     }
@@ -159,10 +228,10 @@ mod native {
             let fb_info = sk::gpu::gl::FramebufferInfo { fboid: fb_binding, format: gl_format, protected: sk::gpu::Protected::No };
 
             // Create a BackendRenderTarget for GL.
-            let backend = sk::gpu::BackendRenderTarget::new_gl((width, height), 0, 8, fb_info);
+            let backend = sk::gpu::backend_render_targets::make_gl((width, height), 0, 8, fb_info);
 
             // Create a Skia GPU-backed Surface from the backend render target.
-            let surface = sk::Surface::from_backend_render_target(
+            let surface = sk::gpu::surfaces::wrap_backend_render_target(
                 dctx,
                 &backend,
                 sk::gpu::SurfaceOrigin::BottomLeft,

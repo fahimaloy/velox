@@ -38,6 +38,22 @@ fn style_lookup_len(style: Option<&str>, key: &str, base: i32) -> Option<i32> {
     None
 }
 
+fn style_lookup_str(style: Option<&str>, key: &str) -> Option<String> {
+    let s = style?;
+    for decl in s.split(';') {
+        let d = decl.trim();
+        if d.is_empty() {
+            continue;
+        }
+        if let Some((k, v)) = d.split_once(':') {
+            if k.trim() == key {
+                return Some(v.trim().to_string());
+            }
+        }
+    }
+    None
+}
+
 fn style_box_sides(style: Option<&str>, base: &str) -> (i32, i32, i32, i32) {
     // returns (left, right, top, bottom)
     let s = style.unwrap_or("");
@@ -65,13 +81,15 @@ pub fn compute_layout(node: &VNode, viewport_w: i32, viewport_h: i32) -> LayoutN
     fn at(node: &VNode, x: i32, y: i32, avail_w: i32, avail_h: i32) -> LayoutNode {
         match node {
             VNode::Text(t) => {
-                let w = (t.trim().len() as i32).max(1) * 8; // simple estimate
+                let len = t.chars().count() as i32;
+                let w = if len > 0 { len * 8 } else { 0 }; // simple estimate
                 LayoutNode { rect: Rect { x, y, w, h: 16 }, children: vec![] }
             }
-            VNode::Element { props, children, .. } => {
+            VNode::Element { tag, props, children } => {
                 let style = props.attrs.get("style").map(|s| s.as_str());
                 let (ml, mr, mt, mb) = style_box_sides(style, "margin");
                 let (pl, pr, pt, pb) = style_box_sides(style, "padding");
+                let is_root = matches!(tag.as_str(), "body" | "html");
 
                 // Element outer position with margins
                 let elem_x = x + ml;
@@ -79,7 +97,11 @@ pub fn compute_layout(node: &VNode, viewport_w: i32, viewport_h: i32) -> LayoutN
 
                 // Determine width: if set, use as content+padding width; else take available width
                 let declared_w = style_lookup_len(style, "width", avail_w);
-                let rect_w = declared_w.unwrap_or(avail_w);
+                let rect_w = if is_root {
+                    (avail_w - ml - mr).max(1)
+                } else {
+                    declared_w.unwrap_or(avail_w)
+                };
 
                 // Content box
                 let content_x = elem_x + pl;
@@ -119,22 +141,99 @@ pub fn compute_layout(node: &VNode, viewport_w: i32, viewport_h: i32) -> LayoutN
                         // set all y to top for now (no align-items support beyond start)
                         for ln in &mut laid_children { ln.rect.y = content_y_start; }
                     }
-                } else { // block
+                } else { // block with inline text flow
+                    let mut cur_x = content_x;
                     let mut cur_y = content_y_start;
+                    let mut line_h = 0;
+                    let mut max_y_end = content_y_start;
                     for c in children {
-                        let child_ln = at(c, content_x, cur_y, content_w, (avail_h - pt - pb).max(0));
-                        // increment cur_y by child's own outer height (we approximate bottom margin via its style)
-                        let child_style = match c { VNode::Element { props, .. } => props.attrs.get("style").map(|s| s.as_str()), _ => None };
-                        let (_cml, _cmr, _cmt, cmb) = style_box_sides(child_style, "margin");
-                        cur_y = child_ln.rect.y + child_ln.rect.h + cmb;
+                        let is_text = matches!(c, VNode::Text(_));
+                        if !is_text && cur_x != content_x {
+                            cur_y += line_h;
+                            cur_x = content_x;
+                            line_h = 0;
+                        }
+
+                        let child_ln = at(
+                            c,
+                            cur_x,
+                            cur_y,
+                            (content_w - (cur_x - content_x)).max(0),
+                            (avail_h - pt - pb).max(0),
+                        );
+
+                        if is_text {
+                            let line_limit = content_x + content_w;
+                            if cur_x != content_x && (cur_x + child_ln.rect.w) > line_limit {
+                                cur_y += line_h.max(child_ln.rect.h);
+                                cur_x = content_x;
+                                line_h = 0;
+                            }
+                        }
+
+                        let child_ln = if is_text {
+                            at(
+                                c,
+                                cur_x,
+                                cur_y,
+                                (content_w - (cur_x - content_x)).max(0),
+                                (avail_h - pt - pb).max(0),
+                            )
+                        } else {
+                            child_ln
+                        };
+
+                        if is_text {
+                            cur_x += child_ln.rect.w;
+                            line_h = line_h.max(child_ln.rect.h);
+                        } else {
+                            let child_style = match c { VNode::Element { props, .. } => props.attrs.get("style").map(|s| s.as_str()), _ => None };
+                            let (_cml, _cmr, _cmt, cmb) = style_box_sides(child_style, "margin");
+                            cur_y = child_ln.rect.y + child_ln.rect.h + cmb;
+                            cur_x = content_x;
+                            line_h = 0;
+                        }
+
+                        max_y_end = max_y_end.max(child_ln.rect.y + child_ln.rect.h);
                         laid_children.push(child_ln);
                     }
+                    if line_h > 0 {
+                        max_y_end = max_y_end.max(cur_y + line_h);
+                    }
+                    cur_y = max_y_end;
                 }
 
                 // Height: declared or content height + paddings
                 let declared_h = style_lookup_len(style, "height", avail_h);
-                let content_h = if let Some(last) = laid_children.last() { (last.rect.y + last.rect.h - content_y_start).max(0) } else { 0 };
-                let rect_h = declared_h.unwrap_or(content_h + pb);
+                let content_h = laid_children
+                    .iter()
+                    .map(|c| c.rect.y + c.rect.h)
+                    .max()
+                    .map(|max_y| (max_y - content_y_start).max(0))
+                    .unwrap_or(0);
+                let rect_h = if is_root {
+                    (avail_h - mt - mb).max(1)
+                } else {
+                    declared_h.unwrap_or(content_h + pt + pb)
+                };
+
+                if tag == "button" && children.len() == 1 {
+                    if let Some(child) = laid_children.get_mut(0) {
+                        let content_h = (rect_h - pt - pb).max(0);
+                        let child_h = child.rect.h;
+                        let offset_y = ((content_h - child_h).max(0)) / 2;
+                        child.rect.y = elem_y + pt + offset_y;
+
+                        let align = style_lookup_str(style, "text-align").unwrap_or_else(|| "left".to_string());
+                        let child_w = child.rect.w;
+                        let offset_x = match align.as_str() {
+                            "center" => ((content_w - child_w).max(0)) / 2,
+                            "right" => (content_w - child_w).max(0),
+                            _ => 0,
+                        };
+                        child.rect.x = content_x + offset_x;
+                    }
+                }
 
                 LayoutNode { rect: Rect { x: elem_x, y: elem_y, w: rect_w, h: rect_h }, children: laid_children }
             }

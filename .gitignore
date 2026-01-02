@@ -40,7 +40,6 @@ coverage/
 # Local planning file (not for VCS)
 PROJECT_TODOS.yml
 RELEASE_V1_PLAN.yml
-AGENTS.md
 
-AGENTS.md
-skia-plan.txt
+plan.txt
+todo.txt

@@ -19,5 +19,7 @@ Data flows top-down:
 Backends:
 - wgpu: compiles and tested; serves as a template for a GPU-backed renderer.
 - skia: split features — `skia` (API-only stub) and `skia-native` (pulls `skia-safe`; heavy native build).
+  - Windowed Skia currently renders to a raster surface and presents via `softbuffer` for Wayland/X11 compatibility.
+  - GPU-backed Skia surfaces are experimental on Linux; expect raster fallback unless EGL window surfaces are implemented.
 
 Examples under `examples/` demonstrate usage; tests across crates validate behavior end-to-end. This modular design isolates responsibilities and makes it easy to evolve components independently.

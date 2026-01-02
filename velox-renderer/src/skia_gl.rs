@@ -20,8 +20,7 @@ mod unix_impl {
     use std::os::raw::c_void;
 
     use skia_safe as sk;
-    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
-    use glow;
+    use raw_window_handle::{HasRawWindowHandle, RawWindowHandle};
     use glow::HasContext;
 
     pub struct SkiaGlContext {
@@ -41,6 +40,19 @@ mod unix_impl {
                 // Use the newer helper for creating a GL-backed DirectContext
                 skia_safe::gpu::direct_contexts::make_gl(iface, None)
             }
+
+        pub fn make_current(&self) -> Result<(), String> {
+            if egl::make_current(
+                self.egl_display,
+                self.egl_surface,
+                self.egl_surface,
+                self.egl_context,
+            ) {
+                Ok(())
+            } else {
+                Err("egl: make_current failed".into())
+            }
+        }
     }
 
     impl Drop for SkiaGlContext {
@@ -68,9 +80,9 @@ mod unix_impl {
         egl::choose_config(dpy, attribs, 1)
     }
 
-    pub fn create_context_from_winit(window: &impl HasWindowHandle) -> Result<SkiaGlContext, String> {
+    pub fn create_context_from_winit(window: &impl HasRawWindowHandle) -> Result<SkiaGlContext, String> {
         // Acquire raw handle (currently unused) and implement a minimal EGL init path.
-        let _raw = window.window_handle();
+        let _raw = window.raw_window_handle();
 
         // Initialize EGL display
         let display = egl::get_display(egl::EGL_DEFAULT_DISPLAY).ok_or_else(|| {
@@ -214,18 +226,42 @@ mod unix_impl {
     pub fn draw_gpu_test_frame(width: i32, height: i32) -> Result<(), String> {
         // Create headless context and DirectContext
         let gl_ctx = create_headless_context()?;
+        let _ = gl_ctx.make_current();
         let mut dctx = gl_ctx.into_direct_context().ok_or_else(|| "skia: could not create DirectContext".to_string())?;
 
-        // We can at least verify that a DirectContext exists; creating a full
-        // BackendRenderTarget is platform- and API-version-sensitive and may
-        // require finer-grained skia-safe bindings. For now, log success and
-        // fall back to drawing into a CPU raster surface to validate the
-        // render path.
-        eprintln!("[skia_gl] DirectContext created — GPU path available");
+        // Attempt to build a GPU-backed Surface using the current framebuffer.
+        let mut surface = {
+            let gl = unsafe {
+                glow::Context::from_loader_function(|s| egl::get_proc_address(s) as *const _)
+            };
+            let fb_binding = unsafe { gl.get_parameter_i32(glow::FRAMEBUFFER_BINDING) } as u32;
+            let fb_info = skia_safe::gpu::gl::FramebufferInfo {
+                fboid: fb_binding,
+                format: glow::RGBA8,
+                protected: skia_safe::gpu::Protected::No,
+            };
+            let backend = skia_safe::gpu::backend_render_targets::make_gl(
+                (width, height),
+                0,
+                8,
+                fb_info,
+            );
+            skia_safe::gpu::surfaces::wrap_backend_render_target(
+                &mut dctx,
+                &backend,
+                skia_safe::gpu::SurfaceOrigin::BottomLeft,
+                skia_safe::ColorType::RGBA8888,
+                None,
+                None,
+            )
+        };
 
-        // Fallback: draw to a small raster surface to validate drawing
-        let mut surface = skia_safe::surfaces::raster_n32_premul((width as i32, height as i32))
-            .ok_or_else(|| "skia: failed to create raster fallback surface".to_string())?;
+        if surface.is_none() {
+            eprintln!("[skia_gl] GPU surface creation failed; falling back to raster");
+            surface = skia_safe::surfaces::raster_n32_premul((width, height));
+        }
+
+        let mut surface = surface.ok_or_else(|| "skia: failed to create surface".to_string())?;
         let canvas = surface.canvas();
         canvas.clear(skia_safe::Color::WHITE);
         let mut paint = skia_safe::Paint::default();
@@ -234,7 +270,6 @@ mod unix_impl {
         let r = skia_safe::Rect::from_xywh(4.0, 4.0, (width - 8) as f32, (height - 8) as f32);
         canvas.draw_rect(r, &paint);
 
-        // Take a snapshot to materialize the raster drawing
         let _img = surface.image_snapshot();
 
         // Ensure GPU context work (if any) is flushed
@@ -267,4 +302,3 @@ pub fn create_context() -> Result<SkiaGlContext, String> {
     // Create a headless pbuffer-backed context for CI and headless environments.
     unix_impl::create_headless_context()
 }
-

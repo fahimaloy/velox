@@ -159,6 +159,75 @@ pub(crate) fn emit_children(children: &[Node]) -> String {
     format!("vec![{}]", items.join(", "))
 }
 
+fn rewrite_if_expr(expr: &str) -> String {
+    let has_cmp = expr.contains("==")
+        || expr.contains("!=")
+        || expr.contains(">=")
+        || expr.contains("<=")
+        || expr.contains('>')
+        || expr.contains('<');
+    let mut out = String::new();
+    let mut ident = String::new();
+    let mut chars = expr.chars().peekable();
+
+    fn flush_ident(out: &mut String, ident: &mut String, has_cmp: bool) {
+        if ident.is_empty() {
+            return;
+        }
+        let token = ident.as_str();
+        let keep = token == "true"
+            || token == "false"
+            || token == "resolve"
+            || token == "state"
+            || token.contains('.');
+        if keep {
+            out.push_str(token);
+        } else if has_cmp {
+            out.push_str(&format!(
+                "resolve({}).parse::<f64>().unwrap_or(0.0)",
+                string_lit(token)
+            ));
+        } else {
+            out.push_str(&format!("!resolve({}).is_empty()", string_lit(token)));
+        }
+        ident.clear();
+    }
+
+    while let Some(ch) = chars.next() {
+        if ch.is_ascii_alphabetic() || ch == '_' {
+            ident.push(ch);
+            while let Some(&next) = chars.peek() {
+                if next.is_ascii_alphanumeric() || next == '_' {
+                    ident.push(next);
+                    chars.next();
+                } else {
+                    break;
+                }
+            }
+            flush_ident(&mut out, &mut ident, has_cmp);
+        } else if has_cmp && ch.is_ascii_digit() {
+            let mut num = String::new();
+            num.push(ch);
+            while let Some(&next) = chars.peek() {
+                if next.is_ascii_digit() || next == '.' {
+                    num.push(next);
+                    chars.next();
+                } else {
+                    break;
+                }
+            }
+            if !num.contains('.') {
+                num.push_str(".0");
+            }
+            out.push_str(&num);
+        } else {
+            out.push(ch);
+        }
+    }
+    flush_ident(&mut out, &mut ident, has_cmp);
+    out
+}
+
 fn emit_node_with(n: &Node) -> String {
     match n {
         Node::Text(t) => format!(r#"text({})"#, string_lit(t)),
@@ -172,7 +241,7 @@ fn emit_node_with(n: &Node) -> String {
                 // clone attrs and remove the directive so it does not become a prop
                 let mut attrs2 = attrs.clone();
                 let dir = attrs2.remove(pos);
-                let expr = dir.value.unwrap_or_default();
+                let expr = rewrite_if_expr(&dir.value.unwrap_or_default());
                 // construct a temporary element node with remaining attrs
                 let tmp = Node::Element { tag: tag.clone(), attrs: attrs2, children: children.clone(), self_closing: false };
                 let inner = emit_node_with(&tmp);
@@ -226,7 +295,7 @@ fn emit_children_with(children: &[Node]) -> String {
                 if let Some(pos) = attrs.iter().position(|a| matches!(a.kind, AttrKind::Directive) && a.name == "if") {
                     let mut attrs_if = attrs.clone();
                     let dir = attrs_if.remove(pos);
-                    let expr_if = dir.value.unwrap_or_default();
+                    let expr_if = rewrite_if_expr(&dir.value.unwrap_or_default());
                     let tmp_if = Node::Element { tag: tag.clone(), attrs: attrs_if, children: ch.clone(), self_closing: *self_closing };
                     let inner_if = emit_node_with(&tmp_if);
 
@@ -239,7 +308,7 @@ fn emit_children_with(children: &[Node]) -> String {
                             if let Some(pos2) = attrs2.iter().position(|a| matches!(a.kind, AttrKind::Directive) && (a.name == "else-if" || a.name == "elseif")) {
                                 let mut attrs_ei = attrs2.clone();
                                 let dir_ei = attrs_ei.remove(pos2);
-                                let expr_ei = dir_ei.value.unwrap_or_default();
+                                let expr_ei = rewrite_if_expr(&dir_ei.value.unwrap_or_default());
                                 let tmp_ei = Node::Element { tag: tag2.clone(), attrs: attrs_ei, children: ch2.clone(), self_closing: *sc2 };
                                 let inner_ei = emit_node_with(&tmp_ei);
                                 chain_parts.push(format!(r#"else if ({}) {{ {} }}"#, expr_ei.trim(), inner_ei));
@@ -322,7 +391,7 @@ fn emit_children_with_state(children: &[Node]) -> String {
                 if let Some(pos) = attrs.iter().position(|a| matches!(a.kind, AttrKind::Directive) && a.name == "if") {
                     let mut attrs_if = attrs.clone();
                     let dir = attrs_if.remove(pos);
-                    let expr_if = dir.value.unwrap_or_default();
+                    let expr_if = rewrite_if_expr(&dir.value.unwrap_or_default());
                     let tmp_if = Node::Element { tag: tag.clone(), attrs: attrs_if, children: ch.clone(), self_closing: *self_closing };
                     let inner_if = emit_node_with_state(&tmp_if);
                     // collect else-if/else chain
@@ -334,7 +403,7 @@ fn emit_children_with_state(children: &[Node]) -> String {
                             if let Some(pos2) = attrs2.iter().position(|a| matches!(a.kind, AttrKind::Directive) && (a.name == "else-if" || a.name == "elseif")) {
                                 let mut attrs_ei = attrs2.clone();
                                 let dir_ei = attrs_ei.remove(pos2);
-                                let expr_ei = dir_ei.value.unwrap_or_default();
+                                let expr_ei = rewrite_if_expr(&dir_ei.value.unwrap_or_default());
                                 let tmp_ei = Node::Element { tag: tag2.clone(), attrs: attrs_ei, children: ch2.clone(), self_closing: *sc2 };
                                 let inner_ei = emit_node_with_state(&tmp_ei);
                                 chain_parts.push(format!(r#"else if ({}) {{ {} }}"#, expr_ei.trim(), inner_ei));

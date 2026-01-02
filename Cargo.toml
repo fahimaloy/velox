@@ -11,4 +11,6 @@ members = [
     "examples/gallery",
 
     "examples/myapp",
+    "examples/interactive_skia",
+    "examples/vx_demo",
 ]
