@@ -2879,11 +2879,12 @@ checksum = "f1bddf1187be692e79c5ffeab891132dfb0f236ed36a43c7ed39f1165ee20191"
 
 [[package]]
 name = "velox-cli"
-version = "0.1.1"
+version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
  "velox-sfc",
+ "velox-style",
 ]
 
 [[package]]
@@ -2909,6 +2910,7 @@ dependencies = [
  "softbuffer",
  "velox-core",
  "velox-dom",
+ "velox-sfc",
  "velox-style",
  "wgpu",
  "wgpu_glyph",

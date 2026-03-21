@@ -28,12 +28,16 @@ pub struct ClickTarget {
     pub rect: velox_dom::layout::Rect,
     pub handler: String,
     pub payload: Option<String>,
+    pub z_index: i32,
+    pub order: i32,
 }
 
 #[derive(Debug, Clone)]
 pub struct HoverTarget {
     pub rect: velox_dom::layout::Rect,
     pub id: u32,
+    pub z_index: i32,
+    pub order: i32,
 }
 
 pub fn is_hoverable(tag: &str, props: &velox_dom::Props) -> bool {
@@ -50,17 +54,47 @@ pub fn is_hoverable(tag: &str, props: &velox_dom::Props) -> bool {
 pub fn collect_click_targets(
     vnode: &VNode,
     layout: &velox_dom::layout::LayoutNode,
+    clip: Option<velox_dom::layout::Rect>,
+    order: &mut i32,
     out: &mut Vec<ClickTarget>,
 ) {
+    fn intersect(a: velox_dom::layout::Rect, b: velox_dom::layout::Rect) -> Option<velox_dom::layout::Rect> {
+        let x0 = a.x.max(b.x);
+        let y0 = a.y.max(b.y);
+        let x1 = (a.x + a.w).min(b.x + b.w);
+        let y1 = (a.y + a.h).min(b.y + b.h);
+        if x1 <= x0 || y1 <= y0 { return None; }
+        Some(velox_dom::layout::Rect { x: x0, y: y0, w: x1 - x0, h: y1 - y0 })
+    }
+    let next_clip = match (clip, layout.clip) {
+        (Some(c), Some(lc)) => intersect(c, lc),
+        (None, Some(lc)) => Some(lc),
+        (Some(c), None) => Some(c),
+        (None, None) => None,
+    };
     match vnode {
         VNode::Text(_) => {}
         VNode::Element { props, children, .. } => {
             if let Some(handler) = props.attrs.get("on:click").cloned() {
                 let payload = props.attrs.get("on:click-payload").cloned();
-                out.push(ClickTarget { rect: layout.rect, handler, payload });
+                if next_clip.map(|c| rects_intersect(layout.rect, c)).unwrap_or(true) {
+                    let ord = *order;
+                    *order += 1;
+                    out.push(ClickTarget { rect: layout.rect, handler, payload, z_index: layout.z_index, order: ord });
+                }
             }
-            for (child, child_layout) in children.iter().zip(&layout.children) {
-                collect_click_targets(child, child_layout, out);
+            let mut ordered: Vec<(i32, usize)> = layout.children.iter().enumerate()
+                .filter_map(|(i, ln)| if ln.display_none { None } else { Some((ln.z_index, i)) })
+                .collect();
+            ordered.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
+            for (_, idx) in ordered {
+                if let Some(child_layout) = layout.children.get(idx) {
+                    if let Some(src_idx) = child_layout.source_index {
+                        if let Some(child) = children.get(src_idx) {
+                            collect_click_targets(child, child_layout, next_clip, order, out);
+                        }
+                    }
+                }
             }
         }
     }
@@ -69,8 +103,24 @@ pub fn collect_click_targets(
 pub fn collect_hover_targets(
     vnode: &VNode,
     layout: &velox_dom::layout::LayoutNode,
+    clip: Option<velox_dom::layout::Rect>,
+    order: &mut i32,
     out: &mut Vec<HoverTarget>,
 ) {
+    fn intersect(a: velox_dom::layout::Rect, b: velox_dom::layout::Rect) -> Option<velox_dom::layout::Rect> {
+        let x0 = a.x.max(b.x);
+        let y0 = a.y.max(b.y);
+        let x1 = (a.x + a.w).min(b.x + b.w);
+        let y1 = (a.y + a.h).min(b.y + b.h);
+        if x1 <= x0 || y1 <= y0 { return None; }
+        Some(velox_dom::layout::Rect { x: x0, y: y0, w: x1 - x0, h: y1 - y0 })
+    }
+    let next_clip = match (clip, layout.clip) {
+        (Some(c), Some(lc)) => intersect(c, lc),
+        (None, Some(lc)) => Some(lc),
+        (Some(c), None) => Some(c),
+        (None, None) => None,
+    };
     match vnode {
         VNode::Text(_) => {}
         VNode::Element { tag, props, children, .. } => {
@@ -80,13 +130,35 @@ pub fn collect_hover_targets(
                     .get("data-hover-id")
                     .and_then(|v| v.parse::<u32>().ok())
                     .unwrap_or(0);
-                out.push(HoverTarget { rect: layout.rect, id });
+                if next_clip.map(|c| rects_intersect(layout.rect, c)).unwrap_or(true) {
+                    let ord = *order;
+                    *order += 1;
+                    out.push(HoverTarget { rect: layout.rect, id, z_index: layout.z_index, order: ord });
+                }
             }
-            for (child, child_layout) in children.iter().zip(&layout.children) {
-                collect_hover_targets(child, child_layout, out);
+            let mut ordered: Vec<(i32, usize)> = layout.children.iter().enumerate()
+                .filter_map(|(i, ln)| if ln.display_none { None } else { Some((ln.z_index, i)) })
+                .collect();
+            ordered.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
+            for (_, idx) in ordered {
+                if let Some(child_layout) = layout.children.get(idx) {
+                    if let Some(src_idx) = child_layout.source_index {
+                        if let Some(child) = children.get(src_idx) {
+                            collect_hover_targets(child, child_layout, next_clip, order, out);
+                        }
+                    }
+                }
             }
         }
     }
+}
+
+fn rects_intersect(a: velox_dom::layout::Rect, b: velox_dom::layout::Rect) -> bool {
+    let x0 = a.x.max(b.x);
+    let y0 = a.y.max(b.y);
+    let x1 = (a.x + a.w).min(b.x + b.w);
+    let y1 = (a.y + a.h).min(b.y + b.h);
+    x1 > x0 && y1 > y0
 }
 
 pub fn hit_test_click<'a>(
@@ -94,7 +166,14 @@ pub fn hit_test_click<'a>(
     x: f32,
     y: f32,
 ) -> Option<(&'a str, Option<&'a str>)> {
-    for target in targets {
+    let mut ordered: Vec<(i32, usize)> = targets
+        .iter()
+        .enumerate()
+        .map(|(i, t)| (t.order, i))
+        .collect();
+    ordered.sort_by(|a, b| b.0.cmp(&a.0).then(b.1.cmp(&a.1)));
+    for (_, idx) in ordered {
+        let target = &targets[idx];
         let r = target.rect;
         let x0 = r.x as f32;
         let y0 = r.y as f32;
@@ -108,7 +187,14 @@ pub fn hit_test_click<'a>(
 }
 
 pub fn hit_test_hover(targets: &[HoverTarget], x: f32, y: f32) -> Option<u32> {
-    for target in targets {
+    let mut ordered: Vec<(i32, usize)> = targets
+        .iter()
+        .enumerate()
+        .map(|(i, t)| (t.order, i))
+        .collect();
+    ordered.sort_by(|a, b| b.0.cmp(&a.0).then(b.1.cmp(&a.1)));
+    for (_, idx) in ordered {
+        let target = &targets[idx];
         let r = target.rect;
         let x0 = r.x as f32;
         let y0 = r.y as f32;

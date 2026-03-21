@@ -1,6 +1,25 @@
-use std::collections::HashMap;
+//! Velox Style - CSS Styling System
+//!
+//! This crate provides comprehensive CSS support for Velox:
+//! - CSS property parsing and computed styles
+//! - Unit handling (px, %, rem, em, vw, vh)
+//! - Color parsing (hex, rgb, rgba, named colors)
+//! - Flexbox layout properties
+//! - Style inheritance and cascading
 
-use cssparser::{Parser, ParserInput, RuleListParser, ToCss};
+mod properties;
+mod units;
+pub mod fonts;
+pub mod visual_effects;
+
+pub use properties::*;
+pub use units::*;
+// Re-export non-conflicting font types.
+pub use fonts::{FontDescriptor, FontFamily, FontMetrics, FontStyle, GenericFamily, LineHeight};
+// Avoid collision with properties::BoxShadow by aliasing visual effects type.
+pub use visual_effects::{BorderRadius, BoxShadow as VisualBoxShadow, TextShadow};
+
+use std::collections::HashMap;
 use velox_dom::{VNode, Props};
 
 #[derive(Debug, Clone, PartialEq)]
@@ -27,6 +46,8 @@ pub struct Stylesheet {
 
 impl Stylesheet {
     pub fn parse(css: &str) -> Self {
+        use cssparser::{Parser, ParserInput, RuleListParser, ToCss};
+        
         struct SheetParser {
             rules: Vec<Rule>,
         }
@@ -181,7 +202,6 @@ fn matches_selector(sel: &SimpleSelector, tag: &str, class_attr: Option<&str>, h
 }
 
 fn merge_styles(existing: Option<&str>, new_map: &HashMap<String, String>) -> String {
-    // Convert existing inline style to map
     let mut map: HashMap<String,String> = HashMap::new();
     if let Some(s) = existing {
         for decl in s.split(';') {
@@ -192,11 +212,9 @@ fn merge_styles(existing: Option<&str>, new_map: &HashMap<String, String>) -> St
             }
         }
     }
-    // Override/add new
     for (k,v) in new_map {
         map.insert(k.clone(), v.clone());
     }
-    // Serialize deterministically by key
     let mut keys: Vec<_> = map.keys().cloned().collect();
     keys.sort();
     let mut out = String::new();
@@ -216,8 +234,7 @@ pub fn apply_styles(node: &VNode, sheet: &Stylesheet) -> VNode {
     apply_styles_with_hover(node, sheet, &|_, _| false)
 }
 
-/// Apply stylesheet with a custom hover predicate that decides if a node is hovered.
-/// The predicate receives (tag, props) and returns true if the node is hovered.
+/// Apply stylesheet with a custom hover predicate
 pub fn apply_styles_with_hover<F>(node: &VNode, sheet: &Stylesheet, is_hovered: &F) -> VNode
 where
     F: Fn(&str, &Props) -> bool,
@@ -237,7 +254,6 @@ where
         false
     }
 
-    // Cascade and inheritance for a subset of text properties
     fn filter_inheritable(style: Option<&str>) -> HashMap<String, String> {
         let mut map = HashMap::new();
         if let Some(s) = style {
@@ -267,7 +283,6 @@ where
                 let class_attr = props.attrs.get("class").map(|s| s.as_str());
                 let hovered = is_hovered(tag, props);
                 let mut acc: HashMap<String,String> = inherited.clone();
-                // Apply rules in two passes: tag then class (class overrides tag)
                 for pass in ["tag", "class"] {
                     for rule in &sheet.rules {
                         let is_tag = matches!(rule.selector.kind, SimpleSelectorKind::Tag);
@@ -280,7 +295,6 @@ where
                         }
                     }
                 }
-                // Inline style has highest precedence
                 let mut new_props = props.clone();
                 let merged = merge_styles(new_props.attrs.get("style").map(|s| s.as_str()), &acc);
                 let mut final_style = merged.clone();
@@ -298,7 +312,6 @@ where
                     }
                 }
                 if !final_style.is_empty() { new_props = new_props.set("style", final_style.clone()); }
-                // Inherit only inheritable props to children
                 let inherit_next = filter_inheritable(Some(&final_style));
                 let new_children = children.iter().map(|c| apply_rec(c, sheet, is_hovered, &inherit_next)).collect();
                 VNode::Element { tag: tag.clone(), props: new_props, children: new_children }
@@ -308,4 +321,38 @@ where
 
     let inherited_root: HashMap<String,String> = HashMap::new();
     apply_rec(node, sheet, is_hovered, &inherited_root)
+}
+
+/// Compute styles for a VNode given inline styles and optional stylesheet
+/// Returns a ComputedStyle with all properties resolved
+pub fn compute_styles_for_node(
+    node: &VNode,
+    inline_style: Option<&str>,
+    sheet: Option<&Stylesheet>,
+    is_hovered: bool,
+) -> ComputedStyle {
+    let mut computed = ComputedStyle::new();
+    
+    // Apply inline styles first (highest precedence)
+    if let Some(style) = inline_style {
+        computed.apply_inline_style(style);
+    }
+    
+    // Apply stylesheet styles
+    if let Some(sheet) = sheet {
+        if let VNode::Element { tag, props, .. } = node {
+            let class_attr = props.attrs.get("class").map(|s| s.as_str());
+            
+            // Apply matching rules from stylesheet
+            for rule in &sheet.rules {
+                if matches_selector(&rule.selector, tag, class_attr, is_hovered) {
+                    for (prop, value) in &rule.decls {
+                        computed.set_property(prop, value);
+                    }
+                }
+            }
+        }
+    }
+    
+    computed
 }

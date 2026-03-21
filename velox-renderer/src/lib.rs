@@ -6,6 +6,8 @@ use velox_style::{Stylesheet, apply_styles_with_hover};
 use std::collections::{HashMap, HashSet};
 
 pub mod events;
+pub mod event_binding;
+pub mod text;
 
 // Native Skia GL helper module (feature-gated)
 #[cfg(feature = "skia-native")]
@@ -123,8 +125,13 @@ fn build_a11y_tree_with_layout(
         },
         VNode::Element { tag, props, children, .. } => {
             let mut child_nodes = Vec::new();
-            for (ch, ch_layout) in children.iter().zip(&layout.children) {
-                child_nodes.push(build_a11y_tree_with_layout(ch, ch_layout, next_id));
+            for ch_layout in &layout.children {
+                if ch_layout.display_none { continue; }
+                if let Some(src_idx) = ch_layout.source_index {
+                    if let Some(ch) = children.get(src_idx) {
+                        child_nodes.push(build_a11y_tree_with_layout(ch, ch_layout, next_id));
+                    }
+                }
             }
             A11yNode {
                 id,
@@ -529,9 +536,11 @@ where
     ) {
         let layout = velox_dom::layout::compute_layout(vnode, width as i32, height as i32);
         click_targets.clear();
-        crate::events::collect_click_targets(vnode, &layout, click_targets);
+        let mut order = 0;
+        crate::events::collect_click_targets(vnode, &layout, None, &mut order, click_targets);
         hover_targets.clear();
-        crate::events::collect_hover_targets(vnode, &layout, hover_targets);
+        let mut order = 0;
+        crate::events::collect_hover_targets(vnode, &layout, None, &mut order, hover_targets);
     }
 
     fn with_hover_ids(vnode: &velox_dom::VNode, next_id: &mut u32) -> velox_dom::VNode {
@@ -857,10 +866,13 @@ where
         }
         match vnode {
             velox_dom::VNode::Element { children, .. } => {
-                for (i, ch) in children.iter().enumerate() {
-                    if let Some(lc) = layout.children.get(i) {
-                        if let Some(r) = find_rect_pred(ch, lc, pred) {
-                            return Some(r);
+                for lc in &layout.children {
+                    if lc.display_none { continue; }
+                    if let Some(src_idx) = lc.source_index {
+                        if let Some(ch) = children.get(src_idx) {
+                            if let Some(r) = find_rect_pred(ch, lc, pred) {
+                                return Some(r);
+                            }
                         }
                     }
                 }
@@ -1025,10 +1037,13 @@ where
         }
         match vnode {
             velox_dom::VNode::Element { children, .. } => {
-                for (i, ch) in children.iter().enumerate() {
-                    if let Some(lc) = layout.children.get(i) {
-                        if let Some(found) = find_node_and_rect(ch, lc, pred) {
-                            return Some(found);
+                for lc in &layout.children {
+                    if lc.display_none { continue; }
+                    if let Some(src_idx) = lc.source_index {
+                        if let Some(ch) = children.get(src_idx) {
+                            if let Some(found) = find_node_and_rect(ch, lc, pred) {
+                                return Some(found);
+                            }
                         }
                     }
                 }
@@ -1087,8 +1102,11 @@ where
                         let r = layout.rect;
                         out.push((r.x as f32, r.y as f32, (r.x + r.w) as f32, (r.y + r.h) as f32, handler, payload));
                     }
-                    for (i,ch) in children.iter().enumerate() {
-                        if let Some(lc) = layout.children.get(i) { collect_clicks(ch, lc, out); }
+                    for lc in &layout.children {
+                        if lc.display_none { continue; }
+                        if let Some(src_idx) = lc.source_index {
+                            if let Some(ch) = children.get(src_idx) { collect_clicks(ch, lc, out); }
+                        }
                     }
                 }
             }
@@ -1196,7 +1214,12 @@ where
                     velox_dom::VNode::Text(_) => {}
                     velox_dom::VNode::Element { props, children, .. } => {
                         if props.attrs.contains_key("on:click") { out.push((layout.rect, props, children.as_slice())); }
-                        for (i, ch) in children.iter().enumerate() { if let Some(lc) = layout.children.get(i) { collect_click_nodes(ch, lc, out); } }
+                        for lc in &layout.children {
+                            if lc.display_none { continue; }
+                            if let Some(src_idx) = lc.source_index {
+                                if let Some(ch) = children.get(src_idx) { collect_click_nodes(ch, lc, out); }
+                            }
+                        }
                     }
                 }
             }
@@ -1244,7 +1267,14 @@ where
                         velox_dom::VNode::Element { props, children, .. } => {
                             let has = props.attrs.get("class").map(|s| s.split_whitespace().any(|c| c == class)).unwrap_or(false);
                             if has { return Some((layout.rect, props)); }
-                            for (i, ch) in children.iter().enumerate() { if let Some(lc) = layout.children.get(i) { if let Some(v) = find_rect_for_class(ch, lc, class) { return Some(v); } } }
+                            for lc in &layout.children {
+                                if lc.display_none { continue; }
+                                if let Some(src_idx) = lc.source_index {
+                                    if let Some(ch) = children.get(src_idx) {
+                                        if let Some(v) = find_rect_for_class(ch, lc, class) { return Some(v); }
+                                    }
+                                }
+                            }
                             None
                         }
                     }
@@ -1255,7 +1285,14 @@ where
                         velox_dom::VNode::Element { tag, props, children, .. } => {
                             let is_btn = props.attrs.contains_key("on:click") || *tag == "button" || props.attrs.get("class").map(|s| s.split_whitespace().any(|c| c == "btn")).unwrap_or(false);
                             if is_btn { return Some(props); }
-                            for (i, ch) in children.iter().enumerate() { let _ = layout.children.get(i)?; if let Some(p) = find_click_node(ch, &layout.children[i]) { return Some(p); } }
+                            for lc in &layout.children {
+                                if lc.display_none { continue; }
+                                if let Some(src_idx) = lc.source_index {
+                                    if let Some(ch) = children.get(src_idx) {
+                                        if let Some(p) = find_click_node(ch, lc) { return Some(p); }
+                                    }
+                                }
+                            }
                             None
                         }
                     }

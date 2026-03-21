@@ -45,6 +45,7 @@ ab_glyph = "0.2"
 [dev-dependencies]
 velox-core = { path = "../velox-core" }
 velox-style = { path = "../velox-style" }
+velox-sfc = { path = "../velox-sfc" }
 criterion = "0.5"
 
 [[bench]]

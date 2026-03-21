@@ -182,7 +182,8 @@ pub mod skia_impl {
                         radius = Some(px);
                     }
                 } else if key == "overflow" {
-                    overflow_hidden = val.eq_ignore_ascii_case("hidden");
+                    let v = val.to_ascii_lowercase();
+                    overflow_hidden = v == "hidden" || v == "scroll" || v == "auto";
                 } else if key == "clip-path" {
                     clip_inset = parse_clip_inset(val);
                 } else if key == "opacity" {
@@ -400,8 +401,13 @@ pub mod skia_impl {
                 if crate::events::is_hoverable(tag, props) {
                     out.push(layout.rect);
                 }
-                for (child, child_layout) in children.iter().zip(&layout.children) {
-                    collect_debug_hit_rects(child, child_layout, out);
+                for child_layout in &layout.children {
+                    if child_layout.display_none { continue; }
+                    if let Some(src_idx) = child_layout.source_index {
+                        if let Some(child) = children.get(src_idx) {
+                            collect_debug_hit_rects(child, child_layout, out);
+                        }
+                    }
                 }
             }
         }
@@ -941,33 +947,33 @@ pub mod skia_impl {
                         layout.rect.h as f32,
                     );
                     let did_clip = apply_clips(canvas, rect, clip_rrect, overflow_hidden, clip_inset);
-                    let mut ordered: Vec<(i32, usize)> = children
+                    let mut ordered: Vec<(i32, usize)> = layout
+                        .children
                         .iter()
                         .enumerate()
-                        .map(|(i, ch)| {
-                            let z = match ch {
-                                VNode::Element { props, .. } => z_index_for_props(props),
-                                _ => 0,
-                            };
-                            (z, i)
+                        .filter_map(|(i, ln)| {
+                            if ln.display_none { return None; }
+                            Some((ln.z_index, i))
                         })
                         .collect();
                     ordered.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
-                    for (_, idx) in ordered {
-                        if let Some(child) = children.get(idx) {
-                            if let Some(child_layout) = layout.children.get(idx) {
-                                render_with_layout(
-                                    canvas,
-                                    child,
-                                    child_layout,
-                                    rect,
-                                    fonts,
-                                    child_text_style,
-                                    &child_family,
-                                    paints,
-                                    images,
-                                    opacity,
-                                );
+                    for (_, layout_idx) in ordered {
+                        if let Some(child_layout) = layout.children.get(layout_idx) {
+                            if let Some(src_idx) = child_layout.source_index {
+                                if let Some(child) = children.get(src_idx) {
+                                    render_with_layout(
+                                        canvas,
+                                        child,
+                                        child_layout,
+                                        rect,
+                                        fonts,
+                                        child_text_style,
+                                        &child_family,
+                                        paints,
+                                        images,
+                                        opacity,
+                                    );
+                                }
                             }
                         }
                     }
