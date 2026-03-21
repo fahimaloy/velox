@@ -30,6 +30,289 @@ Examples:
 
 ---
 
+## Installing Velox CLI
+
+### Option 1: From Source (Recommended for Development)
+
+Clone the repository and build the CLI:
+
+```bash
+git clone https://github.com/fahimaloy/velox.git
+cd velox
+cargo install --path velox-cli --force
+```
+
+This installs the `velox` binary globally to your Cargo bin directory (`~/.cargo/bin`).
+
+Verify installation:
+
+```bash
+velox version
+```
+
+You should see output like:
+```
+velox 0.1.0
+Edition: 2021
+Platform: Linux
+```
+
+### Option 2: Using `cargo` Directly (Without Global Install)
+
+If you want to run the CLI without installing it globally, use:
+
+```bash
+cd velox
+cargo run -p velox-cli -- <command>
+```
+
+For example:
+```bash
+cargo run -p velox-cli -- init myapp
+cargo run -p velox-cli -- version
+```
+
+### Verifying Your Installation
+
+After either installation method, verify the CLI is available and functional:
+
+```bash
+# Show help
+velox --help
+
+# Show version
+velox version
+
+# Create a test project
+velox init test-project
+```
+
+---
+
+## Using the Velox CLI
+
+The CLI provides the following commands:
+
+### 1. `velox init <name|path>`
+
+Create a new Velox project with scaffolding.
+
+**Syntax:**
+```bash
+velox init <project-name>
+velox init /path/to/project
+```
+
+**Examples:**
+```bash
+# Create project in current directory
+velox init myapp
+
+# Create project at absolute path
+velox init /tmp/myapp
+
+# Create project at relative path
+velox init ../projects/myapp
+```
+
+**What it generates:**
+- `Cargo.toml` with Velox dependencies
+- `src/App.vx` — the main component (SFC format)
+- `src/main.rs` — Rust entry point
+- `build.rs` — build script
+- `README.md` — project instructions
+- `assets/` directory for images/resources
+
+**Next steps after init:**
+```bash
+cd myapp
+velox dev      # Start development server
+cargo run      # Build and run
+```
+
+---
+
+### 2. `velox build <input> [options]`
+
+Compile a `.vx` Single File Component to Rust code.
+
+**Syntax:**
+```bash
+velox build <path-to-file.vx> -o <output-dir>
+```
+
+**Options:**
+- `-o, --out-dir <PATH>` — Output directory (default: `target/velox-gen`)
+
+**Examples:**
+```bash
+# Build a component to default output
+velox build src/App.vx
+
+# Build with custom output directory
+velox build src/App.vx -o my_generated
+
+# Build from scaffolded example
+velox build examples/counter-app/src/App.vx
+```
+
+**Output:**
+Generates Rust code (e.g., `App.rs`) that can be `include!` macro'd into your project.
+
+---
+
+### 3. `velox dev [options]`
+
+Start a development server with hot reload.
+
+**Syntax:**
+```bash
+velox dev [--watch <directory>]
+```
+
+**Options:**
+- `-w, --watch <PATH>` — Watch directory for changes (default: `src`)
+
+**Examples:**
+```bash
+# Watch src/ and reload on changes
+velox dev
+
+# Watch a custom directory
+velox dev --watch assets
+```
+
+**Workflow:**
+- File changes are detected automatically
+- App rebuilds and restarts
+- Press `r` to manually reload
+- Press `q` to quit
+
+---
+
+### 4. `velox run [options]`
+
+Build and run a Velox project.
+
+**Syntax:**
+```bash
+velox run [--release]
+```
+
+**Options:**
+- `--release` — Build in release mode (optimized, slower compile)
+
+**Examples:**
+```bash
+# Debug build (faster compile, slower runtime)
+velox run
+
+# Release build (slower compile, faster runtime)
+velox run --release
+```
+
+---
+
+### 5. `velox lint [target]`
+
+Check `.vx` files for syntax errors and issues.
+
+**Syntax:**
+```bash
+velox lint [<file-or-directory>]
+```
+
+**Examples:**
+```bash
+# Lint all .vx files in src/
+velox lint
+
+# Lint a specific file
+velox lint src/App.vx
+
+# Lint a custom directory
+velox lint components/
+```
+
+**Output:**
+Reports parse errors, component issues, and style problems.
+
+---
+
+### 6. `velox version`
+
+Display CLI version, edition, and platform information.
+
+**Examples:**
+```bash
+velox version
+```
+
+**Output:**
+```
+velox 0.1.0
+Edition: 2021
+Platform: Linux
+```
+
+---
+
+## Complete Workflow Example
+
+### Create and Run a New App
+
+```bash
+# 1. Create project
+velox init myapp
+cd myapp
+
+# 2. Start dev server (watches src/)
+velox dev
+
+# 3. In another terminal, edit src/App.vx
+# Changes auto-reload in the running app
+
+# 4. To build for distribution
+velox run --release
+```
+
+### Working with Components
+
+```bash
+# 1. Create a new component
+echo '
+<template>
+  <div class="button">
+    <p>{{ label }}</p>
+  </div>
+</template>
+
+<script setup>
+pub fn new() {
+    // logic here
+}
+</script>
+
+<style>
+.button {
+  padding: 10px 20px;
+  border: 1px solid #ccc;
+}
+</style>
+' > src/Button.vx
+
+# 2. Lint the component
+velox lint src/Button.vx
+
+# 3. Build to Rust
+velox build src/Button.vx -o target/components
+
+# 4. Dev server auto-picks up changes
+velox dev
+```
+
+---
+
 ## Current Feature Coverage (v0.1 line)
 
 ### SFC / Compiler
@@ -58,65 +341,6 @@ Examples:
 - Backend support:
   - `wgpu` (GPU path)
   - `skia-native` (native Skia path)
-
-### CLI
-- `velox init <name|path>`
-- `velox build`
-- `velox dev`
-- `velox run`
-- `velox lint`
-- `velox version`
-
----
-
-## Exact Use Cases
-
-### 1) Create a New Velox App
-
-```bash
-velox init myapp
-cd myapp
-cargo build
-cargo run
-```
-
-Also supports absolute/relative paths:
-
-```bash
-velox init /tmp/myapp
-```
-
-### 2) Build a `.vx` Component to Rust
-
-```bash
-velox build src/App.vx --out-dir target/velox-gen
-```
-
-### 3) Lint `.vx` Files During Development
-
-```bash
-velox lint src
-```
-
-### 4) Run Development Mode (watch/reload workflow)
-
-```bash
-velox dev
-```
-
-### 5) Run the Counter App Example
-
-```bash
-cd examples/counter-app
-cargo run
-```
-
-### 6) Validate Whole Workspace Before Shipping
-
-```bash
-cargo test --workspace --all-targets
-cargo build --workspace --release
-```
 
 ---
 
@@ -155,22 +379,6 @@ Example:
     <p v-else>Negative</p>
   </div>
 </template>
-```
-
----
-
-## CLI Installation
-
-### From this workspace
-
-```bash
-cargo install --path velox-cli --force
-```
-
-Then verify:
-
-```bash
-velox version
 ```
 
 ---
