@@ -11,25 +11,26 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Build a .vx/.vue Single File Component into Rust.
+    /// Build the current project, or compile a specific .vx/.vue file into Rust.
     Build {
-        /// Path to .vx/.vue file
-        input: PathBuf,
-        /// Output directory (default: target/velox-gen)
+        /// Optional path to .vx/.vue file. If omitted, builds the current project.
+        input: Option<PathBuf>,
+        /// Output directory (used only when building a single .vx/.vue file)
         #[arg(long)]
         out_dir: Option<PathBuf>,
-        /// What to emit: stub constants or a render() function
+        /// What to emit when building a single .vx/.vue file
         #[arg(long, value_enum, default_value_t = velox_cli::EmitMode::Stub)]
         emit: velox_cli::EmitMode,
+        /// Build in release mode when building the current project
+        #[arg(long)]
+        release: bool,
     },
-    /// Initialize a new Velox app under examples/<name>
+    /// Initialize a new Velox app in the current directory
     Init { name: String },
-    /// Run an app package (cargo run -p <pkg>)
-    Run { package: String },
-    /// Build an app package (cargo build -p <pkg>)
-    BuildApp { package: String, #[arg(long)] release: bool },
-    /// Dev server: restart app on file changes (polling)
-    Dev { package: String, #[arg(long)] watch: Option<PathBuf> },
+    /// Run the current project (cargo run)
+    Run,
+    /// Dev server: restart current project on file changes (polling)
+    Dev { #[arg(long)] watch: Option<PathBuf> },
 }
 
 fn main() -> Result<()> {
@@ -39,16 +40,22 @@ fn main() -> Result<()> {
             input,
             out_dir,
             emit,
-        } => velox_cli::build_cmd(&input, out_dir.as_deref(), emit)?,
+            release,
+        } => {
+            if let Some(input) = input {
+                velox_cli::build_cmd(&input, out_dir.as_deref(), emit)?;
+            } else {
+                velox_cli::build_current(release)?;
+            }
+        }
         Commands::Init { name } => {
-            let path = velox_cli::init_app(&name)?;
+            let path = velox_cli::init_project(&name)?;
             println!("Initialized app at {}", path.display());
         }
-        Commands::Run { package } => velox_cli::run_app(&package)?,
-        Commands::BuildApp { package, release } => velox_cli::build_app(&package, release)?,
-        Commands::Dev { package, watch } => {
-            let dir = watch.unwrap_or_else(|| PathBuf::from(format!("examples/{}", package)));
-            velox_cli::dev_app(&package, &dir)?;
+        Commands::Run => velox_cli::run_current()?,
+        Commands::Dev { watch } => {
+            let dir = watch.unwrap_or_else(|| PathBuf::from("src"));
+            velox_cli::dev_current(&dir)?;
         }
     }
     Ok(())

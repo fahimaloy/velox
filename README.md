@@ -11,16 +11,45 @@ It provides:
 
 ---
 
-## Workspace Crates
+## Quick Start
 
-- `velox-core` — reactive primitives (signals/effects/lifecycle)
-- `velox-sfc` — SFC parsing + template codegen + component resolver
-- `velox-dom` — VNode types, diffing, layout
-- `velox-style` — CSS parsing, selectors, style application
-- `velox-renderer` — rendering + events (`wgpu`, `skia-native`)
-- `velox-cli` — developer workflow commands
+1. [Prerequisites](#prerequisites)
+2. [Build Everything](#build-everything)
+3. [Install Velox CLI](#install-velox-cli)
+4. [Verify Installation](#verify-installation)
+5. [Next Steps](#next-steps)
 
-Examples:
+---
+
+## Prerequisites
+
+Before starting, ensure you have:
+
+- **Rust 1.70+** — Install from [rustup.rs](https://rustup.rs)
+  ```bash
+  rustup --version
+  cargo --version
+  ```
+- **Git** — For cloning the repository
+- **Build tools** — Required by Rust:
+  - Linux: `build-essential`, `pkg-config`, `libssl-dev`
+  - macOS: Xcode Command Line Tools (`xcode-select --install`)
+  - Windows: Microsoft C++ build tools
+
+---
+
+## Workspace Structure
+
+The Velox repository is organized into modular crates:
+
+- **`velox-core`** — Reactive primitives (signals/effects/lifecycle)
+- **`velox-sfc`** — SFC parsing + template codegen + component resolver
+- **`velox-dom`** — VNode types, diffing, layout
+- **`velox-style`** — CSS parsing, selectors, style application
+- **`velox-renderer`** — Rendering + events (`wgpu`, `skia-native` backends)
+- **`velox-cli`** — Developer workflow commands
+
+Plus examples:
 - `examples/counter-app`
 - `examples/todo`
 - `examples/gallery`
@@ -30,70 +59,229 @@ Examples:
 
 ---
 
-## Installing Velox CLI
+## Build Everything
 
-### Option 1: From Source (Recommended for Development)
-
-Clone the repository and build the CLI:
+### Step 1: Clone the Repository
 
 ```bash
 git clone https://github.com/fahimaloy/velox.git
 cd velox
+```
+
+### Step 2: Build All Crates
+
+Build the entire workspace with all tests:
+
+```bash
+# Build everything (debug mode - faster compile)
+cargo build --workspace
+
+# Build everything in release mode (slower compile, faster runtime)
+cargo build --workspace --release
+```
+
+### Step 3: Run Tests (Optional)
+
+Ensure everything compiles and tests pass:
+
+```bash
+# Run full test suite across all crates
+cargo test --workspace --all-targets
+```
+
+### Build Specific Backends (Optional)
+
+The renderer supports multiple backends:
+
+```bash
+# Build with wgpu backend (GPU rendering)
+cargo build -p velox-renderer --features wgpu
+
+# Build with native skia backend
+cargo build -p velox-renderer --features skia-native
+
+# Build both
+cargo build -p velox-renderer --all-features
+```
+
+---
+
+## Install Velox CLI
+
+After building, install the Velox CLI globally:
+
+### Option 1: Install from Local Source (Recommended for Development)
+
+Install from your cloned repository:
+
+```bash
+cd /path/to/velox
 cargo install --path velox-cli --force
 ```
 
-This installs the `velox` binary globally to your Cargo bin directory (`~/.cargo/bin`).
+This installs the `velox` binary to your Cargo bin directory. The binary path is:
 
-Verify installation:
+```
+~/.cargo/bin/velox
+```
+
+The `~/.cargo/bin` directory should already be in your `$PATH`. If not, add it:
 
 ```bash
+# Add to ~/.bashrc, ~/.zshrc, or similar:
+export PATH="$HOME/.cargo/bin:$PATH"
+```
+
+### Option 2: Run Without Global Install
+
+If you prefer not to install globally, you can run the CLI directly from the repository:
+
+```bash
+cd /path/to/velox
+
+# Instead of: velox init myapp
+# Use:        cargo run -p velox-cli -- init myapp
+
+# Instead of: velox build src/App.vx
+# Use:        cargo run -p velox-cli -- build src/App.vx
+```
+
+Add this alias to your shell config for convenience:
+
+```bash
+# Add to ~/.bashrc or ~/.zshrc
+alias velox='cd /path/to/velox && cargo run -p velox-cli --'
+```
+
+---
+
+## Verify Installation
+
+### Check CLI is Available
+
+Run one of these commands (depending on your installation method):
+
+```bash
+# If installed globally:
 velox version
+
+# If using cargo run alias:
+velox version
+
+# Output should be:
+# velox 0.1.0
+# Edition: 2021
+# Platform: Linux (or your OS)
 ```
 
-You should see output like:
-```
-velox 0.1.0
-Edition: 2021
-Platform: Linux
-```
-
-### Option 2: Using `cargo` Directly (Without Global Install)
-
-If you want to run the CLI without installing it globally, use:
+### Verify Help Works
 
 ```bash
-cd velox
-cargo run -p velox-cli -- <command>
-```
-
-For example:
-```bash
-cargo run -p velox-cli -- init myapp
-cargo run -p velox-cli -- version
-```
-
-### Verifying Your Installation
-
-After either installation method, verify the CLI is available and functional:
-
-```bash
-# Show help
 velox --help
+```
 
-# Show version
-velox version
+You should see a list of available commands.
 
-# Create a test project
-velox init test-project
+### Quick Smoke Test
+
+Create a test project to ensure everything works:
+
+```bash
+velox init test-velox-app
+cd test-velox-app
+
+# Try building the scaffolded app
+velox build src/App.vx
+
+# Try linting
+velox lint src/App.vx
+```
+
+If all commands succeed, your installation is complete!
+
+---
+
+## Next Steps
+
+### Path to Use Velox Commands
+
+Depending on your installation method, use:
+
+**If installed globally** (`cargo install`):
+```bash
+velox init myapp
+velox build src/App.vx
+velox dev
+```
+
+**If using without global install** (using alias recommendation):
+```bash
+velox init myapp
+velox build src/App.vx
+velox dev
+```
+
+In both cases, you reference paths **relative to where you run the command**, not relative to the Velox repository.
+
+### Your First App
+
+```bash
+# 1. Create a new Velox app (runs from anywhere)
+velox init my-first-app
+cd my-first-app
+
+# View the generated structure:
+ls -la
+# Cargo.toml, src/App.vx, src/main.rs, build.rs, assets/, etc.
+
+# 2. Lint the scaffolded component
+velox lint src/App.vx
+
+# 3. Build the component (generates Rust code)
+velox build src/App.vx
+
+# 4. Run the app
+cargo run
+
+# Or use the shorthand:
+velox run
+```
+
+### For Development Workflow
+
+```bash
+cd my-first-app
+
+# Start dev server with hot reload (watches src/ by default)
+velox dev
+
+# In another terminal, edit src/App.vx and save
+# → App reloads automatically
+
+# Press 'r' in the dev terminal to manually reload
+# Press 'q' to quit
+```
+
+### Run Examples
+
+```bash
+# From anywhere, test the counter app example:
+velox init temp-counter
+cd temp-counter
+
+# Or build an example from the Velox repository:
+cd /path/to/velox
+velox build examples/counter-app/src/App.vx
+cargo run --example counter-app
 ```
 
 ---
 
 ## Using the Velox CLI
 
-The CLI provides the following commands:
+### Complete Command Reference
 
-### 1. `velox init <name|path>`
+#### 1. `velox init <name|path>`
 
 Create a new Velox project with scaffolding.
 
@@ -101,6 +289,7 @@ Create a new Velox project with scaffolding.
 ```bash
 velox init <project-name>
 velox init /path/to/project
+velox init ../relative/path
 ```
 
 **Examples:**
@@ -108,60 +297,71 @@ velox init /path/to/project
 # Create project in current directory
 velox init myapp
 
-# Create project at absolute path
+# Create at absolute path
 velox init /tmp/myapp
 
-# Create project at relative path
+# Create at relative path
 velox init ../projects/myapp
 ```
 
-**What it generates:**
+**Generated files:**
 - `Cargo.toml` with Velox dependencies
-- `src/App.vx` — the main component (SFC format)
+- `src/App.vx` — main component (SFC format)
 - `src/main.rs` — Rust entry point
 - `build.rs` — build script
 - `README.md` — project instructions
-- `assets/` directory for images/resources
+- `assets/` — directory for images/resources
 
-**Next steps after init:**
+**After init:**
 ```bash
 cd myapp
-velox dev      # Start development server
-cargo run      # Build and run
+velox dev         # Start with hot reload
+velox run         # Build and run once
+velox run --release  # Release build
 ```
 
 ---
 
-### 2. `velox build <input> [options]`
+#### 2. `velox build [input] [options]`
 
-Compile a `.vx` Single File Component to Rust code.
+Build the current project by default, or compile a specific `.vx` file to generated Rust source.
 
 **Syntax:**
 ```bash
+velox build
+velox build --release
 velox build <path-to-file.vx> -o <output-dir>
 ```
 
 **Options:**
-- `-o, --out-dir <PATH>` — Output directory (default: `target/velox-gen`)
+- `--release` — Release build when building the current project
+- `-o, --out-dir <PATH>` — Output directory when compiling a single `.vx` file (default: `target/velox-gen`)
 
 **Examples:**
 ```bash
-# Build a component to default output
+# Build the entire current project (like vite build / flutter build)
+velox build
+
+# Build current project in release mode
+velox build --release
+
+# Compile a single component to generated Rust source
 velox build src/App.vx
 
-# Build with custom output directory
+# Build to custom directory
 velox build src/App.vx -o my_generated
 
-# Build from scaffolded example
+# Build from examples
 velox build examples/counter-app/src/App.vx
 ```
 
 **Output:**
-Generates Rust code (e.g., `App.rs`) that can be `include!` macro'd into your project.
+- `velox build` produces a full Cargo project build (binary in `target/debug` or `target/release`).
+- `velox build src/App.vx` generates Rust source (e.g., `App.rs`) for inspection/integration and is not directly executable.
 
 ---
 
-### 3. `velox dev [options]`
+#### 3. `velox dev [options]`
 
 Start a development server with hot reload.
 
@@ -175,22 +375,25 @@ velox dev [--watch <directory>]
 
 **Examples:**
 ```bash
-# Watch src/ and reload on changes
+# Watch src/ with auto-reload
 velox dev
 
-# Watch a custom directory
+# Watch custom directory
 velox dev --watch assets
+
+# Watch multiple or specific paths
+velox dev --watch src --watch assets
 ```
 
 **Workflow:**
-- File changes are detected automatically
+- File changes auto-detected
 - App rebuilds and restarts
 - Press `r` to manually reload
 - Press `q` to quit
 
 ---
 
-### 4. `velox run [options]`
+#### 4. `velox run [options]`
 
 Build and run a Velox project.
 
@@ -200,20 +403,23 @@ velox run [--release]
 ```
 
 **Options:**
-- `--release` — Build in release mode (optimized, slower compile)
+- `--release` — Optimized build (slower compile, faster runtime)
 
 **Examples:**
 ```bash
-# Debug build (faster compile, slower runtime)
+# Debug build (faster compile)
 velox run
 
-# Release build (slower compile, faster runtime)
+# Release build (faster runtime)
 velox run --release
+
+# Watch and rebuild (equivalent to velox dev)
+velox dev
 ```
 
 ---
 
-### 5. `velox lint [target]`
+#### 5. `velox lint [target]`
 
 Check `.vx` files for syntax errors and issues.
 
@@ -224,13 +430,13 @@ velox lint [<file-or-directory>]
 
 **Examples:**
 ```bash
-# Lint all .vx files in src/
+# Lint all .vx in current src/
 velox lint
 
-# Lint a specific file
+# Lint specific file
 velox lint src/App.vx
 
-# Lint a custom directory
+# Lint custom directory
 velox lint components/
 ```
 
@@ -239,9 +445,9 @@ Reports parse errors, component issues, and style problems.
 
 ---
 
-### 6. `velox version`
+#### 6. `velox version`
 
-Display CLI version, edition, and platform information.
+Display CLI version, edition, and platform.
 
 **Examples:**
 ```bash
@@ -257,30 +463,37 @@ Platform: Linux
 
 ---
 
-## Complete Workflow Example
+## Workflow Examples
 
-### Create and Run a New App
+### Complete: Create, Develop, and Release an App
 
 ```bash
-# 1. Create project
+# 1. Create a new app
 velox init myapp
 cd myapp
 
-# 2. Start dev server (watches src/)
+# 2. Start development server (watches src/ by default)
 velox dev
 
 # 3. In another terminal, edit src/App.vx
-# Changes auto-reload in the running app
+#    Save the file and watch it reload automatically
 
-# 4. To build for distribution
+# 4. When ready, build for distribution
 velox run --release
+
+# 5. Your built app is ready in target/release/
+./target/release/myapp
 ```
 
-### Working with Components
+### Create a Component Library
 
 ```bash
-# 1. Create a new component
-echo '
+# 1. Create a new app
+velox init component-lib
+cd component-lib
+
+# 2. Create components in src/
+cat > src/Button.vx << 'EOF'
 <template>
   <div class="button">
     <p>{{ label }}</p>
@@ -289,7 +502,7 @@ echo '
 
 <script setup>
 pub fn new() {
-    // logic here
+    // Button logic here
 }
 </script>
 
@@ -297,106 +510,194 @@ pub fn new() {
 .button {
   padding: 10px 20px;
   border: 1px solid #ccc;
+  border-radius: 4px;
 }
 </style>
-' > src/Button.vx
+EOF
 
-# 2. Lint the component
+# 3. Lint your components
 velox lint src/Button.vx
+velox lint src/        # Lint all .vx files
 
-# 3. Build to Rust
+# 4. Build components to Rust
 velox build src/Button.vx -o target/components
 
-# 4. Dev server auto-picks up changes
-velox dev
+# 5. Use in your app
+# Include the generated Rust files in your project
 ```
 
----
-
-## Current Feature Coverage (v0.1 line)
-
-### SFC / Compiler
-- `.vx` single-file components
-- `<script setup>` Rust logic and state
-- Template interpolation: `{{ expr }}`
-- Conditionals: `v-if`, `v-else-if`, `v-else`
-- Component import resolution
-
-### Styling
-- CSS parsing + application to VNode tree
-- Text styling: `font-size`, `font-weight`, `line-height`, `text-decoration`, `font-style`
-- Visual effects: border radius, shadows, opacity
-- Basic selector support and inline style synthesis
-
-### DOM / Layout
-- VNode diffing and patching
-- Block layout with sizing/margins/padding
-- Positioning support: `static | relative | absolute | fixed | sticky`
-- Z-index / stacking context behavior
-- Overflow clipping and scroll offsets
-
-### Renderer / Events
-- Event binding for common UI events (`click`, `input`, `change`, keyboard/mouse variants)
-- Hit testing aligned with stacking/render order
-- Backend support:
-  - `wgpu` (GPU path)
-  - `skia-native` (native Skia path)
-
----
-
-## Build & Test Commands (Project Root)
+### Development Loop
 
 ```bash
-# Build everything
-cargo build --workspace
+# 1. Start your app development
+velox init myapp
+cd myapp
 
-# Full test suite
-cargo test --workspace --all-targets
+# 2. In terminal 1: Start dev server
+velox dev
 
-# Build renderer with wgpu backend
-cargo build -p velox-renderer --features wgpu
+# 3. In terminal 2: Edit and test
+$ velox lint src/App.vx          # Check syntax
+$ velox build src/App.vx         # Rebuild
 
-# Build renderer with native skia backend
-cargo build -p velox-renderer --features skia-native
+# 4. Watch terminal 1 for app reload
+#    Changes appear automatically
+
+# 5. Kill dev server when done
+# (In terminal 1, press q)
 ```
 
 ---
 
-## Template Syntax (Canonical)
+## Development and Testing
 
-Use canonical directives in templates:
-- `v-if`
-- `v-else-if`
-- `v-else`
+### Building the Velox Framework from Source
 
-Example:
+If you're contributing to Velox or want to modify the framework:
+
+```bash
+# From the Velox repository root
+cd /path/to/velox
+
+# Build all crates
+cargo build --workspace
+
+# Build with optimizations
+cargo build --workspace --release
+
+# Run all tests
+cargo test --workspace --all-targets
+
+# Build specific renderer backend
+cargo build -p velox-renderer --features wgpu
+cargo build -p velox-renderer --features skia-native
+
+# Run tests for specific crate
+cargo test -p velox-core
+cargo test -p velox-sfc
+cargo test -p velox-renderer
+```
+
+### Running Examples
+
+```bash
+cd /path/to/velox
+
+# Build and run the counter app
+cargo run --example counter-app
+
+# Build and run the todo app
+cargo run --example todo
+
+# Run the gallery
+cargo run --example gallery
+
+# Run the demo
+cargo run --example vx_demo
+```
+
+---
+
+## Supported Features (v0.1 line)
+
+### SFC / Compiler
+- `.vx` single-file components with `<template>`, `<script setup>`, `<style>`
+- Rust logic and state in component setup
+- Template interpolation: `{{ expr }}`
+- Conditionals: `v-if`, `v-else-if`, `v-else`
+- Component import resolution and composition
+
+### Styling
+- CSS parsing with style application to VNode tree
+- Text styling: `font-size`, `font-weight`, `line-height`, `text-decoration`, `font-style`
+- Visual effects: `border-radius`, `box-shadow`, `opacity`
+- CSS selectors and inline style synthesis
+
+### DOM & Layout
+- Virtual DOM diffing and efficient patching
+- Block layout engine with sizing, margins, padding
+- Positioning: `static | relative | absolute | fixed | sticky`
+- Z-index and stacking context
+- Overflow clipping and scroll offsets
+
+### Rendering & Events
+- Event binding for common UI events: `click`, `input`, `change`, keyboard, mouse events
+- Hit testing aligned with render order and stacking
+- Multiple renderer backends:
+  - **wgpu** — GPU-accelerated rendering
+  - **skia-native** — Native Skia rendering
+
+---
+
+## Template Syntax Reference
+
+Templates use canonical directives:
 
 ```html
 <template>
   <div>
-    <p v-if="count > 0">Positive</p>
-    <p v-else-if="count == 0">Zero</p>
-    <p v-else>Negative</p>
+    <p v-if="count > 0">Count is positive</p>
+    <p v-else-if="count == 0">Count is zero</p>
+    <p v-else>Count is negative</p>
+    
+    <span>{{ label }}</span>
   </div>
 </template>
 ```
 
+**Supported directives:**
+- `v-if` — Conditional rendering (true/false)
+- `v-else-if` — Additional condition
+- `v-else` — Fallback when all conditions false
+- `{{ expr }}` — Template interpolation
+
 ---
 
-## Recommended Release Gate (before publishing)
+## Release Checklist
 
-Run this checklist:
+Before publishing a new version, verify:
 
-1. `cargo test --workspace --all-targets`
-2. `cargo build --workspace --release`
-3. `velox init <tmp-app>` smoke test
-4. `velox lint src` in scaffolded app
-5. Build/run `examples/counter-app`
-6. Final manual review of docs/examples
+```bash
+# 1. Run full test suite
+cargo test --workspace --all-targets
+
+# 2. Build everything in release mode
+cargo build --workspace --release
+
+# 3. Test CLI scaffolding
+velox init test-app
+cd test-app
+velox lint src/
+velox build src/App.vx
+cd ..
+
+# 4. Build and test examples
+cd examples/counter-app
+velox lint src/
+cargo run
+
+# 5. Final manual review
+# - Verify documentation accuracy
+# - Check README examples work
+# - Confirm all examples run cleanly
+```
+
+---
+
+## Contributing
+
+This repository is currently in active stabilization for the first stable release. When contributing:
+
+- Ensure all tests pass: `cargo test --workspace --all-targets`
+- Build in release mode to catch optimizations: `cargo build --workspace --release`
+- Manual verification of examples recommended before PRs
+- Update relevant documentation when changing behavior
 
 ---
 
 ## Notes
 
-- This repository is currently in active stabilization for the first stable release line.
-- Manual verification and targeted debug passes are recommended before tagging a release.
+- Velox is a modular framework with independent crates that can be used separately
+- The CLI (`velox-cli`) is the primary developer-facing tool
+- Multiple renderer backends allow flexibility in deployment targets
+- The SFC compiler generates optimized Rust code from `.vx` components

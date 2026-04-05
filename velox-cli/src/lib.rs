@@ -6,6 +6,45 @@ use anyhow::Result;
 use clap::ValueEnum;
 use std::path::{Path, PathBuf};
 
+/// Normalize and validate a Cargo package name.
+///
+/// Dots and whitespace are converted to hyphens to match user expectations.
+pub fn validate_and_normalize_package_name(name: &str) -> Result<String> {
+    let trimmed = name.trim();
+    if trimmed.is_empty() {
+        anyhow::bail!("package name cannot be empty");
+    }
+
+    let normalized = trimmed
+        .replace('.', "-")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join("-");
+
+    let mut chars = normalized.chars();
+    let Some(first) = chars.next() else {
+        anyhow::bail!("package name cannot be empty");
+    };
+
+    if !first.is_ascii_alphabetic() && first != '_' {
+        anyhow::bail!(
+            "invalid package name '{trimmed}': first character must be a letter or '_'"
+        );
+    }
+
+    if let Some((idx, ch)) = normalized
+        .chars()
+        .enumerate()
+        .find(|(_, ch)| !ch.is_ascii_alphanumeric() && *ch != '_' && *ch != '-')
+    {
+        anyhow::bail!(
+            "invalid package name '{trimmed}': character '{ch}' at position {idx} is not allowed"
+        );
+    }
+
+    Ok(normalized)
+}
+
 #[derive(Clone, Copy, Debug, ValueEnum)]
 pub enum EmitMode {
     Stub,
@@ -41,7 +80,7 @@ pub fn build_cmd(input: &Path, out_dir: Option<&Path>, emit: EmitMode) -> Result
                 .unwrap_or("");
             let render_fn = velox_sfc::compile_template_to_rs(tpl_src, name)
                 .map_err(|e| anyhow::anyhow!(e))?;
-            let mut stub = velox_sfc::to_stub_rs(&sfc, name);
+            let stub = velox_sfc::to_stub_rs(&sfc, name);
             let indented = render_fn
                 .lines()
                 .map(|l| format!("    {}", l))

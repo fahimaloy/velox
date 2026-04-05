@@ -118,6 +118,17 @@ where
         }
         flush_queue();
     }
+
+    /// Functional update: apply a closure to the current value and set the result.
+    /// Useful for updates like `count.update(|v| v + 1)`.
+    pub fn update<F>(&self, f: F)
+    where
+        F: FnOnce(T) -> T,
+    {
+        let current = self.get();
+        let new = f(current);
+        self.set(new);
+    }
 }
 
 /// Register a closure as a reactive effect:

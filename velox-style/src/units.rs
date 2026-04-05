@@ -133,6 +133,14 @@ impl Color {
     /// Blue
     pub const BLUE: Color = Color { r: 0, g: 0, b: 255, a: 255 };
     
+    /// Modern dark theme colors
+    pub const DARK_BG: Color = Color { r: 26, g: 26, b: 26, a: 255 };         // #1a1a1a
+    pub const DARK_TEXT: Color = Color { r: 224, g: 224, b: 224, a: 255 };    // #e0e0e0
+    pub const DARK_CARD: Color = Color { r: 38, g: 38, b: 38, a: 255 };       // #262626
+    pub const ACCENT_BLUE: Color = Color { r: 52, g: 120, b: 246, a: 255 };   // #3478f6
+    pub const ACCENT_GREEN: Color = Color { r: 34, g: 197, b: 94, a: 255 };   // #22c55e
+    pub const BORDER_DARK: Color = Color { r: 55, g: 65, b: 81, a: 255 };     // #374151
+    
     /// Create a new color
     pub fn new(r: u8, g: u8, b: u8, a: u8) -> Self {
         Color { r, g, b, a }
@@ -262,6 +270,12 @@ impl fmt::Display for Color {
         } else {
             write!(f, "rgba({}, {}, {}, {})", self.r, self.g, self.b, self.a as f32 / 255.0)
         }
+    }
+}
+
+impl Default for Color {
+    fn default() -> Self {
+        Color::BLACK
     }
 }
 

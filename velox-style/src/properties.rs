@@ -373,6 +373,66 @@ pub struct BoxShadow {
     pub inset: bool,
 }
 
+/// Parse 1-4 value shorthand for sides
+fn parse_sides_shorthand<T: Copy + Default>(value: &str, parser: impl Fn(&str) -> Option<T>) -> Option<Sides<T>> {
+    let parts: Vec<&str> = value.split_whitespace().collect();
+    match parts.len() {
+        1 => {
+            let v = parser(parts[0])?;
+            Some(Sides::all(v))
+        }
+        2 => {
+            let v = parser(parts[0])?;
+            let h = parser(parts[1])?;
+            Some(Sides { top: v, right: h, bottom: v, left: h })
+        }
+        3 => {
+            let top = parser(parts[0])?;
+            let h = parser(parts[1])?;
+            let bottom = parser(parts[2])?;
+            Some(Sides { top, right: h, bottom, left: h })
+        }
+        4 => {
+            let top = parser(parts[0])?;
+            let right = parser(parts[1])?;
+            let bottom = parser(parts[2])?;
+            let left = parser(parts[3])?;
+            Some(Sides { top, right, bottom, left })
+        }
+        _ => None,
+    }
+}
+
+/// Parse CSS border shorthand "width style color" (any order)
+fn parse_border_shorthand(value: &str) -> Option<Sides<Border>> {
+    let parts: Vec<&str> = value.split_whitespace().collect();
+    if parts.is_empty() { return None; }
+
+    let mut width = None;
+    let mut style = None;
+    let mut color = None;
+
+    for part in parts {
+        if let Some(w) = Length::parse(part) {
+            width = Some(w);
+        } else if let Some(s) = BorderStyle::parse(part) {
+            style = Some(s);
+        } else if let Some(c) = Color::parse(part) {
+            color = Some(c);
+        }
+    }
+
+    let border = Border {
+        width: width.unwrap_or(Length::Px(3.0)), // Default medium
+        style: style.unwrap_or(BorderStyle::None),
+        color: color.unwrap_or(Color::BLACK),
+    };
+    
+    Some(Sides::all(border))
+}
+
+
+
 impl ComputedStyle {
     pub fn new() -> Self {
         Self {
@@ -501,8 +561,8 @@ impl ComputedStyle {
             
             // Box model - spacing
             "margin" => {
-                if let Some(l) = Length::parse(value) {
-                    self.margin = Sides::all(l);
+                if let Some(sides) = parse_sides_shorthand(value, Length::parse) {
+                    self.margin = sides;
                 }
             }
             "margin-top" => {
@@ -526,8 +586,8 @@ impl ComputedStyle {
                 }
             }
             "padding" => {
-                if let Some(l) = Length::parse(value) {
-                    self.padding = Sides::all(l);
+                if let Some(sides) = parse_sides_shorthand(value, Length::parse) {
+                    self.padding = sides;
                 }
             }
             "padding-top" => {
@@ -708,37 +768,41 @@ impl ComputedStyle {
                 }
             }
             
-            // Border (simplified - just set all sides)
-            "border-width" => {
-                if let Some(l) = Length::parse(value) {
-                    self.border = Sides::all(Border { width: l, style: BorderStyle::Solid, color: Color::BLACK });
+            // Border shorthand
+            "border" => {
+                if let Some(sides) = parse_border_shorthand(value) {
+                    self.border = sides;
                 }
             }
-            "border-color" => {
-                if let Some(c) = Color::parse(value) {
-                    let mut new_border = self.border.clone();
-                    new_border.top.color = c;
-                    new_border.right.color = c;
-                    new_border.bottom.color = c;
-                    new_border.left.color = c;
-                    self.border = new_border;
+            "border-width" => {
+                if let Some(sides) = parse_sides_shorthand(value, Length::parse) {
+                    self.border.top.width = sides.top;
+                    self.border.right.width = sides.right;
+                    self.border.bottom.width = sides.bottom;
+                    self.border.left.width = sides.left;
                 }
             }
             "border-style" => {
-                if let Some(s) = BorderStyle::parse(value) {
-                    let mut new_border = self.border.clone();
-                    new_border.top.style = s;
-                    new_border.right.style = s;
-                    new_border.bottom.style = s;
-                    new_border.left.style = s;
-                    self.border = new_border;
+                if let Some(sides) = parse_sides_shorthand(value, BorderStyle::parse) {
+                    self.border.top.style = sides.top;
+                    self.border.right.style = sides.right;
+                    self.border.bottom.style = sides.bottom;
+                    self.border.left.style = sides.left;
+                }
+            }
+            "border-color" => {
+                if let Some(sides) = parse_sides_shorthand(value, Color::parse) {
+                    self.border.top.color = sides.top;
+                    self.border.right.color = sides.right;
+                    self.border.bottom.color = sides.bottom;
+                    self.border.left.color = sides.left;
                 }
             }
             
             // Border radius
             "border-radius" => {
-                if let Some(l) = Length::parse(value) {
-                    self.border_radius = Sides::all(l);
+                if let Some(sides) = parse_sides_shorthand(value, Length::parse) {
+                    self.border_radius = sides;
                 }
             }
             

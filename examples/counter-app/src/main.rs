@@ -14,7 +14,7 @@ fn main() {
     let vnode = render_with(|name| {
         match name {
             "count" => state.count.get().to_string(),
-            "title" => state.title.borrow().to_string(),
+            "title" => state.title.get(),
             _ => String::new(),
         }
     });

@@ -680,6 +680,24 @@ where
                     window.request_redraw();
                 }
             }
+            Event::WindowEvent { event: WindowEvent::KeyboardInput { input, .. }, .. } => {
+                // Handle keyboard shortcuts
+                use winit::event::VirtualKeyCode;
+                if let Some(keycode) = input.virtual_keycode {
+                    if input.state == ElementState::Pressed {
+                        match keycode {
+                            VirtualKeyCode::R => {
+                                // Trigger reload (app will exit, dev server will restart it)
+                                *control_flow = ControlFlow::Exit;
+                            }
+                            VirtualKeyCode::Q => {
+                                *control_flow = ControlFlow::Exit;
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            }
             Event::RedrawRequested(_) => {
                 // Render VNode -> Skia frame and present.
                 if let Some(s) = &mut renderer.surface {

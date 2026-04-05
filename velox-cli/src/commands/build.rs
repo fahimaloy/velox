@@ -3,12 +3,29 @@ use std::fs;
 use std::path::Path;
 use std::process::Command;
 
-/// Build an app package via cargo build
+/// Build the current project via cargo build.
+pub fn build_current(release: bool) -> Result<()> {
+    let mut args = vec!["build"];
+    if release {
+        args.push("--release");
+    }
+    let status = Command::new("cargo").args(&args).status()?;
+    if !status.success() {
+        anyhow::bail!("project build failed")
+    }
+    Ok(())
+}
+
+/// Build an app package via cargo build -p <pkg>.
 pub fn build_app(pkg: &str, release: bool) -> Result<()> {
     let mut args = vec!["build", "-p", pkg];
-    if release { args.push("--release"); }
+    if release {
+        args.push("--release");
+    }
     let status = Command::new("cargo").args(&args).status()?;
-    if !status.success() { anyhow::bail!("app build failed") }
+    if !status.success() {
+        anyhow::bail!("app build failed")
+    }
     Ok(())
 }
 
@@ -33,7 +50,7 @@ pub fn build_vx(input: &Path, out_dir: Option<&Path>) -> Result<()> {
     let render_fn = velox_sfc::compile_template_to_rs(tpl_src, name)
         .map_err(|e| anyhow::anyhow!(e))?;
     
-    let mut stub = velox_sfc::to_stub_rs(&sfc, name);
+    let stub = velox_sfc::to_stub_rs(&sfc, name);
     
     let indented = render_fn
         .lines()

@@ -49,32 +49,30 @@
 </template>
 
 <script setup>
-use std::cell::Cell;
 use std::rc::Rc;
+use velox_core::signal::Signal;
 
 pub struct State {
-  pub count: Cell<i32>,
-  pub title: Cell<String>,
-  pub input_value: Cell<String>,
+  pub count: Rc<Signal<i32>>,
+  pub title: Rc<Signal<String>>,
+  pub input_value: Rc<Signal<String>>,
 }
 
 impl State {
   pub fn new() -> Self {
     Self {
-      count: Cell::new(0),
-      title: Cell::new("Velox Counter".to_string()),
-      input_value: Cell::new(String::new()),
+      count: Rc::new(Signal::new(0)),
+      title: Rc::new(Signal::new("Velox Counter".to_string())),
+      input_value: Rc::new(Signal::new(String::new())),
     }
   }
 
   pub fn increment(&self) {
-    let v = self.count.get() + 1;
-    self.count.set(v);
+    self.count.update(|v| v + 1);
   }
 
   pub fn decrement(&self) {
-    let v = self.count.get() - 1;
-    self.count.set(v);
+    self.count.update(|v| v - 1);
   }
 
   pub fn reset(&self) {
@@ -83,9 +81,8 @@ impl State {
   }
 
   pub fn add_custom(&self) {
-    if let Ok(val) = self.input_value.borrow().parse::<i32>() {
-      let current = self.count.get();
-      self.count.set(current + val);
+    if let Ok(val) = self.input_value.get().parse::<i32>() {
+      self.count.update(|v| v + val);
       self.input_value.set(String::new());
     }
   }

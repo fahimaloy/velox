@@ -21,14 +21,17 @@ enum Commands {
         name: String,
     },
 
-    /// Build a .vx component to Rust
-    #[command(about = "Compile a .vx Single File Component")]
+    /// Build the current project, or compile a .vx component to Rust
+    #[command(about = "Build project (default) or compile a .vx component")]
     Build {
-        /// Path to .vx file
-        input: PathBuf,
-        /// Output directory
+        /// Optional path to .vx file. If omitted, builds current project.
+        input: Option<PathBuf>,
+        /// Output directory when compiling a .vx file
         #[arg(long, short = 'o')]
         out_dir: Option<PathBuf>,
+        /// Release mode when building current project
+        #[arg(long)]
+        release: bool,
     },
 
     /// Run a Velox project
@@ -67,18 +70,27 @@ fn main() -> Result<()> {
             let path = velox_cli::commands::init_project(&name)?;
             println!("✅ Created Velox project at: {}", path.display());
             println!("\n📖 Next steps:");
-            println!("   cd {}", name);
+            println!("   cd {}", path.display());
             println!("   velox dev");
         }
 
-        Commands::Build { input, out_dir } => {
-            velox_cli::build_cmd(&input, out_dir.as_deref(), velox_cli::EmitMode::Render)?;
+        Commands::Build {
+            input,
+            out_dir,
+            release,
+        } => {
+            if let Some(input) = input {
+                velox_cli::build_cmd(&input, out_dir.as_deref(), velox_cli::EmitMode::Render)?;
+                println!("ℹ️  The generated .rs file is source code, not an executable.");
+            } else {
+                velox_cli::commands::build_current(release)?;
+            }
         }
 
         Commands::Run { release } => {
             if release {
                 println!("🔨 Building in release mode...");
-                velox_cli::commands::build_app(".", true)?;
+                velox_cli::commands::build_current(true)?;
             }
             println!("▶️  Running project...");
             velox_cli::commands::run_current()?;

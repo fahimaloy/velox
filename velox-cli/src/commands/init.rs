@@ -4,12 +4,19 @@ use std::path::PathBuf;
 
 /// Initialize a new Velox project
 pub fn init_project(name: &str) -> Result<PathBuf> {
-    let project_dir = PathBuf::from(name);
-    let project_name = project_dir
+  let requested_dir = PathBuf::from(name);
+  let requested_name = requested_dir
         .file_name()
         .and_then(|s| s.to_str())
         .filter(|s| !s.is_empty())
         .ok_or_else(|| anyhow::anyhow!("invalid project path/name: {name}"))?;
+
+  let package_name = crate::validate_and_normalize_package_name(requested_name)?;
+  let project_dir = if requested_dir.components().count() == 1 {
+    PathBuf::from(&package_name)
+  } else {
+    requested_dir
+  };
 
     // Create directory structure
     fs::create_dir_all(&project_dir)?;
@@ -17,7 +24,7 @@ pub fn init_project(name: &str) -> Result<PathBuf> {
     fs::create_dir_all(project_dir.join("assets"))?;
 
     // Write files from templates
-    let cargo_toml = generate_cargo_toml(project_name);
+  let cargo_toml = generate_cargo_toml(&package_name);
     fs::write(project_dir.join("Cargo.toml"), cargo_toml)?;
     
     let main_rs = generate_main_rs();
@@ -26,7 +33,7 @@ pub fn init_project(name: &str) -> Result<PathBuf> {
     let app_vx = generate_app_vx();
     fs::write(project_dir.join("src/App.vx"), app_vx)?;
     
-    let readme = generate_readme(project_name);
+    let readme = generate_readme(&package_name);
     fs::write(project_dir.join("README.md"), readme)?;
 
     let build_rs = generate_build_rs();
@@ -35,8 +42,9 @@ pub fn init_project(name: &str) -> Result<PathBuf> {
     println!("✅ Created Velox project: {}", project_dir.display());
     println!("📦 To get started:");
     println!("   cd {}", project_dir.display());
-    println!("   cargo build");
-    println!("   cargo run");
+    println!("   velox dev");
+    println!("   velox build");
+    println!("   velox run");
     
     Ok(project_dir)
 }
@@ -120,11 +128,13 @@ name = "{name}"
 version = "0.1.0"
 edition = "2021"
 
+[workspace]
+
 [dependencies]
 velox-core = {{ git = "https://github.com/fahimaloy/velox" }}
 velox-dom = {{ git = "https://github.com/fahimaloy/velox" }}
 velox-style = {{ git = "https://github.com/fahimaloy/velox" }}
-velox-renderer = {{ git = "https://github.com/fahimaloy/velox" }}
+velox-renderer = {{ git = "https://github.com/fahimaloy/velox", features = ["skia-native"] }}
 
 [build-dependencies]
 velox-cli = {{ git = "https://github.com/fahimaloy/velox" }}
@@ -132,22 +142,37 @@ velox-cli = {{ git = "https://github.com/fahimaloy/velox" }}
 }
 
 fn generate_main_rs() -> String {
-    r#"use velox_style::Stylesheet;
+  r#"use std::sync::Arc;
+use velox_dom::VNode;
+use velox_style::Stylesheet;
 
 include!(concat!(env!("OUT_DIR"), "/App.rs"));
 
 fn main() {
-    println!("🚀 Starting Velox app...");
+  println!("Starting Velox app...");
 
-    let state = app::script_rs::State::new();
-    let _vnode = app::render_with(|name| match name {
-        "title" => state.title.borrow().clone(),
+  let state = Arc::new(app::script_rs::State::new());
+
+  let make_view = {
+    let state = Arc::clone(&state);
+    move |_w: u32, _h: u32| -> (VNode, Stylesheet) {
+      let vnode = app::render_with_state(Arc::clone(&state), |name| match name {
+        "title" => state.title.get(),
         "count" => state.count.get().to_string(),
         _ => String::new(),
-    });
-    let _sheet = Stylesheet::parse(app::STYLE);
+      });
+      let sheet = Stylesheet::parse(app::STYLE);
+      (vnode, sheet)
+    }
+  };
 
-    println!("✅ App rendered successfully!");
+  let on_event = app::make_on_event(Arc::clone(&state));
+  let get_title = {
+    let state = Arc::clone(&state);
+    move || state.title.get()
+  };
+
+  velox_renderer::run_window_vnode_skia("Velox App", make_view, on_event, get_title);
 }
 "#.to_string()
 }
@@ -160,32 +185,34 @@ fn generate_app_vx() -> String {
     </header>
     <main class="content">
       <div class="card">
-        <p>Welcome to Velox! 🚀</p>
-        <button class="btn" @click="handleClick">Click me</button>
+        <p>Welcome to Velox!</p>
+        <p>Current count: {{ count }}</p>
+        <button class="btn" @click="handle_click">Click me</button>
       </div>
     </main>
   </div>
 </template>
 
 <script setup>
-use std::cell::{Cell, RefCell};
+use std::rc::Rc;
+use velox_core::signal::Signal;
 
 pub struct State {
-  pub count: Cell<i32>,
-  pub title: RefCell<String>,
+  pub count: Rc<Signal<i32>>,
+  pub title: Rc<Signal<String>>,
 }
 
 impl State {
   pub fn new() -> Self {
     Self {
-      count: Cell::new(0),
-      title: RefCell::new("Hello Velox!".to_string()),
+      count: Rc::new(Signal::new(0)),
+      title: Rc::new(Signal::new("Hello Velox!".to_string())),
     }
   }
 
-  pub fn handleClick(&self) {
-    let v = self.count.get() + 1;
-    self.count.set(v);
+  pub fn handle_click(&self) {
+    self.count.set(self.count.get() + 1);
+    self.title.set(format!("Hello Velox! ({})", self.count.get()));
   }
 }
 </script>
@@ -195,15 +222,27 @@ impl State {
   display: flex;
   flex-direction: column;
   min-height: 100vh;
-  background-color: #f5f5f5;
-  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  margin: 0px;
+  padding: 0px;
+  background-color: #1a1a1a;
+  color: #e0e0e0;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Apple Color Emoji", "Segoe UI Emoji", "Noto Color Emoji", sans-serif;
 }
 
 .header {
-  background-color: #333;
-  color: white;
-  padding: 1rem;
+  background-color: #262626;
+  color: #e0e0e0;
+  border-bottom: 1px solid #374151;
+  margin: 0px;
+  padding: 16px;
   text-align: center;
+}
+
+.header h1 {
+  margin: 0px;
+  padding: 0px;
+  font-size: 28px;
+  color: #3478f6;
 }
 
 .content {
@@ -211,30 +250,51 @@ impl State {
   display: flex;
   justify-content: center;
   align-items: center;
-  padding: 2rem;
+  margin: 0px;
+  padding: 32px;
 }
 
 .card {
-  background: white;
+  background: #262626;
+  border: 1px solid #374151;
   border-radius: 8px;
-  padding: 2rem;
-  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+  margin: 0px;
+  padding: 32px;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
   text-align: center;
+  max-width: 600px;
+}
+
+.card p {
+  margin: 0px;
+  padding: 0px;
+  font-size: 16px;
+  color: #e0e0e0;
+}
+
+.card p + p {
+  margin-top: 8px;
 }
 
 .btn {
-  background-color: #007bff;
+  background-color: #3478f6;
   color: white;
   border: none;
-  border-radius: 4px;
-  padding: 0.5rem 1rem;
-  font-size: 1rem;
+  border-radius: 6px;
+  padding: 12px 24px;
+  font-size: 16px;
+  font-weight: 500;
   cursor: pointer;
-  margin-top: 1rem;
+  margin-top: 16px;
+  transition: background-color 0.2s ease;
 }
 
 .btn:hover {
-  background-color: #0056b3;
+  background-color: #2563eb;
+}
+
+.btn:active {
+  background-color: #1d4ed8;
 }
 </style>
 "#.to_string()
