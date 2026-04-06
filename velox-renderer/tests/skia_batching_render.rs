@@ -17,7 +17,12 @@ fn render_many_boxes_checksum() {
     }
     let vnode = h("div", vec![("style", "width:128px;height:128px")], children);
 
-    let png = match velox_renderer::render_vnode_to_raster_png(&vnode, &Stylesheet::default(), 128, 128) {
+    let png = match velox_renderer::render_vnode_to_raster_png(
+        &vnode,
+        &Stylesheet::default(),
+        128,
+        128,
+    ) {
         Ok(b) => b,
         Err(e) => panic!("render failed: {}", e),
     };

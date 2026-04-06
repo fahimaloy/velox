@@ -102,7 +102,9 @@ pub mod skia_impl {
     }
 
     fn parse_px_value(value: &str) -> Option<f32> {
-        value.strip_suffix("px").and_then(|px| px.trim().parse::<f32>().ok())
+        value
+            .strip_suffix("px")
+            .and_then(|px| px.trim().parse::<f32>().ok())
     }
 
     fn parse_float_value(value: &str) -> Option<f32> {
@@ -141,7 +143,12 @@ pub mod skia_impl {
             4 => (parts[0], parts[1], parts[2], parts[3]),
             _ => return None,
         };
-        Some(ClipInsets { top, right, bottom, left })
+        Some(ClipInsets {
+            top,
+            right,
+            bottom,
+            left,
+        })
     }
 
     fn parse_style_attr(
@@ -342,10 +349,8 @@ pub mod skia_impl {
         if let Some(brightness) = filters.brightness {
             let b = brightness.max(0.0);
             let matrix: [f32; 20] = [
-                b, 0.0, 0.0, 0.0, 0.0,
-                0.0, b, 0.0, 0.0, 0.0,
-                0.0, 0.0, b, 0.0, 0.0,
-                0.0, 0.0, 0.0, 1.0, 0.0,
+                b, 0.0, 0.0, 0.0, 0.0, 0.0, b, 0.0, 0.0, 0.0, 0.0, 0.0, b, 0.0, 0.0, 0.0, 0.0, 0.0,
+                1.0, 0.0,
             ];
             paint.set_color_filter(sk::color_filters::matrix_row_major(&matrix, None));
         }
@@ -358,7 +363,11 @@ pub mod skia_impl {
         family: &str,
         size: f32,
     ) -> Vec<(String, f32)> {
-        let limit = if max_width <= 0.0 { f32::INFINITY } else { max_width };
+        let limit = if max_width <= 0.0 {
+            f32::INFINITY
+        } else {
+            max_width
+        };
         let mut lines = Vec::new();
         for para in text.split('\n') {
             if para.trim().is_empty() {
@@ -397,12 +406,19 @@ pub mod skia_impl {
     ) {
         match vnode {
             VNode::Text(_) => {}
-            VNode::Element { tag, props, children, .. } => {
+            VNode::Element {
+                tag,
+                props,
+                children,
+                ..
+            } => {
                 if crate::events::is_hoverable(tag, props) {
                     out.push(layout.rect);
                 }
                 for child_layout in &layout.children {
-                    if child_layout.display_none { continue; }
+                    if child_layout.display_none {
+                        continue;
+                    }
                     if let Some(src_idx) = child_layout.source_index {
                         if let Some(child) = children.get(src_idx) {
                             collect_debug_hit_rects(child, child_layout, out);
@@ -451,7 +467,9 @@ pub mod skia_impl {
 
     impl ImageCache {
         fn new() -> Self {
-            ImageCache { images: HashMap::new() }
+            ImageCache {
+                images: HashMap::new(),
+            }
         }
 
         fn load(&mut self, src: &str) -> Option<sk::Image> {
@@ -515,7 +533,9 @@ pub mod skia_impl {
             inherited_opacity: f32,
         ) {
             match node {
-                VNode::Element { props, children, .. } => {
+                VNode::Element {
+                    props, children, ..
+                } => {
                     let mut clip_rrect = None;
                     let mut overflow_hidden = false;
                     let mut clip_inset = None;
@@ -549,7 +569,9 @@ pub mod skia_impl {
 
                         if let Some(border) = border {
                             paints.stroke.set_stroke_width(border.width);
-                            paints.stroke.set_color(color_with_opacity(border.color, opacity));
+                            paints
+                                .stroke
+                                .set_color(color_with_opacity(border.color, opacity));
                             if let Some(rrect) = rrect {
                                 canvas.draw_rrect(rrect, &paints.stroke);
                             } else {
@@ -564,12 +586,7 @@ pub mod skia_impl {
                         paints.image.set_alpha_f(opacity);
                         apply_filters_to_paint(&mut paints.image, filters);
                         if let Some(img) = images.load(src) {
-                            canvas.draw_image_rect(
-                                img,
-                                None,
-                                rect,
-                                &paints.image,
-                            );
+                            canvas.draw_image_rect(img, None, rect, &paints.image);
                         }
                     }
 
@@ -577,7 +594,8 @@ pub mod skia_impl {
                     let child_count = children.len().max(1);
                     let child_h = rect.height() / (child_count as f32);
                     let rect = rect;
-                    let did_clip = apply_clips(canvas, rect, clip_rrect, overflow_hidden, clip_inset);
+                    let did_clip =
+                        apply_clips(canvas, rect, clip_rrect, overflow_hidden, clip_inset);
                     let mut ordered: Vec<(i32, usize, &VNode)> = children
                         .iter()
                         .enumerate()
@@ -628,12 +646,8 @@ pub mod skia_impl {
                         font_size,
                     );
                     let line_height = font_size * 1.2;
-                    let layout_rect = sk::Rect::from_xywh(
-                        rect.left,
-                        rect.top,
-                        rect.width(),
-                        rect.height(),
-                    );
+                    let layout_rect =
+                        sk::Rect::from_xywh(rect.left, rect.top, rect.width(), rect.height());
                     let align_rect = if layout_rect.width() >= container_rect.width() - 0.5 {
                         container_rect
                     } else {
@@ -652,8 +666,12 @@ pub mod skia_impl {
                         };
                         let tx = match text_style.align {
                             TextAlign::Left => align_rect.left + padding,
-                            TextAlign::Center => align_rect.left + (align_rect.width() - line_w) * 0.5,
-                            TextAlign::Right => (align_rect.right - line_w - padding).max(align_rect.left + padding),
+                            TextAlign::Center => {
+                                align_rect.left + (align_rect.width() - line_w) * 0.5
+                            }
+                            TextAlign::Right => {
+                                (align_rect.right - line_w - padding).max(align_rect.left + padding)
+                            }
                         };
                         #[allow(unused_must_use)]
                         {
@@ -724,7 +742,11 @@ pub mod skia_impl {
             if let Some(tf) = load_default_typeface() {
                 typefaces.insert(default_family.clone(), tf);
             }
-            FontCache { typefaces, fonts: HashMap::new(), default_family }
+            FontCache {
+                typefaces,
+                fonts: HashMap::new(),
+                default_family,
+            }
         }
 
         pub fn default_family(&self) -> String {
@@ -746,7 +768,10 @@ pub mod skia_impl {
         /// Return a `skia_safe::Font` at the requested `size` and `family`.
         pub fn font(&mut self, family: &str, size: f32) -> sk::Font {
             let size_key = (size * 100.0).round() as u32;
-            let key = FontKey { family: family.to_string(), size_key };
+            let key = FontKey {
+                family: family.to_string(),
+                size_key,
+            };
             if let Some(font) = self.fonts.get(&key) {
                 return font.clone();
             }
@@ -801,7 +826,13 @@ pub mod skia_impl {
                 return Some(tf);
             }
         }
-        let preferred_families = ["DejaVu Sans", "Noto Sans", "Sans", "Arial", "Liberation Sans"];
+        let preferred_families = [
+            "DejaVu Sans",
+            "Noto Sans",
+            "Sans",
+            "Arial",
+            "Liberation Sans",
+        ];
         for family in preferred_families {
             let mut set = font_mgr.match_family(family);
             if set.count() == 0 {
@@ -871,7 +902,9 @@ pub mod skia_impl {
             inherited_opacity: f32,
         ) {
             match node {
-                VNode::Element { props, children, .. } => {
+                VNode::Element {
+                    props, children, ..
+                } => {
                     let mut clip_rrect = None;
                     let mut overflow_hidden = false;
                     let mut clip_inset = None;
@@ -909,7 +942,9 @@ pub mod skia_impl {
                         }
                         if let Some(border) = border {
                             paints.stroke.set_stroke_width(border.width);
-                            paints.stroke.set_color(color_with_opacity(border.color, opacity));
+                            paints
+                                .stroke
+                                .set_color(color_with_opacity(border.color, opacity));
                             if let Some(rrect) = rrect {
                                 canvas.draw_rrect(rrect, &paints.stroke);
                             } else {
@@ -930,12 +965,7 @@ pub mod skia_impl {
                                 layout.rect.w as f32,
                                 layout.rect.h as f32,
                             );
-                            canvas.draw_image_rect(
-                                img,
-                                None,
-                                rect,
-                                &paints.image,
-                            );
+                            canvas.draw_image_rect(img, None, rect, &paints.image);
                         }
                     }
 
@@ -946,13 +976,16 @@ pub mod skia_impl {
                         layout.rect.w as f32,
                         layout.rect.h as f32,
                     );
-                    let did_clip = apply_clips(canvas, rect, clip_rrect, overflow_hidden, clip_inset);
+                    let did_clip =
+                        apply_clips(canvas, rect, clip_rrect, overflow_hidden, clip_inset);
                     let mut ordered: Vec<(i32, usize)> = layout
                         .children
                         .iter()
                         .enumerate()
                         .filter_map(|(i, ln)| {
-                            if ln.display_none { return None; }
+                            if ln.display_none {
+                                return None;
+                            }
                             Some((ln.z_index, i))
                         })
                         .collect();
@@ -1006,8 +1039,8 @@ pub mod skia_impl {
                     } else {
                         layout_rect
                     };
-                    let text_bottom = (layout.rect.y as f32)
-                        + (layout.rect.h as f32).max(line_height);
+                    let text_bottom =
+                        (layout.rect.y as f32) + (layout.rect.h as f32).max(line_height);
                     for (idx, (line, line_w)) in lines.into_iter().enumerate() {
                         let ty = layout.rect.y as f32 + font_size + (idx as f32) * line_height;
                         if ty > text_bottom {
@@ -1020,8 +1053,12 @@ pub mod skia_impl {
                         };
                         let tx = match text_style.align {
                             TextAlign::Left => align_rect.left + padding,
-                            TextAlign::Center => align_rect.left + (align_rect.width() - line_w) * 0.5,
-                            TextAlign::Right => (align_rect.right - line_w - padding).max(align_rect.left + padding),
+                            TextAlign::Center => {
+                                align_rect.left + (align_rect.width() - line_w) * 0.5
+                            }
+                            TextAlign::Right => {
+                                (align_rect.right - line_w - padding).max(align_rect.left + padding)
+                            }
                         };
                         #[allow(unused_must_use)]
                         {
@@ -1072,7 +1109,10 @@ pub mod skia_impl {
             collect_debug_hit_rects(vnode, &layout_root, &mut rects);
             if debug_log {
                 for r in &rects {
-                    eprintln!("[skia debug] hit rect: x={} y={} w={} h={}", r.x, r.y, r.w, r.h);
+                    eprintln!(
+                        "[skia debug] hit rect: x={} y={} w={} h={}",
+                        r.x, r.y, r.w, r.h
+                    );
                 }
             }
             if debug_overlay {
@@ -1105,7 +1145,10 @@ pub mod skia_impl {
         fn render_overflow_hidden_clips_children() {
             let vnode = h(
                 "div",
-                vec![("style", "background-color:#FFFFFF;overflow:hidden;width:40px;height:40px")],
+                vec![(
+                    "style",
+                    "background-color:#FFFFFF;overflow:hidden;width:40px;height:40px",
+                )],
                 vec![h(
                     "div",
                     vec![("style", "background-color:#FF0000;width:40px;height:80px")],

@@ -11,7 +11,10 @@ fn render_dpr2_checksum() {
 
     let vnode = h(
         "div",
-        vec![("style", "background-color:#FFFFFF;border:1px solid #000000;width:64px;height:32px")],
+        vec![(
+            "style",
+            "background-color:#FFFFFF;border:1px solid #000000;width:64px;height:32px",
+        )],
         vec![text("Hi")],
     );
 

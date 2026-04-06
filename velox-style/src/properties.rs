@@ -27,11 +27,21 @@ impl<T: Default> Default for Sides<T> {
 
 impl<T: Copy> Sides<T> {
     pub fn new(top: T, right: T, bottom: T, left: T) -> Self {
-        Self { top, right, bottom, left }
+        Self {
+            top,
+            right,
+            bottom,
+            left,
+        }
     }
-    
+
     pub fn all(value: T) -> Self {
-        Self { top: value, right: value, bottom: value, left: value }
+        Self {
+            top: value,
+            right: value,
+            bottom: value,
+            left: value,
+        }
     }
 }
 
@@ -140,7 +150,7 @@ impl FontWeight {
             _ => s.parse::<u16>().ok().map(FontWeight::Value),
         }
     }
-    
+
     pub fn to_number(&self) -> u16 {
         match self {
             FontWeight::Normal => 400,
@@ -218,7 +228,7 @@ pub struct ComputedStyle {
     pub position: Position,
     pub z_index: Option<i32>,
     pub opacity: f32,
-    
+
     // Box model
     pub width: Length,
     pub height: Length,
@@ -231,29 +241,30 @@ pub struct ComputedStyle {
     pub border: Sides<Border>,
     pub border_radius: Sides<Length>,
     pub box_sizing: BoxSizing,
-    
+
     // Positioning offsets
     pub top: Length,
     pub right: Length,
     pub bottom: Length,
     pub left: Length,
-    
+
     // Flex properties
     pub flex_direction: FlexDirection,
     pub flex_wrap: FlexWrap,
     pub justify_content: JustifyContent,
     pub align_items: AlignItems,
+    pub align_self: AlignSelf,
     pub flex_grow: f32,
     pub flex_shrink: f32,
     pub flex_basis: Length,
     pub gap: Length,
     pub row_gap: Length,
     pub column_gap: Length,
-    
+
     // Background
     pub background_color: Color,
     pub background_image: Option<String>,
-    
+
     // Typography
     pub color: Color,
     pub font_size: Length,
@@ -263,18 +274,18 @@ pub struct ComputedStyle {
     pub letter_spacing: Length,
     pub text_align: TextAlign,
     pub text_decoration: TextDecoration,
-    
+
     // Overflow
     pub overflow: Overflow,
     pub overflow_x: Overflow,
     pub overflow_y: Overflow,
-    
+
     // Visibility
     pub visibility: Visibility,
-    
+
     // Transform
     pub transform: Transform,
-    
+
     // Box shadow (simplified - just a single shadow)
     pub box_shadow: Option<BoxShadow>,
 }
@@ -335,9 +346,11 @@ pub struct Transform {
 
 impl Transform {
     pub fn new() -> Self {
-        Self { operations: Vec::new() }
+        Self {
+            operations: Vec::new(),
+        }
     }
-    
+
     pub fn is_empty(&self) -> bool {
         self.operations.is_empty()
     }
@@ -374,7 +387,10 @@ pub struct BoxShadow {
 }
 
 /// Parse 1-4 value shorthand for sides
-fn parse_sides_shorthand<T: Copy + Default>(value: &str, parser: impl Fn(&str) -> Option<T>) -> Option<Sides<T>> {
+fn parse_sides_shorthand<T: Copy + Default>(
+    value: &str,
+    parser: impl Fn(&str) -> Option<T>,
+) -> Option<Sides<T>> {
     let parts: Vec<&str> = value.split_whitespace().collect();
     match parts.len() {
         1 => {
@@ -384,20 +400,35 @@ fn parse_sides_shorthand<T: Copy + Default>(value: &str, parser: impl Fn(&str) -
         2 => {
             let v = parser(parts[0])?;
             let h = parser(parts[1])?;
-            Some(Sides { top: v, right: h, bottom: v, left: h })
+            Some(Sides {
+                top: v,
+                right: h,
+                bottom: v,
+                left: h,
+            })
         }
         3 => {
             let top = parser(parts[0])?;
             let h = parser(parts[1])?;
             let bottom = parser(parts[2])?;
-            Some(Sides { top, right: h, bottom, left: h })
+            Some(Sides {
+                top,
+                right: h,
+                bottom,
+                left: h,
+            })
         }
         4 => {
             let top = parser(parts[0])?;
             let right = parser(parts[1])?;
             let bottom = parser(parts[2])?;
             let left = parser(parts[3])?;
-            Some(Sides { top, right, bottom, left })
+            Some(Sides {
+                top,
+                right,
+                bottom,
+                left,
+            })
         }
         _ => None,
     }
@@ -406,7 +437,9 @@ fn parse_sides_shorthand<T: Copy + Default>(value: &str, parser: impl Fn(&str) -
 /// Parse CSS border shorthand "width style color" (any order)
 fn parse_border_shorthand(value: &str) -> Option<Sides<Border>> {
     let parts: Vec<&str> = value.split_whitespace().collect();
-    if parts.is_empty() { return None; }
+    if parts.is_empty() {
+        return None;
+    }
 
     let mut width = None;
     let mut style = None;
@@ -427,11 +460,9 @@ fn parse_border_shorthand(value: &str) -> Option<Sides<Border>> {
         style: style.unwrap_or(BorderStyle::None),
         color: color.unwrap_or(Color::BLACK),
     };
-    
+
     Some(Sides::all(border))
 }
-
-
 
 impl ComputedStyle {
     pub fn new() -> Self {
@@ -459,6 +490,7 @@ impl ComputedStyle {
             flex_wrap: FlexWrap::NoWrap,
             justify_content: JustifyContent::default(),
             align_items: AlignItems::default(),
+            align_self: AlignSelf::default(),
             flex_grow: 0.0,
             flex_shrink: 1.0,
             flex_basis: Length::Auto,
@@ -483,13 +515,15 @@ impl ComputedStyle {
             box_shadow: None,
         }
     }
-    
+
     /// Parse inline style string and apply to this style
     pub fn apply_inline_style(&mut self, style: &str) {
         for decl in style.split(';') {
             let decl = decl.trim();
-            if decl.is_empty() { continue; }
-            
+            if decl.is_empty() {
+                continue;
+            }
+
             if let Some((prop, value)) = decl.split_once(':') {
                 let prop = prop.trim();
                 let value = value.trim();
@@ -497,11 +531,11 @@ impl ComputedStyle {
             }
         }
     }
-    
+
     /// Set a CSS property
     pub fn set_property(&mut self, prop: &str, value: &str) {
         let prop_lower = prop.to_lowercase();
-        
+
         match prop_lower.as_str() {
             // Display
             "display" => {
@@ -509,7 +543,7 @@ impl ComputedStyle {
                     self.display = d;
                 }
             }
-            
+
             // Position
             "position" => {
                 if let Some(p) = Position::parse(value) {
@@ -526,7 +560,7 @@ impl ComputedStyle {
                     self.opacity = o.clamp(0.0, 1.0);
                 }
             }
-            
+
             // Box model - dimensions
             "width" => {
                 if let Some(l) = Length::parse(value) {
@@ -558,7 +592,7 @@ impl ComputedStyle {
                     self.max_height = l;
                 }
             }
-            
+
             // Box model - spacing
             "margin" => {
                 if let Some(sides) = parse_sides_shorthand(value, Length::parse) {
@@ -610,7 +644,7 @@ impl ComputedStyle {
                     self.padding.left = l;
                 }
             }
-            
+
             // Positioning offsets
             "top" => {
                 if let Some(l) = Length::parse(value) {
@@ -632,7 +666,7 @@ impl ComputedStyle {
                     self.left = l;
                 }
             }
-            
+
             // Flex
             "flex-direction" => {
                 if let Some(fd) = FlexDirection::parse(value) {
@@ -652,6 +686,11 @@ impl ComputedStyle {
             "align-items" => {
                 if let Some(ai) = AlignItems::parse(value) {
                     self.align_items = ai;
+                }
+            }
+            "align-self" => {
+                if let Some(as_) = AlignSelf::parse(value) {
+                    self.align_self = as_;
                 }
             }
             "flex-grow" => {
@@ -686,7 +725,7 @@ impl ComputedStyle {
                     self.column_gap = l;
                 }
             }
-            
+
             // Background
             "background-color" => {
                 if let Some(c) = Color::parse(value) {
@@ -696,7 +735,7 @@ impl ComputedStyle {
             "background-image" => {
                 self.background_image = Some(value.to_string());
             }
-            
+
             // Typography
             "color" => {
                 if let Some(c) = Color::parse(value) {
@@ -741,7 +780,7 @@ impl ComputedStyle {
                     self.text_decoration = td;
                 }
             }
-            
+
             // Overflow
             "overflow" => {
                 if let Some(o) = Overflow::parse(value) {
@@ -760,14 +799,14 @@ impl ComputedStyle {
                     self.overflow_y = o;
                 }
             }
-            
+
             // Visibility
             "visibility" => {
                 if let Some(v) = Visibility::parse(value) {
                     self.visibility = v;
                 }
             }
-            
+
             // Border shorthand
             "border" => {
                 if let Some(sides) = parse_border_shorthand(value) {
@@ -798,25 +837,25 @@ impl ComputedStyle {
                     self.border.left.color = sides.left;
                 }
             }
-            
+
             // Border radius
             "border-radius" => {
                 if let Some(sides) = parse_sides_shorthand(value, Length::parse) {
                     self.border_radius = sides;
                 }
             }
-            
+
             // Box sizing
             "box-sizing" => {
                 if let Some(bs) = BoxSizing::parse(value) {
                     self.box_sizing = bs;
                 }
             }
-            
+
             _ => {}
         }
     }
-    
+
     /// Check if this element creates a stacking context
     pub fn creates_stacking_context(&self) -> bool {
         self.position != Position::Static
@@ -824,12 +863,12 @@ impl ComputedStyle {
             || self.opacity < 1.0
             || !self.transform.is_empty()
     }
-    
+
     /// Check if display is none
     pub fn is_display_none(&self) -> bool {
         self.display == Display::None
     }
-    
+
     /// Check if visibility is hidden
     pub fn is_hidden(&self) -> bool {
         self.visibility == Visibility::Hidden
@@ -858,43 +897,48 @@ pub struct StyleRule {
 /// CSS selector (simplified)
 #[derive(Debug, Clone, PartialEq)]
 pub enum Selector {
-    Universal,                           // *
-    Element(String),                     // div
-    Class(String),                       // .class
-    Id(String),                          // #id
+    Universal,                                // *
+    Element(String),                          // div
+    Class(String),                            // .class
+    Id(String),                               // #id
     Descendant(Box<Selector>, Box<Selector>), // parent child
-    Child(Box<Selector>, Box<Selector>), // parent > child
-    Pseudo(Box<Selector>, String),       // :hover, :focus, etc.
+    Child(Box<Selector>, Box<Selector>),      // parent > child
+    Pseudo(Box<Selector>, String),            // :hover, :focus, etc.
 }
 
 impl StyleSheet {
     pub fn new() -> Self {
         Self { rules: Vec::new() }
     }
-    
+
     /// Add a rule to the stylesheet
     pub fn add_rule(&mut self, selector: Selector, declarations: HashMap<String, String>) {
-        self.rules.push(StyleRule { selector, declarations });
+        self.rules.push(StyleRule {
+            selector,
+            declarations,
+        });
     }
-    
+
     /// Parse a simple CSS string and add rules
     pub fn parse(css: &str) -> Self {
         let mut sheet = Self::new();
-        
+
         // Simple CSS parser - looks for selector { declarations }
         let mut in_decl = false;
         let mut current_selector = String::new();
         let mut current_decls = HashMap::new();
-        
+
         for line in css.lines() {
             let line = line.trim();
-            if line.is_empty() { continue; }
-            
+            if line.is_empty() {
+                continue;
+            }
+
             if line.starts_with('{') {
                 in_decl = true;
                 continue;
             }
-            
+
             if line.ends_with('}') {
                 // End of rule
                 if !current_selector.is_empty() {
@@ -906,7 +950,7 @@ impl StyleSheet {
                 current_decls.clear();
                 continue;
             }
-            
+
             if !in_decl {
                 // This is a selector
                 current_selector = line.trim_end_matches('{').trim().to_string();
@@ -919,34 +963,34 @@ impl StyleSheet {
                 }
             }
         }
-        
+
         sheet
     }
-    
+
     fn parse_selector(s: &str) -> Selector {
         let s = s.trim();
-        
+
         // Universal
         if s == "*" {
             return Selector::Universal;
         }
-        
+
         // ID
         if let Some(id) = s.strip_prefix('#') {
             return Selector::Id(id.to_string());
         }
-        
+
         // Class
         if let Some(cls) = s.strip_prefix('.') {
             return Selector::Class(cls.to_string());
         }
-        
+
         // Pseudo selector
         if let Some((base, pseudo)) = s.split_once(':') {
             let base_sel = Self::parse_selector(base.trim());
             return Selector::Pseudo(Box::new(base_sel), pseudo.trim().to_string());
         }
-        
+
         // Child selector
         if s.contains('>') {
             let parts: Vec<&str> = s.split('>').collect();
@@ -956,7 +1000,7 @@ impl StyleSheet {
                 return Selector::Child(Box::new(parent), Box::new(child));
             }
         }
-        
+
         // Descendant selector
         if s.contains(' ') {
             let parts: Vec<&str> = s.split_whitespace().collect();
@@ -966,7 +1010,7 @@ impl StyleSheet {
                 return Selector::Descendant(Box::new(ancestor), Box::new(descendant));
             }
         }
-        
+
         // Element
         Selector::Element(s.to_string())
     }
@@ -975,22 +1019,22 @@ impl StyleSheet {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     #[test]
     fn test_computed_style() {
         let mut style = ComputedStyle::new();
-        
+
         style.set_property("width", "100px");
         assert_eq!(style.width, Length::Px(100.0));
-        
+
         style.set_property("margin", "10px");
         assert_eq!(style.margin.top, Length::Px(10.0));
         assert_eq!(style.margin.right, Length::Px(10.0));
-        
+
         style.set_property("background-color", "#ff0000");
         assert_eq!(style.background_color, Color::RED);
     }
-    
+
     #[test]
     fn test_stylesheet_parse() {
         let css = r#"
@@ -1002,7 +1046,7 @@ mod tests {
                 color: red;
             }
         "#;
-        
+
         let sheet = StyleSheet::parse(css);
         assert_eq!(sheet.rules.len(), 2);
     }

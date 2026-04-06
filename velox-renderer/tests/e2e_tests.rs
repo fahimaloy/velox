@@ -1,10 +1,10 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use velox_core::signal::{Signal, effect};
+use velox_core::signal::{effect, Signal};
 use velox_dom::{diff::diff, h, text, Props, VNode};
 use velox_renderer::Renderer;
-use velox_style::{Stylesheet, apply_styles};
+use velox_style::{apply_styles, Stylesheet};
 
 fn view(count: i32) -> VNode {
     h(
@@ -36,11 +36,16 @@ fn end_to_end_reactive_updates_and_mount() {
     }
 
     // Initial tree should reflect 0 and carry style
-    if let VNode::Element { props, children, .. } = &*current.borrow() {
+    if let VNode::Element {
+        props, children, ..
+    } = &*current.borrow()
+    {
         assert_eq!(props.attrs.get("class").unwrap(), "app");
         assert!(props.attrs.get("style").unwrap().contains("color: red;"));
         assert!(matches!(children[0], VNode::Text(_)));
-    } else { panic!("expected element"); }
+    } else {
+        panic!("expected element");
+    }
 
     // Mount returns a summary tree (in-memory)
     let r = velox_renderer::new_selected_renderer();
@@ -58,6 +63,7 @@ fn end_to_end_reactive_updates_and_mount() {
         }
         _ => panic!("expected element children"),
     };
-    assert!(patches.iter().any(|p| matches!(p, velox_dom::diff::Patch::Replace(_))));
+    assert!(patches
+        .iter()
+        .any(|p| matches!(p, velox_dom::diff::Patch::Replace(_))));
 }
-

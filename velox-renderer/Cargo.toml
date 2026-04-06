@@ -2,7 +2,7 @@
 [package]
 name = "velox-renderer"
 version = "0.1.1"
-edition = "2024"
+edition = "2021"
 publish = false
 
 [features]
@@ -41,6 +41,8 @@ pollster = "0.3"
 bytemuck = { version = "1", features = ["derive"] }
 wgpu_glyph = "0.20"
 ab_glyph = "0.2"
+
+serde = { version = "1.0", features = ["derive"] }
 
 [dev-dependencies]
 velox-core = { path = "../velox-core" }

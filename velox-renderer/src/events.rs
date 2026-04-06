@@ -8,9 +8,17 @@ pub struct EventRegistry {
     handlers: HashMap<String, Box<dyn FnMut()>>,
 }
 
+impl Default for EventRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl EventRegistry {
     pub fn new() -> Self {
-        Self { handlers: HashMap::new() }
+        Self {
+            handlers: HashMap::new(),
+        }
     }
     pub fn on<F: FnMut() + 'static>(&mut self, name: impl Into<String>, f: F) {
         self.handlers.insert(name.into(), Box::new(f));
@@ -58,13 +66,23 @@ pub fn collect_click_targets(
     order: &mut i32,
     out: &mut Vec<ClickTarget>,
 ) {
-    fn intersect(a: velox_dom::layout::Rect, b: velox_dom::layout::Rect) -> Option<velox_dom::layout::Rect> {
+    fn intersect(
+        a: velox_dom::layout::Rect,
+        b: velox_dom::layout::Rect,
+    ) -> Option<velox_dom::layout::Rect> {
         let x0 = a.x.max(b.x);
         let y0 = a.y.max(b.y);
         let x1 = (a.x + a.w).min(b.x + b.w);
         let y1 = (a.y + a.h).min(b.y + b.h);
-        if x1 <= x0 || y1 <= y0 { return None; }
-        Some(velox_dom::layout::Rect { x: x0, y: y0, w: x1 - x0, h: y1 - y0 })
+        if x1 <= x0 || y1 <= y0 {
+            return None;
+        }
+        Some(velox_dom::layout::Rect {
+            x: x0,
+            y: y0,
+            w: x1 - x0,
+            h: y1 - y0,
+        })
     }
     let next_clip = match (clip, layout.clip) {
         (Some(c), Some(lc)) => intersect(c, lc),
@@ -74,17 +92,37 @@ pub fn collect_click_targets(
     };
     match vnode {
         VNode::Text(_) => {}
-        VNode::Element { props, children, .. } => {
+        VNode::Element {
+            props, children, ..
+        } => {
             if let Some(handler) = props.attrs.get("on:click").cloned() {
                 let payload = props.attrs.get("on:click-payload").cloned();
-                if next_clip.map(|c| rects_intersect(layout.rect, c)).unwrap_or(true) {
+                if next_clip
+                    .map(|c| rects_intersect(layout.rect, c))
+                    .unwrap_or(true)
+                {
                     let ord = *order;
                     *order += 1;
-                    out.push(ClickTarget { rect: layout.rect, handler, payload, z_index: layout.z_index, order: ord });
+                    out.push(ClickTarget {
+                        rect: layout.rect,
+                        handler,
+                        payload,
+                        z_index: layout.z_index,
+                        order: ord,
+                    });
                 }
             }
-            let mut ordered: Vec<(i32, usize)> = layout.children.iter().enumerate()
-                .filter_map(|(i, ln)| if ln.display_none { None } else { Some((ln.z_index, i)) })
+            let mut ordered: Vec<(i32, usize)> = layout
+                .children
+                .iter()
+                .enumerate()
+                .filter_map(|(i, ln)| {
+                    if ln.display_none {
+                        None
+                    } else {
+                        Some((ln.z_index, i))
+                    }
+                })
                 .collect();
             ordered.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
             for (_, idx) in ordered {
@@ -107,13 +145,23 @@ pub fn collect_hover_targets(
     order: &mut i32,
     out: &mut Vec<HoverTarget>,
 ) {
-    fn intersect(a: velox_dom::layout::Rect, b: velox_dom::layout::Rect) -> Option<velox_dom::layout::Rect> {
+    fn intersect(
+        a: velox_dom::layout::Rect,
+        b: velox_dom::layout::Rect,
+    ) -> Option<velox_dom::layout::Rect> {
         let x0 = a.x.max(b.x);
         let y0 = a.y.max(b.y);
         let x1 = (a.x + a.w).min(b.x + b.w);
         let y1 = (a.y + a.h).min(b.y + b.h);
-        if x1 <= x0 || y1 <= y0 { return None; }
-        Some(velox_dom::layout::Rect { x: x0, y: y0, w: x1 - x0, h: y1 - y0 })
+        if x1 <= x0 || y1 <= y0 {
+            return None;
+        }
+        Some(velox_dom::layout::Rect {
+            x: x0,
+            y: y0,
+            w: x1 - x0,
+            h: y1 - y0,
+        })
     }
     let next_clip = match (clip, layout.clip) {
         (Some(c), Some(lc)) => intersect(c, lc),
@@ -123,21 +171,43 @@ pub fn collect_hover_targets(
     };
     match vnode {
         VNode::Text(_) => {}
-        VNode::Element { tag, props, children, .. } => {
+        VNode::Element {
+            tag,
+            props,
+            children,
+            ..
+        } => {
             if is_hoverable(tag, props) {
                 let id = props
                     .attrs
                     .get("data-hover-id")
                     .and_then(|v| v.parse::<u32>().ok())
                     .unwrap_or(0);
-                if next_clip.map(|c| rects_intersect(layout.rect, c)).unwrap_or(true) {
+                if next_clip
+                    .map(|c| rects_intersect(layout.rect, c))
+                    .unwrap_or(true)
+                {
                     let ord = *order;
                     *order += 1;
-                    out.push(HoverTarget { rect: layout.rect, id, z_index: layout.z_index, order: ord });
+                    out.push(HoverTarget {
+                        rect: layout.rect,
+                        id,
+                        z_index: layout.z_index,
+                        order: ord,
+                    });
                 }
             }
-            let mut ordered: Vec<(i32, usize)> = layout.children.iter().enumerate()
-                .filter_map(|(i, ln)| if ln.display_none { None } else { Some((ln.z_index, i)) })
+            let mut ordered: Vec<(i32, usize)> = layout
+                .children
+                .iter()
+                .enumerate()
+                .filter_map(|(i, ln)| {
+                    if ln.display_none {
+                        None
+                    } else {
+                        Some((ln.z_index, i))
+                    }
+                })
                 .collect();
             ordered.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
             for (_, idx) in ordered {
@@ -161,11 +231,7 @@ fn rects_intersect(a: velox_dom::layout::Rect, b: velox_dom::layout::Rect) -> bo
     x1 > x0 && y1 > y0
 }
 
-pub fn hit_test_click<'a>(
-    targets: &'a [ClickTarget],
-    x: f32,
-    y: f32,
-) -> Option<(&'a str, Option<&'a str>)> {
+pub fn hit_test_click(targets: &[ClickTarget], x: f32, y: f32) -> Option<(&str, Option<&str>)> {
     let mut ordered: Vec<(i32, usize)> = targets
         .iter()
         .enumerate()
@@ -216,7 +282,9 @@ pub fn dispatch(event: &str, tree: &RenderTree, registry: &mut EventRegistry) ->
     fn walk(node: &VNode, key: &str, out: &mut Vec<String>) {
         match node {
             VNode::Text(_) => {}
-            VNode::Element { props, children, .. } => {
+            VNode::Element {
+                props, children, ..
+            } => {
                 if let Some(v) = props.attrs.get(key) {
                     out.push(v.clone());
                 }
@@ -249,13 +317,19 @@ pub struct Runtime {
 
 impl Runtime {
     pub fn new(tree: RenderTree) -> Self {
-        Self { tree, registry: EventRegistry::new(), last_click: None, hover_sent: false }
+        Self {
+            tree,
+            registry: EventRegistry::new(),
+            last_click: None,
+            hover_sent: false,
+        }
     }
 
     /// Call on mouse left-button press; detects double-click within 400ms.
     pub fn mouse_click(&mut self) -> usize {
         let now = Instant::now();
-        let clicks = if let Some(prev) = self.last_click {
+
+        if let Some(prev) = self.last_click {
             if now.duration_since(prev) <= Duration::from_millis(400) {
                 self.last_click = None;
                 dispatch("dblclick", &self.tree, &mut self.registry)
@@ -266,17 +340,20 @@ impl Runtime {
         } else {
             self.last_click = Some(now);
             dispatch("click", &self.tree, &mut self.registry)
-        };
-        clicks
+        }
     }
 
     /// Call on cursor moved; fires a one-shot hover event.
     pub fn cursor_moved(&mut self) -> usize {
-        if self.hover_sent { return 0; }
+        if self.hover_sent {
+            return 0;
+        }
         self.hover_sent = true;
         dispatch("hover", &self.tree, &mut self.registry)
     }
 
     /// Reset hover state (useful for tests or leaving the window).
-    pub fn reset_hover(&mut self) { self.hover_sent = false; }
+    pub fn reset_hover(&mut self) {
+        self.hover_sent = false;
+    }
 }

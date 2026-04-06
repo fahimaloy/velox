@@ -13,4 +13,3 @@ fn mount_counts_nodes_and_texts() {
     assert_eq!(tree.node_count, 4, "div + text + span + text");
     assert_eq!(tree.text_count, 2);
 }
-

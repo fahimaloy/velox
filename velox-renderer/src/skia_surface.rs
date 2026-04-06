@@ -6,9 +6,9 @@
 
 #[cfg(feature = "skia-native")]
 mod native {
+    use glow::HasContext;
     use skia_safe as sk;
     use std::path::Path;
-    use glow::HasContext;
 
     pub struct SkiaSurface {
         surface: sk::Surface,
@@ -39,7 +39,7 @@ mod native {
         }
 
         /// Return a reference to the canvas.
-            pub fn canvas(&mut self) -> &sk::Canvas {
+        pub fn canvas(&mut self) -> &sk::Canvas {
             // Prefer the mutable canvas accessor when available.
             #[allow(deprecated)]
             {
@@ -126,7 +126,8 @@ mod native {
                 if let Some(gl_ctx) = &self._gl_ctx {
                     let _ = gl_ctx.make_current();
                 }
-                if let Some(new_surf) = create_gpu_surface_from_direct_context(dctx, width, height) {
+                if let Some(new_surf) = create_gpu_surface_from_direct_context(dctx, width, height)
+                {
                     self.surface = new_surf;
                     return Ok(());
                 }
@@ -141,43 +142,32 @@ mod native {
         }
     }
 
-        /// Attempt to create a window-backed Skia surface from a raw-window-handle.
-        ///
-        /// This function tries to create a native GL/EGL context for the provided
-        /// `HasWindowHandle` and, if successful, will attempt to create a
-        /// `DirectContext`. For Phase 1 we return a raster surface if creating a
-        /// GPU-backed surface is not yet supported.
-        pub fn create_window_surface_from_handle(
-            window: &impl raw_window_handle::HasRawWindowHandle,
-            width: i32,
-            height: i32,
-        ) -> Result<SkiaSurface, String> {
-            // Try to create a native GL/EGL context using the helper in `skia_gl`.
-            match crate::skia_gl::create_context_from_winit(window) {
-                Ok(gl_ctx) => {
-                    // Try to make a DirectContext from the GL interface.
-                    if let Some(mut dctx) = gl_ctx.into_direct_context() {
-                        eprintln!("[skia_surface] DirectContext created (GPU path available)");
-                        // Attempt to build a GPU-backed Skia surface from the DirectContext.
-                        // If successful, return a SkiaSurface that owns both the DirectContext
-                        // and the native GL context so they are kept alive for the lifetime
-                        // of the surface.
-                        if let Some(gpu_surf) = create_gpu_surface_from_direct_context(&mut dctx, width, height) {
-                            return Ok(SkiaSurface {
-                                surface: gpu_surf,
-                                width,
-                                height,
-                                scale_factor: 1.0,
-                                _gpu_ctx: Some(dctx),
-                                #[cfg(all(feature = "skia-native", unix))]
-                                _gl_ctx: Some(gl_ctx),
-                            });
-                        }
-                        // Fallback to raster until the platform-specific path is implemented.
-                        let surface = sk::surfaces::raster_n32_premul((width, height))
-                            .ok_or_else(|| "skia: failed to create raster fallback surface".to_string())?;
+    /// Attempt to create a window-backed Skia surface from a raw-window-handle.
+    ///
+    /// This function tries to create a native GL/EGL context for the provided
+    /// `HasWindowHandle` and, if successful, will attempt to create a
+    /// `DirectContext`. For Phase 1 we return a raster surface if creating a
+    /// GPU-backed surface is not yet supported.
+    pub fn create_window_surface_from_handle(
+        window: &impl raw_window_handle::HasRawWindowHandle,
+        width: i32,
+        height: i32,
+    ) -> Result<SkiaSurface, String> {
+        // Try to create a native GL/EGL context using the helper in `skia_gl`.
+        match crate::skia_gl::create_context_from_winit(window) {
+            Ok(gl_ctx) => {
+                // Try to make a DirectContext from the GL interface.
+                if let Some(mut dctx) = gl_ctx.into_direct_context() {
+                    eprintln!("[skia_surface] DirectContext created (GPU path available)");
+                    // Attempt to build a GPU-backed Skia surface from the DirectContext.
+                    // If successful, return a SkiaSurface that owns both the DirectContext
+                    // and the native GL context so they are kept alive for the lifetime
+                    // of the surface.
+                    if let Some(gpu_surf) =
+                        create_gpu_surface_from_direct_context(&mut dctx, width, height)
+                    {
                         return Ok(SkiaSurface {
-                            surface,
+                            surface: gpu_surf,
                             width,
                             height,
                             scale_factor: 1.0,
@@ -185,18 +175,35 @@ mod native {
                             #[cfg(all(feature = "skia-native", unix))]
                             _gl_ctx: Some(gl_ctx),
                         });
-                    } else {
-                        eprintln!("[skia_surface] Could not make DirectContext; falling back to raster");
                     }
-                }
-                Err(e) => {
-                    eprintln!("[skia_surface] create_context_from_winit failed: {}", e);
+                    // Fallback to raster until the platform-specific path is implemented.
+                    let surface =
+                        sk::surfaces::raster_n32_premul((width, height)).ok_or_else(|| {
+                            "skia: failed to create raster fallback surface".to_string()
+                        })?;
+                    return Ok(SkiaSurface {
+                        surface,
+                        width,
+                        height,
+                        scale_factor: 1.0,
+                        _gpu_ctx: Some(dctx),
+                        #[cfg(all(feature = "skia-native", unix))]
+                        _gl_ctx: Some(gl_ctx),
+                    });
+                } else {
+                    eprintln!(
+                        "[skia_surface] Could not make DirectContext; falling back to raster"
+                    );
                 }
             }
-
-            // Fallback to CPU raster surface
-            SkiaSurface::new_raster(width, height)
+            Err(e) => {
+                eprintln!("[skia_surface] create_context_from_winit failed: {}", e);
+            }
         }
+
+        // Fallback to CPU raster surface
+        SkiaSurface::new_raster(width, height)
+    }
 
     pub use SkiaSurface as Surface;
 
@@ -225,7 +232,11 @@ mod native {
             // Choose a color format. We assume a standard RGBA8 buffer here.
             let gl_format = glow::RGBA8;
 
-            let fb_info = sk::gpu::gl::FramebufferInfo { fboid: fb_binding, format: gl_format, protected: sk::gpu::Protected::No };
+            let fb_info = sk::gpu::gl::FramebufferInfo {
+                fboid: fb_binding,
+                format: gl_format,
+                protected: sk::gpu::Protected::No,
+            };
 
             // Create a BackendRenderTarget for GL.
             let backend = sk::gpu::backend_render_targets::make_gl((width, height), 0, 8, fb_info);
@@ -241,7 +252,10 @@ mod native {
             );
 
             if surface.is_some() {
-                eprintln!("[skia_surface] created GPU-backed Surface (fbo={})", fb_binding);
+                eprintln!(
+                    "[skia_surface] created GPU-backed Surface (fbo={})",
+                    fb_binding
+                );
             } else {
                 eprintln!("[skia_surface] Surface::from_backend_render_target returned None");
             }
@@ -253,8 +267,12 @@ mod native {
 
 #[cfg(not(feature = "skia-native"))]
 mod nostub {
-    pub struct Surface { _private: () }
-    pub fn create_window_surface(_w: i32, _h: i32) -> Result<Surface, String> { Err("skia-native feature not enabled".into()) }
+    pub struct Surface {
+        _private: (),
+    }
+    pub fn create_window_surface(_w: i32, _h: i32) -> Result<Surface, String> {
+        Err("skia-native feature not enabled".into())
+    }
     pub use Surface as SkiaSurface;
 }
 

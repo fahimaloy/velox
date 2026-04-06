@@ -7,7 +7,7 @@
 //! - Text alignment
 //! - Text decoration (underline, overline, strikethrough)
 
-use velox_style::fonts::{FontFamily, FontWeight, FontStyle, LineHeight, FontMetrics};
+use velox_style::fonts::{FontStyle, LineHeight};
 
 /// Text measurement and layout result
 #[derive(Debug, Clone)]
@@ -102,30 +102,30 @@ impl TextRenderConfig {
             ..Default::default()
         }
     }
-    
+
     pub fn with_color(mut self, r: u8, g: u8, b: u8, a: u8) -> Self {
         self.color = (r, g, b, a);
         self
     }
-    
+
     pub fn with_weight(mut self, weight: u16) -> Self {
         self.font_weight = weight.clamp(100, 900);
         self.bold = weight >= 700;
         self
     }
-    
+
     pub fn with_alignment(mut self, align: u8) -> Self {
         self.text_align = align.min(2);
         self
     }
-    
+
     pub fn with_decoration(mut self, underline: bool, overline: bool, strikethrough: bool) -> Self {
         self.underline = underline;
         self.overline = overline;
         self.strikethrough = strikethrough;
         self
     }
-    
+
     pub fn with_max_width(mut self, width: f32) -> Self {
         self.max_width = Some(width.max(0.0));
         self
@@ -142,19 +142,19 @@ impl TextMeasurer {
         if text.is_empty() {
             return (0.0, config.font_size);
         }
-        
+
         // Very rough approximation: average character width = 0.5 * font_size
         let char_width = config.font_size * 0.5;
         let width = text.len() as f32 * char_width;
         let height = config.line_height.to_pixels(config.font_size);
-        
+
         (width, height)
     }
-    
+
     /// Layout text with wrapping
     pub fn layout(text: &str, config: &TextRenderConfig) -> TextLayout {
         let line_height = config.line_height.to_pixels(config.font_size);
-        
+
         if config.max_width.is_none() {
             // Single line, no wrapping
             let (width, _) = Self::measure(text, config);
@@ -171,23 +171,23 @@ impl TextMeasurer {
                 baseline: config.font_size * 0.8,
             };
         }
-        
+
         // Multi-line with wrapping
         let max_width = config.max_width.unwrap();
-        let char_width = config.font_size * 0.5;
+        let _char_width = config.font_size * 0.5;
         let mut lines = Vec::new();
         let mut current_line = String::new();
         let mut y_offset = 0.0;
-        
+
         for word in text.split_whitespace() {
             let test_line = if current_line.is_empty() {
                 word.to_string()
             } else {
                 format!("{} {}", current_line, word)
             };
-            
+
             let (line_width, _) = Self::measure(&test_line, config);
-            
+
             if line_width > max_width && !current_line.is_empty() {
                 // Save current line and start new one
                 let (w, _) = Self::measure(&current_line, config);
@@ -204,7 +204,7 @@ impl TextMeasurer {
                 current_line = test_line;
             }
         }
-        
+
         // Add final line
         if !current_line.is_empty() {
             let (w, _) = Self::measure(&current_line, config);
@@ -216,16 +216,16 @@ impl TextMeasurer {
                 baseline: config.font_size * 0.8,
             });
         }
-        
+
         let total_height = if lines.is_empty() {
             line_height
         } else {
             let last = &lines[lines.len() - 1];
             last.y_offset + last.height
         };
-        
+
         let total_width = lines.iter().map(|l| l.width).fold(0.0, f32::max);
-        
+
         TextLayout {
             lines,
             width: total_width,
@@ -238,32 +238,32 @@ impl TextMeasurer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     #[test]
     fn test_text_config() {
         let config = TextRenderConfig::new("Arial", 16.0)
             .with_weight(700)
             .with_color(255, 0, 0, 255);
-        
+
         assert_eq!(config.font_size, 16.0);
         assert_eq!(config.font_weight, 700);
         assert!(config.bold);
     }
-    
+
     #[test]
     fn test_text_measurement() {
         let config = TextRenderConfig::default();
         let (w, h) = TextMeasurer::measure("Hello", &config);
-        
+
         assert!(w > 0.0);
         assert_eq!(h, 19.2); // 1.2 * 16.0
     }
-    
+
     #[test]
     fn test_line_height() {
         let mut config = TextRenderConfig::default();
         config.line_height = LineHeight::Number(1.5);
-        
+
         let (_, h) = TextMeasurer::measure("Hello", &config);
         assert_eq!(h, 24.0); // 1.5 * 16.0
     }

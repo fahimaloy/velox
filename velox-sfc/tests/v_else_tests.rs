@@ -3,7 +3,7 @@ use velox_sfc::compile_template_to_rs;
 #[test]
 fn codegen_v_if_else_pairing() {
     let tpl = "<div><p v-if=\"show\">A</p><p v-else>B</p></div>";
-    let rs = compile_template_to_rs(tpl, "App").unwrap();
+    let rs = compile_template_to_rs(tpl, "App", None).unwrap();
     // should emit a conditional `if (show) { ... } else { ... }` inside children
     assert!(
         rs.contains("if (show)")

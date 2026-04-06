@@ -3,20 +3,19 @@
 //! Handles font family resolution, font matching, and font loading
 //! with support for system fonts and custom font files.
 
-
-
 /// Font weight values (100-900)
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 pub enum FontWeight {
-    Thin = 100,        // 100
-    ExtraLight = 200,  // 200
-    Light = 300,       // 300
-    Normal = 400,      // 400 (default)
-    Medium = 500,      // 500
-    SemiBold = 600,    // 600
-    Bold = 700,        // 700
-    ExtraBold = 800,   // 800
-    Black = 900,       // 900
+    Thin = 100,       // 100
+    ExtraLight = 200, // 200
+    Light = 300,      // 300
+    #[default]
+    Normal = 400, // 400 (default)
+    Medium = 500,     // 500
+    SemiBold = 600,   // 600
+    Bold = 700,       // 700
+    ExtraBold = 800,  // 800
+    Black = 900,      // 900
 }
 
 impl FontWeight {
@@ -43,21 +42,16 @@ impl FontWeight {
             _ => FontWeight::Black,
         }
     }
-    
+
     pub fn to_number(&self) -> u16 {
         *self as u16
     }
 }
 
-impl Default for FontWeight {
-    fn default() -> Self {
-        FontWeight::Normal
-    }
-}
-
 /// Font style (normal or italic)
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum FontStyle {
+    #[default]
     Normal,
     Italic,
     Oblique,
@@ -74,14 +68,8 @@ impl FontStyle {
     }
 }
 
-impl Default for FontStyle {
-    fn default() -> Self {
-        FontStyle::Normal
-    }
-}
-
 /// Line height value (can be number, length, or percentage)
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub enum LineHeight {
     /// Number multiplied by font size
     Number(f32),
@@ -90,39 +78,40 @@ pub enum LineHeight {
     /// Relative to parent (percentage)
     Percentage(f32),
     /// Browser default (1.2x font size)
+    #[default]
     Normal,
 }
 
 impl LineHeight {
     pub fn parse(s: &str) -> Option<Self> {
         let s = s.trim();
-        
+
         if s.eq_ignore_ascii_case("normal") {
             return Some(LineHeight::Normal);
         }
-        
+
         if let Some(num_str) = s.strip_suffix("px") {
             if let Ok(v) = num_str.trim().parse::<f32>() {
                 return Some(LineHeight::Pixels(v));
             }
         }
-        
+
         if let Some(pct_str) = s.strip_suffix('%') {
             if let Ok(v) = pct_str.trim().parse::<f32>() {
                 return Some(LineHeight::Percentage(v / 100.0));
             }
         }
-        
+
         // Try plain number
         if let Ok(v) = s.parse::<f32>() {
             if v > 0.0 {
                 return Some(LineHeight::Number(v));
             }
         }
-        
+
         None
     }
-    
+
     /// Calculate actual line height in pixels given font size
     pub fn to_pixels(&self, font_size: f32) -> f32 {
         match self {
@@ -131,12 +120,6 @@ impl LineHeight {
             LineHeight::Percentage(pct) => *pct * font_size,
             LineHeight::Normal => 1.2 * font_size,
         }
-    }
-}
-
-impl Default for LineHeight {
-    fn default() -> Self {
-        LineHeight::Normal
     }
 }
 
@@ -158,12 +141,12 @@ impl FontDescriptor {
             size: size.round() as u32,
         }
     }
-    
+
     pub fn with_weight(mut self, weight: FontWeight) -> Self {
         self.weight = weight;
         self
     }
-    
+
     pub fn with_style(mut self, style: FontStyle) -> Self {
         self.style = style;
         self
@@ -183,32 +166,30 @@ impl FontFamily {
             .split(',')
             .map(|f| {
                 let trimmed = f.trim();
-                let unquoted = trimmed
-                    .trim_matches('"')
-                    .trim_matches('\'');
+                let unquoted = trimmed.trim_matches('"').trim_matches('\'');
                 unquoted.to_string()
             })
             .filter(|f| !f.is_empty())
             .collect::<Vec<_>>();
-        
+
         Self {
             families: if families.is_empty() {
                 vec!["sans-serif".to_string()]
             } else {
                 families
-            }
+            },
         }
     }
-    
+
     pub fn families(&self) -> &[String] {
         &self.families
     }
-    
+
     /// Get the primary font family name
     pub fn primary(&self) -> &str {
         &self.families[0]
     }
-    
+
     /// Get fallback names
     pub fn fallbacks(&self) -> &[String] {
         if self.families.len() > 1 {
@@ -243,6 +224,7 @@ pub enum GenericFamily {
 }
 
 impl GenericFamily {
+    #[allow(clippy::should_implement_trait)]
     pub fn from_str(s: &str) -> Option<Self> {
         match s.trim().to_lowercase().as_str() {
             "serif" => Some(GenericFamily::Serif),
@@ -254,7 +236,7 @@ impl GenericFamily {
             _ => None,
         }
     }
-    
+
     /// Get platform-specific font names for this generic family
     pub fn system_fonts(&self) -> &'static [&'static str] {
         match self {
@@ -324,7 +306,7 @@ impl FontMetrics {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     #[test]
     fn test_font_weight() {
         assert_eq!(FontWeight::Normal.to_number(), 400);
@@ -332,26 +314,26 @@ mod tests {
         assert_eq!(FontWeight::from_number(400), FontWeight::Normal);
         assert_eq!(FontWeight::from_number(850), FontWeight::ExtraBold);
     }
-    
+
     #[test]
     fn test_line_height() {
         let lh = LineHeight::parse("1.5").unwrap();
         assert_eq!(lh.to_pixels(16.0), 24.0);
-        
+
         let lh = LineHeight::parse("20px").unwrap();
         assert_eq!(lh.to_pixels(16.0), 20.0);
-        
+
         let lh = LineHeight::Normal;
         assert_eq!(lh.to_pixels(16.0), 19.2);
     }
-    
+
     #[test]
     fn test_font_family_parsing() {
         let ff = FontFamily::new("Arial, Helvetica, sans-serif");
         assert_eq!(ff.primary(), "Arial");
         assert_eq!(ff.fallbacks(), ["Helvetica", "sans-serif"]);
     }
-    
+
     #[test]
     fn test_generic_family() {
         let gf = GenericFamily::from_str("sans-serif").unwrap();

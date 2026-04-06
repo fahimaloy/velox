@@ -27,7 +27,9 @@ fn reconcile_reorders_and_reuses_by_key() {
 
     // old[0] should be the previously-existing node with key "b" (uid old-b)
     match &old[0] {
-        VNode::Element { props, children, .. } => {
+        VNode::Element {
+            props, children, ..
+        } => {
             assert_eq!(props.attrs.get("key").map(|s| s.as_str()), Some("b"));
             assert_eq!(props.attrs.get("uid").map(|s| s.as_str()), Some("old-b"));
             // since we reused the old node, its child text remains the original "B"

@@ -17,10 +17,7 @@ fn hit_test_click_targets() {
             ),
             h(
                 "button",
-                vec![
-                    ("on:click", "btn-b"),
-                    ("style", "width:60px;height:30px"),
-                ],
+                vec![("on:click", "btn-b"), ("style", "width:60px;height:30px")],
                 vec![],
             ),
         ],

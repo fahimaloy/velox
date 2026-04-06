@@ -1,31 +1,82 @@
 use std::env;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 fn main() {
-    // Compile .vx files to Rust
+    let manifest_dir = env::var("CARGO_MANIFEST_DIR").unwrap();
     let out_dir = env::var("OUT_DIR").unwrap();
-    let vx_files = ["src/App.vx"];
-    
-    for file in &vx_files {
-        let path = Path::new(file);
-        if path.exists() {
-            let content = fs::read_to_string(path).unwrap();
-            let generated = compile_vx(&content);
-            let out_path = Path::new(&out_dir).join(
-                path.file_stem().unwrap().to_str().unwrap().to_string() + ".rs"
-            );
-            fs::write(&out_path, generated).unwrap();
-        }
+    let src_dir = PathBuf::from(&manifest_dir).join("src");
+
+    // Collect all .vx files recursively
+    let vx_files = collect_vx_files(&src_dir);
+
+    for vx_path in &vx_files {
+        compile_vx_file(vx_path, &src_dir, &out_dir);
     }
-    
-    // Rebuild if .vx files change
-    for file in &vx_files {
-        println!("cargo:rerun-if-changed={}", file);
+
+    // Rebuild if any .vx file changes
+    for vx_path in &vx_files {
+        println!("cargo:rerun-if-changed={}", vx_path.display());
     }
 }
 
-fn compile_vx(content: &str) -> String {
-    // Simplified compilation - in real implementation would use velox-sfc
-    format!("// Generated from .vx file\n{}", content)
+/// Recursively find all .vx files in a directory
+fn collect_vx_files(dir: &Path) -> Vec<PathBuf> {
+    let mut files = Vec::new();
+    if let Ok(entries) = fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                files.extend(collect_vx_files(&path));
+            } else if path.extension().map_or(false, |ext| ext == "vx") {
+                files.push(path);
+            }
+        }
+    }
+    files
+}
+
+/// Compile a single .vx file to Rust using velox-sfc
+fn compile_vx_file(vx_path: &Path, src_dir: &Path, out_dir: &str) {
+    let content = match fs::read_to_string(vx_path) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("Warning: Could not read {:?}: {}", vx_path, e);
+            return;
+        }
+    };
+
+    let sfc = match velox_sfc::parse_sfc(&content) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("Warning: Could not parse {:?}: {}", vx_path, e);
+            return;
+        }
+    };
+
+    // Determine component name from file stem
+    let component_name = vx_path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("component")
+        .to_string();
+
+    // Generate stub Rust code
+    let generated = velox_sfc::to_stub_rs(&sfc, &component_name);
+
+    // Compute relative path from src/ to maintain directory structure
+    let relative = vx_path.strip_prefix(src_dir).unwrap_or(vx_path);
+
+    // Create output directory structure
+    if let Some(parent) = relative.parent() {
+        let out_subdir = PathBuf::from(out_dir).join(parent);
+        fs::create_dir_all(&out_subdir).ok();
+    }
+
+    // Write generated Rust file
+    let out_path = PathBuf::from(out_dir).join(relative.with_extension("rs"));
+
+    if let Err(e) = fs::write(&out_path, &generated) {
+        eprintln!("Warning: Could not write {:?}: {}", out_path, e);
+    }
 }

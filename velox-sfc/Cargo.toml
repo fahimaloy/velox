@@ -7,5 +7,7 @@ publish = false
 [dependencies]
 pest         = "2.8"
 pest_derive  = "2.8"
-quote        = "1.0"
-syn          = { version = "2.0", features = ["full"] }
+
+[dev-dependencies]
+velox-dom = { path = "../velox-dom" }
+velox-renderer = { path = "../velox-renderer" }

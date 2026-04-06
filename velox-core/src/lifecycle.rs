@@ -33,4 +33,3 @@ pub fn run_destroy_hooks() {
         }
     });
 }
-

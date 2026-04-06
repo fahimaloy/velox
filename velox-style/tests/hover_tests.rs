@@ -1,5 +1,5 @@
 use velox_dom::{h, text, Props, VNode};
-use velox_style::{Stylesheet, apply_styles_with_hover};
+use velox_style::{apply_styles_with_hover, Stylesheet};
 
 #[test]
 fn hover_selector_applies_conditionally() {
@@ -12,7 +12,9 @@ div:hover { color: blue; }
 
     // Not hovered
     let styled = apply_styles_with_hover(&vnode, &ss, &|_, _| false);
-    if let VNode::Element { props, .. } = styled { assert!(props.attrs.get("style").is_none()); }
+    if let VNode::Element { props, .. } = styled {
+        assert!(props.attrs.get("style").is_none());
+    }
 
     // Hovered
     let styled2 = apply_styles_with_hover(&vnode, &ss, &|tag, _| tag == "div");
@@ -20,6 +22,7 @@ div:hover { color: blue; }
         let style = props.attrs.get("style").unwrap();
         assert!(style.contains("color: blue;"));
         assert!(style.contains("background: yellow;"));
-    } else { panic!("expected element"); }
+    } else {
+        panic!("expected element");
+    }
 }
-

@@ -10,6 +10,7 @@ pub fn parse_template_to_ast(input: &str) -> Result<Vec<Node>, String> {
     let mut stack: Vec<Node> = Vec::new();
     let mut roots: Vec<Node> = Vec::new();
 
+    #[allow(clippy::ptr_arg)]
     fn push_child(stack: &mut Vec<Node>, roots: &mut Vec<Node>, node: Node) {
         if let Some(Node::Element { children, .. }) = stack.last_mut() {
             children.push(node);
@@ -23,8 +24,8 @@ pub fn parse_template_to_ast(input: &str) -> Result<Vec<Node>, String> {
             // closing tag?
             if i + 1 < bytes.len() && bytes[i + 1] == b'/' {
                 i += 2;
-                let tag = read_ident(&bytes, &mut i);
-                skip_ws(&bytes, &mut i);
+                let tag = read_ident(bytes, &mut i);
+                skip_ws(bytes, &mut i);
                 // expect '>'
                 if i < bytes.len() && bytes[i] == b'>' {
                     i += 1;
@@ -32,11 +33,13 @@ pub fn parse_template_to_ast(input: &str) -> Result<Vec<Node>, String> {
                 // pop until matching tag
                 let mut popped: Option<Node> = None;
                 while let Some(n) = stack.pop() {
-                    if let Node::Element { tag: t, .. } = &n {
-                        if t == &tag {
-                            popped = Some(n);
-                            break;
-                        }
+                    let tag_matches = match &n {
+                        Node::Element { tag: t, .. } => t == &tag,
+                        _ => false,
+                    };
+                    if tag_matches {
+                        popped = Some(n);
+                        break;
                     }
                 }
                 if let Some(n) = popped {
@@ -47,12 +50,12 @@ pub fn parse_template_to_ast(input: &str) -> Result<Vec<Node>, String> {
 
             // opening or self-closing tag
             i += 1;
-            let tag = read_ident(&bytes, &mut i);
+            let tag = read_ident(bytes, &mut i);
             let mut attrs: Vec<TemplateAttr> = Vec::new();
             let mut self_closing = false;
 
             loop {
-                skip_ws(&bytes, &mut i);
+                skip_ws(bytes, &mut i);
                 if i >= bytes.len() {
                     break;
                 }
@@ -61,7 +64,7 @@ pub fn parse_template_to_ast(input: &str) -> Result<Vec<Node>, String> {
                         // possible "/>"
                         self_closing = true;
                         i += 1;
-                        skip_ws(&bytes, &mut i);
+                        skip_ws(bytes, &mut i);
                         if i < bytes.len() && bytes[i] == b'>' {
                             i += 1;
                         }
@@ -73,7 +76,7 @@ pub fn parse_template_to_ast(input: &str) -> Result<Vec<Node>, String> {
                     }
                     _ => {
                         // attribute
-                        if let Some(attr) = read_attribute(&bytes, &mut i) {
+                        if let Some(attr) = read_attribute(bytes, &mut i) {
                             attrs.push(attr);
                         } else {
                             // skip unknown token
@@ -195,13 +198,13 @@ fn read_attribute(bytes: &[u8], i: &mut usize) -> Option<TemplateAttr> {
         value = read_quoted(bytes, i);
     }
 
-    let (kind, name) = if raw_name.starts_with(':') {
-        (AttrKind::Bind, raw_name[1..].to_string())
-    } else if raw_name.starts_with('@') {
-        (AttrKind::On, raw_name[1..].to_string())
-    } else if raw_name.starts_with("v-") {
+    let (kind, name) = if let Some(rest) = raw_name.strip_prefix(':') {
+        (AttrKind::Bind, rest.to_string())
+    } else if let Some(rest) = raw_name.strip_prefix('@') {
+        (AttrKind::On, rest.to_string())
+    } else if let Some(rest) = raw_name.strip_prefix("v-") {
         // normalize directive name: strip `v-` and convert camelCase or underscores to kebab-case
-        let raw_dir = raw_name[2..].to_string();
+        let raw_dir = rest.to_string();
         let name = normalize_directive_name(&raw_dir);
         (AttrKind::Directive, name)
     } else {
@@ -238,7 +241,9 @@ fn normalize_directive_name(s: &str) -> String {
             out.push('-');
         } else if ch.is_ascii_uppercase() {
             out.push('-');
-            for lc in ch.to_lowercase() { out.push(lc); }
+            for lc in ch.to_lowercase() {
+                out.push(lc);
+            }
         } else {
             out.push(ch.to_ascii_lowercase());
         }
@@ -248,8 +253,14 @@ fn normalize_directive_name(s: &str) -> String {
     let mut compact = String::with_capacity(out.len());
     for c in out.chars() {
         if c == '-' {
-            if !prev_dash { compact.push(c); prev_dash = true; }
-        } else { compact.push(c); prev_dash = false; }
+            if !prev_dash {
+                compact.push(c);
+                prev_dash = true;
+            }
+        } else {
+            compact.push(c);
+            prev_dash = false;
+        }
     }
     compact.trim_matches('-').to_string()
 }

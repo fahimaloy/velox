@@ -1,0 +1,85 @@
+<template>
+  <div class="counter">
+    <p class="label">{{ label }}</p>
+    <div class="value">{{ count }}</div>
+    <div class="buttons">
+      <button class="btn" @click="decrement">-</button>
+      <button class="btn" @click="reset">Reset</button>
+      <button class="btn" @click="increment">+</button>
+    </div>
+  </div>
+</template>
+
+<script setup>
+use std::rc::Rc;
+use velox_core::signal::Signal;
+
+pub struct State {
+    pub count: Rc<Signal<i32>>,
+    pub label: Rc<Signal<String>>,
+}
+
+impl State {
+    pub fn new() -> Self {
+        Self {
+            count: Rc::new(Signal::new(0)),
+            label: Rc::new(Signal::new(String::from("Counter"))),
+        }
+    }
+
+    pub fn increment(&self) {
+        self.count.set(self.count.get() + 1);
+    }
+
+    pub fn decrement(&self) {
+        self.count.set(self.count.get() - 1);
+    }
+
+    pub fn reset(&self) {
+        self.count.set(0);
+    }
+}
+
+define_emits!();
+</script>
+
+<style scoped>
+.counter {
+    padding: 16px;
+    background: #16213e;
+    border-radius: 8px;
+    text-align: center;
+}
+
+.label {
+    margin: 0 0 8px;
+    font-size: 14px;
+    color: #8b949e;
+}
+
+.value {
+    font-size: 48px;
+    font-weight: bold;
+    margin: 12px 0;
+}
+
+.buttons {
+    display: flex;
+    gap: 8px;
+    justify-content: center;
+}
+
+.btn {
+    padding: 8px 16px;
+    font-size: 14px;
+    background: #3478f6;
+    color: #ffffff;
+    border: none;
+    border-radius: 4px;
+    cursor: pointer;
+}
+
+.btn:hover {
+    background: #4a8df8;
+}
+</style>

@@ -4,19 +4,19 @@ use std::path::PathBuf;
 
 /// Initialize a new Velox project
 pub fn init_project(name: &str) -> Result<PathBuf> {
-  let requested_dir = PathBuf::from(name);
-  let requested_name = requested_dir
+    let requested_dir = PathBuf::from(name);
+    let requested_name = requested_dir
         .file_name()
         .and_then(|s| s.to_str())
         .filter(|s| !s.is_empty())
         .ok_or_else(|| anyhow::anyhow!("invalid project path/name: {name}"))?;
 
-  let package_name = crate::validate_and_normalize_package_name(requested_name)?;
-  let project_dir = if requested_dir.components().count() == 1 {
-    PathBuf::from(&package_name)
-  } else {
-    requested_dir
-  };
+    let package_name = crate::validate_and_normalize_package_name(requested_name)?;
+    let project_dir = if requested_dir.components().count() == 1 {
+        PathBuf::from(&package_name)
+    } else {
+        requested_dir
+    };
 
     // Create directory structure
     fs::create_dir_all(&project_dir)?;
@@ -24,15 +24,15 @@ pub fn init_project(name: &str) -> Result<PathBuf> {
     fs::create_dir_all(project_dir.join("assets"))?;
 
     // Write files from templates
-  let cargo_toml = generate_cargo_toml(&package_name);
+    let cargo_toml = generate_cargo_toml(&package_name);
     fs::write(project_dir.join("Cargo.toml"), cargo_toml)?;
-    
+
     let main_rs = generate_main_rs();
     fs::write(project_dir.join("src/main.rs"), main_rs)?;
-    
+
     let app_vx = generate_app_vx();
     fs::write(project_dir.join("src/App.vx"), app_vx)?;
-    
+
     let readme = generate_readme(&package_name);
     fs::write(project_dir.join("README.md"), readme)?;
 
@@ -45,7 +45,7 @@ pub fn init_project(name: &str) -> Result<PathBuf> {
     println!("   velox dev");
     println!("   velox build");
     println!("   velox run");
-    
+
     Ok(project_dir)
 }
 
@@ -55,7 +55,8 @@ pub fn init_app(name: &str) -> Result<PathBuf> {
     let src = root.join("src");
     fs::create_dir_all(&src).with_context(|| format!("create {}", src.display()))?;
 
-    let cargo = format!(r#"[package]
+    let cargo = format!(
+        r#"[package]
 name = "{name}"
 version = "0.1.0"
 edition = "2021"
@@ -68,7 +69,8 @@ velox-renderer = {{ path = "../../velox-renderer" }}
 
 [build-dependencies]
 velox-cli = {{ path = "../../velox-cli" }}
-"#);
+"#
+    );
     fs::write(root.join("Cargo.toml"), cargo).context("write Cargo.toml")?;
 
     let app_vx = r#"<template>
@@ -118,12 +120,13 @@ fn main() {
 }
 "#;
     fs::write(src.join("main.rs"), main_rs).context("write main.rs")?;
-    
+
     Ok(root)
 }
 
 fn generate_cargo_toml(name: &str) -> String {
-    format!(r#"[package]
+    format!(
+        r#"[package]
 name = "{name}"
 version = "0.1.0"
 edition = "2021"
@@ -138,43 +141,101 @@ velox-renderer = {{ git = "https://github.com/fahimaloy/velox", features = ["ski
 
 [build-dependencies]
 velox-cli = {{ git = "https://github.com/fahimaloy/velox" }}
-"#)
+"#
+    )
 }
 
 fn generate_main_rs() -> String {
-  r#"use std::sync::Arc;
+    r#"use std::env::args;
+use std::os::unix::net::UnixListener;
+use std::thread;
+use serde_json;
+use std::sync::mpsc;
+use std::sync::Arc;
+use std::sync::Mutex;
+use std::path::PathBuf;
 use velox_dom::VNode;
 use velox_style::Stylesheet;
+use velox_renderer::HmrMessage;
 
 include!(concat!(env!("OUT_DIR"), "/App.rs"));
 
 fn main() {
   println!("Starting Velox app...");
 
-  let state = Arc::new(app::script_rs::State::new());
-
-  let make_view = {
-    let state = Arc::clone(&state);
-    move |_w: u32, _h: u32| -> (VNode, Stylesheet) {
-      let vnode = app::render_with_state(Arc::clone(&state), |name| match name {
-        "title" => state.title.get(),
-        "count" => state.count.get().to_string(),
-        _ => String::new(),
-      });
-      let sheet = Stylesheet::parse(app::STYLE);
-      (vnode, sheet)
-    }
+  let args: Vec<String> = args().collect();
+  let hmr_path = if let Some(i) = args.iter().position(|a| a == "--hmr-socket") {
+    args.get(i+1).cloned()
+  } else {
+    None
   };
 
-  let on_event = app::make_on_event(Arc::clone(&state));
-  let get_title = {
-    let state = Arc::clone(&state);
-    move || state.title.get()
-  };
+  if let Some(path_str) = hmr_path {
+    let path = PathBuf::from(path_str);
+    let listener = UnixListener::bind(&path).expect("bind socket");
+    let (tx, rx) = mpsc::channel();
+    let rx = std::sync::Arc::new(std::sync::Mutex::new(rx));
+    thread::spawn(move || {
+      for stream in listener.incoming() {
+        if let Ok(mut stream) = stream {
+          let mut buffer = Vec::new();
+          stream.read_to_end(&mut buffer).ok();
+          if let Ok(msg) = serde_json::from_slice::<HmrMessage>(&buffer) {
+            tx.send(msg).ok();
+          }
+        }
+      }
+    });
 
-  velox_renderer::run_window_vnode_skia("Velox App", make_view, on_event, get_title);
+    let state = Arc::new(app::script_rs::State::new());
+
+    let make_view = {
+      let state = Arc::clone(&state);
+      move |_w: u32, _h: u32| -> (VNode, Stylesheet) {
+        let vnode = app::render_with_state(Arc::clone(&state), |name| match name {
+          "title" => state.title.get(),
+          "count" => state.count.get().to_string(),
+          _ => String::new(),
+        });
+        let sheet = Stylesheet::parse(app::STYLE);
+        (vnode, sheet)
+      }
+    };
+
+    let on_event = app::make_on_event(Arc::clone(&state));
+    let get_title = {
+      let state = Arc::clone(&state);
+      move || state.title.get()
+    };
+
+    velox_renderer::run_window_vnode_skia_with_hmr("Velox App", make_view, on_event, get_title, rx);
+  } else {
+    let state = Arc::new(app::script_rs::State::new());
+
+    let make_view = {
+      let state = Arc::clone(&state);
+      move |_w: u32, _h: u32| -> (VNode, Stylesheet) {
+        let vnode = app::render_with_state(Arc::clone(&state), |name| match name {
+          "title" => state.title.get().to_string(),
+          "count" => state.count.get().to_string(),
+          _ => String::new(),
+        });
+        let sheet = Stylesheet::parse(app::STYLE);
+        (vnode, sheet)
+      }
+    };
+
+    let on_event = app::make_on_event(Arc::clone(&state));
+    let get_title = {
+      let state = Arc::clone(&state);
+      move || state.title.get()
+    };
+
+    velox_renderer::run_window_vnode_skia_with_hmr("Velox App", make_view, on_event, get_title, rx);
+  }
 }
-"#.to_string()
+"#
+    .to_string()
 }
 
 fn generate_app_vx() -> String {
@@ -206,7 +267,7 @@ impl State {
   pub fn new() -> Self {
     Self {
       count: Rc::new(Signal::new(0)),
-      title: Rc::new(Signal::new("Hello Velox!".to_string())),
+      title: Rc::new(Signal::new(String::from("Hello Velox!"))),
     }
   }
 
@@ -224,17 +285,15 @@ impl State {
   min-height: 100vh;
   margin: 0px;
   padding: 0px;
-  background-color: #1a1a1a;
-  color: #e0e0e0;
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Apple Color Emoji", "Segoe UI Emoji", "Noto Color Emoji", sans-serif;
+  background-color: #f5f7fa;
+  color: #1f2937;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
 }
 
 .header {
-  background-color: #262626;
-  color: #e0e0e0;
-  border-bottom: 1px solid #374151;
-  margin: 0px;
-  padding: 16px;
+  background-color: #1f2937;
+  color: #ffffff;
+  padding: 24px 32px;
   text-align: center;
 }
 
@@ -242,7 +301,8 @@ impl State {
   margin: 0px;
   padding: 0px;
   font-size: 28px;
-  color: #3478f6;
+  font-weight: 700;
+  color: #ffffff;
 }
 
 .content {
@@ -250,17 +310,15 @@ impl State {
   display: flex;
   justify-content: center;
   align-items: center;
-  margin: 0px;
   padding: 32px;
 }
 
 .card {
-  background: #262626;
-  border: 1px solid #374151;
+  background: #ffffff;
+  border: 1px solid #e5e7eb;
   border-radius: 8px;
-  margin: 0px;
   padding: 32px;
-  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
   text-align: center;
   max-width: 600px;
 }
@@ -269,7 +327,7 @@ impl State {
   margin: 0px;
   padding: 0px;
   font-size: 16px;
-  color: #e0e0e0;
+  color: #374151;
 }
 
 .card p + p {
@@ -277,7 +335,7 @@ impl State {
 }
 
 .btn {
-  background-color: #3478f6;
+  background-color: #3b82f6;
   color: white;
   border: none;
   border-radius: 6px;
@@ -297,11 +355,13 @@ impl State {
   background-color: #1d4ed8;
 }
 </style>
-"#.to_string()
+"#
+    .to_string()
 }
 
 fn generate_readme(name: &str) -> String {
-    format!(r#"# {name}
+    format!(
+        r#"# {name}
 
 A Velox application.
 
@@ -345,21 +405,23 @@ For full documentation, visit: https://velox.dev/docs
 ## License
 
 MIT
-"#)
+"#
+    )
 }
 
 fn generate_build_rs() -> String {
     r#"fn main() {
     println!("cargo:rerun-if-changed=src/App.vx");
-    
+
     let input = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("src/App.vx");
-    
+
     let out_dir = std::path::PathBuf::from(std::env::var("OUT_DIR").unwrap());
-    
+
     // Compile App.vx to Rust
     velox_cli::build_cmd(&input, Some(&out_dir), velox_cli::EmitMode::Render
     ).expect("Failed to compile App.vx");
 }
-"#.to_string()
+"#
+    .to_string()
 }

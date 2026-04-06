@@ -7,23 +7,25 @@
 //! - Flexbox layout properties
 //! - Style inheritance and cascading
 
-mod properties;
-mod units;
 pub mod fonts;
 pub mod visual_effects;
 
-pub use properties::*;
-pub use units::*;
+// Re-export types from velox-dom
+pub use velox_dom::style::*;
 // Re-export non-conflicting font types.
 pub use fonts::{FontDescriptor, FontFamily, FontMetrics, FontStyle, GenericFamily, LineHeight};
 // Avoid collision with properties::BoxShadow by aliasing visual effects type.
 pub use visual_effects::{BorderRadius, BoxShadow as VisualBoxShadow, TextShadow};
 
 use std::collections::HashMap;
-use velox_dom::{VNode, Props};
+use velox_dom::{Props, VNode};
 
 #[derive(Debug, Clone, PartialEq)]
-pub enum SimpleSelectorKind { Tag, Class, TagClass }
+pub enum SimpleSelectorKind {
+    Tag,
+    Class,
+    TagClass,
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct SimpleSelector {
@@ -47,7 +49,7 @@ pub struct Stylesheet {
 impl Stylesheet {
     pub fn parse(css: &str) -> Self {
         use cssparser::{Parser, ParserInput, RuleListParser, ToCss};
-        
+
         struct SheetParser {
             rules: Vec<Rule>,
         }
@@ -75,18 +77,21 @@ impl Stylesheet {
                 input: &mut Parser<'i, 't>,
             ) -> Result<Self::QualifiedRule, cssparser::ParseError<'i, Self::Error>> {
                 let mut decls = HashMap::new();
-                for decl in cssparser::DeclarationListParser::new(input, DeclarationParser) {
-                    if let Ok((name, value)) = decl {
-                        if !name.is_empty() {
-                            decls.insert(name, value);
-                        }
+                for (name, value) in
+                    cssparser::DeclarationListParser::new(input, DeclarationParser).flatten()
+                {
+                    if !name.is_empty() {
+                        decls.insert(name, value);
                     }
                 }
                 if decls.is_empty() {
                     return Ok(());
                 }
                 for selector in parse_selector_list(&prelude) {
-                    self.rules.push(Rule { selector, decls: decls.clone() });
+                    self.rules.push(Rule {
+                        selector,
+                        decls: decls.clone(),
+                    });
                 }
                 Ok(())
             }
@@ -175,18 +180,29 @@ impl Stylesheet {
             let _ = rule;
         }
 
-        Stylesheet { rules: sheet_parser.rules }
+        Stylesheet {
+            rules: sheet_parser.rules,
+        }
     }
 }
 
-fn matches_selector(sel: &SimpleSelector, tag: &str, class_attr: Option<&str>, hovered: bool) -> bool {
-    if sel.hover && !hovered { return false; }
+fn matches_selector(
+    sel: &SimpleSelector,
+    tag: &str,
+    class_attr: Option<&str>,
+    hovered: bool,
+) -> bool {
+    if sel.hover && !hovered {
+        return false;
+    }
     match sel.kind {
         SimpleSelectorKind::Tag => sel.tag == tag,
         SimpleSelectorKind::Class => {
             if let Some(classes) = class_attr {
                 classes.split_whitespace().any(|x| x == sel.class)
-            } else { false }
+            } else {
+                false
+            }
         }
         SimpleSelectorKind::TagClass => {
             if sel.tag != tag {
@@ -202,28 +218,34 @@ fn matches_selector(sel: &SimpleSelector, tag: &str, class_attr: Option<&str>, h
 }
 
 fn merge_styles(existing: Option<&str>, new_map: &HashMap<String, String>) -> String {
-    let mut map: HashMap<String,String> = HashMap::new();
+    let mut map: HashMap<String, String> = HashMap::new();
+    // Apply stylesheet styles first (lower precedence)
+    for (k, v) in new_map {
+        map.insert(k.clone(), v.clone());
+    }
+    // Apply inline styles second (highest precedence - they override stylesheet)
     if let Some(s) = existing {
         for decl in s.split(';') {
             let decl = decl.trim();
-            if decl.is_empty() { continue; }
-            if let Some((k,v)) = decl.split_once(':') {
+            if decl.is_empty() {
+                continue;
+            }
+            if let Some((k, v)) = decl.split_once(':') {
                 map.insert(k.trim().to_string(), v.trim().to_string());
             }
         }
     }
-    for (k,v) in new_map {
-        map.insert(k.clone(), v.clone());
-    }
     let mut keys: Vec<_> = map.keys().cloned().collect();
     keys.sort();
     let mut out = String::new();
-    for (i,k) in keys.iter().enumerate() {
-        if i>0 { out.push_str(" "); }
+    for (i, k) in keys.iter().enumerate() {
+        if i > 0 {
+            out.push(' ');
+        }
         out.push_str(k);
         out.push_str(": ");
         out.push_str(map.get(k).unwrap());
-        out.push_str(";");
+        out.push(';');
     }
     out
 }
@@ -259,12 +281,15 @@ where
         if let Some(s) = style {
             for decl in s.split(';') {
                 let d = decl.trim();
-                if d.is_empty() { continue; }
+                if d.is_empty() {
+                    continue;
+                }
                 if let Some((k, v)) = d.split_once(':') {
                     let k = k.trim();
                     let v = v.trim();
                     match k {
-                        "color" | "font-size" | "font-weight" | "text-decoration" | "line-height" => {
+                        "color" | "font-size" | "font-weight" | "text-decoration"
+                        | "line-height" => {
                             map.insert(k.to_string(), v.to_string());
                         }
                         _ => {}
@@ -275,19 +300,32 @@ where
         map
     }
 
-    fn apply_rec<FN>(node: &VNode, sheet: &Stylesheet, is_hovered: &FN, inherited: &HashMap<String, String>) -> VNode
-    where FN: Fn(&str, &Props) -> bool {
+    fn apply_rec<FN>(
+        node: &VNode,
+        sheet: &Stylesheet,
+        is_hovered: &FN,
+        inherited: &HashMap<String, String>,
+    ) -> VNode
+    where
+        FN: Fn(&str, &Props) -> bool,
+    {
         match node {
             VNode::Text(_) => node.clone(),
-            VNode::Element { tag, props, children } => {
+            VNode::Element {
+                tag,
+                props,
+                children,
+            } => {
                 let class_attr = props.attrs.get("class").map(|s| s.as_str());
                 let hovered = is_hovered(tag, props);
-                let mut acc: HashMap<String,String> = inherited.clone();
+                let mut acc: HashMap<String, String> = inherited.clone();
                 for pass in ["tag", "class"] {
                     for rule in &sheet.rules {
                         let is_tag = matches!(rule.selector.kind, SimpleSelectorKind::Tag);
                         let pass_tag = (pass == "tag" && is_tag) || (pass == "class" && !is_tag);
-                        if !pass_tag { continue; }
+                        if !pass_tag {
+                            continue;
+                        }
                         if matches_selector(&rule.selector, tag, class_attr, hovered) {
                             for (k, v) in &rule.decls {
                                 acc.insert(k.clone(), v.clone());
@@ -311,15 +349,24 @@ where
                         final_style.push_str(" text-align: center;");
                     }
                 }
-                if !final_style.is_empty() { new_props = new_props.set("style", final_style.clone()); }
+                if !final_style.is_empty() {
+                    new_props = new_props.set("style", final_style.clone());
+                }
                 let inherit_next = filter_inheritable(Some(&final_style));
-                let new_children = children.iter().map(|c| apply_rec(c, sheet, is_hovered, &inherit_next)).collect();
-                VNode::Element { tag: tag.clone(), props: new_props, children: new_children }
+                let new_children = children
+                    .iter()
+                    .map(|c| apply_rec(c, sheet, is_hovered, &inherit_next))
+                    .collect();
+                VNode::Element {
+                    tag: tag.clone(),
+                    props: new_props,
+                    children: new_children,
+                }
             }
         }
     }
 
-    let inherited_root: HashMap<String,String> = HashMap::new();
+    let inherited_root: HashMap<String, String> = HashMap::new();
     apply_rec(node, sheet, is_hovered, &inherited_root)
 }
 
@@ -332,17 +379,12 @@ pub fn compute_styles_for_node(
     is_hovered: bool,
 ) -> ComputedStyle {
     let mut computed = ComputedStyle::new();
-    
-    // Apply inline styles first (highest precedence)
-    if let Some(style) = inline_style {
-        computed.apply_inline_style(style);
-    }
-    
-    // Apply stylesheet styles
+
+    // Apply stylesheet styles first (lower precedence)
     if let Some(sheet) = sheet {
         if let VNode::Element { tag, props, .. } = node {
             let class_attr = props.attrs.get("class").map(|s| s.as_str());
-            
+
             // Apply matching rules from stylesheet
             for rule in &sheet.rules {
                 if matches_selector(&rule.selector, tag, class_attr, is_hovered) {
@@ -353,6 +395,11 @@ pub fn compute_styles_for_node(
             }
         }
     }
-    
+
+    // Apply inline styles last (highest precedence - they override stylesheet)
+    if let Some(style) = inline_style {
+        computed.apply_inline_style(style);
+    }
+
     computed
 }

@@ -24,4 +24,3 @@ impl<T> RefCell<T> {
         *self.inner.borrow_mut() = value;
     }
 }
-

@@ -1,0 +1,167 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "Velox",
+  "patterns": [
+    { "include": "#template" },
+    { "include": "#script" },
+    { "include": "#style" },
+    { "include": "#comments" }
+  ],
+  "repository": {
+    "template": {
+      "begin": "(<)(template)\\b",
+      "beginCaptures": {
+        "1": { "name": "punctuation.definition.tag.begin.velox" },
+        "2": { "name": "entity.name.tag.velox" }
+      },
+      "end": "(</)(template)(>)",
+      "endCaptures": {
+        "1": { "name": "punctuation.definition.tag.begin.velox" },
+        "2": { "name": "entity.name.tag.velox" },
+        "3": { "name": "punctuation.definition.tag.end.velox" }
+      },
+      "name": "meta.template.velox",
+      "patterns": [
+        { "include": "#template-tags" },
+        { "include": "#template-content" }
+      ]
+    },
+    "template-tags": {
+      "patterns": [
+        {
+          "begin": "\\b(v-if|v-else-if|v-else|v-for|v-model|v-bind|v-on|v-slot|v-pre|v-cloak|v-once)\\s*=",
+          "beginCaptures": { "1": { "name": "entity.other.attribute-name.velox directive.velox" } },
+          "end": "(?=[\"'])",
+          "patterns": [{ "include": "#string" }]
+        },
+        {
+          "begin": "(:)([\\w-]+)\\s*=",
+          "beginCaptures": {
+            "1": { "name": "keyword.operator.bind.velox" },
+            "2": { "name": "entity.other.attribute-name.velox" }
+          },
+          "end": "(?=[\"'])",
+          "patterns": [{ "include": "#string" }]
+        },
+        {
+          "begin": "(@)([\\w-]+)\\s*=",
+          "beginCaptures": {
+            "1": { "name": "keyword.operator.event.velox" },
+            "2": { "name": "entity.other.attribute-name.velox" }
+          },
+          "end": "(?=[\"'])",
+          "patterns": [{ "include": "#string" }]
+        }
+      ]
+    },
+    "template-content": {
+      "patterns": [
+        {
+          "begin": "(<)([\\w-]+)",
+          "beginCaptures": {
+            "1": { "name": "punctuation.definition.tag.begin.velox" },
+            "2": { "name": "entity.name.tag.velox" }
+          },
+          "end": "(/?>)",
+          "endCaptures": { "1": { "name": "punctuation.definition.tag.end.velox" } },
+          "name": "meta.tag.velox",
+          "patterns": [
+            { "include": "#attribute" },
+            { "include": "#string" }
+          ]
+        },
+        {
+          "begin": "(</)([\\w-]+)(>)",
+          "beginCaptures": {
+            "1": { "name": "punctuation.definition.tag.begin.velox" },
+            "2": { "name": "entity.name.tag.velox" },
+            "3": { "name": "punctuation.definition.tag.end.velox" }
+          },
+          "end": "^$"
+        },
+        {
+          "begin": "\\{\\{",
+          "end": "\\}\\}",
+          "beginCaptures": { "0": { "name": "punctuation.definition.interpolation.begin.velox" } },
+          "endCaptures": { "0": { "name": "punctuation.definition.interpolation.end.velox" } },
+          "name": "expression.embedded.velox",
+          "patterns": [{ "include": "#rust-expression" }]
+        },
+        {
+          "include": "text.html.basic"
+        }
+      ]
+    },
+    "attribute": {
+      "match": "\\b([\\w:-]+)\\b",
+      "captures": { "1": { "name": "entity.other.attribute-name.velox" } }
+    },
+    "script": {
+      "begin": "(<)(script)(\\s+setup)?\\b",
+      "beginCaptures": {
+        "1": { "name": "punctuation.definition.tag.begin.velox" },
+        "2": { "name": "entity.name.tag.velox" },
+        "3": { "name": "storage.modifier.velox" }
+      },
+      "end": "(</)(script)(>)",
+      "endCaptures": {
+        "1": { "name": "punctuation.definition.tag.begin.velox" },
+        "2": { "name": "entity.name.tag.velox" },
+        "3": { "name": "punctuation.definition.tag.end.velox" }
+      },
+      "name": "meta.script.velox",
+      "contentName": "source.rust.embedded.velox",
+      "patterns": [{ "include": "source.rust" }]
+    },
+    "style": {
+      "begin": "(<)(style)(\\s+scoped)?\\b",
+      "beginCaptures": {
+        "1": { "name": "punctuation.definition.tag.begin.velox" },
+        "2": { "name": "entity.name.tag.velox" },
+        "3": { "name": "storage.modifier.velox" }
+      },
+      "end": "(</)(style)(>)",
+      "endCaptures": {
+        "1": { "name": "punctuation.definition.tag.begin.velox" },
+        "2": { "name": "entity.name.tag.velox" },
+        "3": { "name": "punctuation.definition.tag.end.velox" }
+      },
+      "name": "meta.style.velox",
+      "contentName": "source.css.embedded.velox",
+      "patterns": [{ "include": "source.css" }]
+    },
+    "comments": {
+      "begin": "<!--",
+      "end": "-->",
+      "captures": { "0": { "name": "punctuation.definition.comment.velox" } },
+      "name": "comment.block.velox"
+    },
+    "string": {
+      "patterns": [
+        {
+          "begin": "\"",
+          "end": "\"",
+          "name": "string.quoted.double.velox",
+          "patterns": [{ "include": "#interpolation" }]
+        },
+        {
+          "begin": "'",
+          "end": "'",
+          "name": "string.quoted.single.velox",
+          "patterns": [{ "include": "#interpolation" }]
+        }
+      ]
+    },
+    "interpolation": {
+      "begin": "\\{\\{",
+      "end": "\\}\\}",
+      "name": "expression.embedded.velox"
+    },
+    "rust-expression": {
+      "patterns": [
+        { "include": "source.rust" }
+      ]
+    }
+  },
+  "scopeName": "source.velox"
+}

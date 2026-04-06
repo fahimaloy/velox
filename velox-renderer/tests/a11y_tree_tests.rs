@@ -6,8 +6,16 @@ fn a11y_tree_includes_roles_and_names() {
         "div",
         (),
         vec![
-            h("button", vec![("aria-label", "Submit")], vec![text("Submit")]),
-            h("img", vec![("alt", "Logo"), ("style", "width:10px;height:10px")], vec![]),
+            h(
+                "button",
+                vec![("aria-label", "Submit")],
+                vec![text("Submit")],
+            ),
+            h(
+                "img",
+                vec![("alt", "Logo"), ("style", "width:10px;height:10px")],
+                vec![],
+            ),
         ],
     );
 

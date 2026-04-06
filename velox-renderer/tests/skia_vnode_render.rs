@@ -16,7 +16,12 @@ fn render_simple_vnode_to_png() {
         vec![text("Hello Skia")],
     );
 
-    let png = match velox_renderer::render_vnode_to_raster_png(&vnode, &Stylesheet::default(), 320, 120) {
+    let png = match velox_renderer::render_vnode_to_raster_png(
+        &vnode,
+        &Stylesheet::default(),
+        320,
+        120,
+    ) {
         Ok(b) => b,
         Err(e) => panic!("render failed: {}", e),
     };

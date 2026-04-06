@@ -30,7 +30,10 @@ enum Commands {
     /// Run the current project (cargo run)
     Run,
     /// Dev server: restart current project on file changes (polling)
-    Dev { #[arg(long)] watch: Option<PathBuf> },
+    Dev {
+        #[arg(long)]
+        watch: Option<PathBuf>,
+    },
 }
 
 fn main() -> Result<()> {

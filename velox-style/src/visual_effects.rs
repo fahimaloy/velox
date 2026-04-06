@@ -2,7 +2,7 @@
 //!
 //! Handles border-radius, opacity, shadows, and other visual effects
 
-use crate::units::Length;
+use velox_dom::style::Length;
 
 /// Border radius for corners
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -16,7 +16,7 @@ pub struct BorderRadius {
 impl BorderRadius {
     pub fn parse(value: &str) -> Option<Self> {
         let parts: Vec<&str> = value.split_whitespace().collect();
-        
+
         match parts.len() {
             1 => {
                 let v = Length::parse(parts[0])?;
@@ -63,7 +63,7 @@ impl BorderRadius {
             _ => None,
         }
     }
-    
+
     pub fn all(radius: Length) -> Self {
         Self {
             top_left: radius,
@@ -108,17 +108,17 @@ impl BoxShadow {
             inset: false,
         }
     }
-    
+
     pub fn with_spread(mut self, spread: f32) -> Self {
         self.spread = spread;
         self
     }
-    
+
     pub fn inset(mut self) -> Self {
         self.inset = true;
         self
     }
-    
+
     /// Parse box-shadow: offset-x offset-y blur spread color
     /// Example: "2px 2px 5px 1px rgba(0,0,0,0.3)"
     pub fn parse(value: &str) -> Option<Self> {
@@ -129,29 +129,41 @@ impl BoxShadow {
         } else {
             value
         };
-        
+
         let mut offset_x = 0.0;
         let mut offset_y = 0.0;
         let mut blur = 0.0;
         let mut spread = 0.0;
         let color = (0u8, 0u8, 0u8, 128u8);
-        
+
         let mut parts = value.split_whitespace();
-        
+
         // Parse offsets and blur
         if let Some(p) = parts.next() {
-            offset_x = p.strip_suffix("px").and_then(|s| s.parse().ok()).unwrap_or(0.0);
+            offset_x = p
+                .strip_suffix("px")
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(0.0);
         }
         if let Some(p) = parts.next() {
-            offset_y = p.strip_suffix("px").and_then(|s| s.parse().ok()).unwrap_or(0.0);
+            offset_y = p
+                .strip_suffix("px")
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(0.0);
         }
         if let Some(p) = parts.next() {
-            blur = p.strip_suffix("px").and_then(|s| s.parse().ok()).unwrap_or(0.0);
+            blur = p
+                .strip_suffix("px")
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(0.0);
         }
         if let Some(p) = parts.next() {
-            spread = p.strip_suffix("px").and_then(|s| s.parse().ok()).unwrap_or(0.0);
+            spread = p
+                .strip_suffix("px")
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(0.0);
         }
-        
+
         Some(BoxShadow {
             offset_x,
             offset_y,
@@ -198,7 +210,7 @@ impl TextShadow {
             color,
         }
     }
-    
+
     /// Parse text-shadow: offset-x offset-y blur color
     pub fn parse(value: &str) -> Option<Self> {
         let value = value.trim();
@@ -206,19 +218,28 @@ impl TextShadow {
         let mut offset_y = 0.0;
         let mut blur = 0.0;
         let color = (0u8, 0u8, 0u8, 128u8);
-        
+
         let mut parts = value.split_whitespace();
-        
+
         if let Some(p) = parts.next() {
-            offset_x = p.strip_suffix("px").and_then(|s| s.parse().ok()).unwrap_or(0.0);
+            offset_x = p
+                .strip_suffix("px")
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(0.0);
         }
         if let Some(p) = parts.next() {
-            offset_y = p.strip_suffix("px").and_then(|s| s.parse().ok()).unwrap_or(0.0);
+            offset_y = p
+                .strip_suffix("px")
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(0.0);
         }
         if let Some(p) = parts.next() {
-            blur = p.strip_suffix("px").and_then(|s| s.parse().ok()).unwrap_or(0.0);
+            blur = p
+                .strip_suffix("px")
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(0.0);
         }
-        
+
         Some(TextShadow {
             offset_x,
             offset_y,
@@ -242,14 +263,14 @@ impl Default for TextShadow {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     #[test]
     fn test_border_radius_single() {
         let br = BorderRadius::parse("8px").unwrap();
         assert_eq!(br.top_left, Length::Px(8.0));
         assert_eq!(br.bottom_right, Length::Px(8.0));
     }
-    
+
     #[test]
     fn test_border_radius_four() {
         let br = BorderRadius::parse("4px 8px 12px 16px").unwrap();
@@ -258,7 +279,7 @@ mod tests {
         assert_eq!(br.bottom_right, Length::Px(12.0));
         assert_eq!(br.bottom_left, Length::Px(16.0));
     }
-    
+
     #[test]
     fn test_box_shadow() {
         let shadow = BoxShadow::new(2.0, 2.0, 5.0, (0, 0, 0, 200));

@@ -4,23 +4,25 @@ use std::cell::{Cell, RefCell};
 use std::collections::HashSet;
 use std::rc::Rc;
 
+/// Type alias for reactive effect closures.
+type Effect = Rc<RefCell<Box<dyn FnMut()>>>;
+
 // Holds the currently running/collecting effect during dependency tracking.
 thread_local! {
-    static CURRENT_EFFECT: RefCell<Option<Rc<RefCell<Box<dyn FnMut()>>>>> =
-        RefCell::new(None);
+    static CURRENT_EFFECT: RefCell<Option<Effect>> = RefCell::new(None);
 
     // Simple microtask-style scheduler queue and guards.
-    static EFFECT_QUEUE: RefCell<Vec<Rc<RefCell<Box<dyn FnMut()>>>>> =
-        RefCell::new(Vec::new());
+    #[allow(clippy::type_complexity)]
+    static EFFECT_QUEUE: RefCell<Vec<Effect>> = RefCell::new(Vec::new());
     static QUEUED: RefCell<HashSet<usize>> = RefCell::new(HashSet::new());
-    static IS_FLUSHING: Cell<bool> = Cell::new(false);
+    static IS_FLUSHING: Cell<bool> = const { Cell::new(false) };
 }
 
-fn ptr_id(rc: &Rc<RefCell<Box<dyn FnMut()>>>) -> usize {
-    rc.as_ptr() as usize
+fn ptr_id(eff: &Effect) -> usize {
+    eff.as_ptr() as usize
 }
 
-fn enqueue_effect(eff: Rc<RefCell<Box<dyn FnMut()>>>) {
+fn enqueue_effect(eff: Effect) {
     EFFECT_QUEUE.with(|q| {
         QUEUED.with(|set| {
             let id = ptr_id(&eff);
@@ -75,7 +77,7 @@ fn flush_queue() {
 /// A reactive signal wrapping a `T: Clone`.
 pub struct Signal<T> {
     value: RefCell<T>,
-    subscribers: RefCell<Vec<Rc<RefCell<Box<dyn FnMut()>>>>>,
+    subscribers: RefCell<Vec<Effect>>,
 }
 
 impl<T> Signal<T>

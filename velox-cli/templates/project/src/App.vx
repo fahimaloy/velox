@@ -5,66 +5,121 @@
     </header>
     <main class="content">
       <div class="card">
-        <p>Count: {{ count }}</p>
-        <button class="btn" @click="increment">Increment</button>
+        <p class="count-display">Count: {{ count }}</p>
+        <div class="actions">
+          <button class="btn" @click="increment">+1</button>
+          <button class="btn" @click="decrement">-1</button>
+          <button class="btn" @click="reset">Reset</button>
+        </div>
+        <p v-if="count > 0" class="status positive">Count is positive</p>
+        <p v-else-if="count < 0" class="status negative">Count is negative</p>
+        <p v-else class="status neutral">Count is zero</p>
       </div>
     </main>
   </div>
 </template>
 
 <script setup>
-import { ref } from 'velox'
+use std::rc::Rc;
+use velox_core::signal::Signal;
 
-const title = 'Hello Velox!'
-const count = ref(0)
+pub struct State {
+    pub count: Rc<Signal<i32>>,
+    pub title: Rc<Signal<String>>,
+}
 
-const increment = () => {
-  count.value++
+impl State {
+    pub fn new() -> Self {
+        Self {
+            count: Rc::new(Signal::new(0)),
+            title: Rc::new(Signal::new(String::from("Hello Velox!"))),
+        }
+    }
+
+    pub fn increment(&self) {
+        self.count.set(self.count.get() + 1);
+        self.title.set(format!("Count: {}", self.count.get()));
+    }
+
+    pub fn decrement(&self) {
+        self.count.set(self.count.get() - 1);
+        self.title.set(format!("Count: {}", self.count.get()));
+    }
+
+    pub fn reset(&self) {
+        self.count.set(0);
+        self.title.set(String::from("Hello Velox!"));
+    }
 }
 </script>
 
 <style scoped>
 .app {
-  display: flex;
-  flex-direction: column;
-  min-height: 100vh;
-  background-color: #f5f5f5;
+    width: 100%;
+    height: 100%;
+    display: block;
+    background: #1a1a2e;
+    color: #e6edf3;
+    font-family: system-ui, sans-serif;
 }
 
 .header {
-  background-color: #333;
-  color: white;
-  padding: 1rem;
-  text-align: center;
+    padding: 20px;
+    text-align: center;
+}
+
+.header h1 {
+    margin: 0;
+    font-size: 24px;
 }
 
 .content {
-  flex: 1;
-  display: flex;
-  justify-content: center;
-  align-items: center;
-  padding: 2rem;
+    display: flex;
+    justify-content: center;
+    padding: 20px;
 }
 
 .card {
-  background: white;
-  border-radius: 8px;
-  padding: 2rem;
-  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
-  text-align: center;
+    background: #16213e;
+    padding: 24px;
+    border-radius: 12px;
+    text-align: center;
+    min-width: 300px;
+}
+
+.count-display {
+    font-size: 32px;
+    font-weight: bold;
+    margin-bottom: 20px;
+}
+
+.actions {
+    display: flex;
+    gap: 12px;
+    justify-content: center;
+    margin-bottom: 16px;
 }
 
 .btn {
-  background-color: #007bff;
-  color: white;
-  border: none;
-  border-radius: 4px;
-  padding: 0.5rem 1rem;
-  cursor: pointer;
-  margin-top: 1rem;
+    padding: 10px 20px;
+    font-size: 16px;
+    background: #3478f6;
+    color: #ffffff;
+    border: none;
+    border-radius: 6px;
+    cursor: pointer;
 }
 
 .btn:hover {
-  background-color: #0056b3;
+    background: #4a8df8;
 }
+
+.status {
+    font-size: 14px;
+    margin-top: 12px;
+}
+
+.positive { color: #3fb950; }
+.negative { color: #f85149; }
+.neutral { color: #8b949e; }
 </style>

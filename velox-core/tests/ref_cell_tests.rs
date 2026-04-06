@@ -8,4 +8,3 @@ fn test_ref_cell() {
     r.set(10);
     assert_eq!(*r.get(), 10);
 }
-

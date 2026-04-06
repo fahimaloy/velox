@@ -1,4 +1,5 @@
 use crate::{Props, VNode};
+use std::collections::{HashMap, HashSet};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Patch {
@@ -8,6 +9,15 @@ pub enum Patch {
     UpdateChild(usize, Vec<Patch>),
     InsertChild(usize, VNode),
     RemoveChild(usize),
+}
+
+impl VNode {
+    pub fn key(&self) -> Option<String> {
+        match self {
+            VNode::Element { props, .. } => props.attrs.get("key").cloned(),
+            _ => None,
+        }
+    }
 }
 
 pub fn diff(old: &VNode, new: &VNode) -> Vec<Patch> {
@@ -61,7 +71,66 @@ fn diff_props(a: &Props, b: &Props) -> Vec<Patch> {
     patches
 }
 
+fn diff_children_keyed(
+    old: &[VNode],
+    new: &[VNode],
+    get_key: impl Fn(&VNode) -> Option<String> + 'static,
+) -> Vec<Patch> {
+    let mut patches = Vec::new();
+
+    // Build key -> index map for old children
+    let mut old_key_map: HashMap<String, usize> = HashMap::new();
+    for (i, node) in old.iter().enumerate() {
+        if let Some(key) = get_key(node) {
+            old_key_map.insert(key, i);
+        }
+    }
+
+    // Track which old nodes have been used
+    let mut used_old_indices: HashSet<usize> = HashSet::new();
+
+    // Process new children
+    for (new_idx, new_node) in new.iter().enumerate() {
+        if let Some(key) = get_key(new_node)
+            && let Some(&old_idx) = old_key_map.get(&key)
+        {
+            // Key matches - diff at that position
+            used_old_indices.insert(old_idx);
+            let child_patches = diff(&old[old_idx], new_node);
+            if !child_patches.is_empty() {
+                patches.push(Patch::UpdateChild(new_idx, child_patches));
+            }
+            continue;
+        }
+
+        // No key or key doesn't match - treat as insert or replace
+        if new_idx < old.len() && !used_old_indices.contains(&new_idx) {
+            patches.push(Patch::UpdateChild(
+                new_idx,
+                vec![Patch::Replace(new_node.clone())],
+            ));
+            used_old_indices.insert(new_idx);
+        } else {
+            patches.push(Patch::InsertChild(new_idx, new_node.clone()));
+        }
+    }
+
+    // Remaining old nodes that weren't matched are removals
+    for i in 0..old.len() {
+        if !used_old_indices.contains(&i) {
+            patches.push(Patch::RemoveChild(i));
+        }
+    }
+
+    patches
+}
+
 fn diff_children(a: &[VNode], b: &[VNode]) -> Vec<Patch> {
+    let has_keys = b.iter().any(|n| n.key().is_some());
+    if has_keys {
+        return diff_children_keyed(a, b, |n| n.key());
+    }
+
     let mut patches = Vec::new();
     let common = a.len().min(b.len());
     for i in 0..common {
@@ -84,4 +153,3 @@ fn diff_children(a: &[VNode], b: &[VNode]) -> Vec<Patch> {
     }
     patches
 }
-

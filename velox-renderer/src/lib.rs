@@ -1,12 +1,20 @@
 //! Renderer crate with optional backends.
 //! No features enabled => stub, compiles fast.
 
-use velox_dom::VNode;
-use velox_style::{Stylesheet, apply_styles_with_hover};
 use std::collections::{HashMap, HashSet};
+use velox_dom::VNode;
 
-pub mod events;
+#[cfg(feature = "skia-native")]
+use std::sync::mpsc::Receiver;
+#[cfg(feature = "skia-native")]
+use std::thread;
+#[cfg(feature = "skia-native")]
+use velox_style::{apply_styles_with_hover, Stylesheet};
+#[cfg(feature = "skia-native")]
+use winit::event_loop::{EventLoop, EventLoopBuilder, EventLoopProxy};
+
 pub mod event_binding;
+pub mod events;
 pub mod text;
 
 // Native Skia GL helper module (feature-gated)
@@ -14,9 +22,9 @@ pub mod text;
 mod skia_gl;
 // Skia surface and renderer helpers (feature-gated)
 #[cfg(feature = "skia-native")]
-mod skia_surface;
-#[cfg(feature = "skia-native")]
 mod skia_render;
+#[cfg(feature = "skia-native")]
+mod skia_surface;
 #[cfg(feature = "skia-native")]
 pub use skia_render::{render_vnode_to_raster_png, render_vnode_to_raster_png_with_scale};
 
@@ -41,6 +49,19 @@ pub struct A11yTree {
     pub root: A11yNode,
 }
 
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub enum HmrMessage {
+    FullReload,
+    HotReload { module_path: String },
+    KeepWindow,
+}
+
+pub trait HmrRenderer {
+    fn hot_update(&mut self, new_vnode: VNode) -> Result<(), String>;
+
+    fn get_window_handle(&self) -> *mut std::ffi::c_void;
+}
+
 fn summarize(v: &VNode, counts: &mut (usize, usize)) {
     match v {
         VNode::Text(_) => {
@@ -59,7 +80,11 @@ fn summarize(v: &VNode, counts: &mut (usize, usize)) {
 fn build_render_tree(v: &VNode) -> RenderTree {
     let mut counts = (0, 0);
     summarize(v, &mut counts);
-    RenderTree { root: v.clone(), node_count: counts.0, text_count: counts.1 }
+    RenderTree {
+        root: v.clone(),
+        node_count: counts.0,
+        text_count: counts.1,
+    }
 }
 
 fn vnode_text_content(node: &VNode) -> String {
@@ -123,10 +148,17 @@ fn build_a11y_tree_with_layout(
             rect: layout.rect,
             children: Vec::new(),
         },
-        VNode::Element { tag, props, children, .. } => {
+        VNode::Element {
+            tag,
+            props,
+            children,
+            ..
+        } => {
             let mut child_nodes = Vec::new();
             for ch_layout in &layout.children {
-                if ch_layout.display_none { continue; }
+                if ch_layout.display_none {
+                    continue;
+                }
                 if let Some(src_idx) = ch_layout.source_index {
                     if let Some(ch) = children.get(src_idx) {
                         child_nodes.push(build_a11y_tree_with_layout(ch, ch_layout, next_id));
@@ -144,11 +176,7 @@ fn build_a11y_tree_with_layout(
     }
 }
 
-pub fn build_a11y_tree(
-    vnode: &VNode,
-    width: i32,
-    height: i32,
-) -> A11yTree {
+pub fn build_a11y_tree(vnode: &VNode, width: i32, height: i32) -> A11yTree {
     let layout = velox_dom::layout::compute_layout(vnode, width, height);
     let mut next_id = 1;
     let root = build_a11y_tree_with_layout(vnode, &layout, &mut next_id);
@@ -158,7 +186,7 @@ pub fn build_a11y_tree(
 /// Reconcile two VNode children vectors using an optional `key` prop.
 /// This is a simple helper that prefers reusing old nodes when the child's
 /// `Props` contains a `key` attribute matching a new child's `key`.
-pub fn reconcile_keyed_children(old: &mut Vec<VNode>, new: &Vec<VNode>) {
+pub fn reconcile_keyed_children(old: &mut Vec<VNode>, new: &[VNode]) {
     let mut key_to_index: HashMap<String, usize> = HashMap::new();
     for (i, n) in old.iter().enumerate() {
         if let VNode::Element { props, .. } = n {
@@ -198,36 +226,47 @@ pub mod wgpu_backend {
     pub fn init() {
         // Attempt headless WGPU initialization to verify adapter/device availability.
         // This is intentionally best-effort and will not panic on failure; it logs to stderr.
-        let instance = _wgpu::Instance::new(_wgpu::InstanceDescriptor { backends: _wgpu::Backends::all(), dx12_shader_compiler: Default::default() });
+        let instance = _wgpu::Instance::new(_wgpu::InstanceDescriptor {
+            backends: _wgpu::Backends::all(),
+            dx12_shader_compiler: Default::default(),
+        });
         // Try to get a real adapter first; if none is found (common in CI),
         // retry requesting a fallback adapter (software renderer) before giving up.
-        let adapter = match pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
-            power_preference: _wgpu::PowerPreference::HighPerformance,
-            compatible_surface: None,
-            force_fallback_adapter: false,
-        })) {
-            Some(a) => a,
-            None => {
-                eprintln!("wgpu backend: no adapter found; retrying with fallback adapter...");
-                match pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
-                    power_preference: _wgpu::PowerPreference::HighPerformance,
-                    compatible_surface: None,
-                    force_fallback_adapter: true,
-                })) {
-                    Some(a2) => a2,
-                    None => {
-                        eprintln!("wgpu backend: no adapter found even with fallback (init skipped)");
-                        return;
+        let adapter =
+            match pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+                power_preference: _wgpu::PowerPreference::HighPerformance,
+                compatible_surface: None,
+                force_fallback_adapter: false,
+            })) {
+                Some(a) => a,
+                None => {
+                    eprintln!("wgpu backend: no adapter found; retrying with fallback adapter...");
+                    match pollster::block_on(instance.request_adapter(
+                        &wgpu::RequestAdapterOptions {
+                            power_preference: _wgpu::PowerPreference::HighPerformance,
+                            compatible_surface: None,
+                            force_fallback_adapter: true,
+                        },
+                    )) {
+                        Some(a2) => a2,
+                        None => {
+                            eprintln!(
+                                "wgpu backend: no adapter found even with fallback (init skipped)"
+                            );
+                            return;
+                        }
                     }
                 }
-            }
-        };
+            };
 
-        match pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
-            label: Some("velox-wgpu-device"),
-            features: wgpu::Features::empty(),
-            limits: wgpu::Limits::default(),
-        }, None)) {
+        match pollster::block_on(adapter.request_device(
+            &wgpu::DeviceDescriptor {
+                label: Some("velox-wgpu-device"),
+                features: wgpu::Features::empty(),
+                limits: wgpu::Limits::default(),
+            },
+            None,
+        )) {
             Ok((_device, _queue)) => {
                 let info = adapter.get_info();
                 eprintln!("wgpu backend: init OK — adapter='{}'", info.name);
@@ -263,17 +302,17 @@ pub mod skia_backend {
     use crate::skia_gl;
     #[cfg(feature = "skia-native")]
     use crate::skia_surface;
+    use crate::HmrRenderer;
     #[cfg(feature = "skia-native")]
     use raw_window_handle::HasRawWindowHandle;
+    use velox_dom::VNode;
 
     pub fn init() {
         match skia_gl::create_context() {
-            Ok(gl_ctx) => {
-                match gl_ctx.into_direct_context() {
-                    Some(_dctx) => eprintln!("skia backend: init OK (DirectContext created)"),
-                    None => eprintln!("skia backend: init failed: couldn't create DirectContext"),
-                }
-            }
+            Ok(gl_ctx) => match gl_ctx.into_direct_context() {
+                Some(_dctx) => eprintln!("skia backend: init OK (DirectContext created)"),
+                None => eprintln!("skia backend: init failed: couldn't create DirectContext"),
+            },
             Err(e) => eprintln!("skia backend: init failed: {}", e),
         }
     }
@@ -283,7 +322,11 @@ pub mod skia_backend {
     }
 
     impl SkiaRenderer {
-        pub fn with_window(window: &impl HasRawWindowHandle, width: i32, height: i32) -> Result<Self, String> {
+        pub fn with_window(
+            window: &impl HasRawWindowHandle,
+            width: i32,
+            height: i32,
+        ) -> Result<Self, String> {
             match skia_surface::create_window_surface_from_handle(window, width, height) {
                 Ok(s) => Ok(SkiaRenderer { surface: Some(s) }),
                 Err(e) => Err(e),
@@ -315,6 +358,16 @@ pub mod skia_backend {
             crate::build_render_tree(vnode)
         }
     }
+
+    impl HmrRenderer for SkiaRenderer {
+        fn hot_update(&mut self, _new_vnode: VNode) -> Result<(), String> {
+            Ok(())
+        }
+
+        fn get_window_handle(&self) -> *mut std::ffi::c_void {
+            std::ptr::null_mut()
+        }
+    }
 }
 
 // Skia stub backend to allow compiling with `--features skia` without native deps.
@@ -324,7 +377,9 @@ pub mod skia_backend {
 
     pub struct SkiaRenderer;
     impl crate::Renderer for SkiaRenderer {
-        fn backend_name(&self) -> &'static str { "skia" }
+        fn backend_name(&self) -> &'static str {
+            "skia"
+        }
         fn mount(&self, vnode: &velox_dom::VNode) -> crate::RenderTree {
             crate::build_render_tree(vnode)
         }
@@ -402,8 +457,12 @@ pub fn create_direct_context() -> Result<skia_safe::gpu::DirectContext, String> 
 }
 
 #[cfg(feature = "skia-native")]
-pub fn run_window_vnode_skia<F, G, H>(title: &str, mut make_view: F, mut on_event: G, mut get_title: H)
-where
+pub fn run_window_vnode_skia<F, G, H>(
+    title: &str,
+    mut make_view: F,
+    mut on_event: G,
+    mut get_title: H,
+) where
     F: FnMut(u32, u32) -> (velox_dom::VNode, Stylesheet) + 'static,
     G: FnMut(&str, Option<&str>) + 'static,
     H: FnMut() -> String + 'static,
@@ -434,7 +493,10 @@ where
             let w = width.max(1);
             let h = height.max(1);
             surface
-                .resize(std::num::NonZeroU32::new(w).unwrap(), std::num::NonZeroU32::new(h).unwrap())
+                .resize(
+                    std::num::NonZeroU32::new(w).unwrap(),
+                    std::num::NonZeroU32::new(h).unwrap(),
+                )
                 .map_err(|e| format!("softbuffer resize failed: {}", e))?;
             Ok(Self {
                 _context: context,
@@ -452,7 +514,10 @@ where
                 return Ok(());
             }
             self.surface
-                .resize(std::num::NonZeroU32::new(w).unwrap(), std::num::NonZeroU32::new(h).unwrap())
+                .resize(
+                    std::num::NonZeroU32::new(w).unwrap(),
+                    std::num::NonZeroU32::new(h).unwrap(),
+                )
                 .map_err(|e| format!("softbuffer resize failed: {}", e))?;
             self.width = w;
             self.height = h;
@@ -460,7 +525,10 @@ where
             Ok(())
         }
 
-        fn present(&mut self, skia_surface: &mut crate::skia_surface::SkiaSurface) -> Result<(), String> {
+        fn present(
+            &mut self,
+            skia_surface: &mut crate::skia_surface::SkiaSurface,
+        ) -> Result<(), String> {
             let width = skia_surface.width.max(1) as u32;
             let height = skia_surface.height.max(1) as u32;
             self.resize(width, height)?;
@@ -500,6 +568,8 @@ where
     }
 
     let event_loop = EventLoop::new();
+    let mut _last_vnode: Option<velox_dom::VNode> = None;
+    let mut _hmr_pending = false;
     let window = WindowBuilder::new()
         .with_title(title)
         .with_inner_size(PhysicalSize::new(800, 600))
@@ -507,10 +577,13 @@ where
         .expect("failed to create window");
 
     let size = window.inner_size();
-    let mut renderer = match crate::skia_surface::SkiaSurface::new_raster(size.width as i32, size.height as i32) {
-        Ok(surface) => skia_backend::SkiaRenderer { surface: Some(surface) },
-        Err(e) => panic!("failed to create SkiaSurface: {}", e),
-    };
+    let mut renderer =
+        match crate::skia_surface::SkiaSurface::new_raster(size.width as i32, size.height as i32) {
+            Ok(surface) => skia_backend::SkiaRenderer {
+                surface: Some(surface),
+            },
+            Err(e) => panic!("failed to create SkiaSurface: {}", e),
+        };
     let mut presenter = match SoftbufferPresenter::new(&window, size.width, size.height) {
         Ok(p) => p,
         Err(e) => panic!("failed to create softbuffer presenter: {}", e),
@@ -546,15 +619,26 @@ where
     fn with_hover_ids(vnode: &velox_dom::VNode, next_id: &mut u32) -> velox_dom::VNode {
         match vnode {
             velox_dom::VNode::Text(_) => vnode.clone(),
-            velox_dom::VNode::Element { tag, props, children } => {
+            velox_dom::VNode::Element {
+                tag,
+                props,
+                children,
+            } => {
                 let mut new_props = props.clone();
                 if crate::events::is_hoverable(tag, props) {
                     let id = *next_id;
                     *next_id += 1;
                     new_props = new_props.set("data-hover-id", id.to_string());
                 }
-                let new_children = children.iter().map(|c| with_hover_ids(c, next_id)).collect();
-                velox_dom::VNode::Element { tag: tag.clone(), props: new_props, children: new_children }
+                let new_children = children
+                    .iter()
+                    .map(|c| with_hover_ids(c, next_id))
+                    .collect();
+                velox_dom::VNode::Element {
+                    tag: tag.clone(),
+                    props: new_props,
+                    children: new_children,
+                }
             }
         }
     }
@@ -565,18 +649,14 @@ where
         let (vnode_raw, sheet) = make_view(vw, vh);
         let mut next_id = 1u32;
         let vnode_tagged = with_hover_ids(&vnode_raw, &mut next_id);
-        let vnode = apply_styles_with_hover(
-            &vnode_tagged,
-            &sheet,
-            &|_tag, props| {
-                props
-                    .attrs
-                    .get("data-hover-id")
-                    .and_then(|v| v.parse::<u32>().ok())
-                    .map(|id| Some(id) == hovered_id)
-                    .unwrap_or(false)
-            },
-        );
+        let vnode = apply_styles_with_hover(&vnode_tagged, &sheet, &|_tag, props| {
+            props
+                .attrs
+                .get("data-hover-id")
+                .and_then(|v| v.parse::<u32>().ok())
+                .map(|id| Some(id) == hovered_id)
+                .unwrap_or(false)
+        });
         recompute_targets(&vnode, vw, vh, &mut click_targets, &mut hover_targets);
     }
 
@@ -586,10 +666,16 @@ where
             Event::NewEvents(StartCause::Init) => {
                 window.request_redraw();
             }
-            Event::WindowEvent { event: WindowEvent::CloseRequested, .. } => {
+            Event::WindowEvent {
+                event: WindowEvent::CloseRequested,
+                ..
+            } => {
                 *control_flow = ControlFlow::Exit;
             }
-            Event::WindowEvent { event: WindowEvent::Resized(new_size), .. } => {
+            Event::WindowEvent {
+                event: WindowEvent::Resized(new_size),
+                ..
+            } => {
                 let _ = renderer.resize(new_size.width as i32, new_size.height as i32);
                 let _ = presenter.resize(new_size.width, new_size.height);
                 if let Some(s) = &mut renderer.surface {
@@ -598,23 +684,27 @@ where
                     let (vnode_raw, sheet) = make_view(vw, vh);
                     let mut next_id = 1u32;
                     let vnode_tagged = with_hover_ids(&vnode_raw, &mut next_id);
-                    let vnode = apply_styles_with_hover(
-                        &vnode_tagged,
-                        &sheet,
-                        &|_tag, props| {
-                            props
-                                .attrs
-                                .get("data-hover-id")
-                                .and_then(|v| v.parse::<u32>().ok())
-                                .map(|id| Some(id) == hovered_id)
-                                .unwrap_or(false)
-                        },
-                    );
+                    let vnode = apply_styles_with_hover(&vnode_tagged, &sheet, &|_tag, props| {
+                        props
+                            .attrs
+                            .get("data-hover-id")
+                            .and_then(|v| v.parse::<u32>().ok())
+                            .map(|id| Some(id) == hovered_id)
+                            .unwrap_or(false)
+                    });
                     recompute_targets(&vnode, vw, vh, &mut click_targets, &mut hover_targets);
                 }
                 window.request_redraw();
             }
-            Event::WindowEvent { event: WindowEvent::ScaleFactorChanged { scale_factor: new_scale, new_inner_size, .. }, .. } => {
+            Event::WindowEvent {
+                event:
+                    WindowEvent::ScaleFactorChanged {
+                        scale_factor: new_scale,
+                        new_inner_size,
+                        ..
+                    },
+                ..
+            } => {
                 scale_factor = new_scale as f32;
                 let _ = renderer.resize(new_inner_size.width as i32, new_inner_size.height as i32);
                 let _ = presenter.resize(new_inner_size.width, new_inner_size.height);
@@ -624,63 +714,73 @@ where
                     let (vnode_raw, sheet) = make_view(vw, vh);
                     let mut next_id = 1u32;
                     let vnode_tagged = with_hover_ids(&vnode_raw, &mut next_id);
-                    let vnode = apply_styles_with_hover(
-                        &vnode_tagged,
-                        &sheet,
-                        &|_tag, props| {
-                            props
-                                .attrs
-                                .get("data-hover-id")
-                                .and_then(|v| v.parse::<u32>().ok())
-                                .map(|id| Some(id) == hovered_id)
-                                .unwrap_or(false)
-                        },
-                    );
+                    let vnode = apply_styles_with_hover(&vnode_tagged, &sheet, &|_tag, props| {
+                        props
+                            .attrs
+                            .get("data-hover-id")
+                            .and_then(|v| v.parse::<u32>().ok())
+                            .map(|id| Some(id) == hovered_id)
+                            .unwrap_or(false)
+                    });
                     recompute_targets(&vnode, vw, vh, &mut click_targets, &mut hover_targets);
                 }
                 window.request_redraw();
             }
-            Event::WindowEvent { event: WindowEvent::CursorMoved { position, .. }, .. } => {
+            Event::WindowEvent {
+                event: WindowEvent::CursorMoved { position, .. },
+                ..
+            } => {
                 mouse_pos = (
                     position.x as f32 / scale_factor,
                     position.y as f32 / scale_factor,
                 );
-                let now_hovered = crate::events::hit_test_hover(&hover_targets, mouse_pos.0, mouse_pos.1);
+                let now_hovered =
+                    crate::events::hit_test_hover(&hover_targets, mouse_pos.0, mouse_pos.1);
                 if now_hovered != hovered_id {
                     hovered_id = now_hovered;
                     window.request_redraw();
                 }
             }
-            Event::WindowEvent { event: WindowEvent::MouseInput { state: ElementState::Pressed, button: MouseButton::Left, .. }, .. } => {
-                if let Some((handler, payload_opt)) = crate::events::hit_test_click(&click_targets, mouse_pos.0, mouse_pos.1) {
-                    let payload_owned = payload_opt
-                        .map(|p| p.to_string())
-                        .unwrap_or_else(|| format!("{{\"x\":{},\"y\":{}}}", mouse_pos.0, mouse_pos.1));
+            Event::WindowEvent {
+                event:
+                    WindowEvent::MouseInput {
+                        state: ElementState::Pressed,
+                        button: MouseButton::Left,
+                        ..
+                    },
+                ..
+            } => {
+                if let Some((handler, payload_opt)) =
+                    crate::events::hit_test_click(&click_targets, mouse_pos.0, mouse_pos.1)
+                {
+                    let payload_owned = payload_opt.map(|p| p.to_string()).unwrap_or_else(|| {
+                        format!("{{\"x\":{},\"y\":{}}}", mouse_pos.0, mouse_pos.1)
+                    });
                     on_event(handler, Some(&payload_owned));
                     if let Some(s) = &mut renderer.surface {
                         let (vw, vh) = logical_size(s.width, s.height, scale_factor);
                         let (vnode_raw, sheet) = make_view(vw, vh);
                         let mut next_id = 1u32;
                         let vnode_tagged = with_hover_ids(&vnode_raw, &mut next_id);
-                        let vnode = apply_styles_with_hover(
-                            &vnode_tagged,
-                            &sheet,
-                            &|_tag, props| {
+                        let vnode =
+                            apply_styles_with_hover(&vnode_tagged, &sheet, &|_tag, props| {
                                 props
                                     .attrs
                                     .get("data-hover-id")
                                     .and_then(|v| v.parse::<u32>().ok())
                                     .map(|id| Some(id) == hovered_id)
                                     .unwrap_or(false)
-                            },
-                        );
+                            });
                         recompute_targets(&vnode, vw, vh, &mut click_targets, &mut hover_targets);
                     }
                     window.set_title(&get_title());
                     window.request_redraw();
                 }
             }
-            Event::WindowEvent { event: WindowEvent::KeyboardInput { input, .. }, .. } => {
+            Event::WindowEvent {
+                event: WindowEvent::KeyboardInput { input, .. },
+                ..
+            } => {
                 // Handle keyboard shortcuts
                 use winit::event::VirtualKeyCode;
                 if let Some(keycode) = input.virtual_keycode {
@@ -706,24 +806,409 @@ where
                     let (vnode_raw, sheet) = make_view(vw, vh);
                     let mut next_id = 1u32;
                     let vnode_tagged = with_hover_ids(&vnode_raw, &mut next_id);
-                    let vnode = apply_styles_with_hover(
-                        &vnode_tagged,
-                        &sheet,
-                        &|_tag, props| {
-                            props
-                                .attrs
-                                .get("data-hover-id")
-                                .and_then(|v| v.parse::<u32>().ok())
-                                .map(|id| Some(id) == hovered_id)
-                                .unwrap_or(false)
-                        },
-                    );
+                    let vnode = apply_styles_with_hover(&vnode_tagged, &sheet, &|_tag, props| {
+                        props
+                            .attrs
+                            .get("data-hover-id")
+                            .and_then(|v| v.parse::<u32>().ok())
+                            .map(|id| Some(id) == hovered_id)
+                            .unwrap_or(false)
+                    });
                     recompute_targets(&vnode, vw, vh, &mut click_targets, &mut hover_targets);
                     if let Err(e) = crate::skia_render::skia_impl::render_frame(s, &vnode, &sheet) {
                         eprintln!("skia render error: {}", e);
                     }
                     if let Err(e) = presenter.present(s) {
                         eprintln!("skia present error: {}", e);
+                    }
+                }
+            }
+            _ => {}
+        }
+    });
+}
+
+#[cfg(feature = "skia-native")]
+pub fn run_window_vnode_skia_with_hmr<F, G, H>(
+    title: &str,
+    mut make_view: F,
+    mut on_event: G,
+    mut get_title: H,
+    hmr_rx: std::sync::Arc<std::sync::Mutex<std::sync::mpsc::Receiver<HmrMessage>>>,
+) where
+    F: FnMut(u32, u32) -> (velox_dom::VNode, Stylesheet) + Send + Sync + 'static,
+    G: FnMut(&str, Option<&str>) + Send + 'static,
+    H: FnMut() -> String + Send + Sync + 'static,
+{
+    use winit::dpi::PhysicalSize;
+    use winit::event::{ElementState, Event, MouseButton, StartCause, WindowEvent};
+    use winit::event_loop::{ControlFlow, EventLoop};
+    use winit::window::WindowBuilder;
+
+    struct SoftbufferPresenter {
+        _context: softbuffer::Context,
+        surface: softbuffer::Surface,
+        width: u32,
+        height: u32,
+        rgba: Vec<u8>,
+    }
+
+    impl SoftbufferPresenter {
+        fn new(window: &winit::window::Window, width: u32, height: u32) -> Result<Self, String> {
+            let context = unsafe {
+                softbuffer::Context::new(window)
+                    .map_err(|e| format!("softbuffer context failed: {}", e))?
+            };
+            let mut surface = unsafe {
+                softbuffer::Surface::new(&context, window)
+                    .map_err(|e| format!("softbuffer surface failed: {}", e))?
+            };
+            let w = width.max(1);
+            let h = height.max(1);
+            surface
+                .resize(
+                    std::num::NonZeroU32::new(w).unwrap(),
+                    std::num::NonZeroU32::new(h).unwrap(),
+                )
+                .map_err(|e| format!("softbuffer resize failed: {}", e))?;
+            Ok(Self {
+                _context: context,
+                surface,
+                width: w,
+                height: h,
+                rgba: vec![0u8; (w as usize) * (h as usize) * 4],
+            })
+        }
+
+        fn resize(&mut self, width: u32, height: u32) -> Result<(), String> {
+            let w = width.max(1);
+            let h = height.max(1);
+            if w == self.width && h == self.height {
+                return Ok(());
+            }
+            self.surface
+                .resize(
+                    std::num::NonZeroU32::new(w).unwrap(),
+                    std::num::NonZeroU32::new(h).unwrap(),
+                )
+                .map_err(|e| format!("softbuffer resize failed: {}", e))?;
+            self.width = w;
+            self.height = h;
+            self.rgba.resize((w as usize) * (h as usize) * 4, 0);
+            Ok(())
+        }
+
+        fn present(
+            &mut self,
+            skia_surface: &mut crate::skia_surface::SkiaSurface,
+        ) -> Result<(), String> {
+            let width = skia_surface.width.max(1) as u32;
+            let height = skia_surface.height.max(1) as u32;
+            self.resize(width, height)?;
+
+            let info = skia_safe::ImageInfo::new(
+                (self.width as i32, self.height as i32),
+                skia_safe::ColorType::RGBA8888,
+                skia_safe::AlphaType::Premul,
+                None,
+            );
+            let row_bytes = (self.width * 4) as usize;
+            if !skia_surface.read_pixels(&info, &mut self.rgba, row_bytes, (0, 0)) {
+                return Err("skia: read_pixels failed".to_string());
+            }
+
+            let mut buffer = self
+                .surface
+                .buffer_mut()
+                .map_err(|e| format!("softbuffer buffer_mut failed: {}", e))?;
+            let pixels: &mut [u32] = &mut buffer;
+            let pixel_count = (self.width as usize) * (self.height as usize);
+            if pixels.len() < pixel_count {
+                return Err("softbuffer: buffer smaller than expected".to_string());
+            }
+            for (i, pixel) in pixels.iter_mut().take(pixel_count).enumerate() {
+                let base = i * 4;
+                let r = self.rgba[base] as u32;
+                let g = self.rgba[base + 1] as u32;
+                let b = self.rgba[base + 2] as u32;
+                *pixel = (r << 16) | (g << 8) | b;
+            }
+            buffer
+                .present()
+                .map_err(|e| format!("softbuffer present failed: {}", e))?;
+            Ok(())
+        }
+    }
+
+    let event_loop = EventLoop::new();
+    let proxy = event_loop.create_proxy();
+    let hmr_rx_for_thread = std::sync::Arc::clone(&hmr_rx);
+    let hmr_rx_for_loop = std::sync::Arc::clone(&hmr_rx);
+    std::thread::spawn(move || {
+        while let Ok(_) = hmr_rx_for_thread.lock().unwrap().recv() {
+            let _ = proxy.send_event(());
+        }
+    });
+
+    let window = WindowBuilder::new()
+        .with_title(title)
+        .with_inner_size(PhysicalSize::new(800, 600))
+        .build(&event_loop)
+        .expect("failed to create window");
+
+    let size = window.inner_size();
+    let mut renderer =
+        match crate::skia_surface::SkiaSurface::new_raster(size.width as i32, size.height as i32) {
+            Ok(surface) => skia_backend::SkiaRenderer {
+                surface: Some(surface),
+            },
+            Err(e) => panic!("failed to create SkiaSurface: {}", e),
+        };
+    let mut presenter = match SoftbufferPresenter::new(&window, size.width, size.height) {
+        Ok(p) => p,
+        Err(e) => panic!("failed to create softbuffer presenter: {}", e),
+    };
+    let mut scale_factor = window.scale_factor() as f32;
+    let mut mouse_pos = (0.0f32, 0.0f32);
+    let mut hovered_id: Option<u32> = None;
+    let mut click_targets: Vec<crate::events::ClickTarget> = Vec::new();
+    let mut hover_targets: Vec<crate::events::HoverTarget> = Vec::new();
+    let mut _last_vnode: Option<velox_dom::VNode> = None;
+
+    fn logical_size(width: i32, height: i32, scale_factor: f32) -> (u32, u32) {
+        let w = ((width as f32) / scale_factor).round().max(1.0) as u32;
+        let h = ((height as f32) / scale_factor).round().max(1.0) as u32;
+        (w, h)
+    }
+
+    fn recompute_targets(
+        vnode: &velox_dom::VNode,
+        width: u32,
+        height: u32,
+        click_targets: &mut Vec<crate::events::ClickTarget>,
+        hover_targets: &mut Vec<crate::events::HoverTarget>,
+    ) {
+        let layout = velox_dom::layout::compute_layout(vnode, width as i32, height as i32);
+        click_targets.clear();
+        let mut order = 0;
+        crate::events::collect_click_targets(vnode, &layout, None, &mut order, click_targets);
+        hover_targets.clear();
+        let mut order = 0;
+        crate::events::collect_hover_targets(vnode, &layout, None, &mut order, hover_targets);
+    }
+
+    fn with_hover_ids(vnode: &velox_dom::VNode, next_id: &mut u32) -> velox_dom::VNode {
+        match vnode {
+            velox_dom::VNode::Text(_) => vnode.clone(),
+            velox_dom::VNode::Element {
+                tag,
+                props,
+                children,
+            } => {
+                let mut new_props = props.clone();
+                if crate::events::is_hoverable(tag, props) {
+                    let id = *next_id;
+                    *next_id += 1;
+                    new_props = new_props.set("data-hover-id", id.to_string());
+                }
+                let new_children = children
+                    .iter()
+                    .map(|c| with_hover_ids(c, next_id))
+                    .collect();
+                velox_dom::VNode::Element {
+                    tag: tag.clone(),
+                    props: new_props,
+                    children: new_children,
+                }
+            }
+        }
+    }
+
+    event_loop.run(move |event, _, control_flow| {
+        *control_flow = ControlFlow::Wait;
+        match event {
+            Event::UserEvent(()) => {
+                if let Ok(msg) = hmr_rx_for_loop.lock().unwrap().try_recv() {
+                    match msg {
+                        HmrMessage::FullReload => {
+                            *control_flow = ControlFlow::Exit;
+                        }
+                        HmrMessage::HotReload { module_path: _ } => {
+                            if let Some(s) = &renderer.surface {
+                                let (vw, vh) = logical_size(s.width, s.height, scale_factor);
+                                let (vnode_raw, _) = make_view(vw, vh);
+                                let new_vnode = vnode_raw;
+                                if let Err(e) = renderer.hot_update(new_vnode) {
+                                    eprintln!("hot_update failed: {}", e);
+                                }
+                                window.request_redraw();
+                            }
+                        }
+                        HmrMessage::KeepWindow => {}
+                    }
+                }
+            }
+            Event::NewEvents(StartCause::Init) => {
+                window.request_redraw();
+            }
+            Event::WindowEvent {
+                event: WindowEvent::CloseRequested,
+                ..
+            } => {
+                *control_flow = ControlFlow::Exit;
+            }
+            Event::WindowEvent {
+                event: WindowEvent::Resized(new_size),
+                ..
+            } => {
+                let _ = renderer.resize(new_size.width as i32, new_size.height as i32);
+                let _ = presenter.resize(new_size.width, new_size.height);
+                if let Some(s) = &mut renderer.surface {
+                    s.set_scale_factor(scale_factor);
+                    let (vw, vh) = logical_size(s.width, s.height, scale_factor);
+                    let (vnode_raw, sheet) = make_view(vw, vh);
+                    let mut next_id = 1u32;
+                    let vnode_tagged = with_hover_ids(&vnode_raw, &mut next_id);
+                    let vnode = apply_styles_with_hover(&vnode_tagged, &sheet, &|_tag, props| {
+                        props
+                            .attrs
+                            .get("data-hover-id")
+                            .and_then(|v| v.parse::<u32>().ok())
+                            .map(|id| Some(id) == hovered_id)
+                            .unwrap_or(false)
+                    });
+                    _last_vnode = Some(vnode.clone());
+                    recompute_targets(&vnode, vw, vh, &mut click_targets, &mut hover_targets);
+                }
+                window.request_redraw();
+            }
+            Event::WindowEvent {
+                event:
+                    WindowEvent::ScaleFactorChanged {
+                        scale_factor: new_scale,
+                        new_inner_size,
+                        ..
+                    },
+                ..
+            } => {
+                scale_factor = new_scale as f32;
+                let _ = renderer.resize(new_inner_size.width as i32, new_inner_size.height as i32);
+                let _ = presenter.resize(new_inner_size.width, new_inner_size.height);
+                if let Some(s) = &mut renderer.surface {
+                    s.set_scale_factor(scale_factor);
+                    let (vw, vh) = logical_size(s.width, s.height, scale_factor);
+                    let (vnode_raw, sheet) = make_view(vw, vh);
+                    let mut next_id = 1u32;
+                    let vnode_tagged = with_hover_ids(&vnode_raw, &mut next_id);
+                    let vnode = apply_styles_with_hover(&vnode_tagged, &sheet, &|_tag, props| {
+                        props
+                            .attrs
+                            .get("data-hover-id")
+                            .and_then(|v| v.parse::<u32>().ok())
+                            .map(|id| Some(id) == hovered_id)
+                            .unwrap_or(false)
+                    });
+                    _last_vnode = Some(vnode.clone());
+                    recompute_targets(&vnode, vw, vh, &mut click_targets, &mut hover_targets);
+                }
+                window.request_redraw();
+            }
+            Event::WindowEvent {
+                event: WindowEvent::CursorMoved { position, .. },
+                ..
+            } => {
+                mouse_pos = (
+                    position.x as f32 / scale_factor,
+                    position.y as f32 / scale_factor,
+                );
+                let now_hovered =
+                    crate::events::hit_test_hover(&hover_targets, mouse_pos.0, mouse_pos.1);
+                if now_hovered != hovered_id {
+                    hovered_id = now_hovered;
+                    window.request_redraw();
+                }
+            }
+            Event::WindowEvent {
+                event:
+                    WindowEvent::MouseInput {
+                        state: ElementState::Pressed,
+                        button: MouseButton::Left,
+                        ..
+                    },
+                ..
+            } => {
+                if let Some((handler, payload_opt)) =
+                    crate::events::hit_test_click(&click_targets, mouse_pos.0, mouse_pos.1)
+                {
+                    let payload_owned = payload_opt.map(|p| p.to_string()).unwrap_or_else(|| {
+                        format!("{{\"x\":{},\"y\":{}}}", mouse_pos.0, mouse_pos.1)
+                    });
+                    on_event(handler, Some(&payload_owned));
+                    if let Some(s) = &mut renderer.surface {
+                        let (vw, vh) = logical_size(s.width, s.height, scale_factor);
+                        let (vnode_raw, sheet) = make_view(vw, vh);
+                        let mut next_id = 1u32;
+                        let vnode_tagged = with_hover_ids(&vnode_raw, &mut next_id);
+                        let vnode =
+                            apply_styles_with_hover(&vnode_tagged, &sheet, &|_tag, props| {
+                                props
+                                    .attrs
+                                    .get("data-hover-id")
+                                    .and_then(|v| v.parse::<u32>().ok())
+                                    .map(|id| Some(id) == hovered_id)
+                                    .unwrap_or(false)
+                            });
+                        _last_vnode = Some(vnode.clone());
+                        recompute_targets(&vnode, vw, vh, &mut click_targets, &mut hover_targets);
+                    }
+                    window.set_title(&get_title());
+                    window.request_redraw();
+                }
+            }
+            Event::WindowEvent {
+                event: WindowEvent::KeyboardInput { input, .. },
+                ..
+            } => {
+                // Handle keyboard shortcuts
+                use winit::event::VirtualKeyCode;
+                if let Some(keycode) = input.virtual_keycode {
+                    if input.state == ElementState::Pressed {
+                        match keycode {
+                            VirtualKeyCode::R => {
+                                // Trigger reload (app will exit, dev server will restart it)
+                                *control_flow = ControlFlow::Exit;
+                            }
+                            VirtualKeyCode::Q => {
+                                *control_flow = ControlFlow::Exit;
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            }
+            Event::RedrawRequested(_) => {
+                // Render VNode -> Skia frame and present.
+                if let Some(s) = &mut renderer.surface {
+                    s.set_scale_factor(scale_factor);
+                    let (vw, vh) = logical_size(s.width, s.height, scale_factor);
+                    let (vnode_raw, sheet) = make_view(vw, vh);
+                    let mut next_id = 1u32;
+                    let vnode_tagged = with_hover_ids(&vnode_raw, &mut next_id);
+                    let vnode = apply_styles_with_hover(&vnode_tagged, &sheet, &|_tag, props| {
+                        props
+                            .attrs
+                            .get("data-hover-id")
+                            .and_then(|v| v.parse::<u32>().ok())
+                            .map(|id| Some(id) == hovered_id)
+                            .unwrap_or(false)
+                    });
+                    _last_vnode = Some(vnode.clone());
+                    recompute_targets(&vnode, vw, vh, &mut click_targets, &mut hover_targets);
+                    if let Err(e) = crate::skia_render::skia_impl::render_frame(s, &vnode, &sheet) {
+                        eprintln!("skia render error: {}", e);
+                    }
+                    if let Err(e) = presenter.present(s) {
+                        eprintln!("softbuffer present error: {}", e);
                     }
                 }
             }
@@ -832,8 +1317,16 @@ where
         array_stride: std::mem::size_of::<Vertex>() as wgpu::BufferAddress,
         step_mode: wgpu::VertexStepMode::Vertex,
         attributes: &[
-            wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x2, offset: 0, shader_location: 0 },
-            wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x3, offset: 8, shader_location: 1 },
+            wgpu::VertexAttribute {
+                format: wgpu::VertexFormat::Float32x2,
+                offset: 0,
+                shader_location: 0,
+            },
+            wgpu::VertexAttribute {
+                format: wgpu::VertexFormat::Float32x3,
+                offset: 8,
+                shader_location: 1,
+            },
         ],
     };
     let pl_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -844,11 +1337,19 @@ where
     let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
         label: Some("velox-pipeline"),
         layout: Some(&pl_layout),
-        vertex: wgpu::VertexState { module: &shader, entry_point: "vs", buffers: &[vlayout] },
+        vertex: wgpu::VertexState {
+            module: &shader,
+            entry_point: "vs",
+            buffers: &[vlayout],
+        },
         fragment: Some(wgpu::FragmentState {
             module: &shader,
             entry_point: "fs",
-            targets: &[Some(wgpu::ColorTargetState { format, blend: Some(wgpu::BlendState::ALPHA_BLENDING), write_mask: wgpu::ColorWrites::ALL })],
+            targets: &[Some(wgpu::ColorTargetState {
+                format,
+                blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
         }),
         primitive: wgpu::PrimitiveState::default(),
         depth_stencil: None,
@@ -885,7 +1386,9 @@ where
         match vnode {
             velox_dom::VNode::Element { children, .. } => {
                 for lc in &layout.children {
-                    if lc.display_none { continue; }
+                    if lc.display_none {
+                        continue;
+                    }
                     if let Some(src_idx) = lc.source_index {
                         if let Some(ch) = children.get(src_idx) {
                             if let Some(r) = find_rect_pred(ch, lc, pred) {
@@ -904,20 +1407,34 @@ where
             match node {
                 velox_dom::VNode::Text(t) => {
                     let s = t.trim();
-                    if s.is_empty() { None } else { Some(s.to_string()) }
+                    if s.is_empty() {
+                        None
+                    } else {
+                        Some(s.to_string())
+                    }
                 }
                 velox_dom::VNode::Element { children, .. } => {
-                    for ch in children { if let Some(s) = first_text(ch) { return Some(s); } }
+                    for ch in children {
+                        if let Some(s) = first_text(ch) {
+                            return Some(s);
+                        }
+                    }
                     None
                 }
             }
         }
         match vnode {
-            velox_dom::VNode::Element { props, children, .. } => {
+            velox_dom::VNode::Element {
+                props, children, ..
+            } => {
                 if has_class(props, class) {
                     return first_text(vnode);
                 }
-                for ch in children { if let Some(s) = find_text_in_class(ch, class) { return Some(s); } }
+                for ch in children {
+                    if let Some(s) = find_text_in_class(ch, class) {
+                        return Some(s);
+                    }
+                }
                 None
             }
             _ => None,
@@ -935,7 +1452,7 @@ where
     let mut btn_handler: Option<String> = None;
     let mut btn_pad_left: f32 = 0.0;
     let mut btn_pad_top: f32 = 0.0;
-    let mut click_targets: Vec<(f32,f32,f32,f32,String, Option<String>)> = Vec::new();
+    let mut click_targets: Vec<(f32, f32, f32, f32, String, Option<String>)> = Vec::new();
 
     // Keep previous vnode around so we can attempt keyed reconciliation between frames.
     let mut prev_vnode: Option<velox_dom::VNode> = None;
@@ -944,30 +1461,70 @@ where
         let (x0, y0, x1, y1) = r;
         let (r, g, b) = (color[0], color[1], color[2]);
         [
-            Vertex { pos: to_ndc(w, h, x0, y0), color: [r, g, b] },
-            Vertex { pos: to_ndc(w, h, x1, y0), color: [r, g, b] },
-            Vertex { pos: to_ndc(w, h, x1, y1), color: [r, g, b] },
-            Vertex { pos: to_ndc(w, h, x0, y0), color: [r, g, b] },
-            Vertex { pos: to_ndc(w, h, x1, y1), color: [r, g, b] },
-            Vertex { pos: to_ndc(w, h, x0, y1), color: [r, g, b] },
+            Vertex {
+                pos: to_ndc(w, h, x0, y0),
+                color: [r, g, b],
+            },
+            Vertex {
+                pos: to_ndc(w, h, x1, y0),
+                color: [r, g, b],
+            },
+            Vertex {
+                pos: to_ndc(w, h, x1, y1),
+                color: [r, g, b],
+            },
+            Vertex {
+                pos: to_ndc(w, h, x0, y0),
+                color: [r, g, b],
+            },
+            Vertex {
+                pos: to_ndc(w, h, x1, y1),
+                color: [r, g, b],
+            },
+            Vertex {
+                pos: to_ndc(w, h, x0, y1),
+                color: [r, g, b],
+            },
         ]
     };
 
     // Font and text renderer (optional): try system font + bundled fonts; otherwise skip text drawing
     let mut glyph: Option<(wgpu_glyph::GlyphBrush<()>, wgpu::util::StagingBelt)> = {
         let mut fonts: Vec<ab_glyph::FontArc> = Vec::new();
-        if let Some(sys) = load_system_font() { fonts.push(sys); }
-        if let Ok(f) = ab_glyph::FontArc::try_from_slice(include_bytes!("../assets/DejaVuSans.ttf")) { fonts.push(f); }
-        if let Ok(f) = ab_glyph::FontArc::try_from_slice(include_bytes!("../assets/NotoSans-Regular.ttf")) { fonts.push(f); }
-        if fonts.is_empty() { None } else { Some((wgpu_glyph::GlyphBrushBuilder::using_fonts(fonts).build(&device, format), wgpu::util::StagingBelt::new(1024))) }
+        if let Some(sys) = load_system_font() {
+            fonts.push(sys);
+        }
+        if let Ok(f) = ab_glyph::FontArc::try_from_slice(include_bytes!("../assets/DejaVuSans.ttf"))
+        {
+            fonts.push(f);
+        }
+        if let Ok(f) =
+            ab_glyph::FontArc::try_from_slice(include_bytes!("../assets/NotoSans-Regular.ttf"))
+        {
+            fonts.push(f);
+        }
+        if fonts.is_empty() {
+            None
+        } else {
+            Some((
+                wgpu_glyph::GlyphBrushBuilder::using_fonts(fonts).build(&device, format),
+                wgpu::util::StagingBelt::new(1024),
+            ))
+        }
     };
 
     // style helpers
     fn parse_color(style: Option<&str>, key: &str, default: [f32; 4]) -> [f32; 4] {
-        let s = if let Some(s) = style { s } else { return default };
+        let s = if let Some(s) = style {
+            s
+        } else {
+            return default;
+        };
         for decl in s.split(';') {
             let d = decl.trim();
-            if d.is_empty() { continue; }
+            if d.is_empty() {
+                continue;
+            }
             if let Some((k, v)) = d.split_once(':') {
                 if k.trim() == key {
                     let v = v.trim();
@@ -985,15 +1542,23 @@ where
         default
     }
     fn parse_px_f32(style: Option<&str>, key: &str, default: f32) -> f32 {
-        let s = if let Some(s) = style { s } else { return default };
+        let s = if let Some(s) = style {
+            s
+        } else {
+            return default;
+        };
         for decl in s.split(';') {
             let d = decl.trim();
-            if d.is_empty() { continue; }
+            if d.is_empty() {
+                continue;
+            }
             if let Some((k, v)) = d.split_once(':') {
                 if k.trim() == key {
                     let v = v.trim();
                     let v = v.strip_suffix("px").unwrap_or(v);
-                    if let Ok(f) = v.trim().parse::<f32>() { return f; }
+                    if let Ok(f) = v.trim().parse::<f32>() {
+                        return f;
+                    }
                 }
             }
         }
@@ -1002,61 +1567,101 @@ where
     fn parse_text_align(style: Option<&str>) -> wgpu_glyph::HorizontalAlign {
         if let Some(v) = style_lookup(style, "text-align") {
             let v = v.to_ascii_lowercase();
-            if v.contains("center") { return wgpu_glyph::HorizontalAlign::Center; }
-            if v.contains("right") { return wgpu_glyph::HorizontalAlign::Right; }
+            if v.contains("center") {
+                return wgpu_glyph::HorizontalAlign::Center;
+            }
+            if v.contains("right") {
+                return wgpu_glyph::HorizontalAlign::Right;
+            }
         }
         wgpu_glyph::HorizontalAlign::Left
     }
     fn parse_font_family_id(style: Option<&str>) -> usize {
         if let Some(v) = style_lookup(style, "font-family") {
             let v = v.to_ascii_lowercase();
-            if v.contains("dejavu") { return 1; }
-            if v.contains("noto") { return 2; }
+            if v.contains("dejavu") {
+                return 1;
+            }
+            if v.contains("noto") {
+                return 2;
+            }
         }
         0
     }
     fn style_lookup<'a>(style: Option<&'a str>, key: &str) -> Option<&'a str> {
         let s = style?;
         for decl in s.split(';') {
-            let d = decl.trim(); if d.is_empty() { continue; }
-            if let Some((k, v)) = d.split_once(':') { if k.trim() == key { return Some(v.trim()); } }
+            let d = decl.trim();
+            if d.is_empty() {
+                continue;
+            }
+            if let Some((k, v)) = d.split_once(':') {
+                if k.trim() == key {
+                    return Some(v.trim());
+                }
+            }
         }
         None
     }
     fn parse_font_weight(style: Option<&str>) -> bool {
         if let Some(v) = style_lookup(style, "font-weight") {
-            if v.eq_ignore_ascii_case("bold") { return true; }
-            if let Ok(n) = v.parse::<i32>() { return n >= 600; }
+            if v.eq_ignore_ascii_case("bold") {
+                return true;
+            }
+            if let Ok(n) = v.parse::<i32>() {
+                return n >= 600;
+            }
         }
         false
     }
     #[derive(Clone, Copy, Default)]
-    struct TextDecor { underline: bool, line_through: bool }
+    struct TextDecor {
+        underline: bool,
+        line_through: bool,
+    }
     fn parse_text_decoration(style: Option<&str>) -> TextDecor {
         if let Some(v) = style_lookup(style, "text-decoration") {
             let mut td = TextDecor::default();
-            for part in v.split_whitespace() { let p = part.trim().to_ascii_lowercase(); if p == "underline" { td.underline = true; } else if p == "line-through" { td.line_through = true; } }
+            for part in v.split_whitespace() {
+                let p = part.trim().to_ascii_lowercase();
+                if p == "underline" {
+                    td.underline = true;
+                } else if p == "line-through" {
+                    td.line_through = true;
+                }
+            }
             return td;
         }
         TextDecor::default()
     }
-    fn approx_text_width_px(s: &str, font_size: f32) -> f32 { (s.chars().count() as f32) * font_size * 0.6 }
+    fn approx_text_width_px(s: &str, font_size: f32) -> f32 {
+        (s.chars().count() as f32) * font_size * 0.6
+    }
 
     // Helper to find the first element matching a predicate and return its rect and props
     fn find_node_and_rect<'a>(
         vnode: &'a velox_dom::VNode,
         layout: &velox_dom::layout::LayoutNode,
         pred: &dyn Fn(&velox_dom::VNode) -> bool,
-    ) -> Option<(velox_dom::layout::Rect, &'a velox_dom::Props, &'a [velox_dom::VNode])> {
+    ) -> Option<(
+        velox_dom::layout::Rect,
+        &'a velox_dom::Props,
+        &'a [velox_dom::VNode],
+    )> {
         if pred(vnode) {
-            if let velox_dom::VNode::Element { props, children, .. } = vnode {
+            if let velox_dom::VNode::Element {
+                props, children, ..
+            } = vnode
+            {
                 return Some((layout.rect, props, children.as_slice()));
             }
         }
         match vnode {
             velox_dom::VNode::Element { children, .. } => {
                 for lc in &layout.children {
-                    if lc.display_none { continue; }
+                    if lc.display_none {
+                        continue;
+                    }
                     if let Some(src_idx) = lc.source_index {
                         if let Some(ch) = children.get(src_idx) {
                             if let Some(found) = find_node_and_rect(ch, lc, pred) {
@@ -1088,22 +1693,38 @@ where
         btn_handler: &mut Option<String>,
         btn_pad_left: &mut f32,
         btn_pad_top: &mut f32,
-        click_targets: &mut Vec<(f32,f32,f32,f32,String, Option<String>)>,
+        click_targets: &mut Vec<(f32, f32, f32, f32, String, Option<String>)>,
         queue: &wgpu::Queue,
         vbuf: &wgpu::Buffer,
     ) {
         let is_hovered = |tag: &str, props: &velox_dom::Props| -> bool {
-            hovered_btn && (props.attrs.contains_key("on:click") || tag == "button" || has_class(props, "btn"))
+            hovered_btn
+                && (props.attrs.contains_key("on:click")
+                    || tag == "button"
+                    || has_class(props, "btn"))
         };
         let vnode = apply_styles_with_hover(vnode_raw, sheet, &is_hovered);
         // root styles
         if let velox_dom::VNode::Element { ref props, .. } = vnode {
-            *bg_color = parse_color(props.attrs.get("style").map(|s| s.as_str()), "background", *bg_color);
-            *text_color = parse_color(props.attrs.get("style").map(|s| s.as_str()), "color", *text_color);
-            *font_size = parse_px_f32(props.attrs.get("style").map(|s| s.as_str()), "font-size", *font_size);
+            *bg_color = parse_color(
+                props.attrs.get("style").map(|s| s.as_str()),
+                "background",
+                *bg_color,
+            );
+            *text_color = parse_color(
+                props.attrs.get("style").map(|s| s.as_str()),
+                "color",
+                *text_color,
+            );
+            *font_size = parse_px_f32(
+                props.attrs.get("style").map(|s| s.as_str()),
+                "font-size",
+                *font_size,
+            );
         }
         // layout and clickable target
-        let layout = velox_dom::layout::compute_layout(&vnode, viewport_w as i32, viewport_h as i32);
+        let layout =
+            velox_dom::layout::compute_layout(&vnode, viewport_w as i32, viewport_h as i32);
         let pred = |n: &velox_dom::VNode| match n {
             velox_dom::VNode::Element { props, tag, .. } => {
                 props.attrs.contains_key("on:click") || *tag == "button" || has_class(props, "btn")
@@ -1111,19 +1732,36 @@ where
             _ => false,
         };
         // collect all clickable targets for event hit testing
-        fn collect_clicks(vnode: &velox_dom::VNode, layout: &velox_dom::layout::LayoutNode, out: &mut Vec<(f32,f32,f32,f32,String, Option<String>)>) {
+        fn collect_clicks(
+            vnode: &velox_dom::VNode,
+            layout: &velox_dom::layout::LayoutNode,
+            out: &mut Vec<(f32, f32, f32, f32, String, Option<String>)>,
+        ) {
             match vnode {
                 velox_dom::VNode::Text(_) => {}
-                velox_dom::VNode::Element { props, children, .. } => {
+                velox_dom::VNode::Element {
+                    props, children, ..
+                } => {
                     if let Some(handler) = props.attrs.get("on:click").cloned() {
                         let payload = props.attrs.get("on:click-payload").cloned();
                         let r = layout.rect;
-                        out.push((r.x as f32, r.y as f32, (r.x + r.w) as f32, (r.y + r.h) as f32, handler, payload));
+                        out.push((
+                            r.x as f32,
+                            r.y as f32,
+                            (r.x + r.w) as f32,
+                            (r.y + r.h) as f32,
+                            handler,
+                            payload,
+                        ));
                     }
                     for lc in &layout.children {
-                        if lc.display_none { continue; }
+                        if lc.display_none {
+                            continue;
+                        }
                         if let Some(src_idx) = lc.source_index {
-                            if let Some(ch) = children.get(src_idx) { collect_clicks(ch, lc, out); }
+                            if let Some(ch) = children.get(src_idx) {
+                                collect_clicks(ch, lc, out);
+                            }
                         }
                     }
                 }
@@ -1132,21 +1770,40 @@ where
         click_targets.clear();
         collect_clicks(&vnode, &layout, click_targets);
         if let Some((r, props, children)) = find_node_and_rect(&vnode, &layout, &pred) {
-            *btn_rect = (r.x as f32, r.y as f32, (r.x + r.w) as f32, (r.y + r.h) as f32);
+            *btn_rect = (
+                r.x as f32,
+                r.y as f32,
+                (r.x + r.w) as f32,
+                (r.y + r.h) as f32,
+            );
             // element styles
             let style_str = props.attrs.get("style").map(|s| s.as_str());
             *btn_color = parse_color(style_str, "background", *btn_color);
             *btn_text_color = parse_color(style_str, "color", *text_color);
             *btn_handler = props.attrs.get("on:click").cloned();
             // padding for label position
-            let pad_left = parse_px_f32(style_str, "padding-left", parse_px_f32(style_str, "padding", 0.0));
-            let pad_top = parse_px_f32(style_str, "padding-top", parse_px_f32(style_str, "padding", 0.0));
+            let pad_left = parse_px_f32(
+                style_str,
+                "padding-left",
+                parse_px_f32(style_str, "padding", 0.0),
+            );
+            let pad_top = parse_px_f32(
+                style_str,
+                "padding-top",
+                parse_px_f32(style_str, "padding", 0.0),
+            );
             *btn_pad_left = pad_left;
             *btn_pad_top = pad_top;
             // label text: first text child
             btn_text.clear();
             for ch in children {
-                if let velox_dom::VNode::Text(t) = ch { let s = t.trim(); if !s.is_empty() { btn_text.push_str(s); break; } }
+                if let velox_dom::VNode::Text(t) = ch {
+                    let s = t.trim();
+                    if !s.is_empty() {
+                        btn_text.push_str(s);
+                        break;
+                    }
+                }
             }
         }
         // update GPU vertices
@@ -1156,67 +1813,204 @@ where
         let (x0, y0, x1, y1) = *btn_rect;
         let (r, g, b) = (btn_color[0], btn_color[1], btn_color[2]);
         let verts = [
-            Vertex { pos: to_ndc(viewport_w, viewport_h, x0, y0), color: [r, g, b] },
-            Vertex { pos: to_ndc(viewport_w, viewport_h, x1, y0), color: [r, g, b] },
-            Vertex { pos: to_ndc(viewport_w, viewport_h, x1, y1), color: [r, g, b] },
-            Vertex { pos: to_ndc(viewport_w, viewport_h, x0, y0), color: [r, g, b] },
-            Vertex { pos: to_ndc(viewport_w, viewport_h, x1, y1), color: [r, g, b] },
-            Vertex { pos: to_ndc(viewport_w, viewport_h, x0, y1), color: [r, g, b] },
+            Vertex {
+                pos: to_ndc(viewport_w, viewport_h, x0, y0),
+                color: [r, g, b],
+            },
+            Vertex {
+                pos: to_ndc(viewport_w, viewport_h, x1, y0),
+                color: [r, g, b],
+            },
+            Vertex {
+                pos: to_ndc(viewport_w, viewport_h, x1, y1),
+                color: [r, g, b],
+            },
+            Vertex {
+                pos: to_ndc(viewport_w, viewport_h, x0, y0),
+                color: [r, g, b],
+            },
+            Vertex {
+                pos: to_ndc(viewport_w, viewport_h, x1, y1),
+                color: [r, g, b],
+            },
+            Vertex {
+                pos: to_ndc(viewport_w, viewport_h, x0, y1),
+                color: [r, g, b],
+            },
         ];
         queue.write_buffer(vbuf, 0, bytemuck::cast_slice(&verts));
     }
 
     {
         let (vnode_raw, sheet) = make_view(config.width, config.height);
-        recompute_from_vnode(&vnode_raw, &sheet, false, config.width, config.height, &mut bg_color, &mut text_color, &mut font_size, &mut btn_rect, &mut btn_color, &mut btn_text_color, &mut btn_text, &mut btn_handler, &mut btn_pad_left, &mut btn_pad_top, &mut click_targets, &queue, &vbuf);
+        recompute_from_vnode(
+            &vnode_raw,
+            &sheet,
+            false,
+            config.width,
+            config.height,
+            &mut bg_color,
+            &mut text_color,
+            &mut font_size,
+            &mut btn_rect,
+            &mut btn_color,
+            &mut btn_text_color,
+            &mut btn_text,
+            &mut btn_handler,
+            &mut btn_pad_left,
+            &mut btn_pad_top,
+            &mut click_targets,
+            &queue,
+            &vbuf,
+        );
         // set initial title from SFC state
         window.set_title(&get_title());
     }
 
     let _ = event_loop.run(move |event, _, control_flow| match event {
-        Event::WindowEvent { event: WindowEvent::CloseRequested, .. } => { *control_flow = ControlFlow::Exit; }
-        Event::WindowEvent { event: WindowEvent::Resized(sz), .. } => {
+        Event::WindowEvent {
+            event: WindowEvent::CloseRequested,
+            ..
+        } => {
+            *control_flow = ControlFlow::Exit;
+        }
+        Event::WindowEvent {
+            event: WindowEvent::Resized(sz),
+            ..
+        } => {
             config.width = sz.width.max(1);
             config.height = sz.height.max(1);
             surface.configure(&device, &config);
             let (vnode_raw, sheet) = make_view(config.width, config.height);
-            recompute_from_vnode(&vnode_raw, &sheet, hovered, config.width, config.height, &mut bg_color, &mut text_color, &mut font_size, &mut btn_rect, &mut btn_color, &mut btn_text_color, &mut btn_text, &mut btn_handler, &mut btn_pad_left, &mut btn_pad_top, &mut click_targets, &queue, &vbuf);
+            recompute_from_vnode(
+                &vnode_raw,
+                &sheet,
+                hovered,
+                config.width,
+                config.height,
+                &mut bg_color,
+                &mut text_color,
+                &mut font_size,
+                &mut btn_rect,
+                &mut btn_color,
+                &mut btn_text_color,
+                &mut btn_text,
+                &mut btn_handler,
+                &mut btn_pad_left,
+                &mut btn_pad_top,
+                &mut click_targets,
+                &queue,
+                &vbuf,
+            );
             window.request_redraw();
         }
-        Event::WindowEvent { event: WindowEvent::CursorMoved { position, .. }, .. } => {
+        Event::WindowEvent {
+            event: WindowEvent::CursorMoved { position, .. },
+            ..
+        } => {
             mouse = (position.x as f32, position.y as f32);
-            let (x0,y0,x1,y1) = btn_rect;
-            let h = mouse.0>=x0&&mouse.0<=x1&&mouse.1>=y0&&mouse.1<=y1;
-            if h!=hovered {
-                hovered=h;
+            let (x0, y0, x1, y1) = btn_rect;
+            let h = mouse.0 >= x0 && mouse.0 <= x1 && mouse.1 >= y0 && mouse.1 <= y1;
+            if h != hovered {
+                hovered = h;
                 // recompute styles with hover
                 let (vnode_raw, sheet) = make_view(config.width, config.height);
-                recompute_from_vnode(&vnode_raw, &sheet, hovered, config.width, config.height, &mut bg_color, &mut text_color, &mut font_size, &mut btn_rect, &mut btn_color, &mut btn_text_color, &mut btn_text, &mut btn_handler, &mut btn_pad_left, &mut btn_pad_top, &mut click_targets, &queue, &vbuf);
+                recompute_from_vnode(
+                    &vnode_raw,
+                    &sheet,
+                    hovered,
+                    config.width,
+                    config.height,
+                    &mut bg_color,
+                    &mut text_color,
+                    &mut font_size,
+                    &mut btn_rect,
+                    &mut btn_color,
+                    &mut btn_text_color,
+                    &mut btn_text,
+                    &mut btn_handler,
+                    &mut btn_pad_left,
+                    &mut btn_pad_top,
+                    &mut click_targets,
+                    &queue,
+                    &vbuf,
+                );
             }
         }
-        Event::WindowEvent { event: WindowEvent::MouseInput { state: ElementState::Pressed, button: MouseButton::Left, .. }, .. } => {
+        Event::WindowEvent {
+            event:
+                WindowEvent::MouseInput {
+                    state: ElementState::Pressed,
+                    button: MouseButton::Left,
+                    ..
+                },
+            ..
+        } => {
             // dispatch to first matching clickable rect
-            if let Some((_,_,_,_, name, payload_opt)) = click_targets.iter().find(|(x0,y0,x1,y1,_,_)| mouse.0>=*x0&&mouse.0<=*x1&&mouse.1>=*y0&&mouse.1<=*y1) {
+            if let Some((_, _, _, _, name, payload_opt)) =
+                click_targets.iter().find(|(x0, y0, x1, y1, _, _)| {
+                    mouse.0 >= *x0 && mouse.0 <= *x1 && mouse.1 >= *y0 && mouse.1 <= *y1
+                })
+            {
                 // Prepare payload: prefer explicit payload from attribute, otherwise forward mouse coords as JSON
-                let payload_owned = payload_opt.clone().unwrap_or_else(|| format!("{{\"x\":{},\"y\":{}}}", mouse.0, mouse.1));
+                let payload_owned = payload_opt
+                    .clone()
+                    .unwrap_or_else(|| format!("{{\"x\":{},\"y\":{}}}", mouse.0, mouse.1));
                 on_event(name, Some(&payload_owned));
                 let (vnode_raw, sheet) = make_view(config.width, config.height);
-                recompute_from_vnode(&vnode_raw, &sheet, hovered, config.width, config.height, &mut bg_color, &mut text_color, &mut font_size, &mut btn_rect, &mut btn_color, &mut btn_text_color, &mut btn_text, &mut btn_handler, &mut btn_pad_left, &mut btn_pad_top, &mut click_targets, &queue, &vbuf);
+                recompute_from_vnode(
+                    &vnode_raw,
+                    &sheet,
+                    hovered,
+                    config.width,
+                    config.height,
+                    &mut bg_color,
+                    &mut text_color,
+                    &mut font_size,
+                    &mut btn_rect,
+                    &mut btn_color,
+                    &mut btn_text_color,
+                    &mut btn_text,
+                    &mut btn_handler,
+                    &mut btn_pad_left,
+                    &mut btn_pad_top,
+                    &mut click_targets,
+                    &queue,
+                    &vbuf,
+                );
                 window.set_title(&get_title());
                 window.request_redraw();
             }
         }
         Event::RedrawRequested(_) => {
-            let frame = match surface.get_current_texture() { Ok(f)=>f, Err(wgpu::SurfaceError::Lost)=>{ surface.configure(&device, &config); return; }, Err(_) => return };
-            let view = frame.texture.create_view(&wgpu::TextureViewDescriptor::default());
-            let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("velox-enc") });
+            let frame = match surface.get_current_texture() {
+                Ok(f) => f,
+                Err(wgpu::SurfaceError::Lost) => {
+                    surface.configure(&device, &config);
+                    return;
+                }
+                Err(_) => return,
+            };
+            let view = frame
+                .texture
+                .create_view(&wgpu::TextureViewDescriptor::default());
+            let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("velox-enc"),
+            });
             // Build and draw quads for all clickable buttons
             // Compute vnode + layout once for this frame
             let (frame_vnode_raw, frame_sheet) = make_view(config.width, config.height);
             // Attempt keyed reconciliation with prior frame to prefer node reuse when `key` props are present
             let frame_vnode_reconciled = if let Some(mut old) = prev_vnode.take() {
                 match (&mut old, &frame_vnode_raw) {
-                    (velox_dom::VNode::Element { children: old_ch, .. }, velox_dom::VNode::Element { children: new_ch, .. }) => {
+                    (
+                        velox_dom::VNode::Element {
+                            children: old_ch, ..
+                        },
+                        velox_dom::VNode::Element {
+                            children: new_ch, ..
+                        },
+                    ) => {
                         // run keyed reconciliation on children
                         crate::reconcile_keyed_children(old_ch, new_ch);
                         old
@@ -1226,70 +2020,186 @@ where
             } else {
                 frame_vnode_raw.clone()
             };
-            let frame_vnode = apply_styles_with_hover(&frame_vnode_reconciled, &frame_sheet, &|tag, props| hovered && (props.attrs.contains_key("on:click") || tag == "button" || has_class(props, "btn")));
-            fn collect_click_nodes<'a>(vnode: &'a velox_dom::VNode, layout: &velox_dom::layout::LayoutNode, out: &mut Vec<(velox_dom::layout::Rect, &'a velox_dom::Props, &'a [velox_dom::VNode])>) {
+            let frame_vnode =
+                apply_styles_with_hover(&frame_vnode_reconciled, &frame_sheet, &|tag, props| {
+                    hovered
+                        && (props.attrs.contains_key("on:click")
+                            || tag == "button"
+                            || has_class(props, "btn"))
+                });
+            fn collect_click_nodes<'a>(
+                vnode: &'a velox_dom::VNode,
+                layout: &velox_dom::layout::LayoutNode,
+                out: &mut Vec<(
+                    velox_dom::layout::Rect,
+                    &'a velox_dom::Props,
+                    &'a [velox_dom::VNode],
+                )>,
+            ) {
                 match vnode {
                     velox_dom::VNode::Text(_) => {}
-                    velox_dom::VNode::Element { props, children, .. } => {
-                        if props.attrs.contains_key("on:click") { out.push((layout.rect, props, children.as_slice())); }
+                    velox_dom::VNode::Element {
+                        props, children, ..
+                    } => {
+                        if props.attrs.contains_key("on:click") {
+                            out.push((layout.rect, props, children.as_slice()));
+                        }
                         for lc in &layout.children {
-                            if lc.display_none { continue; }
+                            if lc.display_none {
+                                continue;
+                            }
                             if let Some(src_idx) = lc.source_index {
-                                if let Some(ch) = children.get(src_idx) { collect_click_nodes(ch, lc, out); }
+                                if let Some(ch) = children.get(src_idx) {
+                                    collect_click_nodes(ch, lc, out);
+                                }
                             }
                         }
                     }
                 }
             }
-            let layout2 = velox_dom::layout::compute_layout(&frame_vnode, config.width as i32, config.height as i32);
-            let mut buttons: Vec<(velox_dom::layout::Rect, &velox_dom::Props, &[velox_dom::VNode])> = Vec::new();
+            let layout2 = velox_dom::layout::compute_layout(
+                &frame_vnode,
+                config.width as i32,
+                config.height as i32,
+            );
+            let mut buttons: Vec<(
+                velox_dom::layout::Rect,
+                &velox_dom::Props,
+                &[velox_dom::VNode],
+            )> = Vec::new();
             collect_click_nodes(&frame_vnode, &layout2, &mut buttons);
             let mut verts_all: Vec<Vertex> = Vec::with_capacity(buttons.len() * 6);
             for (rect, props, _) in &buttons {
                 let style_str = props.attrs.get("style").map(|s| s.as_str());
-                let color = parse_color(style_str, "background", [0.2,0.5,0.8,1.0]);
-                let (x0,y0,x1,y1) = (rect.x as f32, rect.y as f32, (rect.x+rect.w) as f32, (rect.y+rect.h) as f32);
-                let to = |x: f32, y: f32| -> [f32;2] { [ (x / config.width as f32) * 2.0 - 1.0, 1.0 - (y / config.height as f32) * 2.0 ] };
-                let (r,g,b) = (color[0], color[1], color[2]);
-                verts_all.push(Vertex{pos:to(x0,y0),color:[r,g,b]});
-                verts_all.push(Vertex{pos:to(x1,y0),color:[r,g,b]});
-                verts_all.push(Vertex{pos:to(x1,y1),color:[r,g,b]});
-                verts_all.push(Vertex{pos:to(x0,y0),color:[r,g,b]});
-                verts_all.push(Vertex{pos:to(x1,y1),color:[r,g,b]});
-                verts_all.push(Vertex{pos:to(x0,y1),color:[r,g,b]});
+                let color = parse_color(style_str, "background", [0.2, 0.5, 0.8, 1.0]);
+                let (x0, y0, x1, y1) = (
+                    rect.x as f32,
+                    rect.y as f32,
+                    (rect.x + rect.w) as f32,
+                    (rect.y + rect.h) as f32,
+                );
+                let to = |x: f32, y: f32| -> [f32; 2] {
+                    [
+                        (x / config.width as f32) * 2.0 - 1.0,
+                        1.0 - (y / config.height as f32) * 2.0,
+                    ]
+                };
+                let (r, g, b) = (color[0], color[1], color[2]);
+                verts_all.push(Vertex {
+                    pos: to(x0, y0),
+                    color: [r, g, b],
+                });
+                verts_all.push(Vertex {
+                    pos: to(x1, y0),
+                    color: [r, g, b],
+                });
+                verts_all.push(Vertex {
+                    pos: to(x1, y1),
+                    color: [r, g, b],
+                });
+                verts_all.push(Vertex {
+                    pos: to(x0, y0),
+                    color: [r, g, b],
+                });
+                verts_all.push(Vertex {
+                    pos: to(x1, y1),
+                    color: [r, g, b],
+                });
+                verts_all.push(Vertex {
+                    pos: to(x0, y1),
+                    color: [r, g, b],
+                });
             }
             {
                 if !verts_all.is_empty() {
-                    let quad_buf = device.create_buffer(&wgpu::BufferDescriptor { label: Some("velox-quads"), size: (verts_all.len()*std::mem::size_of::<Vertex>()) as u64, usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
+                    let quad_buf = device.create_buffer(&wgpu::BufferDescriptor {
+                        label: Some("velox-quads"),
+                        size: (verts_all.len() * std::mem::size_of::<Vertex>()) as u64,
+                        usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                        mapped_at_creation: false,
+                    });
                     queue.write_buffer(&quad_buf, 0, bytemuck::cast_slice(&verts_all));
-                    let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor { label: Some("velox-pass"), color_attachments: &[Some(wgpu::RenderPassColorAttachment { view: &view, resolve_target: None, ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color { r: bg_color[0] as f64, g: bg_color[1] as f64, b: bg_color[2] as f64, a: bg_color[3] as f64 }), store: true } })], depth_stencil_attachment: None });
+                    let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                        label: Some("velox-pass"),
+                        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                            view: &view,
+                            resolve_target: None,
+                            ops: wgpu::Operations {
+                                load: wgpu::LoadOp::Clear(wgpu::Color {
+                                    r: bg_color[0] as f64,
+                                    g: bg_color[1] as f64,
+                                    b: bg_color[2] as f64,
+                                    a: bg_color[3] as f64,
+                                }),
+                                store: true,
+                            },
+                        })],
+                        depth_stencil_attachment: None,
+                    });
                     rpass.set_pipeline(&pipeline);
                     rpass.set_vertex_buffer(0, quad_buf.slice(..));
                     rpass.draw(0..(verts_all.len() as u32), 0..1);
                 } else {
-                    let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor { label: Some("velox-pass"), color_attachments: &[Some(wgpu::RenderPassColorAttachment { view: &view, resolve_target: None, ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color { r: bg_color[0] as f64, g: bg_color[1] as f64, b: bg_color[2] as f64, a: bg_color[3] as f64 }), store: true } })], depth_stencil_attachment: None });
+                    let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                        label: Some("velox-pass"),
+                        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                            view: &view,
+                            resolve_target: None,
+                            ops: wgpu::Operations {
+                                load: wgpu::LoadOp::Clear(wgpu::Color {
+                                    r: bg_color[0] as f64,
+                                    g: bg_color[1] as f64,
+                                    b: bg_color[2] as f64,
+                                    a: bg_color[3] as f64,
+                                }),
+                                store: true,
+                            },
+                        })],
+                        depth_stencil_attachment: None,
+                    });
                     rpass.set_pipeline(&pipeline);
                 }
             }
             // draw texts from vnode: button label and count using their own styles
             if let Some((ref mut glyph_brush, ref mut staging_belt)) = glyph {
-                use wgpu_glyph::{Section, Text, Layout, HorizontalAlign, VerticalAlign, FontId};
-                let (x0,y0,x1,y1) = btn_rect;
+                use wgpu_glyph::{FontId, HorizontalAlign, Layout, Section, Text, VerticalAlign};
+                let (x0, y0, x1, y1) = btn_rect;
                 let (vnode_raw, sheet) = make_view(config.width, config.height);
-                let vnode = apply_styles_with_hover(&vnode_raw, &sheet, &|tag, props| hovered && (props.attrs.contains_key("on:click") || tag == "button" || has_class(props, "btn")));
+                let vnode = apply_styles_with_hover(&vnode_raw, &sheet, &|tag, props| {
+                    hovered
+                        && (props.attrs.contains_key("on:click")
+                            || tag == "button"
+                            || has_class(props, "btn"))
+                });
 
                 // helpers to locate nodes
-                fn find_rect_for_class<'a>(vnode: &'a velox_dom::VNode, layout: &velox_dom::layout::LayoutNode, class: &str) -> Option<(velox_dom::layout::Rect, &'a velox_dom::Props)> {
+                fn find_rect_for_class<'a>(
+                    vnode: &'a velox_dom::VNode,
+                    layout: &velox_dom::layout::LayoutNode,
+                    class: &str,
+                ) -> Option<(velox_dom::layout::Rect, &'a velox_dom::Props)> {
                     match vnode {
                         velox_dom::VNode::Text(_) => None,
-                        velox_dom::VNode::Element { props, children, .. } => {
-                            let has = props.attrs.get("class").map(|s| s.split_whitespace().any(|c| c == class)).unwrap_or(false);
-                            if has { return Some((layout.rect, props)); }
+                        velox_dom::VNode::Element {
+                            props, children, ..
+                        } => {
+                            let has = props
+                                .attrs
+                                .get("class")
+                                .map(|s| s.split_whitespace().any(|c| c == class))
+                                .unwrap_or(false);
+                            if has {
+                                return Some((layout.rect, props));
+                            }
                             for lc in &layout.children {
-                                if lc.display_none { continue; }
+                                if lc.display_none {
+                                    continue;
+                                }
                                 if let Some(src_idx) = lc.source_index {
                                     if let Some(ch) = children.get(src_idx) {
-                                        if let Some(v) = find_rect_for_class(ch, lc, class) { return Some(v); }
+                                        if let Some(v) = find_rect_for_class(ch, lc, class) {
+                                            return Some(v);
+                                        }
                                     }
                                 }
                             }
@@ -1297,17 +2207,37 @@ where
                         }
                     }
                 }
-                fn find_click_node<'a>(vnode: &'a velox_dom::VNode, layout: &velox_dom::layout::LayoutNode) -> Option<(&'a velox_dom::Props)> {
+                fn find_click_node<'a>(
+                    vnode: &'a velox_dom::VNode,
+                    layout: &velox_dom::layout::LayoutNode,
+                ) -> Option<(&'a velox_dom::Props)> {
                     match vnode {
                         velox_dom::VNode::Text(_) => None,
-                        velox_dom::VNode::Element { tag, props, children, .. } => {
-                            let is_btn = props.attrs.contains_key("on:click") || *tag == "button" || props.attrs.get("class").map(|s| s.split_whitespace().any(|c| c == "btn")).unwrap_or(false);
-                            if is_btn { return Some(props); }
+                        velox_dom::VNode::Element {
+                            tag,
+                            props,
+                            children,
+                            ..
+                        } => {
+                            let is_btn = props.attrs.contains_key("on:click")
+                                || *tag == "button"
+                                || props
+                                    .attrs
+                                    .get("class")
+                                    .map(|s| s.split_whitespace().any(|c| c == "btn"))
+                                    .unwrap_or(false);
+                            if is_btn {
+                                return Some(props);
+                            }
                             for lc in &layout.children {
-                                if lc.display_none { continue; }
+                                if lc.display_none {
+                                    continue;
+                                }
                                 if let Some(src_idx) = lc.source_index {
                                     if let Some(ch) = children.get(src_idx) {
-                                        if let Some(p) = find_click_node(ch, lc) { return Some(p); }
+                                        if let Some(p) = find_click_node(ch, lc) {
+                                            return Some(p);
+                                        }
                                     }
                                 }
                             }
@@ -1315,35 +2245,74 @@ where
                         }
                     }
                 }
-                let layout2 = velox_dom::layout::compute_layout(&vnode, config.width as i32, config.height as i32);
+                let layout2 = velox_dom::layout::compute_layout(
+                    &vnode,
+                    config.width as i32,
+                    config.height as i32,
+                );
 
                 // button text placement with line-height and bold/decoration
-                let btn_style = find_click_node(&vnode, &layout2).and_then(|p| p.attrs.get("style")).map(|s| s.as_str());
+                let btn_style = find_click_node(&vnode, &layout2)
+                    .and_then(|p| p.attrs.get("style"))
+                    .map(|s| s.as_str());
                 let btn_line_h = parse_px_f32(btn_style, "line-height", font_size);
                 let btn_font_size = parse_px_f32(btn_style, "font-size", font_size);
                 // padding right/bottom
-                let btn_pad_right = parse_px_f32(btn_style, "padding-right", parse_px_f32(btn_style, "padding", 0.0));
-                let btn_pad_bottom = parse_px_f32(btn_style, "padding-bottom", parse_px_f32(btn_style, "padding", 0.0));
+                let btn_pad_right = parse_px_f32(
+                    btn_style,
+                    "padding-right",
+                    parse_px_f32(btn_style, "padding", 0.0),
+                );
+                let btn_pad_bottom = parse_px_f32(
+                    btn_style,
+                    "padding-bottom",
+                    parse_px_f32(btn_style, "padding", 0.0),
+                );
                 // text top-left for glyph_brush (Section position is top-left), vertically centered in line box
-                let mut label_pos = (x0 + btn_pad_left, y0 + btn_pad_top + (btn_line_h - btn_font_size).max(0.0) * 0.5);
-                if label_pos.1 + btn_font_size > y1 - 1.0 { label_pos.1 = (y1 - 1.0 - btn_font_size).max(y0 + btn_pad_top); }
-                let label = if btn_text.is_empty() { String::new() } else { btn_text.clone() };
+                let mut label_pos = (
+                    x0 + btn_pad_left,
+                    y0 + btn_pad_top + (btn_line_h - btn_font_size).max(0.0) * 0.5,
+                );
+                if label_pos.1 + btn_font_size > y1 - 1.0 {
+                    label_pos.1 = (y1 - 1.0 - btn_font_size).max(y0 + btn_pad_top);
+                }
+                let label = if btn_text.is_empty() {
+                    String::new()
+                } else {
+                    btn_text.clone()
+                };
                 let btn_td = parse_text_decoration(btn_style);
                 let btn_bold = parse_font_weight(btn_style);
-                let btn_italic = style_lookup(btn_style, "font-style").map(|v| v.eq_ignore_ascii_case("italic")).unwrap_or(false);
+                let btn_italic = style_lookup(btn_style, "font-style")
+                    .map(|v| v.eq_ignore_ascii_case("italic"))
+                    .unwrap_or(false);
                 let btn_align = parse_text_align(btn_style);
                 let btn_font_id = parse_font_family_id(btn_style);
                 if !label.is_empty() {
-                    let mut offsets: Vec<(f32,f32)> = if btn_bold { vec![(0.0,0.0),(0.6,0.0),(0.0,0.6)] } else { vec![(0.0,0.0)] };
-                    if btn_italic { offsets.push((0.4, 0.0)); }
-                    let bounds = ( (x1 - x0 - btn_pad_left - btn_pad_right).max(0.0), (y1 - y0 - btn_pad_top - btn_pad_bottom).max(0.0) );
-                    let layout = Layout::default().h_align(btn_align).v_align(VerticalAlign::Top);
+                    let mut offsets: Vec<(f32, f32)> = if btn_bold {
+                        vec![(0.0, 0.0), (0.6, 0.0), (0.0, 0.6)]
+                    } else {
+                        vec![(0.0, 0.0)]
+                    };
+                    if btn_italic {
+                        offsets.push((0.4, 0.0));
+                    }
+                    let bounds = (
+                        (x1 - x0 - btn_pad_left - btn_pad_right).max(0.0),
+                        (y1 - y0 - btn_pad_top - btn_pad_bottom).max(0.0),
+                    );
+                    let layout = Layout::default()
+                        .h_align(btn_align)
+                        .v_align(VerticalAlign::Top);
                     for (ox, oy) in offsets {
                         glyph_brush.queue(Section {
                             screen_position: (label_pos.0 + ox, label_pos.1 + oy),
                             bounds,
                             layout,
-                            text: vec![Text::new(&label).with_color(btn_text_color).with_scale(btn_font_size).with_font_id(FontId(btn_font_id))],
+                            text: vec![Text::new(&label)
+                                .with_color(btn_text_color)
+                                .with_scale(btn_font_size)
+                                .with_font_id(FontId(btn_font_id))],
                             ..Default::default()
                         });
                     }
@@ -1353,67 +2322,168 @@ where
                 prev_vnode = Some(frame_vnode_reconciled);
 
                 // count text placement with its own padding/line-height and bold/decoration
-                let (count_text, count_pos, count_style, count_bounds) = if let Some((rect, props)) = find_rect_for_class(&vnode, &layout2, "count") {
-                    let style_str = props.attrs.get("style").map(|s| s.as_str());
-                    let cp_l = parse_px_f32(style_str, "padding-left", parse_px_f32(style_str, "padding", 0.0));
-                    let cp_t = parse_px_f32(style_str, "padding-top", parse_px_f32(style_str, "padding", 0.0));
-                    let cp_r = parse_px_f32(style_str, "padding-right", parse_px_f32(style_str, "padding", 0.0));
-                    let cp_b = parse_px_f32(style_str, "padding-bottom", parse_px_f32(style_str, "padding", 0.0));
-                    let line_h = parse_px_f32(style_str, "line-height", font_size);
-                    let count_font_size = parse_px_f32(style_str, "font-size", font_size);
-                    let mut pos_y = rect.y as f32 + cp_t + (line_h - count_font_size).max(0.0) * 0.5;
-                    if pos_y + count_font_size > (rect.y + rect.h - 1) as f32 { pos_y = (rect.y + rect.h - 1) as f32 - count_font_size; }
-                    let pos = (rect.x as f32 + cp_l, pos_y);
-                    // Allow vertical overflow to be visible by giving a tall bound down to bottom of viewport
-                    let bounds_h = (config.height as f32 - rect.y as f32).max((rect.h as f32 - cp_t - cp_b).max(0.0));
-                    let bounds = ( (rect.w as f32 - cp_l - cp_r).max(0.0), bounds_h );
-                    (find_text_in_class(&vnode, "count").unwrap_or_default(), pos, style_str, bounds)
-                } else { (String::new(), (x0, y0), None, (0.0, 0.0)) };
+                let (count_text, count_pos, count_style, count_bounds) =
+                    if let Some((rect, props)) = find_rect_for_class(&vnode, &layout2, "count") {
+                        let style_str = props.attrs.get("style").map(|s| s.as_str());
+                        let cp_l = parse_px_f32(
+                            style_str,
+                            "padding-left",
+                            parse_px_f32(style_str, "padding", 0.0),
+                        );
+                        let cp_t = parse_px_f32(
+                            style_str,
+                            "padding-top",
+                            parse_px_f32(style_str, "padding", 0.0),
+                        );
+                        let cp_r = parse_px_f32(
+                            style_str,
+                            "padding-right",
+                            parse_px_f32(style_str, "padding", 0.0),
+                        );
+                        let cp_b = parse_px_f32(
+                            style_str,
+                            "padding-bottom",
+                            parse_px_f32(style_str, "padding", 0.0),
+                        );
+                        let line_h = parse_px_f32(style_str, "line-height", font_size);
+                        let count_font_size = parse_px_f32(style_str, "font-size", font_size);
+                        let mut pos_y =
+                            rect.y as f32 + cp_t + (line_h - count_font_size).max(0.0) * 0.5;
+                        if pos_y + count_font_size > (rect.y + rect.h - 1) as f32 {
+                            pos_y = (rect.y + rect.h - 1) as f32 - count_font_size;
+                        }
+                        let pos = (rect.x as f32 + cp_l, pos_y);
+                        // Allow vertical overflow to be visible by giving a tall bound down to bottom of viewport
+                        let bounds_h = (config.height as f32 - rect.y as f32)
+                            .max((rect.h as f32 - cp_t - cp_b).max(0.0));
+                        let bounds = ((rect.w as f32 - cp_l - cp_r).max(0.0), bounds_h);
+                        (
+                            find_text_in_class(&vnode, "count").unwrap_or_default(),
+                            pos,
+                            style_str,
+                            bounds,
+                        )
+                    } else {
+                        (String::new(), (x0, y0), None, (0.0, 0.0))
+                    };
                 let count_td = parse_text_decoration(count_style);
                 let count_bold = parse_font_weight(count_style);
-                let count_italic = style_lookup(count_style, "font-style").map(|v| v.eq_ignore_ascii_case("italic")).unwrap_or(false);
+                let count_italic = style_lookup(count_style, "font-style")
+                    .map(|v| v.eq_ignore_ascii_case("italic"))
+                    .unwrap_or(false);
                 let count_align = parse_text_align(count_style);
                 let count_font_id = parse_font_family_id(count_style);
                 if !count_text.is_empty() {
-                    let mut offsets: Vec<(f32,f32)> = if count_bold { vec![(0.0,0.0),(0.6,0.0),(0.0,0.6)] } else { vec![(0.0,0.0)] };
-                    if count_italic { offsets.push((0.4, 0.0)); }
+                    let mut offsets: Vec<(f32, f32)> = if count_bold {
+                        vec![(0.0, 0.0), (0.6, 0.0), (0.0, 0.6)]
+                    } else {
+                        vec![(0.0, 0.0)]
+                    };
+                    if count_italic {
+                        offsets.push((0.4, 0.0));
+                    }
                     let count_font_size = parse_px_f32(count_style, "font-size", font_size);
-                    let layout = Layout::default().h_align(count_align).v_align(VerticalAlign::Top);
+                    let layout = Layout::default()
+                        .h_align(count_align)
+                        .v_align(VerticalAlign::Top);
                     for (ox, oy) in offsets {
                         glyph_brush.queue(Section {
                             screen_position: (count_pos.0 + ox, count_pos.1 + oy),
                             bounds: count_bounds,
                             layout,
-                            text: vec![Text::new(&count_text).with_color(text_color).with_scale(count_font_size).with_font_id(FontId(count_font_id))],
+                            text: vec![Text::new(&count_text)
+                                .with_color(text_color)
+                                .with_scale(count_font_size)
+                                .with_font_id(FontId(count_font_id))],
                             ..Default::default()
                         });
                     }
                 }
-                let _ = glyph_brush.draw_queued(&device, staging_belt, &mut encoder, &view, config.width, config.height);
+                let _ = glyph_brush.draw_queued(
+                    &device,
+                    staging_belt,
+                    &mut encoder,
+                    &view,
+                    config.width,
+                    config.height,
+                );
                 staging_belt.finish();
                 // Text decorations as thin quads in a second pass
                 let mut deco_verts: Vec<Vertex> = Vec::new();
-                let mut push_rect = |x0: f32, y0: f32, x1: f32, y1: f32, color: [f32;3]| {
-                    let to = |x: f32, y: f32| [ (x / config.width as f32) * 2.0 - 1.0, 1.0 - (y / config.height as f32) * 2.0 ];
-                    deco_verts.push(Vertex { pos: to(x0,y0), color });
-                    deco_verts.push(Vertex { pos: to(x1,y0), color });
-                    deco_verts.push(Vertex { pos: to(x1,y1), color });
-                    deco_verts.push(Vertex { pos: to(x0,y0), color });
-                    deco_verts.push(Vertex { pos: to(x1,y1), color });
-                    deco_verts.push(Vertex { pos: to(x0,y1), color });
+                let mut push_rect = |x0: f32, y0: f32, x1: f32, y1: f32, color: [f32; 3]| {
+                    let to = |x: f32, y: f32| {
+                        [
+                            (x / config.width as f32) * 2.0 - 1.0,
+                            1.0 - (y / config.height as f32) * 2.0,
+                        ]
+                    };
+                    deco_verts.push(Vertex {
+                        pos: to(x0, y0),
+                        color,
+                    });
+                    deco_verts.push(Vertex {
+                        pos: to(x1, y0),
+                        color,
+                    });
+                    deco_verts.push(Vertex {
+                        pos: to(x1, y1),
+                        color,
+                    });
+                    deco_verts.push(Vertex {
+                        pos: to(x0, y0),
+                        color,
+                    });
+                    deco_verts.push(Vertex {
+                        pos: to(x1, y1),
+                        color,
+                    });
+                    deco_verts.push(Vertex {
+                        pos: to(x0, y1),
+                        color,
+                    });
                 };
-                let thickness = 1.0f32.max(font_size.max(parse_px_f32(btn_style, "font-size", font_size)).max(parse_px_f32(count_style, "font-size", font_size)) * 0.06);
+                let thickness = 1.0f32.max(
+                    font_size
+                        .max(parse_px_f32(btn_style, "font-size", font_size))
+                        .max(parse_px_f32(count_style, "font-size", font_size))
+                        * 0.06,
+                );
                 if !label.is_empty() && (btn_td.underline || btn_td.line_through) {
                     let fs = parse_px_f32(btn_style, "font-size", font_size);
                     let w = approx_text_width_px(&label, fs);
                     let y_u = (label_pos.1 + fs + thickness).min(y1 - 1.0);
                     let y_s = label_pos.1 + fs * 0.65;
-                    if btn_td.underline { push_rect(label_pos.0, y_u, label_pos.0 + w, (y_u + thickness).min(y1 - 1.0), [btn_text_color[0], btn_text_color[1], btn_text_color[2]]); }
-                    if btn_td.line_through { push_rect(label_pos.0, y_s, label_pos.0 + w, y_s + thickness, [btn_text_color[0], btn_text_color[1], btn_text_color[2]]); }
+                    if btn_td.underline {
+                        push_rect(
+                            label_pos.0,
+                            y_u,
+                            label_pos.0 + w,
+                            (y_u + thickness).min(y1 - 1.0),
+                            [btn_text_color[0], btn_text_color[1], btn_text_color[2]],
+                        );
+                    }
+                    if btn_td.line_through {
+                        push_rect(
+                            label_pos.0,
+                            y_s,
+                            label_pos.0 + w,
+                            y_s + thickness,
+                            [btn_text_color[0], btn_text_color[1], btn_text_color[2]],
+                        );
+                    }
                     // overline
-                    if style_lookup(btn_style, "text-decoration").map(|v| v.to_ascii_lowercase().contains("overline")).unwrap_or(false) {
+                    if style_lookup(btn_style, "text-decoration")
+                        .map(|v| v.to_ascii_lowercase().contains("overline"))
+                        .unwrap_or(false)
+                    {
                         let y_o = (label_pos.1).max(y0 + btn_pad_top);
-                        push_rect(label_pos.0, y_o, label_pos.0 + w, (y_o + thickness).min(y1 - 1.0), [btn_text_color[0], btn_text_color[1], btn_text_color[2]]);
+                        push_rect(
+                            label_pos.0,
+                            y_o,
+                            label_pos.0 + w,
+                            (y_o + thickness).min(y1 - 1.0),
+                            [btn_text_color[0], btn_text_color[1], btn_text_color[2]],
+                        );
                     }
                 }
                 if !count_text.is_empty() && (count_td.underline || count_td.line_through) {
@@ -1421,18 +2491,59 @@ where
                     let w = approx_text_width_px(&count_text, cf);
                     let y_u = count_pos.1 + cf + thickness;
                     let y_s = count_pos.1 + cf * 0.65;
-                    if count_td.underline { push_rect(count_pos.0, y_u, count_pos.0 + w, y_u + thickness, [text_color[0], text_color[1], text_color[2]]); }
-                    if count_td.line_through { push_rect(count_pos.0, y_s, count_pos.0 + w, y_s + thickness, [text_color[0], text_color[1], text_color[2]]); }
-                    if style_lookup(count_style, "text-decoration").map(|v| v.to_ascii_lowercase().contains("overline")).unwrap_or(false) {
+                    if count_td.underline {
+                        push_rect(
+                            count_pos.0,
+                            y_u,
+                            count_pos.0 + w,
+                            y_u + thickness,
+                            [text_color[0], text_color[1], text_color[2]],
+                        );
+                    }
+                    if count_td.line_through {
+                        push_rect(
+                            count_pos.0,
+                            y_s,
+                            count_pos.0 + w,
+                            y_s + thickness,
+                            [text_color[0], text_color[1], text_color[2]],
+                        );
+                    }
+                    if style_lookup(count_style, "text-decoration")
+                        .map(|v| v.to_ascii_lowercase().contains("overline"))
+                        .unwrap_or(false)
+                    {
                         let y_o = count_pos.1;
-                        push_rect(count_pos.0, y_o, count_pos.0 + w, y_o + thickness, [text_color[0], text_color[1], text_color[2]]);
+                        push_rect(
+                            count_pos.0,
+                            y_o,
+                            count_pos.0 + w,
+                            y_o + thickness,
+                            [text_color[0], text_color[1], text_color[2]],
+                        );
                     }
                 }
                 if !deco_verts.is_empty() {
-                    let deco_buf = device.create_buffer(&wgpu::BufferDescriptor { label: Some("velox-deco"), size: (deco_verts.len() * std::mem::size_of::<Vertex>()) as u64, usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
+                    let deco_buf = device.create_buffer(&wgpu::BufferDescriptor {
+                        label: Some("velox-deco"),
+                        size: (deco_verts.len() * std::mem::size_of::<Vertex>()) as u64,
+                        usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                        mapped_at_creation: false,
+                    });
                     queue.write_buffer(&deco_buf, 0, bytemuck::cast_slice(&deco_verts));
                     {
-                        let mut rpass2 = encoder.begin_render_pass(&wgpu::RenderPassDescriptor { label: Some("velox-deco-pass"), color_attachments: &[Some(wgpu::RenderPassColorAttachment { view: &view, resolve_target: None, ops: wgpu::Operations { load: wgpu::LoadOp::Load, store: true } })], depth_stencil_attachment: None });
+                        let mut rpass2 = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                            label: Some("velox-deco-pass"),
+                            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                                view: &view,
+                                resolve_target: None,
+                                ops: wgpu::Operations {
+                                    load: wgpu::LoadOp::Load,
+                                    store: true,
+                                },
+                            })],
+                            depth_stencil_attachment: None,
+                        });
                         rpass2.set_pipeline(&pipeline);
                         rpass2.set_vertex_buffer(0, deco_buf.slice(..));
                         rpass2.draw(0..(deco_verts.len() as u32), 0..1);
@@ -1447,7 +2558,9 @@ where
                 frame.present();
             }
         }
-        Event::MainEventsCleared => { window.request_redraw(); }
+        Event::MainEventsCleared => {
+            window.request_redraw();
+        }
         _ => {}
     });
 }
@@ -1518,7 +2631,10 @@ pub fn run_window(title: &str) {
     // Simple colored quad pipeline (two triangles) for a button placeholder
     #[repr(C)]
     #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
-    struct Vertex { pos: [f32; 2], color: [f32; 3] }
+    struct Vertex {
+        pos: [f32; 2],
+        color: [f32; 3],
+    }
 
     let shader_src = r#"
         struct VsOut {
@@ -1548,8 +2664,16 @@ pub fn run_window(title: &str) {
         array_stride: std::mem::size_of::<Vertex>() as wgpu::BufferAddress,
         step_mode: wgpu::VertexStepMode::Vertex,
         attributes: &[
-            wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x2, offset: 0, shader_location: 0 },
-            wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x3, offset: 8, shader_location: 1 },
+            wgpu::VertexAttribute {
+                format: wgpu::VertexFormat::Float32x2,
+                offset: 0,
+                shader_location: 0,
+            },
+            wgpu::VertexAttribute {
+                format: wgpu::VertexFormat::Float32x3,
+                offset: 8,
+                shader_location: 1,
+            },
         ],
     };
 
@@ -1562,11 +2686,19 @@ pub fn run_window(title: &str) {
     let render_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
         label: Some("velox-pipeline"),
         layout: Some(&pipeline_layout),
-        vertex: wgpu::VertexState { module: &shader, entry_point: "vs", buffers: &[vertex_layout] },
+        vertex: wgpu::VertexState {
+            module: &shader,
+            entry_point: "vs",
+            buffers: &[vertex_layout],
+        },
         fragment: Some(wgpu::FragmentState {
             module: &shader,
             entry_point: "fs",
-            targets: &[Some(wgpu::ColorTargetState { format, blend: Some(wgpu::BlendState::ALPHA_BLENDING), write_mask: wgpu::ColorWrites::ALL })],
+            targets: &[Some(wgpu::ColorTargetState {
+                format,
+                blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
         }),
         primitive: wgpu::PrimitiveState::default(),
         depth_stencil: None,
@@ -1580,22 +2712,54 @@ pub fn run_window(title: &str) {
     let mut hovered = false;
 
     let mut vertex_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-        label: Some("velox-vertices"), size: 6 * std::mem::size_of::<Vertex>() as u64, usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false
+        label: Some("velox-vertices"),
+        size: 6 * std::mem::size_of::<Vertex>() as u64,
+        usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
     });
 
     let create_vertices = |w: u32, h: u32, hovered: bool| -> [Vertex; 6] {
-        let bw = 200.0; let bh = 80.0;
-        let cx = w as f32 / 2.0; let cy = h as f32 / 2.0;
-        let x0 = cx - bw / 2.0; let y0 = cy - bh / 2.0; let x1 = cx + bw / 2.0; let y1 = cy + bh / 2.0;
-        let to_ndc = |x: f32, y: f32| -> [f32; 2] { [ (x / w as f32) * 2.0 - 1.0, 1.0 - (y / h as f32) * 2.0 ] };
-        let (r,g,b) = if hovered { (0.25, 0.6, 0.9) } else { (0.2, 0.5, 0.8) };
+        let bw = 200.0;
+        let bh = 80.0;
+        let cx = w as f32 / 2.0;
+        let cy = h as f32 / 2.0;
+        let x0 = cx - bw / 2.0;
+        let y0 = cy - bh / 2.0;
+        let x1 = cx + bw / 2.0;
+        let y1 = cy + bh / 2.0;
+        let to_ndc = |x: f32, y: f32| -> [f32; 2] {
+            [(x / w as f32) * 2.0 - 1.0, 1.0 - (y / h as f32) * 2.0]
+        };
+        let (r, g, b) = if hovered {
+            (0.25, 0.6, 0.9)
+        } else {
+            (0.2, 0.5, 0.8)
+        };
         [
-            Vertex { pos: to_ndc(x0, y0), color: [r,g,b] },
-            Vertex { pos: to_ndc(x1, y0), color: [r,g,b] },
-            Vertex { pos: to_ndc(x1, y1), color: [r,g,b] },
-            Vertex { pos: to_ndc(x0, y0), color: [r,g,b] },
-            Vertex { pos: to_ndc(x1, y1), color: [r,g,b] },
-            Vertex { pos: to_ndc(x0, y1), color: [r,g,b] },
+            Vertex {
+                pos: to_ndc(x0, y0),
+                color: [r, g, b],
+            },
+            Vertex {
+                pos: to_ndc(x1, y0),
+                color: [r, g, b],
+            },
+            Vertex {
+                pos: to_ndc(x1, y1),
+                color: [r, g, b],
+            },
+            Vertex {
+                pos: to_ndc(x0, y0),
+                color: [r, g, b],
+            },
+            Vertex {
+                pos: to_ndc(x1, y1),
+                color: [r, g, b],
+            },
+            Vertex {
+                pos: to_ndc(x0, y1),
+                color: [r, g, b],
+            },
         ]
     };
 
@@ -1612,14 +2776,27 @@ pub fn run_window(title: &str) {
         vertex_buffer: &wgpu::Buffer,
     ) -> Result<(), SurfaceError> {
         let frame = surface.get_current_texture()?;
-        let view = frame.texture.create_view(&wgpu::TextureViewDescriptor::default());
-        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("velox-encoder") });
+        let view = frame
+            .texture
+            .create_view(&wgpu::TextureViewDescriptor::default());
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("velox-encoder"),
+        });
         {
             let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("velox-pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &view, resolve_target: None,
-                    ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color { r: 0.12, g: 0.12, b: 0.14, a: 1.0 }), store: true }
+                    view: &view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color {
+                            r: 0.12,
+                            g: 0.12,
+                            b: 0.14,
+                            a: 1.0,
+                        }),
+                        store: true,
+                    },
                 })],
                 depth_stencil_attachment: None,
             });
@@ -1643,10 +2820,16 @@ pub fn run_window(title: &str) {
     let title_owned = title.to_string();
 
     let _ = event_loop.run(move |event, _, control_flow| match event {
-        Event::WindowEvent { event: WindowEvent::CloseRequested, .. } => {
+        Event::WindowEvent {
+            event: WindowEvent::CloseRequested,
+            ..
+        } => {
             *control_flow = ControlFlow::Exit;
         }
-        Event::WindowEvent { event: WindowEvent::Resized(new_size), .. } => {
+        Event::WindowEvent {
+            event: WindowEvent::Resized(new_size),
+            ..
+        } => {
             config.width = new_size.width.max(1);
             config.height = new_size.height.max(1);
             surface.configure(&device, &config);
@@ -1654,19 +2837,45 @@ pub fn run_window(title: &str) {
             queue.write_buffer(&vertex_buffer, 0, bytemuck::cast_slice(&verts2));
             redraw_pending = true;
         }
-        Event::WindowEvent { event: WindowEvent::CursorMoved { position, .. }, .. } => {
+        Event::WindowEvent {
+            event: WindowEvent::CursorMoved { position, .. },
+            ..
+        } => {
             mouse_pos = (position.x as f32, position.y as f32);
-            let bw = 200.0; let bh = 80.0;
-            let cx = config.width as f32 / 2.0; let cy = config.height as f32 / 2.0;
-            let x0 = cx - bw/2.0; let y0 = cy - bh/2.0; let x1 = cx + bw/2.0; let y1 = cy + bh/2.0;
-            let now_hovered = mouse_pos.0 >= x0 && mouse_pos.0 <= x1 && mouse_pos.1 >= y0 && mouse_pos.1 <= y1;
-            if now_hovered != hovered { hovered = now_hovered; let verts3 = create_vertices(config.width, config.height, hovered); queue.write_buffer(&vertex_buffer, 0, bytemuck::cast_slice(&verts3)); }
+            let bw = 200.0;
+            let bh = 80.0;
+            let cx = config.width as f32 / 2.0;
+            let cy = config.height as f32 / 2.0;
+            let x0 = cx - bw / 2.0;
+            let y0 = cy - bh / 2.0;
+            let x1 = cx + bw / 2.0;
+            let y1 = cy + bh / 2.0;
+            let now_hovered =
+                mouse_pos.0 >= x0 && mouse_pos.0 <= x1 && mouse_pos.1 >= y0 && mouse_pos.1 <= y1;
+            if now_hovered != hovered {
+                hovered = now_hovered;
+                let verts3 = create_vertices(config.width, config.height, hovered);
+                queue.write_buffer(&vertex_buffer, 0, bytemuck::cast_slice(&verts3));
+            }
             window.request_redraw();
         }
-        Event::WindowEvent { event: WindowEvent::MouseInput { state: winit::event::ElementState::Pressed, button: winit::event::MouseButton::Left, .. }, .. } => {
-            let bw = 200.0; let bh = 80.0;
-            let cx = config.width as f32 / 2.0; let cy = config.height as f32 / 2.0;
-            let x0 = cx - bw/2.0; let y0 = cy - bh/2.0; let x1 = cx + bw/2.0; let y1 = cy + bh/2.0;
+        Event::WindowEvent {
+            event:
+                WindowEvent::MouseInput {
+                    state: winit::event::ElementState::Pressed,
+                    button: winit::event::MouseButton::Left,
+                    ..
+                },
+            ..
+        } => {
+            let bw = 200.0;
+            let bh = 80.0;
+            let cx = config.width as f32 / 2.0;
+            let cy = config.height as f32 / 2.0;
+            let x0 = cx - bw / 2.0;
+            let y0 = cy - bh / 2.0;
+            let x1 = cx + bw / 2.0;
+            let y1 = cy + bh / 2.0;
             if mouse_pos.0 >= x0 && mouse_pos.0 <= x1 && mouse_pos.1 >= y0 && mouse_pos.1 <= y1 {
                 count += 1;
                 window.set_title(&format!("{} — count {}", title_owned, count));
@@ -1678,10 +2887,21 @@ pub fn run_window(title: &str) {
             }
         }
         Event::RedrawRequested(_) => {
-            match render(&surface, &device, &queue, &config, &render_pipeline, &vertex_buffer) {
+            match render(
+                &surface,
+                &device,
+                &queue,
+                &config,
+                &render_pipeline,
+                &vertex_buffer,
+            ) {
                 Ok(()) => {}
-                Err(SurfaceError::Lost) => { surface.configure(&device, &config); }
-                Err(SurfaceError::OutOfMemory) => { *control_flow = ControlFlow::Exit; }
+                Err(SurfaceError::Lost) => {
+                    surface.configure(&device, &config);
+                }
+                Err(SurfaceError::OutOfMemory) => {
+                    *control_flow = ControlFlow::Exit;
+                }
                 Err(_) => {}
             }
             redraw_pending = false;
@@ -1696,30 +2916,61 @@ where
     F: FnMut(i32) + 'static,
 {
     use winit::dpi::PhysicalSize;
-    use winit::event::{Event, WindowEvent, ElementState, MouseButton};
+    use winit::event::{ElementState, Event, MouseButton, WindowEvent};
     use winit::event_loop::{ControlFlow, EventLoop};
     use winit::window::WindowBuilder;
 
     let event_loop = EventLoop::new();
-    let window = WindowBuilder::new().with_title(title).with_inner_size(PhysicalSize::new(800,600)).build(&event_loop).expect("window");
+    let window = WindowBuilder::new()
+        .with_title(title)
+        .with_inner_size(PhysicalSize::new(800, 600))
+        .build(&event_loop)
+        .expect("window");
     let title_owned = title.to_string();
 
     // Reuse the rendering path
     // Minimal re-init by calling into `run_window`-like setup inline to avoid refactor
     let instance = wgpu::Instance::default();
     let surface = unsafe { instance.create_surface(&window) }.expect("surface");
-    let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions { power_preference: wgpu::PowerPreference::HighPerformance, compatible_surface: Some(&surface), force_fallback_adapter: false })).expect("adapter");
-    let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor { label: Some("velox-device"), features: wgpu::Features::empty(), limits: wgpu::Limits::default() }, None)).expect("device");
+    let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+        power_preference: wgpu::PowerPreference::HighPerformance,
+        compatible_surface: Some(&surface),
+        force_fallback_adapter: false,
+    }))
+    .expect("adapter");
+    let (device, queue) = pollster::block_on(adapter.request_device(
+        &wgpu::DeviceDescriptor {
+            label: Some("velox-device"),
+            features: wgpu::Features::empty(),
+            limits: wgpu::Limits::default(),
+        },
+        None,
+    ))
+    .expect("device");
     let mut size = window.inner_size();
-    if size.width == 0 || size.height == 0 { size = PhysicalSize::new(800, 600); window.set_inner_size(size); }
+    if size.width == 0 || size.height == 0 {
+        size = PhysicalSize::new(800, 600);
+        window.set_inner_size(size);
+    }
     let caps = surface.get_capabilities(&adapter);
     let format = caps.formats[0];
-    let mut config = wgpu::SurfaceConfiguration { usage: wgpu::TextureUsages::RENDER_ATTACHMENT, format, width: size.width, height: size.height, present_mode: caps.present_modes[0], alpha_mode: caps.alpha_modes[0], view_formats: vec![] };
+    let mut config = wgpu::SurfaceConfiguration {
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+        format,
+        width: size.width,
+        height: size.height,
+        present_mode: caps.present_modes[0],
+        alpha_mode: caps.alpha_modes[0],
+        view_formats: vec![],
+    };
     surface.configure(&device, &config);
 
     #[repr(C)]
     #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
-    struct Vertex { pos: [f32; 2], color: [f32; 3] }
+    struct Vertex {
+        pos: [f32; 2],
+        color: [f32; 3],
+    }
     let shader_src = r#"
         struct VsOut { @builtin(position) position: vec4<f32>, @location(0) color: vec3<f32>, };
         @vertex fn vs(@location(0) pos: vec2<f32>, @location(1) color: vec3<f32>) -> VsOut {
@@ -1727,39 +2978,213 @@ where
         }
         @fragment fn fs(@location(0) color: vec3<f32>) -> @location(0) vec4<f32> { return vec4<f32>(color, 1.0); }
     "#;
-    let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("velox-shader"), source: wgpu::ShaderSource::Wgsl(shader_src.into()) });
-    let vlayout = wgpu::VertexBufferLayout { array_stride: std::mem::size_of::<Vertex>() as wgpu::BufferAddress, step_mode: wgpu::VertexStepMode::Vertex, attributes: &[
-        wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x2, offset: 0, shader_location: 0 },
-        wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x3, offset: 8, shader_location: 1 },
-    ]};
-    let pl_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: Some("velox-pl"), bind_group_layouts: &[], push_constant_ranges: &[] });
-    let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor { label: Some("velox-pipeline"), layout: Some(&pl_layout), vertex: wgpu::VertexState { module: &shader, entry_point: "vs", buffers: &[vlayout] }, fragment: Some(wgpu::FragmentState { module: &shader, entry_point: "fs", targets: &[Some(wgpu::ColorTargetState { format, blend: Some(wgpu::BlendState::ALPHA_BLENDING), write_mask: wgpu::ColorWrites::ALL })] }), primitive: wgpu::PrimitiveState::default(), depth_stencil: None, multisample: wgpu::MultisampleState::default(), multiview: None });
-    let mut vbuf = device.create_buffer(&wgpu::BufferDescriptor { label: Some("velox-vbuf"), size: 6 * std::mem::size_of::<Vertex>() as u64, usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
+    let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("velox-shader"),
+        source: wgpu::ShaderSource::Wgsl(shader_src.into()),
+    });
+    let vlayout = wgpu::VertexBufferLayout {
+        array_stride: std::mem::size_of::<Vertex>() as wgpu::BufferAddress,
+        step_mode: wgpu::VertexStepMode::Vertex,
+        attributes: &[
+            wgpu::VertexAttribute {
+                format: wgpu::VertexFormat::Float32x2,
+                offset: 0,
+                shader_location: 0,
+            },
+            wgpu::VertexAttribute {
+                format: wgpu::VertexFormat::Float32x3,
+                offset: 8,
+                shader_location: 1,
+            },
+        ],
+    };
+    let pl_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some("velox-pl"),
+        bind_group_layouts: &[],
+        push_constant_ranges: &[],
+    });
+    let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("velox-pipeline"),
+        layout: Some(&pl_layout),
+        vertex: wgpu::VertexState {
+            module: &shader,
+            entry_point: "vs",
+            buffers: &[vlayout],
+        },
+        fragment: Some(wgpu::FragmentState {
+            module: &shader,
+            entry_point: "fs",
+            targets: &[Some(wgpu::ColorTargetState {
+                format,
+                blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
+        }),
+        primitive: wgpu::PrimitiveState::default(),
+        depth_stencil: None,
+        multisample: wgpu::MultisampleState::default(),
+        multiview: None,
+    });
+    let mut vbuf = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("velox-vbuf"),
+        size: 6 * std::mem::size_of::<Vertex>() as u64,
+        usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
 
     let make_quad = |w: u32, h: u32, hovered: bool| -> [Vertex; 6] {
-        let bw = 200.0; let bh = 80.0; let cx = w as f32 / 2.0; let cy = h as f32 / 2.0;
-        let x0 = cx - bw/2.0; let y0 = cy - bh/2.0; let x1 = cx + bw/2.0; let y1 = cy + bh/2.0;
-        let to_ndc = |x: f32, y: f32| [ (x / w as f32) * 2.0 - 1.0, 1.0 - (y / h as f32) * 2.0 ];
-        let (r,g,b) = if hovered { (0.25,0.6,0.9) } else { (0.2,0.5,0.8) };
-        [ Vertex{pos:to_ndc(x0,y0),color:[r,g,b]}, Vertex{pos:to_ndc(x1,y0),color:[r,g,b]}, Vertex{pos:to_ndc(x1,y1),color:[r,g,b]}, Vertex{pos:to_ndc(x0,y0),color:[r,g,b]}, Vertex{pos:to_ndc(x1,y1),color:[r,g,b]}, Vertex{pos:to_ndc(x0,y1),color:[r,g,b]} ]
+        let bw = 200.0;
+        let bh = 80.0;
+        let cx = w as f32 / 2.0;
+        let cy = h as f32 / 2.0;
+        let x0 = cx - bw / 2.0;
+        let y0 = cy - bh / 2.0;
+        let x1 = cx + bw / 2.0;
+        let y1 = cy + bh / 2.0;
+        let to_ndc = |x: f32, y: f32| [(x / w as f32) * 2.0 - 1.0, 1.0 - (y / h as f32) * 2.0];
+        let (r, g, b) = if hovered {
+            (0.25, 0.6, 0.9)
+        } else {
+            (0.2, 0.5, 0.8)
+        };
+        [
+            Vertex {
+                pos: to_ndc(x0, y0),
+                color: [r, g, b],
+            },
+            Vertex {
+                pos: to_ndc(x1, y0),
+                color: [r, g, b],
+            },
+            Vertex {
+                pos: to_ndc(x1, y1),
+                color: [r, g, b],
+            },
+            Vertex {
+                pos: to_ndc(x0, y0),
+                color: [r, g, b],
+            },
+            Vertex {
+                pos: to_ndc(x1, y1),
+                color: [r, g, b],
+            },
+            Vertex {
+                pos: to_ndc(x0, y1),
+                color: [r, g, b],
+            },
+        ]
     };
     let mut hovered = false;
-    queue.write_buffer(&vbuf, 0, bytemuck::cast_slice(&make_quad(config.width, config.height, hovered)));
+    queue.write_buffer(
+        &vbuf,
+        0,
+        bytemuck::cast_slice(&make_quad(config.width, config.height, hovered)),
+    );
     let mut mouse = (0.0f32, 0.0f32);
     let mut count = 0;
     on_change(count);
 
     let _ = event_loop.run(move |event, _, control_flow| match event {
-        Event::WindowEvent { event: WindowEvent::CloseRequested, .. } => { *control_flow = ControlFlow::Exit; }
-        Event::WindowEvent { event: WindowEvent::Resized(sz), .. } => { config.width = sz.width.max(1); config.height = sz.height.max(1); surface.configure(&device, &config); queue.write_buffer(&vbuf, 0, bytemuck::cast_slice(&make_quad(config.width, config.height, hovered))); window.request_redraw(); }
-        Event::WindowEvent { event: WindowEvent::CursorMoved { position, .. }, .. } => { mouse = (position.x as f32, position.y as f32); let bw=200.0; let bh=80.0; let cx=config.width as f32/2.0; let cy=config.height as f32/2.0; let x0=cx-bw/2.0; let y0=cy-bh/2.0; let x1=cx+bw/2.0; let y1=cy+bh/2.0; let h = mouse.0>=x0 && mouse.0<=x1 && mouse.1>=y0 && mouse.1<=y1; if h!=hovered { hovered=h; queue.write_buffer(&vbuf, 0, bytemuck::cast_slice(&make_quad(config.width, config.height, hovered))); } window.request_redraw(); }
-        Event::WindowEvent { event: WindowEvent::MouseInput { state: ElementState::Pressed, button: MouseButton::Left, .. }, .. } => { let bw=200.0; let bh=80.0; let cx=config.width as f32/2.0; let cy=config.height as f32/2.0; let x0=cx-bw/2.0; let y0=cy-bh/2.0; let x1=cx+bw/2.0; let y1=cy+bh/2.0; if mouse.0>=x0 && mouse.0<=x1 && mouse.1>=y0 && mouse.1<=y1 { count += 1; window.set_title(&format!("{} — count {}", title_owned, count)); on_change(count); } }
+        Event::WindowEvent {
+            event: WindowEvent::CloseRequested,
+            ..
+        } => {
+            *control_flow = ControlFlow::Exit;
+        }
+        Event::WindowEvent {
+            event: WindowEvent::Resized(sz),
+            ..
+        } => {
+            config.width = sz.width.max(1);
+            config.height = sz.height.max(1);
+            surface.configure(&device, &config);
+            queue.write_buffer(
+                &vbuf,
+                0,
+                bytemuck::cast_slice(&make_quad(config.width, config.height, hovered)),
+            );
+            window.request_redraw();
+        }
+        Event::WindowEvent {
+            event: WindowEvent::CursorMoved { position, .. },
+            ..
+        } => {
+            mouse = (position.x as f32, position.y as f32);
+            let bw = 200.0;
+            let bh = 80.0;
+            let cx = config.width as f32 / 2.0;
+            let cy = config.height as f32 / 2.0;
+            let x0 = cx - bw / 2.0;
+            let y0 = cy - bh / 2.0;
+            let x1 = cx + bw / 2.0;
+            let y1 = cy + bh / 2.0;
+            let h = mouse.0 >= x0 && mouse.0 <= x1 && mouse.1 >= y0 && mouse.1 <= y1;
+            if h != hovered {
+                hovered = h;
+                queue.write_buffer(
+                    &vbuf,
+                    0,
+                    bytemuck::cast_slice(&make_quad(config.width, config.height, hovered)),
+                );
+            }
+            window.request_redraw();
+        }
+        Event::WindowEvent {
+            event:
+                WindowEvent::MouseInput {
+                    state: ElementState::Pressed,
+                    button: MouseButton::Left,
+                    ..
+                },
+            ..
+        } => {
+            let bw = 200.0;
+            let bh = 80.0;
+            let cx = config.width as f32 / 2.0;
+            let cy = config.height as f32 / 2.0;
+            let x0 = cx - bw / 2.0;
+            let y0 = cy - bh / 2.0;
+            let x1 = cx + bw / 2.0;
+            let y1 = cy + bh / 2.0;
+            if mouse.0 >= x0 && mouse.0 <= x1 && mouse.1 >= y0 && mouse.1 <= y1 {
+                count += 1;
+                window.set_title(&format!("{} — count {}", title_owned, count));
+                on_change(count);
+            }
+        }
         Event::RedrawRequested(_) => {
-            let frame = match surface.get_current_texture() { Ok(f)=>f, Err(wgpu::SurfaceError::Lost)=>{ surface.configure(&device, &config); return; }, Err(_) => return };
-            let view = frame.texture.create_view(&wgpu::TextureViewDescriptor::default());
-            let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("velox-enc") });
+            let frame = match surface.get_current_texture() {
+                Ok(f) => f,
+                Err(wgpu::SurfaceError::Lost) => {
+                    surface.configure(&device, &config);
+                    return;
+                }
+                Err(_) => return,
+            };
+            let view = frame
+                .texture
+                .create_view(&wgpu::TextureViewDescriptor::default());
+            let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("velox-enc"),
+            });
             {
-                let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor { label: Some("velox-pass"), color_attachments: &[Some(wgpu::RenderPassColorAttachment { view: &view, resolve_target: None, ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color { r: 0.12, g: 0.12, b: 0.14, a: 1.0 }), store: true } })], depth_stencil_attachment: None });
+                let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("velox-pass"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: &view,
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(wgpu::Color {
+                                r: 0.12,
+                                g: 0.12,
+                                b: 0.14,
+                                a: 1.0,
+                            }),
+                            store: true,
+                        },
+                    })],
+                    depth_stencil_attachment: None,
+                });
                 rpass.set_pipeline(&pipeline);
                 rpass.set_vertex_buffer(0, vbuf.slice(..));
                 rpass.draw(0..6, 0..1);
@@ -1767,7 +3192,9 @@ where
             queue.submit(Some(encoder.finish()));
             frame.present();
         }
-        Event::MainEventsCleared => { window.request_redraw(); }
+        Event::MainEventsCleared => {
+            window.request_redraw();
+        }
         _ => {}
     });
 }
@@ -1790,10 +3217,21 @@ pub fn run_counter_window() {
     };
 
     let _ = event_loop.run(move |event, _, control_flow| match event {
-        Event::WindowEvent { event: WindowEvent::CloseRequested, .. } => {
+        Event::WindowEvent {
+            event: WindowEvent::CloseRequested,
+            ..
+        } => {
             *control_flow = ControlFlow::Exit;
         }
-        Event::WindowEvent { event: WindowEvent::MouseInput { state: ElementState::Pressed, button: MouseButton::Left, .. }, .. } => {
+        Event::WindowEvent {
+            event:
+                WindowEvent::MouseInput {
+                    state: ElementState::Pressed,
+                    button: MouseButton::Left,
+                    ..
+                },
+            ..
+        } => {
             count += 1;
             update_title(count);
         }

@@ -1,4 +1,8 @@
-use velox_dom::{diff::{diff, Patch}, h, text, Props, VNode};
+use velox_dom::{
+    Props, VNode,
+    diff::{Patch, diff},
+    h, text,
+};
 
 #[test]
 fn props_set_and_remove() {
@@ -48,4 +52,3 @@ fn text_change_replaces() {
     let patches = diff(&a, &b);
     assert_eq!(patches, vec![Patch::Replace(b.clone())]);
 }
-

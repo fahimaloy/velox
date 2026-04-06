@@ -55,7 +55,14 @@ pub fn text(t: impl Into<String>) -> VNode {
 }
 
 pub mod diff;
+
 pub mod layout;
+
+pub mod style;
+
+pub mod text_wrap;
+
+pub use style::*;
 
 #[cfg(test)]
 mod tests {

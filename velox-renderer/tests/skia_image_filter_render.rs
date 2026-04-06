@@ -20,15 +20,19 @@ fn render_image_filters_checksum() {
         "img",
         vec![
             ("src", image_path),
-            ("style", "width:16px;height:16px;opacity:0.5;filter:blur(1px) brightness(1.2)"),
+            (
+                "style",
+                "width:16px;height:16px;opacity:0.5;filter:blur(1px) brightness(1.2)",
+            ),
         ],
         vec![],
     );
 
-    let png = match velox_renderer::render_vnode_to_raster_png(&vnode, &Stylesheet::default(), 32, 32) {
-        Ok(b) => b,
-        Err(e) => panic!("render failed: {}", e),
-    };
+    let png =
+        match velox_renderer::render_vnode_to_raster_png(&vnode, &Stylesheet::default(), 32, 32) {
+            Ok(b) => b,
+            Err(e) => panic!("render failed: {}", e),
+        };
 
     let checksum = fnv1a(&png);
     println!("image filter checksum: 0x{checksum:08x}");

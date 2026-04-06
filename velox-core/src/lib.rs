@@ -1,4 +1,6 @@
 pub mod lifecycle;
+pub mod next_tick;
+pub mod provide_inject;
 pub mod ref_cell;
 pub mod signal;
 pub mod watch;

@@ -27,9 +27,7 @@ pub fn validate_and_normalize_package_name(name: &str) -> Result<String> {
     };
 
     if !first.is_ascii_alphabetic() && first != '_' {
-        anyhow::bail!(
-            "invalid package name '{trimmed}': first character must be a letter or '_'"
-        );
+        anyhow::bail!("invalid package name '{trimmed}': first character must be a letter or '_'");
     }
 
     if let Some((idx, ch)) = normalized
@@ -55,9 +53,9 @@ pub enum EmitMode {
 pub fn build_cmd(input: &Path, out_dir: Option<&Path>, emit: EmitMode) -> Result<()> {
     use anyhow::Context;
     use std::fs;
-    
-    let src = fs::read_to_string(input)
-        .with_context(|| format!("failed to read {}", input.display()))?;
+
+    let src =
+        fs::read_to_string(input).with_context(|| format!("failed to read {}", input.display()))?;
 
     let sfc = velox_sfc::parse_sfc(&src).map_err(|e| anyhow::anyhow!(e))?;
 
@@ -78,7 +76,7 @@ pub fn build_cmd(input: &Path, out_dir: Option<&Path>, emit: EmitMode) -> Result
                 .as_ref()
                 .map(|t| t.content.as_str())
                 .unwrap_or("");
-            let render_fn = velox_sfc::compile_template_to_rs(tpl_src, name)
+            let render_fn = velox_sfc::compile_template_to_rs(tpl_src, name, None)
                 .map_err(|e| anyhow::anyhow!(e))?;
             let stub = velox_sfc::to_stub_rs(&sfc, name);
             let indented = render_fn
@@ -87,18 +85,18 @@ pub fn build_cmd(input: &Path, out_dir: Option<&Path>, emit: EmitMode) -> Result
                 .collect::<Vec<_>>()
                 .join("\n");
             if let Some(pos) = stub.rfind("\n}\n") {
-                let before = &stub[..pos+1];
-                let after = &stub[pos+1..];
+                let before = &stub[..pos + 1];
+                let after = &stub[pos + 1..];
                 code.push_str(before);
-                code.push_str("\n");
+                code.push('\n');
                 code.push_str(&indented);
-                code.push_str("\n");
+                code.push('\n');
                 code.push_str(after);
             } else {
                 code.push_str(&stub);
-                code.push_str("\n");
+                code.push('\n');
                 code.push_str(&render_fn);
-                code.push_str("\n");
+                code.push('\n');
             }
         }
     }

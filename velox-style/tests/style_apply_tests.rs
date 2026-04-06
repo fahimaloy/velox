@@ -1,5 +1,5 @@
 use velox_dom::{h, text, Props, VNode};
-use velox_style::{Stylesheet, apply_styles};
+use velox_style::{apply_styles, Stylesheet};
 
 #[test]
 fn applies_tag_and_class_rules() {
@@ -40,7 +40,9 @@ div { color: blue; }
         let style = props.attrs.get("style").unwrap();
         // Our simple merger creates deterministic order by key; just assert final value
         assert!(style.contains("color: red;"));
-    } else { panic!("expected element"); }
+    } else {
+        panic!("expected element");
+    }
 }
 
 #[test]
@@ -53,7 +55,10 @@ fn children_receive_styles_recursively() {
         if let VNode::Element { props, .. } = &children[0] {
             let style = props.attrs.get("style").unwrap();
             assert!(style.contains("color: green;"));
-        } else { panic!("expected span element"); }
-    } else { panic!("expected div element"); }
+        } else {
+            panic!("expected span element");
+        }
+    } else {
+        panic!("expected div element");
+    }
 }
-

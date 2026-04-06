@@ -4,7 +4,7 @@ use std::path::PathBuf;
 #[test]
 fn cli_build_emits_stub_file() {
     let manifest_dir = env!("CARGO_MANIFEST_DIR");
-    let input = PathBuf::from(manifest_dir).join("../examples/todo/src/App.vx");
+    let input = PathBuf::from(manifest_dir).join("templates/project/src/App.vx");
 
     let out_dir = PathBuf::from(manifest_dir)
         .join("../target/velox-cli-tests")
@@ -15,13 +15,16 @@ fn cli_build_emits_stub_file() {
 
     let out_file = out_dir.join("App.rs");
     let content = fs::read_to_string(&out_file).expect("read stub output");
-    assert!(content.contains("pub const TEMPLATE"), "stub should contain TEMPLATE const");
+    assert!(
+        content.contains("pub const TEMPLATE"),
+        "stub should contain TEMPLATE const"
+    );
 }
 
 #[test]
 fn cli_build_emits_render_fn() {
     let manifest_dir = env!("CARGO_MANIFEST_DIR");
-    let input = PathBuf::from(manifest_dir).join("../examples/todo/src/App.vx");
+    let input = PathBuf::from(manifest_dir).join("templates/project/src/App.vx");
 
     let out_dir = PathBuf::from(manifest_dir)
         .join("../target/velox-cli-tests")
@@ -32,6 +35,8 @@ fn cli_build_emits_render_fn() {
 
     let out_file = out_dir.join("App.rs");
     let content = fs::read_to_string(&out_file).expect("read render output");
-    assert!(content.contains("pub fn render()"), "render mode should include render() fn");
+    assert!(
+        content.contains("pub fn render()"),
+        "render mode should include render() fn"
+    );
 }
-

@@ -1,0 +1,6 @@
+# Clippy configuration
+too-many-arguments-threshold = 8
+cognitive-complexity-threshold = 25
+
+# Allow type complexity for inherent patterns
+type-complexity-threshold = 300

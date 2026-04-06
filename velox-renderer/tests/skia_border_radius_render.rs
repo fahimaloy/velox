@@ -12,13 +12,18 @@ fn render_border_radius_vnode_checksum() {
     let vnode = h(
         "div",
         vec![("style", "background-color:#FFFFFF;border-radius:12px")],
-        vec![h("div", vec![("style", "background-color:#FF0000")], vec![])],
+        vec![h(
+            "div",
+            vec![("style", "background-color:#FF0000")],
+            vec![],
+        )],
     );
 
-    let png = match velox_renderer::render_vnode_to_raster_png(&vnode, &Stylesheet::default(), 64, 64) {
-        Ok(b) => b,
-        Err(e) => panic!("render failed: {}", e),
-    };
+    let png =
+        match velox_renderer::render_vnode_to_raster_png(&vnode, &Stylesheet::default(), 64, 64) {
+            Ok(b) => b,
+            Err(e) => panic!("render failed: {}", e),
+        };
 
     let checksum = fnv1a(&png);
     println!("border-radius checksum: 0x{checksum:08x}");

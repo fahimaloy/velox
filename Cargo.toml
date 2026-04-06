@@ -7,10 +7,4 @@ members = [
     "velox-renderer",
     "velox-style",
     "velox-cli",
-    "examples/todo",
-    "examples/gallery",
-
-    "examples/myapp",
-    "examples/interactive_skia",
-    "examples/vx_demo",
 ]

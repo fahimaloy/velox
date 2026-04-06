@@ -163,7 +163,10 @@ fn lint_directory(dir: &std::path::Path) -> Result<()> {
     if file_count == 0 {
         println!("⚠️  No .vx files found in {}", dir.display());
     } else {
-        println!("\n📊 Lint results: {} files, {} errors", file_count, error_count);
+        println!(
+            "\n📊 Lint results: {} files, {} errors",
+            file_count, error_count
+        );
     }
 
     if error_count > 0 {

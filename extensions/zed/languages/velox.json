@@ -1,0 +1,18 @@
+[
+  {
+    "language": "Velox",
+    "file_types": ["Velox"],
+    "name": "velox",
+    "grammar": "velox",
+    "path_suffixes": [".vx"],
+    "line_comments": ["// ", "/* ", " */"],
+    "brackets": {
+      "pairs": [
+        { "open": "{", "close": "}" },
+        { "open": "[", "close": "]" },
+        { "open": "(", "close": ")" },
+        { "open": "<", "close": ">" }
+      ]
+    }
+  }
+]

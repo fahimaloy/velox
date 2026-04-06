@@ -16,12 +16,12 @@
 
 #[cfg(all(feature = "skia-native", unix))]
 mod unix_impl {
-    use std::ptr;
     use std::os::raw::c_void;
+    use std::ptr;
 
-    use skia_safe as sk;
-    use raw_window_handle::{HasRawWindowHandle, RawWindowHandle};
     use glow::HasContext;
+    use raw_window_handle::{HasRawWindowHandle, RawWindowHandle};
+    use skia_safe as sk;
 
     pub struct SkiaGlContext {
         // EGL handles
@@ -33,13 +33,13 @@ mod unix_impl {
 
     impl SkiaGlContext {
         pub fn into_direct_context(&self) -> Option<skia_safe::gpu::DirectContext> {
-                let iface = match &self.interface {
-                    Some(i) => i,
-                    None => return None,
-                };
-                // Use the newer helper for creating a GL-backed DirectContext
-                skia_safe::gpu::direct_contexts::make_gl(iface, None)
-            }
+            let iface = match &self.interface {
+                Some(i) => i,
+                None => return None,
+            };
+            // Use the newer helper for creating a GL-backed DirectContext
+            skia_safe::gpu::direct_contexts::make_gl(iface, None)
+        }
 
         pub fn make_current(&self) -> Result<(), String> {
             if egl::make_current(
@@ -59,7 +59,12 @@ mod unix_impl {
         fn drop(&mut self) {
             // Make no context current and destroy EGL resources. Best-effort cleanup;
             // errors are ignored because this is a destructor.
-            let _ = egl::make_current(self.egl_display, egl::EGL_NO_SURFACE, egl::EGL_NO_SURFACE, egl::EGL_NO_CONTEXT);
+            let _ = egl::make_current(
+                self.egl_display,
+                egl::EGL_NO_SURFACE,
+                egl::EGL_NO_SURFACE,
+                egl::EGL_NO_CONTEXT,
+            );
             egl::destroy_surface(self.egl_display, self.egl_surface);
             egl::destroy_context(self.egl_display, self.egl_context);
             egl::terminate(self.egl_display);
@@ -68,19 +73,27 @@ mod unix_impl {
 
     fn choose_egl_config(dpy: egl::EGLDisplay) -> Option<egl::EGLConfig> {
         let attribs: &[egl::EGLint] = &[
-            egl::EGL_RED_SIZE as egl::EGLint, 8,
-            egl::EGL_GREEN_SIZE as egl::EGLint, 8,
-            egl::EGL_BLUE_SIZE as egl::EGLint, 8,
-            egl::EGL_ALPHA_SIZE as egl::EGLint, 8,
-            egl::EGL_DEPTH_SIZE as egl::EGLint, 24,
-            egl::EGL_STENCIL_SIZE as egl::EGLint, 8,
+            egl::EGL_RED_SIZE as egl::EGLint,
+            8,
+            egl::EGL_GREEN_SIZE as egl::EGLint,
+            8,
+            egl::EGL_BLUE_SIZE as egl::EGLint,
+            8,
+            egl::EGL_ALPHA_SIZE as egl::EGLint,
+            8,
+            egl::EGL_DEPTH_SIZE as egl::EGLint,
+            24,
+            egl::EGL_STENCIL_SIZE as egl::EGLint,
+            8,
             egl::EGL_NONE as egl::EGLint,
         ];
         // use helper from the egl crate
         egl::choose_config(dpy, attribs, 1)
     }
 
-    pub fn create_context_from_winit(window: &impl HasRawWindowHandle) -> Result<SkiaGlContext, String> {
+    pub fn create_context_from_winit(
+        window: &impl HasRawWindowHandle,
+    ) -> Result<SkiaGlContext, String> {
         // Acquire raw handle (currently unused) and implement a minimal EGL init path.
         let _raw = window.raw_window_handle();
 
@@ -93,7 +106,10 @@ mod unix_impl {
         let mut major: egl::EGLint = 0;
         let mut minor: egl::EGLint = 0;
         if !egl::initialize(display, &mut major, &mut minor) {
-            eprintln!("[skia_gl] egl: failed to initialize (major={}, minor={})", major, minor);
+            eprintln!(
+                "[skia_gl] egl: failed to initialize (major={}, minor={})",
+                major, minor
+            );
             return Err("egl: failed to initialize".into());
         }
 
@@ -104,12 +120,24 @@ mod unix_impl {
         })?;
 
         // Create an EGL context
-        let ctx_attribs: &[egl::EGLint] = &[egl::EGL_CONTEXT_CLIENT_VERSION as egl::EGLint, 2, egl::EGL_NONE as egl::EGLint];
-        let context = egl::create_context(display, config, egl::EGL_NO_CONTEXT, ctx_attribs).ok_or_else(|| "egl: failed to create context".to_string())?;
+        let ctx_attribs: &[egl::EGLint] = &[
+            egl::EGL_CONTEXT_CLIENT_VERSION as egl::EGLint,
+            2,
+            egl::EGL_NONE as egl::EGLint,
+        ];
+        let context = egl::create_context(display, config, egl::EGL_NO_CONTEXT, ctx_attribs)
+            .ok_or_else(|| "egl: failed to create context".to_string())?;
 
         // Create a pbuffer surface as a default headless surface
-        let pbuffer_attribs: &[egl::EGLint] = &[egl::EGL_WIDTH as egl::EGLint, 1, egl::EGL_HEIGHT as egl::EGLint, 1, egl::EGL_NONE as egl::EGLint];
-        let surface = egl::create_pbuffer_surface(display, config, pbuffer_attribs).ok_or_else(|| "egl: failed to create pbuffer surface".to_string())?;
+        let pbuffer_attribs: &[egl::EGLint] = &[
+            egl::EGL_WIDTH as egl::EGLint,
+            1,
+            egl::EGL_HEIGHT as egl::EGLint,
+            1,
+            egl::EGL_NONE as egl::EGLint,
+        ];
+        let surface = egl::create_pbuffer_surface(display, config, pbuffer_attribs)
+            .ok_or_else(|| "egl: failed to create pbuffer surface".to_string())?;
 
         // Make context current
         if !egl::make_current(display, surface, surface, context) {
@@ -119,11 +147,13 @@ mod unix_impl {
         }
 
         // Build skia-safe GL interface from current GL funcs
-        let interface = unsafe { skia_safe::gpu::gl::Interface::new_load_with(|name: &str| {
-            // Use EGL's get_proc_address to load GL symbols
-            let f = egl::get_proc_address(name);
-            f as *const _
-        }) };
+        let interface = unsafe {
+            skia_safe::gpu::gl::Interface::new_load_with(|name: &str| {
+                // Use EGL's get_proc_address to load GL symbols
+                let f = egl::get_proc_address(name);
+                f as *const _
+            })
+        };
 
         let iface = match interface {
             Some(i) => i,
@@ -148,7 +178,10 @@ mod unix_impl {
         let mut major: egl::EGLint = 0;
         let mut minor: egl::EGLint = 0;
         if !egl::initialize(display, &mut major, &mut minor) {
-            eprintln!("[skia_gl] egl: failed to initialize (major={}, minor={})", major, minor);
+            eprintln!(
+                "[skia_gl] egl: failed to initialize (major={}, minor={})",
+                major, minor
+            );
             return Err("egl: failed to initialize".into());
         }
 
@@ -158,11 +191,23 @@ mod unix_impl {
             msg
         })?;
 
-        let ctx_attribs: &[egl::EGLint] = &[egl::EGL_CONTEXT_CLIENT_VERSION as egl::EGLint, 2, egl::EGL_NONE as egl::EGLint];
-        let context = egl::create_context(display, config, egl::EGL_NO_CONTEXT, ctx_attribs).ok_or_else(|| "egl: failed to create context".to_string())?;
+        let ctx_attribs: &[egl::EGLint] = &[
+            egl::EGL_CONTEXT_CLIENT_VERSION as egl::EGLint,
+            2,
+            egl::EGL_NONE as egl::EGLint,
+        ];
+        let context = egl::create_context(display, config, egl::EGL_NO_CONTEXT, ctx_attribs)
+            .ok_or_else(|| "egl: failed to create context".to_string())?;
 
-        let pbuffer_attribs: &[egl::EGLint] = &[egl::EGL_WIDTH as egl::EGLint, 1, egl::EGL_HEIGHT as egl::EGLint, 1, egl::EGL_NONE as egl::EGLint];
-        let surface = egl::create_pbuffer_surface(display, config, pbuffer_attribs).ok_or_else(|| "egl: failed to create pbuffer surface".to_string())?;
+        let pbuffer_attribs: &[egl::EGLint] = &[
+            egl::EGL_WIDTH as egl::EGLint,
+            1,
+            egl::EGL_HEIGHT as egl::EGLint,
+            1,
+            egl::EGL_NONE as egl::EGLint,
+        ];
+        let surface = egl::create_pbuffer_surface(display, config, pbuffer_attribs)
+            .ok_or_else(|| "egl: failed to create pbuffer surface".to_string())?;
 
         if !egl::make_current(display, surface, surface, context) {
             egl::destroy_surface(display, surface);
@@ -170,10 +215,12 @@ mod unix_impl {
             return Err("egl: make_current failed".into());
         }
 
-        let interface = unsafe { skia_safe::gpu::gl::Interface::new_load_with(|name: &str| {
-            let f = egl::get_proc_address(name);
-            f as *const _
-        }) };
+        let interface = unsafe {
+            skia_safe::gpu::gl::Interface::new_load_with(|name: &str| {
+                let f = egl::get_proc_address(name);
+                f as *const _
+            })
+        };
 
         let iface = match interface {
             Some(i) => i,
@@ -193,7 +240,10 @@ mod unix_impl {
     pub fn draw_test_frame() -> Result<(), String> {
         // Try to create a DirectContext; if it fails, continue with raster fallback.
         let dctx = match skia_safe::gpu::direct_contexts::make_gl(
-            &create_headless_context()?.interface.clone().ok_or_else(|| "no gl interface".to_string())?,
+            &create_headless_context()?
+                .interface
+                .clone()
+                .ok_or_else(|| "no gl interface".to_string())?,
             None,
         ) {
             Some(dc) => Some(dc),
@@ -227,7 +277,9 @@ mod unix_impl {
         // Create headless context and DirectContext
         let gl_ctx = create_headless_context()?;
         let _ = gl_ctx.make_current();
-        let mut dctx = gl_ctx.into_direct_context().ok_or_else(|| "skia: could not create DirectContext".to_string())?;
+        let mut dctx = gl_ctx
+            .into_direct_context()
+            .ok_or_else(|| "skia: could not create DirectContext".to_string())?;
 
         // Attempt to build a GPU-backed Surface using the current framebuffer.
         let mut surface = {
@@ -240,12 +292,8 @@ mod unix_impl {
                 format: glow::RGBA8,
                 protected: skia_safe::gpu::Protected::No,
             };
-            let backend = skia_safe::gpu::backend_render_targets::make_gl(
-                (width, height),
-                0,
-                8,
-                fb_info,
-            );
+            let backend =
+                skia_safe::gpu::backend_render_targets::make_gl((width, height), 0, 8, fb_info);
             skia_safe::gpu::surfaces::wrap_backend_render_target(
                 &mut dctx,
                 &backend,
@@ -286,11 +334,14 @@ pub use unix_impl::*;
 /// Convenience: create a `skia_safe::gpu::DirectContext` from a headless EGL context.
 pub fn create_direct_context() -> Result<skia_safe::gpu::DirectContext, String> {
     let ctx = unix_impl::create_headless_context()?;
-    ctx.into_direct_context().ok_or_else(|| "skia: could not create DirectContext".to_string())
+    ctx.into_direct_context()
+        .ok_or_else(|| "skia: could not create DirectContext".to_string())
 }
 
 #[cfg(not(all(feature = "skia-native", unix)))]
-pub struct SkiaGlContext { _private: () }
+pub struct SkiaGlContext {
+    _private: (),
+}
 
 #[cfg(not(all(feature = "skia-native", unix)))]
 pub fn create_context() -> Result<SkiaGlContext, String> {

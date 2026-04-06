@@ -33,7 +33,10 @@ pub fn lint_directory(dir: &Path) -> Result<()> {
         }
     }
 
-    println!("\n📊 Lint results: {} files, {} errors", file_count, error_count);
+    println!(
+        "\n📊 Lint results: {} files, {} errors",
+        file_count, error_count
+    );
 
     if error_count > 0 {
         Err(anyhow::anyhow!("Lint failed with {} errors", error_count))

@@ -15,10 +15,11 @@ fn render_border_vnode_checksum() {
         vec![],
     );
 
-    let png = match velox_renderer::render_vnode_to_raster_png(&vnode, &Stylesheet::default(), 64, 64) {
-        Ok(b) => b,
-        Err(e) => panic!("render failed: {}", e),
-    };
+    let png =
+        match velox_renderer::render_vnode_to_raster_png(&vnode, &Stylesheet::default(), 64, 64) {
+            Ok(b) => b,
+            Err(e) => panic!("render failed: {}", e),
+        };
 
     let checksum = fnv1a(&png);
     println!("border checksum: 0x{checksum:08x}");
