@@ -1,7 +1,7 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use crate::signal::effect;
+use crate::signal::{effect, EffectHandle};
 
 /// Watch a reactive source and call `callback(new, old)` when it changes.
 /// - Runs the source once to capture dependencies (no callback on first run)
@@ -16,11 +16,19 @@ pub struct WatchOptions {
 }
 
 pub struct WatchHandle {
-    // Placeholder for future cleanup
+    effect_handle: EffectHandle,
 }
 
 impl WatchHandle {
-    pub fn stop(self) {}
+    /// Stop watching - the callback will no longer be invoked.
+    pub fn stop(&self) {
+        self.effect_handle.stop();
+    }
+
+    /// Check if the watch is still active.
+    pub fn is_active(&self) -> bool {
+        self.effect_handle.is_active()
+    }
 }
 
 pub fn watch<T, S, F>(mut source: S, callback: F, options: WatchOptions) -> WatchHandle
@@ -31,7 +39,7 @@ where
 {
     let prev: Rc<RefCell<Option<T>>> = Rc::new(RefCell::new(None));
 
-    effect({
+    let handle = effect({
         let prev = prev.clone();
         let mut callback = callback;
         move || {
@@ -59,13 +67,13 @@ where
             }
         }
     });
-    WatchHandle {}
+    WatchHandle { effect_handle: handle }
 }
 
 pub fn watch_effect<F>(f: F, _options: WatchOptions) -> WatchHandle
 where
     F: FnMut() + 'static,
 {
-    effect(f);
-    WatchHandle {}
+    let handle = effect(f);
+    WatchHandle { effect_handle: handle }
 }

@@ -11,7 +11,15 @@ use crossterm::{
 };
 use serde_json;
 use std::io::{self, Stdout, Write};
+
+// Platform-specific socket imports
+#[cfg(unix)]
 use std::os::unix::net::UnixStream;
+#[cfg(windows)]
+use std::os::windows::io::{AsRawHandle, FromRawHandle};
+#[cfg(windows)]
+use std::fs::OpenOptions;
+
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::mpsc;
@@ -287,11 +295,37 @@ impl DevServerUI {
     }
 }
 
+#[cfg(unix)]
 fn send_hmr_message(socket_path: &Path, msg: &HmrMessage) -> Result<()> {
     let mut stream = UnixStream::connect(socket_path)?;
     let json = serde_json::to_vec(msg)?;
     stream.write_all(&json)?;
     Ok(())
+}
+
+#[cfg(windows)]
+fn send_hmr_message(socket_path: &Path, msg: &HmrMessage) -> Result<()> {
+    // On Windows, use named pipes
+    use std::io::Read;
+    let pipe_name = format!("\\\\.\\pipe\\{}", socket_path.file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("velox-hmr"));
+    
+    // Try to connect to existing pipe
+    let mut stream = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&pipe_name)?;
+    
+    let json = serde_json::to_vec(msg)?;
+    stream.write_all(&json)?;
+    Ok(())
+}
+
+#[cfg(not(any(unix, windows)))]
+fn send_hmr_message(_socket_path: &Path, _msg: &HmrMessage) -> Result<()> {
+    // Fallback for unsupported platforms
+    anyhow::bail!("HMR not supported on this platform")
 }
 
 /// Dev server with hot reload
@@ -345,7 +379,7 @@ pub fn dev_app_hmr(pkg: &str, watch_dir: &Path) -> Result<()> {
         } else {
             cmd.args(["run", "-p", pkg]);
         }
-        cmd.arg("--hmr-socket").arg(&socket_path);
+        cmd.arg("--").arg("--hmr-socket").arg(&socket_path);
         cmd.stdin(Stdio::null())
             .stdout(Stdio::inherit())
             .stderr(Stdio::inherit());
@@ -381,7 +415,7 @@ pub fn dev_app_hmr(pkg: &str, watch_dir: &Path) -> Result<()> {
                     } else {
                         new_cmd.args(["run", "-p", pkg]);
                     }
-                    new_cmd.arg("--hmr-socket").arg(&socket_path);
+                    new_cmd.arg("--").arg("--hmr-socket").arg(&socket_path);
                     new_cmd
                         .stdin(Stdio::null())
                         .stdout(Stdio::inherit())
@@ -451,7 +485,7 @@ pub fn dev_app_hmr(pkg: &str, watch_dir: &Path) -> Result<()> {
             } else {
                 new_cmd.args(["run", "-p", pkg]);
             }
-            new_cmd.arg("--hmr-socket").arg(&socket_path);
+            new_cmd.arg("--").arg("--hmr-socket").arg(&socket_path);
             new_cmd
                 .stdin(Stdio::null())
                 .stdout(Stdio::inherit())

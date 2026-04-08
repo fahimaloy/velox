@@ -8,6 +8,8 @@
 //! - Style inheritance and cascading
 
 pub mod fonts;
+pub mod properties;
+pub mod units;
 pub mod visual_effects;
 
 // Re-export types from velox-dom

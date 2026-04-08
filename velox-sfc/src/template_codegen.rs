@@ -77,8 +77,10 @@ pub fn compile_template_to_rs(
 }
 
 pub fn render_with_props(props: std::collections::HashMap<&str, String>) -> velox_dom::VNode {
-    let _ = props;
-    render()
+    let resolve_props = |key: &str| -> String {
+        props.get(key).cloned().unwrap_or_default()
+    };
+    render_with(resolve_props)
 }"#
         .to_string());
     }
@@ -121,8 +123,10 @@ pub fn render_with<F>(mut resolve: F) -> velox_dom::VNode where F: FnMut(&str) -
     out.push_str("\n\n");
     out.push_str(
         r#"pub fn render_with_props(props: std::collections::HashMap<&str, String>) -> velox_dom::VNode {
-    let _ = props;
-    render()
+    let resolve_props = |key: &str| -> String {
+        props.get(key).cloned().unwrap_or_default()
+    };
+    render_with(resolve_props)
 }"#,
     );
 
@@ -434,7 +438,7 @@ fn emit_node_with(n: &Node) -> String {
                     // and access items via indexing
                     let mut loop_code = String::new();
                     loop_code
-                        .push_str("{ let mut temp_children: Vec<velox_dom::VNode> = Vec::new();\n");
+                        .push_str("{ let mut __children: Vec<velox_dom::VNode> = Vec::new();\n");
                     loop_code.push_str(&format!(
                         "let __for_expr = resolve(\"{}\");\n",
                         for_info.expr
@@ -477,7 +481,7 @@ fn emit_node_with(n: &Node) -> String {
                     }
 
                     loop_code.push_str("}\n");
-                    loop_code.push_str("temp_children }");
+                    loop_code.push_str("__children; }");
 
                     return loop_code;
                 }
@@ -1181,7 +1185,7 @@ fn emit_node_with_ctx_for_loop(n: &Node, for_info: &VForInfo) -> String {
             if key == for_info.item_name {
                 // Direct item reference: use indexed access via resolve
                 return format!(
-                    r#"text(&{{ let s = resolve("{}[{{}}]", {}); s }})"#,
+                    r#"text(&resolve(&format!("{}[{{}}]", {})))"#,
                     for_info.expr, for_info.index_name
                 );
             }
@@ -1192,7 +1196,7 @@ fn emit_node_with_ctx_for_loop(n: &Node, for_info: &VForInfo) -> String {
             {
                 let prop_path = &key[for_info.item_name.len()..];
                 return format!(
-                    r#"text(&{{ let s = resolve("{expr}[{{}}]{prop_path}", {idx}); s }})"#,
+                    r#"text(&resolve(&format!("{expr}[{{}}]{prop_path}", {idx})))"#,
                     expr = for_info.expr,
                     idx = for_info.index_name,
                 );

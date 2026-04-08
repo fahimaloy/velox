@@ -103,8 +103,9 @@ impl Default for Border {
 }
 
 /// Text alignment
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum TextAlign {
+    #[default]
     Left,
     Center,
     Right,
@@ -123,15 +124,10 @@ impl TextAlign {
     }
 }
 
-impl Default for TextAlign {
-    fn default() -> Self {
-        TextAlign::Left
-    }
-}
-
 /// Font weight
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub enum FontWeight {
+    #[default]
     Normal,
     Bold,
     Bolder,
@@ -162,15 +158,10 @@ impl FontWeight {
     }
 }
 
-impl Default for FontWeight {
-    fn default() -> Self {
-        FontWeight::Normal
-    }
-}
-
 /// Text decoration
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum TextDecoration {
+    #[default]
     None,
     Underline,
     Overline,
@@ -189,15 +180,10 @@ impl TextDecoration {
     }
 }
 
-impl Default for TextDecoration {
-    fn default() -> Self {
-        TextDecoration::None
-    }
-}
-
 /// Flex wrap
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum FlexWrap {
+    #[default]
     NoWrap,
     Wrap,
     WrapReverse,
@@ -211,12 +197,6 @@ impl FlexWrap {
             "wrap-reverse" => Some(FlexWrap::WrapReverse),
             _ => None,
         }
-    }
-}
-
-impl Default for FlexWrap {
-    fn default() -> Self {
-        FlexWrap::NoWrap
     }
 }
 
@@ -291,8 +271,9 @@ pub struct ComputedStyle {
 }
 
 /// Box sizing
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum BoxSizing {
+    #[default]
     ContentBox,
     BorderBox,
 }
@@ -307,15 +288,10 @@ impl BoxSizing {
     }
 }
 
-impl Default for BoxSizing {
-    fn default() -> Self {
-        BoxSizing::ContentBox
-    }
-}
-
 /// Visibility
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Visibility {
+    #[default]
     Visible,
     Hidden,
     Collapse,
@@ -329,12 +305,6 @@ impl Visibility {
             "collapse" => Some(Visibility::Collapse),
             _ => None,
         }
-    }
-}
-
-impl Default for Visibility {
-    fn default() -> Self {
-        Visibility::Visible
     }
 }
 
@@ -758,11 +728,9 @@ impl ComputedStyle {
             "line-height" => {
                 if let Ok(lh) = value.parse::<f32>() {
                     self.line_height = Some(lh);
-                } else if let Some(l) = Length::parse(value) {
+                } else if let Some(Length::Px(px)) = Length::parse(value) {
                     // Could store as Length, keeping it simple for now
-                    if let Length::Px(px) = l {
-                        self.line_height = Some(px);
-                    }
+                    self.line_height = Some(px);
                 }
             }
             "letter-spacing" => {

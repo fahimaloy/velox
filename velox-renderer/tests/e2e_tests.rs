@@ -25,15 +25,15 @@ fn end_to_end_reactive_updates_and_mount() {
     // Current VNode tree stored in a cell, recomputed from signals via effect
     let current: Rc<RefCell<VNode>> = Rc::new(RefCell::new(apply_styles(&view(0), &ss)));
 
-    {
+    let _handle = {
         let count = count.clone();
         let current = current.clone();
         effect(move || {
             let v = view(count.get());
             let styled = apply_styles(&v, &ss);
             *current.borrow_mut() = styled;
-        });
-    }
+        })
+    };
 
     // Initial tree should reflect 0 and carry style
     if let VNode::Element {

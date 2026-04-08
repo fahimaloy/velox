@@ -143,6 +143,7 @@ mod unix_impl {
         if !egl::make_current(display, surface, surface, context) {
             egl::destroy_surface(display, surface);
             egl::destroy_context(display, context);
+            egl::terminate(display);
             return Err("egl: make_current failed".into());
         }
 
@@ -212,6 +213,7 @@ mod unix_impl {
         if !egl::make_current(display, surface, surface, context) {
             egl::destroy_surface(display, surface);
             egl::destroy_context(display, context);
+            egl::terminate(display);
             return Err("egl: make_current failed".into());
         }
 

@@ -1,7 +1,11 @@
 [package]
 name = "velox-core"
-version = "0.1.1"
+version = "0.1.0"
 edition = "2024"
+license = "MIT"
+description = "Core reactive primitives for the Velox UI framework"
+authors = ["fahimaloy"]
+repository = "https://github.com/fahimaloy/velox"
 publish = false
 
 [dependencies]

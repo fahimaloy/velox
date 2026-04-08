@@ -1232,11 +1232,10 @@ pub fn compute_layout(node: &VNode, viewport_w: i32, viewport_h: i32) -> LayoutN
                                 main_offset
                                     + start_offset
                                     + line_idx as f32 * (items[item_idx].flex_basis + start_offset)
-                                    + start_offset
                             } else if justify_content == "space-around" {
-                                let _half_gap = start_offset / 2.0;
+                                let half_gap = start_offset / 2.0;
                                 if line_idx == 0 {
-                                    main_offset
+                                    main_offset + half_gap
                                 } else {
                                     let prev_size = items[line.items[line_idx - 1]].flex_basis;
                                     let prev_pos = if line_idx == 1 {

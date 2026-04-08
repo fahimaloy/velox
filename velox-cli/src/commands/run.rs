@@ -11,8 +11,12 @@ pub fn run_app(pkg: &str) -> Result<()> {
 }
 
 /// Run the current project
-pub fn run_current() -> Result<()> {
-    let status = Command::new("cargo").arg("run").status()?;
+pub fn run_current(release: bool) -> Result<()> {
+    let mut args = vec!["run"];
+    if release {
+        args.push("--release");
+    }
+    let status = Command::new("cargo").args(&args).status()?;
     if !status.success() {
         anyhow::bail!("run failed")
     }

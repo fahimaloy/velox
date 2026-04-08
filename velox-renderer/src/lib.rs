@@ -25,6 +25,9 @@ mod skia_gl;
 mod skia_render;
 #[cfg(feature = "skia-native")]
 mod skia_surface;
+// Softbuffer presenter for window rendering (feature-gated)
+#[cfg(feature = "skia-native")]
+mod presenter;
 #[cfg(feature = "skia-native")]
 pub use skia_render::{render_vnode_to_raster_png, render_vnode_to_raster_png_with_scale};
 
@@ -319,6 +322,7 @@ pub mod skia_backend {
 
     pub struct SkiaRenderer {
         pub surface: Option<skia_surface::SkiaSurface>,
+        pub vnode: Option<VNode>,
     }
 
     impl SkiaRenderer {
@@ -328,7 +332,7 @@ pub mod skia_backend {
             height: i32,
         ) -> Result<Self, String> {
             match skia_surface::create_window_surface_from_handle(window, width, height) {
-                Ok(s) => Ok(SkiaRenderer { surface: Some(s) }),
+                Ok(s) => Ok(SkiaRenderer { surface: Some(s), vnode: None }),
                 Err(e) => Err(e),
             }
         }
@@ -360,7 +364,8 @@ pub mod skia_backend {
     }
 
     impl HmrRenderer for SkiaRenderer {
-        fn hot_update(&mut self, _new_vnode: VNode) -> Result<(), String> {
+        fn hot_update(&mut self, new_vnode: VNode) -> Result<(), String> {
+            self.vnode = Some(new_vnode);
             Ok(())
         }
 
@@ -434,7 +439,7 @@ pub fn new_selected_renderer() -> SelectedRenderer {
     #[cfg(all(not(feature = "wgpu"), feature = "skia"))]
     {
         // Construct SkiaRenderer with no surface for the default selected renderer.
-        skia_backend::SkiaRenderer { surface: None }
+        skia_backend::SkiaRenderer { surface: None, vnode: None }
     }
     #[cfg(all(not(feature = "wgpu"), not(feature = "skia")))]
     {
@@ -472,101 +477,6 @@ pub fn run_window_vnode_skia<F, G, H>(
     use winit::event_loop::{ControlFlow, EventLoop};
     use winit::window::WindowBuilder;
 
-    struct SoftbufferPresenter {
-        _context: softbuffer::Context,
-        surface: softbuffer::Surface,
-        width: u32,
-        height: u32,
-        rgba: Vec<u8>,
-    }
-
-    impl SoftbufferPresenter {
-        fn new(window: &winit::window::Window, width: u32, height: u32) -> Result<Self, String> {
-            let context = unsafe {
-                softbuffer::Context::new(window)
-                    .map_err(|e| format!("softbuffer context failed: {}", e))?
-            };
-            let mut surface = unsafe {
-                softbuffer::Surface::new(&context, window)
-                    .map_err(|e| format!("softbuffer surface failed: {}", e))?
-            };
-            let w = width.max(1);
-            let h = height.max(1);
-            surface
-                .resize(
-                    std::num::NonZeroU32::new(w).unwrap(),
-                    std::num::NonZeroU32::new(h).unwrap(),
-                )
-                .map_err(|e| format!("softbuffer resize failed: {}", e))?;
-            Ok(Self {
-                _context: context,
-                surface,
-                width: w,
-                height: h,
-                rgba: vec![0u8; (w as usize) * (h as usize) * 4],
-            })
-        }
-
-        fn resize(&mut self, width: u32, height: u32) -> Result<(), String> {
-            let w = width.max(1);
-            let h = height.max(1);
-            if w == self.width && h == self.height {
-                return Ok(());
-            }
-            self.surface
-                .resize(
-                    std::num::NonZeroU32::new(w).unwrap(),
-                    std::num::NonZeroU32::new(h).unwrap(),
-                )
-                .map_err(|e| format!("softbuffer resize failed: {}", e))?;
-            self.width = w;
-            self.height = h;
-            self.rgba.resize((w as usize) * (h as usize) * 4, 0);
-            Ok(())
-        }
-
-        fn present(
-            &mut self,
-            skia_surface: &mut crate::skia_surface::SkiaSurface,
-        ) -> Result<(), String> {
-            let width = skia_surface.width.max(1) as u32;
-            let height = skia_surface.height.max(1) as u32;
-            self.resize(width, height)?;
-
-            let info = skia_safe::ImageInfo::new(
-                (self.width as i32, self.height as i32),
-                skia_safe::ColorType::RGBA8888,
-                skia_safe::AlphaType::Premul,
-                None,
-            );
-            let row_bytes = (self.width * 4) as usize;
-            if !skia_surface.read_pixels(&info, &mut self.rgba, row_bytes, (0, 0)) {
-                return Err("skia: read_pixels failed".to_string());
-            }
-
-            let mut buffer = self
-                .surface
-                .buffer_mut()
-                .map_err(|e| format!("softbuffer buffer_mut failed: {}", e))?;
-            let pixels: &mut [u32] = &mut buffer;
-            let pixel_count = (self.width as usize) * (self.height as usize);
-            if pixels.len() < pixel_count {
-                return Err("softbuffer: buffer smaller than expected".to_string());
-            }
-            for (i, pixel) in pixels.iter_mut().take(pixel_count).enumerate() {
-                let base = i * 4;
-                let r = self.rgba[base] as u32;
-                let g = self.rgba[base + 1] as u32;
-                let b = self.rgba[base + 2] as u32;
-                *pixel = (r << 16) | (g << 8) | b;
-            }
-            buffer
-                .present()
-                .map_err(|e| format!("softbuffer present failed: {}", e))?;
-            Ok(())
-        }
-    }
-
     let event_loop = EventLoop::new();
     let mut _last_vnode: Option<velox_dom::VNode> = None;
     let mut _hmr_pending = false;
@@ -581,12 +491,19 @@ pub fn run_window_vnode_skia<F, G, H>(
         match crate::skia_surface::SkiaSurface::new_raster(size.width as i32, size.height as i32) {
             Ok(surface) => skia_backend::SkiaRenderer {
                 surface: Some(surface),
+                vnode: None,
             },
-            Err(e) => panic!("failed to create SkiaSurface: {}", e),
+                        Err(e) => {
+                eprintln!("failed to create SkiaSurface: {}", e);
+                return;
+            }
         };
-    let mut presenter = match SoftbufferPresenter::new(&window, size.width, size.height) {
+    let mut presenter = match crate::presenter::SoftbufferPresenter::new(&window, size.width, size.height) {
         Ok(p) => p,
-        Err(e) => panic!("failed to create softbuffer presenter: {}", e),
+                Err(e) => {
+            eprintln!("failed to create softbuffer presenter: {}", e);
+            return;
+        }
     };
     let mut scale_factor = window.scale_factor() as f32;
     let mut mouse_pos = (0.0f32, 0.0f32);
@@ -845,108 +762,25 @@ pub fn run_window_vnode_skia_with_hmr<F, G, H>(
     use winit::event_loop::{ControlFlow, EventLoop};
     use winit::window::WindowBuilder;
 
-    struct SoftbufferPresenter {
-        _context: softbuffer::Context,
-        surface: softbuffer::Surface,
-        width: u32,
-        height: u32,
-        rgba: Vec<u8>,
-    }
-
-    impl SoftbufferPresenter {
-        fn new(window: &winit::window::Window, width: u32, height: u32) -> Result<Self, String> {
-            let context = unsafe {
-                softbuffer::Context::new(window)
-                    .map_err(|e| format!("softbuffer context failed: {}", e))?
-            };
-            let mut surface = unsafe {
-                softbuffer::Surface::new(&context, window)
-                    .map_err(|e| format!("softbuffer surface failed: {}", e))?
-            };
-            let w = width.max(1);
-            let h = height.max(1);
-            surface
-                .resize(
-                    std::num::NonZeroU32::new(w).unwrap(),
-                    std::num::NonZeroU32::new(h).unwrap(),
-                )
-                .map_err(|e| format!("softbuffer resize failed: {}", e))?;
-            Ok(Self {
-                _context: context,
-                surface,
-                width: w,
-                height: h,
-                rgba: vec![0u8; (w as usize) * (h as usize) * 4],
-            })
-        }
-
-        fn resize(&mut self, width: u32, height: u32) -> Result<(), String> {
-            let w = width.max(1);
-            let h = height.max(1);
-            if w == self.width && h == self.height {
-                return Ok(());
-            }
-            self.surface
-                .resize(
-                    std::num::NonZeroU32::new(w).unwrap(),
-                    std::num::NonZeroU32::new(h).unwrap(),
-                )
-                .map_err(|e| format!("softbuffer resize failed: {}", e))?;
-            self.width = w;
-            self.height = h;
-            self.rgba.resize((w as usize) * (h as usize) * 4, 0);
-            Ok(())
-        }
-
-        fn present(
-            &mut self,
-            skia_surface: &mut crate::skia_surface::SkiaSurface,
-        ) -> Result<(), String> {
-            let width = skia_surface.width.max(1) as u32;
-            let height = skia_surface.height.max(1) as u32;
-            self.resize(width, height)?;
-
-            let info = skia_safe::ImageInfo::new(
-                (self.width as i32, self.height as i32),
-                skia_safe::ColorType::RGBA8888,
-                skia_safe::AlphaType::Premul,
-                None,
-            );
-            let row_bytes = (self.width * 4) as usize;
-            if !skia_surface.read_pixels(&info, &mut self.rgba, row_bytes, (0, 0)) {
-                return Err("skia: read_pixels failed".to_string());
-            }
-
-            let mut buffer = self
-                .surface
-                .buffer_mut()
-                .map_err(|e| format!("softbuffer buffer_mut failed: {}", e))?;
-            let pixels: &mut [u32] = &mut buffer;
-            let pixel_count = (self.width as usize) * (self.height as usize);
-            if pixels.len() < pixel_count {
-                return Err("softbuffer: buffer smaller than expected".to_string());
-            }
-            for (i, pixel) in pixels.iter_mut().take(pixel_count).enumerate() {
-                let base = i * 4;
-                let r = self.rgba[base] as u32;
-                let g = self.rgba[base + 1] as u32;
-                let b = self.rgba[base + 2] as u32;
-                *pixel = (r << 16) | (g << 8) | b;
-            }
-            buffer
-                .present()
-                .map_err(|e| format!("softbuffer present failed: {}", e))?;
-            Ok(())
-        }
-    }
-
     let event_loop = EventLoop::new();
     let proxy = event_loop.create_proxy();
     let hmr_rx_for_thread = std::sync::Arc::clone(&hmr_rx);
     let hmr_rx_for_loop = std::sync::Arc::clone(&hmr_rx);
     std::thread::spawn(move || {
-        while let Ok(_) = hmr_rx_for_thread.lock().unwrap().recv() {
-            let _ = proxy.send_event(());
+        loop {
+            match hmr_rx_for_thread.lock() {
+                Ok(rx) => {
+                    if rx.recv().is_ok() {
+                        let _ = proxy.send_event(());
+                    } else {
+                        break;
+                    }
+                }
+                Err(_) => {
+                    // Mutex poisoned - exit thread gracefully
+                    break;
+                }
+            }
         }
     });
 
@@ -961,12 +795,19 @@ pub fn run_window_vnode_skia_with_hmr<F, G, H>(
         match crate::skia_surface::SkiaSurface::new_raster(size.width as i32, size.height as i32) {
             Ok(surface) => skia_backend::SkiaRenderer {
                 surface: Some(surface),
+                vnode: None,
             },
-            Err(e) => panic!("failed to create SkiaSurface: {}", e),
+                        Err(e) => {
+                eprintln!("failed to create SkiaSurface: {}", e);
+                return;
+            }
         };
-    let mut presenter = match SoftbufferPresenter::new(&window, size.width, size.height) {
+    let mut presenter = match crate::presenter::SoftbufferPresenter::new(&window, size.width, size.height) {
         Ok(p) => p,
-        Err(e) => panic!("failed to create softbuffer presenter: {}", e),
+                Err(e) => {
+            eprintln!("failed to create softbuffer presenter: {}", e);
+            return;
+        }
     };
     let mut scale_factor = window.scale_factor() as f32;
     let mut mouse_pos = (0.0f32, 0.0f32);

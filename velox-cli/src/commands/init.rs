@@ -146,8 +146,8 @@ velox-cli = {{ git = "https://github.com/fahimaloy/velox" }}
 }
 
 fn generate_main_rs() -> String {
-    r#"use std::env::args;
-use std::os::unix::net::UnixListener;
+    r#"use std::io::Read;
+use std::env::args;
 use std::thread;
 use serde_json;
 use std::sync::mpsc;
@@ -157,6 +157,14 @@ use std::path::PathBuf;
 use velox_dom::VNode;
 use velox_style::Stylesheet;
 use velox_renderer::HmrMessage;
+
+// Platform-specific socket imports
+#[cfg(unix)]
+use std::os::unix::net::UnixListener;
+#[cfg(windows)]
+use std::os::windows::io::{AsRawHandle, FromRawHandle};
+#[cfg(windows)]
+use std::fs::OpenOptions;
 
 include!(concat!(env!("OUT_DIR"), "/App.rs"));
 
@@ -171,44 +179,98 @@ fn main() {
   };
 
   if let Some(path_str) = hmr_path {
-    let path = PathBuf::from(path_str);
-    let listener = UnixListener::bind(&path).expect("bind socket");
-    let (tx, rx) = mpsc::channel();
-    let rx = std::sync::Arc::new(std::sync::Mutex::new(rx));
-    thread::spawn(move || {
-      for stream in listener.incoming() {
-        if let Ok(mut stream) = stream {
-          let mut buffer = Vec::new();
-          stream.read_to_end(&mut buffer).ok();
-          if let Ok(msg) = serde_json::from_slice::<HmrMessage>(&buffer) {
-            tx.send(msg).ok();
+    #[cfg(unix)]
+    {
+      let path = PathBuf::from(path_str);
+      let listener = UnixListener::bind(&path).expect("bind socket");
+      let (tx, rx) = mpsc::channel();
+      let rx = std::sync::Arc::new(std::sync::Mutex::new(rx));
+      thread::spawn(move || {
+        for stream in listener.incoming() {
+          if let Ok(mut stream) = stream {
+            let mut buffer = Vec::new();
+            stream.read_to_end(&mut buffer).ok();
+            if let Ok(msg) = serde_json::from_slice::<HmrMessage>(&buffer) {
+              tx.send(msg).ok();
+            }
           }
         }
-      }
-    });
+      });
 
-    let state = Arc::new(app::script_rs::State::new());
+      let state = Arc::new(app::script_rs::State::new());
 
-    let make_view = {
-      let state = Arc::clone(&state);
-      move |_w: u32, _h: u32| -> (VNode, Stylesheet) {
-        let vnode = app::render_with_state(Arc::clone(&state), |name| match name {
-          "title" => state.title.get(),
-          "count" => state.count.get().to_string(),
-          _ => String::new(),
-        });
-        let sheet = Stylesheet::parse(app::STYLE);
-        (vnode, sheet)
-      }
-    };
+      let make_view = {
+        let state = Arc::clone(&state);
+        move |_w: u32, _h: u32| -> (VNode, Stylesheet) {
+          let vnode = app::render_with_state(Arc::clone(&state), |name| match name {
+            "title" => state.title.get(),
+            "count" => state.count.get().to_string(),
+            _ => String::new(),
+          });
+          let sheet = Stylesheet::parse(app::STYLE);
+          (vnode, sheet)
+        }
+      };
 
-    let on_event = app::make_on_event(Arc::clone(&state));
-    let get_title = {
-      let state = Arc::clone(&state);
-      move || state.title.get()
-    };
+      let on_event = app::make_on_event(Arc::clone(&state));
+      let get_title = {
+        let state = Arc::clone(&state);
+        move || state.title.get()
+      };
 
-    velox_renderer::run_window_vnode_skia_with_hmr("Velox App", make_view, on_event, get_title, rx);
+      velox_renderer::run_window_vnode_skia("Velox App", make_view, on_event, get_title);
+    }
+    #[cfg(windows)]
+    {
+      // On Windows, use named pipes for HMR
+      let pipe_name = format!("\\\\.\\pipe\\{}", path_str);
+      let (tx, rx) = mpsc::channel();
+      let rx = std::sync::Arc::new(std::sync::Mutex::new(rx));
+      thread::spawn(move || {
+        // Create named pipe server
+        use std::io::Read;
+        let listener = OpenOptions::new()
+          .read(true)
+          .write(true)
+          .create(true)
+          .open(&pipe_name)
+          .expect("create named pipe");
+        
+        let mut buffer = Vec::new();
+        let mut stream = listener;
+        stream.read_to_end(&mut buffer).ok();
+        if let Ok(msg) = serde_json::from_slice::<HmrMessage>(&buffer) {
+          tx.send(msg).ok();
+        }
+      });
+
+      let state = Arc::new(app::script_rs::State::new());
+
+      let make_view = {
+        let state = Arc::clone(&state);
+        move |_w: u32, _h: u32| -> (VNode, Stylesheet) {
+          let vnode = app::render_with_state(Arc::clone(&state), |name| match name {
+            "title" => state.title.get(),
+            "count" => state.count.get().to_string(),
+            _ => String::new(),
+          });
+          let sheet = Stylesheet::parse(app::STYLE);
+          (vnode, sheet)
+        }
+      };
+
+      let on_event = app::make_on_event(Arc::clone(&state));
+      let get_title = {
+        let state = Arc::clone(&state);
+        move || state.title.get()
+      };
+
+      velox_renderer::run_window_vnode_skia("Velox App", make_view, on_event, get_title);
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+      eprintln!("HMR not supported on this platform");
+    }
   } else {
     let state = Arc::new(app::script_rs::State::new());
 
@@ -231,7 +293,7 @@ fn main() {
       move || state.title.get()
     };
 
-    velox_renderer::run_window_vnode_skia_with_hmr("Velox App", make_view, on_event, get_title, rx);
+    velox_renderer::run_window_vnode_skia("Velox App", make_view, on_event, get_title);
   }
 }
 "#

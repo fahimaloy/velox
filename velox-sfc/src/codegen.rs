@@ -61,13 +61,13 @@ pub fn to_stub_rs(sfc: &Sfc, component_name: &str) -> String {
     }
 
     out.push_str(&format!("pub mod {} {}\n", name, open));
-    out.push_str(&format!("    pub const TEMPLATE: &str = r#\"{}\"#;\n", t));
+    out.push_str(&format!("    pub const TEMPLATE: &str = r#\"{}\"#;\n", escape_raw_string(t)));
     out.push_str(&format!(
         "    pub const SCRIPT_SETUP: &str = r#\"{}\"#;\n",
-        ss
+        escape_raw_string(ss)
     ));
-    out.push_str(&format!("    pub const SCRIPT: &str = r#\"{}\"#;\n", s));
-    out.push_str(&format!("    pub const STYLE: &str = r#\"{}\"#;\n", st));
+    out.push_str(&format!("    pub const SCRIPT: &str = r#\"{}\"#;\n", escape_raw_string(s)));
+    out.push_str(&format!("    pub const STYLE: &str = r#\"{}\"#;\n", escape_raw_string(st)));
     if !ss.is_empty() {
         out.push_str("    pub mod script_rs {\n        #![allow(unused_variables, unused_imports, unused_mut, unused_assignments)]\n");
         out.push_str("        use super::*;\n");
@@ -193,5 +193,11 @@ fn sanitize_ident(raw: &str) -> String {
 }
 
 fn is_ident_char(ch: char) -> bool {
-    ch.is_ascii_alphanumeric() || ch == '_' || ch == '-'
+    ch.is_ascii_alphanumeric() || ch == '_'
+}
+
+/// Escape content for use in r#"..."# raw string literals.
+/// The sequence "# would terminate the raw string early, so we escape it.
+fn escape_raw_string(s: &str) -> String {
+    s.replace("\"#", "\"\\#")
 }

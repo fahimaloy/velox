@@ -119,7 +119,7 @@ impl BoxShadow {
         self
     }
 
-    /// Parse box-shadow: offset-x offset-y blur spread color
+/// Parse box-shadow: offset-x offset-y blur spread color
     /// Example: "2px 2px 5px 1px rgba(0,0,0,0.3)"
     pub fn parse(value: &str) -> Option<Self> {
         let value = value.trim();
@@ -134,34 +134,87 @@ impl BoxShadow {
         let mut offset_y = 0.0;
         let mut blur = 0.0;
         let mut spread = 0.0;
-        let color = (0u8, 0u8, 0u8, 128u8);
+        let mut color = (0u8, 0u8, 0u8, 128u8);
 
-        let mut parts = value.split_whitespace();
+        // Collect all parts, handling multi-token color values like "rgba(0, 0, 0, 0.3)"
+        let mut parts: Vec<&str> = Vec::new();
+        let mut current_part = String::new();
+        let mut paren_depth = 0;
+
+        for token in value.split_whitespace() {
+            let open_parens = token.matches('(').count();
+            let close_parens = token.matches(')').count();
+
+            if paren_depth == 0 && open_parens == 0 && close_parens == 0 {
+                // Simple token - add directly
+                parts.push(token);
+            } else {
+                // Part of a function-like value (e.g., rgba, rgb)
+                if paren_depth == 0 {
+                    current_part.clear();
+                }
+                if !current_part.is_empty() {
+                    current_part.push(' ');
+                }
+                current_part.push_str(token);
+                paren_depth += open_parens as i32 - close_parens as i32;
+
+                if paren_depth == 0 && !current_part.is_empty() {
+                    // We have a complete function call
+                    parts.push(Box::leak(current_part.clone().into_boxed_str()));
+                }
+            }
+        }
+
+        // If no multi-token colors were found, fall back to simple split
+        if parts.is_empty() {
+            parts = value.split_whitespace().collect();
+        }
+
+        let mut part_idx = 0;
 
         // Parse offsets and blur
-        if let Some(p) = parts.next() {
+        if part_idx < parts.len() {
+            let p = parts[part_idx];
             offset_x = p
                 .strip_suffix("px")
                 .and_then(|s| s.parse().ok())
                 .unwrap_or(0.0);
+            part_idx += 1;
         }
-        if let Some(p) = parts.next() {
+        if part_idx < parts.len() {
+            let p = parts[part_idx];
             offset_y = p
                 .strip_suffix("px")
                 .and_then(|s| s.parse().ok())
                 .unwrap_or(0.0);
+            part_idx += 1;
         }
-        if let Some(p) = parts.next() {
+        if part_idx < parts.len() {
+            let p = parts[part_idx];
             blur = p
                 .strip_suffix("px")
                 .and_then(|s| s.parse().ok())
                 .unwrap_or(0.0);
+            part_idx += 1;
         }
-        if let Some(p) = parts.next() {
-            spread = p
-                .strip_suffix("px")
-                .and_then(|s| s.parse().ok())
-                .unwrap_or(0.0);
+        // Fourth token could be spread (px) or color
+        if part_idx < parts.len() {
+            let p = parts[part_idx];
+            if p.ends_with("px") {
+                spread = p
+                    .strip_suffix("px")
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(0.0);
+                part_idx += 1;
+            }
+        }
+        // Remaining token(s) should be color
+        if part_idx < parts.len() {
+            let color_str = parts[part_idx..].join(" ");
+            if let Some(c) = velox_dom::style::Color::parse(&color_str) {
+                color = (c.r, c.g, c.b, c.a);
+            }
         }
 
         Some(BoxShadow {
@@ -217,27 +270,74 @@ impl TextShadow {
         let mut offset_x = 0.0;
         let mut offset_y = 0.0;
         let mut blur = 0.0;
-        let color = (0u8, 0u8, 0u8, 128u8);
+        let mut color = (0u8, 0u8, 0u8, 128u8);
 
-        let mut parts = value.split_whitespace();
+        // Collect all parts, handling multi-token color values like "rgba(0, 0, 0, 0.3)"
+        let mut parts: Vec<&str> = Vec::new();
+        let mut current_part = String::new();
+        let mut paren_depth = 0;
 
-        if let Some(p) = parts.next() {
+        for token in value.split_whitespace() {
+            let open_parens = token.matches('(').count();
+            let close_parens = token.matches(')').count();
+
+            if paren_depth == 0 && open_parens == 0 && close_parens == 0 {
+                parts.push(token);
+            } else {
+                if paren_depth == 0 {
+                    current_part.clear();
+                }
+                if !current_part.is_empty() {
+                    current_part.push(' ');
+                }
+                current_part.push_str(token);
+                paren_depth += open_parens as i32 - close_parens as i32;
+
+                if paren_depth == 0 && !current_part.is_empty() {
+                    parts.push(Box::leak(current_part.clone().into_boxed_str()));
+                }
+            }
+        }
+
+        if parts.is_empty() {
+            parts = value.split_whitespace().collect();
+        }
+
+        let mut part_idx = 0;
+
+        if part_idx < parts.len() {
+            let p = parts[part_idx];
             offset_x = p
                 .strip_suffix("px")
                 .and_then(|s| s.parse().ok())
                 .unwrap_or(0.0);
+            part_idx += 1;
         }
-        if let Some(p) = parts.next() {
+        if part_idx < parts.len() {
+            let p = parts[part_idx];
             offset_y = p
                 .strip_suffix("px")
                 .and_then(|s| s.parse().ok())
                 .unwrap_or(0.0);
+            part_idx += 1;
         }
-        if let Some(p) = parts.next() {
-            blur = p
-                .strip_suffix("px")
-                .and_then(|s| s.parse().ok())
-                .unwrap_or(0.0);
+        // Third token could be blur (px) or color
+        if part_idx < parts.len() {
+            let p = parts[part_idx];
+            if p.ends_with("px") {
+                blur = p
+                    .strip_suffix("px")
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(0.0);
+                part_idx += 1;
+            }
+        }
+        // Remaining token(s) should be color
+        if part_idx < parts.len() {
+            let color_str = parts[part_idx..].join(" ");
+            if let Some(c) = velox_dom::style::Color::parse(&color_str) {
+                color = (c.r, c.g, c.b, c.a);
+            }
         }
 
         Some(TextShadow {

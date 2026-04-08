@@ -59,6 +59,27 @@ pub fn is_hoverable(tag: &str, props: &velox_dom::Props) -> bool {
         .unwrap_or(false)
 }
 
+/// Compute the intersection of two rectangles.
+/// Returns `Some(Rect)` if they intersect, `None` if they don't.
+fn intersect(
+    a: velox_dom::layout::Rect,
+    b: velox_dom::layout::Rect,
+) -> Option<velox_dom::layout::Rect> {
+    let x0 = a.x.max(b.x);
+    let y0 = a.y.max(b.y);
+    let x1 = (a.x + a.w).min(b.x + b.w);
+    let y1 = (a.y + a.h).min(b.y + b.h);
+    if x1 <= x0 || y1 <= y0 {
+        return None;
+    }
+    Some(velox_dom::layout::Rect {
+        x: x0,
+        y: y0,
+        w: x1 - x0,
+        h: y1 - y0,
+    })
+}
+
 pub fn collect_click_targets(
     vnode: &VNode,
     layout: &velox_dom::layout::LayoutNode,
@@ -66,24 +87,6 @@ pub fn collect_click_targets(
     order: &mut i32,
     out: &mut Vec<ClickTarget>,
 ) {
-    fn intersect(
-        a: velox_dom::layout::Rect,
-        b: velox_dom::layout::Rect,
-    ) -> Option<velox_dom::layout::Rect> {
-        let x0 = a.x.max(b.x);
-        let y0 = a.y.max(b.y);
-        let x1 = (a.x + a.w).min(b.x + b.w);
-        let y1 = (a.y + a.h).min(b.y + b.h);
-        if x1 <= x0 || y1 <= y0 {
-            return None;
-        }
-        Some(velox_dom::layout::Rect {
-            x: x0,
-            y: y0,
-            w: x1 - x0,
-            h: y1 - y0,
-        })
-    }
     let next_clip = match (clip, layout.clip) {
         (Some(c), Some(lc)) => intersect(c, lc),
         (None, Some(lc)) => Some(lc),
@@ -145,24 +148,6 @@ pub fn collect_hover_targets(
     order: &mut i32,
     out: &mut Vec<HoverTarget>,
 ) {
-    fn intersect(
-        a: velox_dom::layout::Rect,
-        b: velox_dom::layout::Rect,
-    ) -> Option<velox_dom::layout::Rect> {
-        let x0 = a.x.max(b.x);
-        let y0 = a.y.max(b.y);
-        let x1 = (a.x + a.w).min(b.x + b.w);
-        let y1 = (a.y + a.h).min(b.y + b.h);
-        if x1 <= x0 || y1 <= y0 {
-            return None;
-        }
-        Some(velox_dom::layout::Rect {
-            x: x0,
-            y: y0,
-            w: x1 - x0,
-            h: y1 - y0,
-        })
-    }
     let next_clip = match (clip, layout.clip) {
         (Some(c), Some(lc)) => intersect(c, lc),
         (None, Some(lc)) => Some(lc),

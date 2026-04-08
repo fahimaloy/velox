@@ -9,7 +9,7 @@ fn watch_triggers_on_change_only() {
     let count = Rc::new(Signal::new(0));
     let events: Rc<StdRefCell<Vec<(i32, i32)>>> = Rc::new(StdRefCell::new(vec![]));
 
-    {
+    let _handle = {
         let count_src = count.clone();
         let events_cb = events.clone();
         watch(
@@ -18,8 +18,8 @@ fn watch_triggers_on_change_only() {
                 events_cb.borrow_mut().push((new, old));
             },
             WatchOptions::default(),
-        );
-    }
+        )
+    };
 
     // No callback on initial run
     assert!(events.borrow().is_empty());
@@ -41,7 +41,7 @@ fn watch_callback_can_mutate_signals() {
     let count = Rc::new(Signal::new(0));
     let seen: Rc<StdRefCell<Vec<i32>>> = Rc::new(StdRefCell::new(vec![]));
 
-    {
+    let _handle = {
         // IMPORTANT: use two separate clones so each closure owns its own Rc
         let count_src = count.clone();
         let count_cb = count.clone();
@@ -57,8 +57,8 @@ fn watch_callback_can_mutate_signals() {
                 }
             },
             WatchOptions::default(),
-        );
-    }
+        )
+    };
 
     // Kick off the chain
     count.set(1);

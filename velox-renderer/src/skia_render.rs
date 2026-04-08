@@ -502,13 +502,6 @@ pub mod skia_impl {
         let canvas = surface.canvas();
         canvas.clear(sk::Color::WHITE);
 
-        let default_text_style = TextStyle {
-            color: sk::Color::from_argb(255, 0, 0, 0),
-            align: TextAlign::Left,
-            underline: false,
-            font_size: 14.0,
-        };
-
         let mut fonts = FontCache::new();
         let mut images = ImageCache::new();
         let default_family = fonts.default_family();

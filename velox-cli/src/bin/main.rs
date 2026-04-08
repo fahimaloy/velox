@@ -93,7 +93,7 @@ fn main() -> Result<()> {
                 velox_cli::commands::build_current(true)?;
             }
             println!("▶️  Running project...");
-            velox_cli::commands::run_current()?;
+            velox_cli::commands::run_current(release)?;
         }
 
         Commands::Dev { watch } => {

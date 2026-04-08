@@ -20,7 +20,7 @@ jobs:
       - name: Clippy
         run: cargo clippy --workspace -- -D warnings
       - name: Test (workspace)
-        run: cargo test --workspace --all-features --no-fail-fast
+        run: cargo test --workspace --no-fail-fast
 
   renderer-features:
     runs-on: ubuntu-latest

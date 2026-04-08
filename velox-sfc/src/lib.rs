@@ -6,6 +6,9 @@ pub mod template_ast;
 pub mod template_codegen;
 pub mod template_parse;
 
+#[cfg(test)]
+mod codegen_unit_tests;
+
 pub use component_resolver::{ComponentImport, ComponentResolver, transform_components};
 pub use sfc::{Attr, ScriptBlock, Sfc, StyleBlock, TemplateBlock, parse_sfc};
 

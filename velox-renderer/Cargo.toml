@@ -1,8 +1,11 @@
-
 [package]
 name = "velox-renderer"
-version = "0.1.1"
+version = "0.1.0"
 edition = "2021"
+license = "MIT"
+description = "Rendering backends (Skia, WGPU) for the Velox UI framework"
+authors = ["fahimaloy"]
+repository = "https://github.com/fahimaloy/velox"
 publish = false
 
 [features]

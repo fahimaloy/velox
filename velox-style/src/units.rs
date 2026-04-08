@@ -7,7 +7,7 @@ use std::fmt;
 
 
 /// A CSS length value with unit
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub enum Length {
     /// Pixels (px)
     Px(f32),
@@ -24,6 +24,7 @@ pub enum Length {
     /// Auto length
     Auto,
     /// Zero (unitless)
+    #[default]
     Zero,
 }
 
@@ -86,12 +87,6 @@ impl Length {
     /// Check if length is auto
     pub fn is_auto(&self) -> bool {
         matches!(self, Length::Auto)
-    }
-}
-
-impl Default for Length {
-    fn default() -> Self {
-        Length::Zero
     }
 }
 
@@ -280,8 +275,9 @@ impl Default for Color {
 }
 
 /// CSS display property
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Display {
+    #[default]
     Block,
     Inline,
     InlineBlock,
@@ -304,15 +300,10 @@ impl Display {
     }
 }
 
-impl Default for Display {
-    fn default() -> Self {
-        Display::Block
-    }
-}
-
 /// CSS position property
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Position {
+    #[default]
     Static,
     Relative,
     Absolute,
@@ -333,15 +324,10 @@ impl Position {
     }
 }
 
-impl Default for Position {
-    fn default() -> Self {
-        Position::Static
-    }
-}
-
 /// CSS flex direction
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum FlexDirection {
+    #[default]
     Row,
     RowReverse,
     Column,
@@ -360,15 +346,10 @@ impl FlexDirection {
     }
 }
 
-impl Default for FlexDirection {
-    fn default() -> Self {
-        FlexDirection::Row
-    }
-}
-
 /// CSS justify-content values
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum JustifyContent {
+    #[default]
     FlexStart,
     FlexEnd,
     Center,
@@ -391,19 +372,14 @@ impl JustifyContent {
     }
 }
 
-impl Default for JustifyContent {
-    fn default() -> Self {
-        JustifyContent::FlexStart
-    }
-}
-
 /// CSS align-items values
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum AlignItems {
     FlexStart,
     FlexEnd,
     Center,
     Baseline,
+    #[default]
     Stretch,
 }
 
@@ -420,15 +396,36 @@ impl AlignItems {
     }
 }
 
-impl Default for AlignItems {
-    fn default() -> Self {
-        AlignItems::Stretch
+/// CSS align-self values
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum AlignSelf {
+    #[default]
+    Auto,
+    FlexStart,
+    FlexEnd,
+    Center,
+    Baseline,
+    Stretch,
+}
+
+impl AlignSelf {
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.trim().to_lowercase().as_str() {
+            "auto" => Some(AlignSelf::Auto),
+            "flex-start" => Some(AlignSelf::FlexStart),
+            "flex-end" => Some(AlignSelf::FlexEnd),
+            "center" => Some(AlignSelf::Center),
+            "baseline" => Some(AlignSelf::Baseline),
+            "stretch" => Some(AlignSelf::Stretch),
+            _ => None,
+        }
     }
 }
 
 /// CSS overflow values
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Overflow {
+    #[default]
     Visible,
     Hidden,
     Scroll,
@@ -444,12 +441,6 @@ impl Overflow {
             "auto" => Some(Overflow::Auto),
             _ => None,
         }
-    }
-}
-
-impl Default for Overflow {
-    fn default() -> Self {
-        Overflow::Visible
     }
 }
 

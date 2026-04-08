@@ -94,8 +94,8 @@ fn next_tick_nested_callbacks() {
             });
         });
     }
-    // The outer callback runs; inner one is queued for next flush
-    assert!(*depth.borrow() >= 1);
+    // With loop-based flush, both callbacks should execute
+    assert_eq!(*depth.borrow(), 2);
 }
 
 #[test]
@@ -109,4 +109,13 @@ fn next_tick_callback_that_panics() {
     });
     // The panic should propagate
     assert!(result.is_err());
+
+    // Verify that FLUSHING is properly reset after the panic
+    // by scheduling another callback that should work normally
+    let counter = Rc::new(StdRefCell::new(0));
+    let c = counter.clone();
+    next_tick(move || {
+        *c.borrow_mut() = 42;
+    });
+    assert_eq!(*counter.borrow(), 42);
 }

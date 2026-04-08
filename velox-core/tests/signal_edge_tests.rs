@@ -10,13 +10,13 @@ use velox_core::signal::{Signal, effect};
 fn signal_string_type() {
     let s = Rc::new(Signal::new(String::from("hello")));
     let observed = Rc::new(StdRefCell::new(String::new()));
-    {
+    let _handle = {
         let s_clone = s.clone();
         let observed_clone = observed.clone();
         effect(move || {
             *observed_clone.borrow_mut() = s_clone.get();
-        });
-    }
+        })
+    };
     assert_eq!(*observed.borrow(), "hello");
     s.set(String::from("world"));
     assert_eq!(*observed.borrow(), "world");
@@ -26,13 +26,13 @@ fn signal_string_type() {
 fn signal_bool_type() {
     let s = Rc::new(Signal::new(false));
     let observed = Rc::new(StdRefCell::new(false));
-    {
+    let _handle = {
         let s_clone = s.clone();
         let observed_clone = observed.clone();
         effect(move || {
             *observed_clone.borrow_mut() = s_clone.get();
-        });
-    }
+        })
+    };
     assert!(!*observed.borrow());
     s.set(true);
     assert!(*observed.borrow());
@@ -43,20 +43,20 @@ fn signal_multiple_effects_same_signal() {
     let s = Rc::new(Signal::new(0));
     let a = Rc::new(StdRefCell::new(0));
     let b = Rc::new(StdRefCell::new(0));
-    {
+    let _handle_a = {
         let s_clone = s.clone();
         let a_clone = a.clone();
         effect(move || {
             *a_clone.borrow_mut() = s_clone.get() * 2;
-        });
-    }
-    {
+        })
+    };
+    let _handle_b = {
         let s_clone = s.clone();
         let b_clone = b.clone();
         effect(move || {
             *b_clone.borrow_mut() = s_clone.get() * 3;
-        });
-    }
+        })
+    };
     assert_eq!(*a.borrow(), 0);
     assert_eq!(*b.borrow(), 0);
     s.set(5);
@@ -69,14 +69,14 @@ fn signal_effect_reads_multiple_signals() {
     let a = Rc::new(Signal::new(1));
     let b = Rc::new(Signal::new(2));
     let sum = Rc::new(StdRefCell::new(0));
-    {
+    let _handle = {
         let a_clone = a.clone();
         let b_clone = b.clone();
         let sum_clone = sum.clone();
         effect(move || {
             *sum_clone.borrow_mut() = a_clone.get() + b_clone.get();
-        });
-    }
+        })
+    };
     assert_eq!(*sum.borrow(), 3);
     a.set(10);
     assert_eq!(*sum.borrow(), 12);
@@ -89,15 +89,15 @@ fn signal_effect_does_not_fire_on_unread_signal() {
     let s1 = Rc::new(Signal::new(1));
     let s2 = Rc::new(Signal::new(2));
     let count = Rc::new(StdRefCell::new(0));
-    {
+    let _handle = {
         let s1_clone = s1.clone();
         let count_clone = count.clone();
         effect(move || {
             // Only read s1
             let _ = s1_clone.get();
             *count_clone.borrow_mut() += 1;
-        });
-    }
+        })
+    };
     assert_eq!(*count.borrow(), 1);
     // Changing s2 should NOT trigger the effect
     s2.set(99);
@@ -122,14 +122,14 @@ fn signal_functional_update() {
 fn signal_update_triggers_effects() {
     let s = Rc::new(Signal::new(0));
     let count = Rc::new(StdRefCell::new(0));
-    {
+    let _handle = {
         let s_clone = s.clone();
         let count_clone = count.clone();
         effect(move || {
             let _ = s_clone.get();
             *count_clone.borrow_mut() += 1;
-        });
-    }
+        })
+    };
     assert_eq!(*count.borrow(), 1);
     s.update(|v| v + 1);
     assert_eq!(*count.borrow(), 2);
@@ -141,7 +141,7 @@ fn signal_nested_effect_subscription() {
     let outer = Rc::new(Signal::new(0));
     let inner = Rc::new(Signal::new(0));
     let outer_count = Rc::new(StdRefCell::new(0));
-    {
+    let _handle = {
         let outer_clone = outer.clone();
         let inner_clone = inner.clone();
         let outer_count_clone = outer_count.clone();
@@ -153,8 +153,8 @@ fn signal_nested_effect_subscription() {
             effect(move || {
                 let _ = inner_clone2.get();
             });
-        });
-    }
+        })
+    };
     assert_eq!(*outer_count.borrow(), 1);
     outer.set(1);
     assert_eq!(*outer_count.borrow(), 2);
@@ -167,14 +167,14 @@ fn signal_same_value_still_triggers() {
     // The signal set() method always notifies subscribers, even if value is same
     let s = Rc::new(Signal::new(5));
     let count = Rc::new(StdRefCell::new(0));
-    {
+    let _handle = {
         let s_clone = s.clone();
         let count_clone = count.clone();
         effect(move || {
             let _ = s_clone.get();
             *count_clone.borrow_mut() += 1;
-        });
-    }
+        })
+    };
     assert_eq!(*count.borrow(), 1);
     // Setting the same value still triggers (signal does not do equality check)
     s.set(5);
@@ -185,13 +185,13 @@ fn signal_same_value_still_triggers() {
 fn signal_vec_type() {
     let s = Rc::new(Signal::new(vec![1, 2, 3]));
     let len = Rc::new(StdRefCell::new(0));
-    {
+    let _handle = {
         let s_clone = s.clone();
         let len_clone = len.clone();
         effect(move || {
             *len_clone.borrow_mut() = s_clone.get().len();
-        });
-    }
+        })
+    };
     assert_eq!(*len.borrow(), 3);
     s.set(vec![1, 2, 3, 4, 5]);
     assert_eq!(*len.borrow(), 5);
@@ -201,13 +201,13 @@ fn signal_vec_type() {
 fn signal_option_type() {
     let s = Rc::new(Signal::new(Some(42)));
     let val = Rc::new(StdRefCell::new(None));
-    {
+    let _handle = {
         let s_clone = s.clone();
         let val_clone = val.clone();
         effect(move || {
             *val_clone.borrow_mut() = s_clone.get();
-        });
-    }
+        })
+    };
     assert_eq!(*val.borrow(), Some(42));
     s.set(None);
     assert_eq!(*val.borrow(), None);
@@ -220,12 +220,12 @@ fn signal_option_type() {
 #[test]
 fn effect_runs_immediately() {
     let executed = Rc::new(StdRefCell::new(false));
-    {
+    let _handle = {
         let executed_clone = executed.clone();
         effect(move || {
             *executed_clone.borrow_mut() = true;
-        });
-    }
+        })
+    };
     assert!(*executed.borrow());
 }
 
@@ -239,12 +239,12 @@ fn effect_empty_closure() {
 fn effect_no_signal_read_no_re_run() {
     // An effect that doesn't read any signal shouldn't re-run on any set()
     let count = Rc::new(StdRefCell::new(0));
-    {
+    let _handle = {
         let count_clone = count.clone();
         effect(move || {
             *count_clone.borrow_mut() += 1;
-        });
-    }
+        })
+    };
     assert_eq!(*count.borrow(), 1);
     // Since no signals were read, setting any signal shouldn't trigger
     let unrelated = Signal::new(0);
@@ -257,7 +257,7 @@ fn effect_multiple_set_in_same_scope() {
     let a = Rc::new(Signal::new(0));
     let b = Rc::new(Signal::new(0));
     let count = Rc::new(StdRefCell::new(0));
-    {
+    let _handle = {
         let a_clone = a.clone();
         let b_clone = b.clone();
         let count_clone = count.clone();
@@ -265,8 +265,8 @@ fn effect_multiple_set_in_same_scope() {
             let _ = a_clone.get();
             let _ = b_clone.get();
             *count_clone.borrow_mut() += 1;
-        });
-    }
+        })
+    };
     assert_eq!(*count.borrow(), 1);
     // Setting both in quick succession
     a.set(1);
