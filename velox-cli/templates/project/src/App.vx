@@ -1,7 +1,7 @@
 <template>
   <div class="app">
     <header class="header">
-      <h1>{{ title }}</h1>
+      <h1 class="title">{{ title }}</h1>
     </header>
     <main class="content">
       <div class="card">
@@ -11,44 +11,45 @@
           <button class="btn" @click="decrement">-1</button>
           <button class="btn" @click="reset">Reset</button>
         </div>
-        <p v-if="count > 0" class="status positive">Count is positive</p>
-        <p v-else-if="count < 0" class="status negative">Count is negative</p>
-        <p v-else class="status neutral">Count is zero</p>
       </div>
     </main>
   </div>
 </template>
 
 <script setup>
-use std::rc::Rc;
-use velox_core::signal::Signal;
+use std::cell::{Cell, RefCell};
 
 pub struct State {
-    pub count: Rc<Signal<i32>>,
-    pub title: Rc<Signal<String>>,
+    pub counter: Cell<i32>,
+    pub title: RefCell<String>,
 }
 
 impl State {
     pub fn new() -> Self {
         Self {
-            count: Rc::new(Signal::new(0)),
-            title: Rc::new(Signal::new(String::from("Hello Velox!"))),
+            counter: Cell::new(0),
+            title: RefCell::new(String::from("Hello Velox!")),
         }
     }
 
+    pub fn get_title(&self) -> String {
+        self.title.borrow().clone()
+    }
+
+    pub fn get_counter(&self) -> i32 {
+        self.counter.get()
+    }
+
     pub fn increment(&self) {
-        self.count.set(self.count.get() + 1);
-        self.title.set(format!("Count: {}", self.count.get()));
+        self.counter.set(self.counter.get() + 1);
     }
 
     pub fn decrement(&self) {
-        self.count.set(self.count.get() - 1);
-        self.title.set(format!("Count: {}", self.count.get()));
+        self.counter.set(self.counter.get() - 1);
     }
 
     pub fn reset(&self) {
-        self.count.set(0);
-        self.title.set(String::from("Hello Velox!"));
+        self.counter.set(0);
     }
 }
 </script>
@@ -113,13 +114,4 @@ impl State {
 .btn:hover {
     background: #4a8df8;
 }
-
-.status {
-    font-size: 14px;
-    margin-top: 12px;
-}
-
-.positive { color: #3fb950; }
-.negative { color: #f85149; }
-.neutral { color: #8b949e; }
 </style>

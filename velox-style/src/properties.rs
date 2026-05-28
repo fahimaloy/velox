@@ -46,8 +46,9 @@ impl<T: Copy> Sides<T> {
 }
 
 /// Border style
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum BorderStyle {
+    #[default]
     None,
     Hidden,
     Solid,
@@ -75,12 +76,6 @@ impl BorderStyle {
             "outset" => Some(BorderStyle::Outset),
             _ => None,
         }
-    }
-}
-
-impl Default for BorderStyle {
-    fn default() -> Self {
-        BorderStyle::None
     }
 }
 

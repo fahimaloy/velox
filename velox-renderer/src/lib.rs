@@ -5,13 +5,7 @@ use std::collections::{HashMap, HashSet};
 use velox_dom::VNode;
 
 #[cfg(feature = "skia-native")]
-use std::sync::mpsc::Receiver;
-#[cfg(feature = "skia-native")]
-use std::thread;
-#[cfg(feature = "skia-native")]
-use velox_style::{apply_styles_with_hover, Stylesheet};
-#[cfg(feature = "skia-native")]
-use winit::event_loop::{EventLoop, EventLoopBuilder, EventLoopProxy};
+use velox_style::{Stylesheet, apply_styles_with_hover};
 
 pub mod event_binding;
 pub mod events;
@@ -60,9 +54,31 @@ pub enum HmrMessage {
 }
 
 pub trait HmrRenderer {
+    /// Initialize the rendering backend (e.g. create DirectContext, verify GPU).
+    fn init() -> Result<(), String> where Self: Sized;
+
+    /// Mount a VNode into the renderer for display.
+    fn mount(&mut self, vnode: VNode) -> Result<(), String>;
+
+    /// Hot-update the rendered VNode.
     fn hot_update(&mut self, new_vnode: VNode) -> Result<(), String>;
 
+    /// Get the raw window handle for platform integration.
     fn get_window_handle(&self) -> *mut std::ffi::c_void;
+}
+
+/// High-level renderer lifecycle trait. Backends implement this to expose
+/// a consistent `new -> mount -> hot_update` workflow that returns `Result`
+/// instead of panicking on failure.
+pub trait VeloxRenderer {
+    /// Construct a new renderer instance.
+    fn new() -> Result<Self, String> where Self: Sized;
+
+    /// Mount a VNode tree for rendering, returning an error on failure.
+    fn mount(&mut self, vnode: VNode) -> Result<(), String>;
+
+    /// Hot-replace the rendered VNode tree, returning an error on failure.
+    fn hot_update(&mut self, new_vnode: VNode) -> Result<(), String>;
 }
 
 fn summarize(v: &VNode, counts: &mut (usize, usize)) {
@@ -218,7 +234,7 @@ pub fn reconcile_keyed_children(old: &mut Vec<VNode>, new: &[VNode]) {
 /// Minimal renderer trait. Backends implement this to expose a consistent API.
 pub trait Renderer {
     fn backend_name(&self) -> &'static str;
-    fn mount(&self, vnode: &VNode) -> RenderTree;
+    fn mount(&self, vnode: &VNode) -> Result<RenderTree, String>;
 }
 
 #[cfg(feature = "wgpu")]
@@ -285,7 +301,7 @@ pub mod wgpu_backend {
         fn backend_name(&self) -> &'static str {
             "wgpu"
         }
-        fn mount(&self, vnode: &velox_dom::VNode) -> crate::RenderTree {
+        fn mount(&self, vnode: &velox_dom::VNode) -> Result<crate::RenderTree, String> {
             // Try a GPU-backed present; log errors but do not fail the mount.
             #[cfg(all(feature = "skia-native", unix))]
             {
@@ -293,7 +309,7 @@ pub mod wgpu_backend {
                     eprintln!("skia backend: GPU present failed: {}", e);
                 }
             }
-            crate::build_render_tree(vnode)
+            Ok(crate::build_render_tree(vnode))
         }
     }
 }
@@ -301,22 +317,26 @@ pub mod wgpu_backend {
 // Real Skia backend only when `skia-native` is enabled.
 #[cfg(feature = "skia-native")]
 pub mod skia_backend {
+    use crate::HmrRenderer;
+    use crate::VeloxRenderer;
     #[cfg(feature = "skia-native")]
     use crate::skia_gl;
     #[cfg(feature = "skia-native")]
     use crate::skia_surface;
-    use crate::HmrRenderer;
     #[cfg(feature = "skia-native")]
     use raw_window_handle::HasRawWindowHandle;
     use velox_dom::VNode;
 
-    pub fn init() {
+    pub fn init() -> Result<(), String> {
         match skia_gl::create_context() {
             Ok(gl_ctx) => match gl_ctx.into_direct_context() {
-                Some(_dctx) => eprintln!("skia backend: init OK (DirectContext created)"),
-                None => eprintln!("skia backend: init failed: couldn't create DirectContext"),
+                Some(_dctx) => {
+                    eprintln!("skia backend: init OK (DirectContext created)");
+                    Ok(())
+                }
+                None => Err("skia backend: init failed: couldn't create DirectContext".to_string()),
             },
-            Err(e) => eprintln!("skia backend: init failed: {}", e),
+            Err(e) => Err(format!("skia backend: init failed: {}", e)),
         }
     }
 
@@ -332,7 +352,10 @@ pub mod skia_backend {
             height: i32,
         ) -> Result<Self, String> {
             match skia_surface::create_window_surface_from_handle(window, width, height) {
-                Ok(s) => Ok(SkiaRenderer { surface: Some(s), vnode: None }),
+                Ok(s) => Ok(SkiaRenderer {
+                    surface: Some(s),
+                    vnode: None,
+                }),
                 Err(e) => Err(e),
             }
         }
@@ -358,12 +381,21 @@ pub mod skia_backend {
         fn backend_name(&self) -> &'static str {
             "skia"
         }
-        fn mount(&self, vnode: &velox_dom::VNode) -> crate::RenderTree {
-            crate::build_render_tree(vnode)
+        fn mount(&self, vnode: &velox_dom::VNode) -> Result<crate::RenderTree, String> {
+            Ok(crate::build_render_tree(vnode))
         }
     }
 
     impl HmrRenderer for SkiaRenderer {
+        fn init() -> Result<(), String> {
+            init()
+        }
+
+        fn mount(&mut self, vnode: VNode) -> Result<(), String> {
+            self.vnode = Some(vnode);
+            Ok(())
+        }
+
         fn hot_update(&mut self, new_vnode: VNode) -> Result<(), String> {
             self.vnode = Some(new_vnode);
             Ok(())
@@ -373,28 +405,59 @@ pub mod skia_backend {
             std::ptr::null_mut()
         }
     }
+
+    impl VeloxRenderer for SkiaRenderer {
+        fn new() -> Result<Self, String> {
+            Ok(SkiaRenderer {
+                surface: None,
+                vnode: None,
+            })
+        }
+
+        fn mount(&mut self, vnode: VNode) -> Result<(), String> {
+            self.vnode = Some(vnode);
+            Ok(())
+        }
+
+        fn hot_update(&mut self, new_vnode: VNode) -> Result<(), String> {
+            self.vnode = Some(new_vnode);
+            Ok(())
+        }
+    }
 }
 
 // Skia stub backend to allow compiling with `--features skia` without native deps.
 #[cfg(all(feature = "skia", not(feature = "skia-native")))]
 pub mod skia_backend {
-    pub fn init() {}
+    pub fn init() -> Result<(), String> { Ok(()) }
 
     pub struct SkiaRenderer;
     impl crate::Renderer for SkiaRenderer {
         fn backend_name(&self) -> &'static str {
             "skia"
         }
-        fn mount(&self, vnode: &velox_dom::VNode) -> crate::RenderTree {
-            crate::build_render_tree(vnode)
+        fn mount(&self, vnode: &velox_dom::VNode) -> Result<crate::RenderTree, String> {
+            Ok(crate::build_render_tree(vnode))
         }
+    }
+    impl crate::HmrRenderer for SkiaRenderer {
+        fn init() -> Result<(), String> { Ok(()) }
+        fn mount(&mut self, _vnode: velox_dom::VNode) -> Result<(), String> { Ok(()) }
+        fn hot_update(&mut self, _new_vnode: velox_dom::VNode) -> Result<(), String> { Ok(()) }
+        fn get_window_handle(&self) -> *mut std::ffi::c_void { std::ptr::null_mut() }
+    }
+    impl crate::VeloxRenderer for SkiaRenderer {
+        fn new() -> Result<Self, String> { Ok(SkiaRenderer) }
+        fn mount(&mut self, _vnode: velox_dom::VNode) -> Result<(), String> { Ok(()) }
+        fn hot_update(&mut self, _new_vnode: velox_dom::VNode) -> Result<(), String> { Ok(()) }
     }
 }
 
 /// Stub init used when no backend features are enabled.
 #[cfg(not(any(feature = "wgpu", feature = "skia")))]
-pub fn init() {
-    // Intentionally empty
+pub fn init() -> Result<(), String> {
+    // Intentionally empty — no backend enabled
+    Ok(())
 }
 
 // Simple identifier of the selected backend, useful for tests.
@@ -425,9 +488,22 @@ impl Renderer for StubRenderer {
     fn backend_name(&self) -> &'static str {
         "stub"
     }
-    fn mount(&self, vnode: &VNode) -> RenderTree {
-        build_render_tree(vnode)
+    fn mount(&self, vnode: &VNode) -> Result<RenderTree, String> {
+        Ok(build_render_tree(vnode))
     }
+}
+#[cfg(all(not(feature = "wgpu"), not(feature = "skia")))]
+impl HmrRenderer for StubRenderer {
+    fn init() -> Result<(), String> { Ok(()) }
+    fn mount(&mut self, _vnode: VNode) -> Result<(), String> { Ok(()) }
+    fn hot_update(&mut self, _new_vnode: VNode) -> Result<(), String> { Ok(()) }
+    fn get_window_handle(&self) -> *mut std::ffi::c_void { std::ptr::null_mut() }
+}
+#[cfg(all(not(feature = "wgpu"), not(feature = "skia")))]
+impl VeloxRenderer for StubRenderer {
+    fn new() -> Result<Self, String> { Ok(StubRenderer) }
+    fn mount(&mut self, _vnode: VNode) -> Result<(), String> { Ok(()) }
+    fn hot_update(&mut self, _new_vnode: VNode) -> Result<(), String> { Ok(()) }
 }
 
 /// Construct the feature-selected renderer.
@@ -436,10 +512,17 @@ pub fn new_selected_renderer() -> SelectedRenderer {
     {
         wgpu_backend::WgpuRenderer
     }
-    #[cfg(all(not(feature = "wgpu"), feature = "skia"))]
+    #[cfg(all(not(feature = "wgpu"), feature = "skia-native"))]
     {
         // Construct SkiaRenderer with no surface for the default selected renderer.
-        skia_backend::SkiaRenderer { surface: None, vnode: None }
+        skia_backend::SkiaRenderer {
+            surface: None,
+            vnode: None,
+        }
+    }
+    #[cfg(all(not(feature = "wgpu"), feature = "skia", not(feature = "skia-native")))]
+    {
+        skia_backend::SkiaRenderer
     }
     #[cfg(all(not(feature = "wgpu"), not(feature = "skia")))]
     {
@@ -467,7 +550,8 @@ pub fn run_window_vnode_skia<F, G, H>(
     mut make_view: F,
     mut on_event: G,
     mut get_title: H,
-) where
+) -> Result<(), String>
+where
     F: FnMut(u32, u32) -> (velox_dom::VNode, Stylesheet) + 'static,
     G: FnMut(&str, Option<&str>) + 'static,
     H: FnMut() -> String + 'static,
@@ -484,7 +568,7 @@ pub fn run_window_vnode_skia<F, G, H>(
         .with_title(title)
         .with_inner_size(PhysicalSize::new(800, 600))
         .build(&event_loop)
-        .expect("failed to create window");
+        .map_err(|e| format!("failed to create window: {e}"))?;
 
     let size = window.inner_size();
     let mut renderer =
@@ -493,18 +577,17 @@ pub fn run_window_vnode_skia<F, G, H>(
                 surface: Some(surface),
                 vnode: None,
             },
-                        Err(e) => {
-                eprintln!("failed to create SkiaSurface: {}", e);
-                return;
+            Err(e) => {
+                return Err(format!("failed to create SkiaSurface: {e}"));
             }
         };
-    let mut presenter = match crate::presenter::SoftbufferPresenter::new(&window, size.width, size.height) {
-        Ok(p) => p,
-                Err(e) => {
-            eprintln!("failed to create softbuffer presenter: {}", e);
-            return;
-        }
-    };
+    let mut presenter =
+        match crate::presenter::SoftbufferPresenter::new(&window, size.width, size.height) {
+            Ok(p) => p,
+            Err(e) => {
+                return Err(format!("failed to create softbuffer presenter: {e}"));
+            }
+        };
     let mut scale_factor = window.scale_factor() as f32;
     let mut mouse_pos = (0.0f32, 0.0f32);
     let mut hovered_id: Option<u32> = None;
@@ -745,6 +828,7 @@ pub fn run_window_vnode_skia<F, G, H>(
     });
 }
 
+
 #[cfg(feature = "skia-native")]
 pub fn run_window_vnode_skia_with_hmr<F, G, H>(
     title: &str,
@@ -752,7 +836,8 @@ pub fn run_window_vnode_skia_with_hmr<F, G, H>(
     mut on_event: G,
     mut get_title: H,
     hmr_rx: std::sync::Arc<std::sync::Mutex<std::sync::mpsc::Receiver<HmrMessage>>>,
-) where
+) -> Result<(), String>
+where
     F: FnMut(u32, u32) -> (velox_dom::VNode, Stylesheet) + Send + Sync + 'static,
     G: FnMut(&str, Option<&str>) + Send + 'static,
     H: FnMut() -> String + Send + Sync + 'static,
@@ -788,7 +873,7 @@ pub fn run_window_vnode_skia_with_hmr<F, G, H>(
         .with_title(title)
         .with_inner_size(PhysicalSize::new(800, 600))
         .build(&event_loop)
-        .expect("failed to create window");
+        .map_err(|e| format!("failed to create window: {e}"))?;
 
     let size = window.inner_size();
     let mut renderer =
@@ -797,18 +882,17 @@ pub fn run_window_vnode_skia_with_hmr<F, G, H>(
                 surface: Some(surface),
                 vnode: None,
             },
-                        Err(e) => {
-                eprintln!("failed to create SkiaSurface: {}", e);
-                return;
+            Err(e) => {
+                return Err(format!("failed to create SkiaSurface: {e}"));
             }
         };
-    let mut presenter = match crate::presenter::SoftbufferPresenter::new(&window, size.width, size.height) {
-        Ok(p) => p,
-                Err(e) => {
-            eprintln!("failed to create softbuffer presenter: {}", e);
-            return;
-        }
-    };
+    let mut presenter =
+        match crate::presenter::SoftbufferPresenter::new(&window, size.width, size.height) {
+            Ok(p) => p,
+            Err(e) => {
+                return Err(format!("failed to create softbuffer presenter: {e}"));
+            }
+        };
     let mut scale_factor = window.scale_factor() as f32;
     let mut mouse_pos = (0.0f32, 0.0f32);
     let mut hovered_id: Option<u32> = None;
@@ -879,7 +963,7 @@ pub fn run_window_vnode_skia_with_hmr<F, G, H>(
                                 let (vw, vh) = logical_size(s.width, s.height, scale_factor);
                                 let (vnode_raw, _) = make_view(vw, vh);
                                 let new_vnode = vnode_raw;
-                                if let Err(e) = renderer.hot_update(new_vnode) {
+                                if let Err(e) = HmrRenderer::hot_update(&mut renderer, new_vnode) {
                                     eprintln!("hot_update failed: {}", e);
                                 }
                                 window.request_redraw();
@@ -1058,6 +1142,7 @@ pub fn run_window_vnode_skia_with_hmr<F, G, H>(
     });
 }
 
+
 #[cfg(feature = "wgpu")]
 fn load_system_font() -> Option<ab_glyph::FontArc> {
     use std::fs;
@@ -1080,7 +1165,7 @@ fn load_system_font() -> Option<ab_glyph::FontArc> {
 }
 
 #[cfg(feature = "wgpu")]
-pub fn run_window_vnode<F, G, H>(title: &str, mut make_view: F, mut on_event: G, mut get_title: H)
+pub fn run_window_vnode<F, G, H>(title: &str, mut make_view: F, mut on_event: G, mut get_title: H) -> Result<(), String>
 where
     F: FnMut(u32, u32) -> (velox_dom::VNode, Stylesheet) + 'static,
     G: FnMut(&str, Option<&str>) + 'static,
@@ -1097,19 +1182,20 @@ where
         .with_title(title)
         .with_inner_size(PhysicalSize::new(800, 600))
         .build(&event_loop)
-        .expect("window");
+        .map_err(|e| format!("failed to create window: {e}"))?;
     let mut size = window.inner_size();
     let _title_owned = title.to_string();
 
     // WGPU setup (reuse pipeline from run_window)
     let instance = wgpu::Instance::default();
-    let surface = unsafe { instance.create_surface(&window) }.expect("surface");
+    let surface = unsafe { instance.create_surface(&window) }
+        .map_err(|e| format!("failed to create surface: {e}"))?;
     let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
         power_preference: wgpu::PowerPreference::HighPerformance,
         compatible_surface: Some(&surface),
         force_fallback_adapter: false,
     }))
-    .expect("adapter");
+    .ok_or("no suitable GPU adapter found")?;
     let (device, queue) = pollster::block_on(adapter.request_device(
         &wgpu::DeviceDescriptor {
             label: Some("velox-device"),
@@ -1118,7 +1204,7 @@ where
         },
         None,
     ))
-    .expect("device");
+    .map_err(|e| format!("failed to request device: {e}"))?;
 
     if size.width == 0 || size.height == 0 {
         size = PhysicalSize::new(800, 600);
@@ -2150,10 +2236,12 @@ where
                             screen_position: (label_pos.0 + ox, label_pos.1 + oy),
                             bounds,
                             layout,
-                            text: vec![Text::new(&label)
-                                .with_color(btn_text_color)
-                                .with_scale(btn_font_size)
-                                .with_font_id(FontId(btn_font_id))],
+                            text: vec![
+                                Text::new(&label)
+                                    .with_color(btn_text_color)
+                                    .with_scale(btn_font_size)
+                                    .with_font_id(FontId(btn_font_id)),
+                            ],
                             ..Default::default()
                         });
                     }
@@ -2232,10 +2320,12 @@ where
                             screen_position: (count_pos.0 + ox, count_pos.1 + oy),
                             bounds: count_bounds,
                             layout,
-                            text: vec![Text::new(&count_text)
-                                .with_color(text_color)
-                                .with_scale(count_font_size)
-                                .with_font_id(FontId(count_font_id))],
+                            text: vec![
+                                Text::new(&count_text)
+                                    .with_color(text_color)
+                                    .with_scale(count_font_size)
+                                    .with_font_id(FontId(count_font_id)),
+                            ],
                             ..Default::default()
                         });
                     }
@@ -2408,7 +2498,7 @@ where
 
 // Minimal window runner using winit when `wgpu` feature is enabled.
 #[cfg(feature = "wgpu")]
-pub fn run_window(title: &str) {
+pub fn run_window(title: &str) -> Result<(), String> {
     use wgpu::SurfaceError;
     use winit::dpi::PhysicalSize;
     use winit::event::{Event, WindowEvent};
@@ -2427,20 +2517,20 @@ pub fn run_window(title: &str) {
             w
         }
         Err(e) => {
-            eprintln!("[window] failed to create window: {}", e);
-            return;
+            return Err(format!("failed to create window: {e}"));
         }
     };
 
     // WGPU setup
     let instance = wgpu::Instance::default();
-    let surface = unsafe { instance.create_surface(&window) }.expect("create surface");
+    let surface = unsafe { instance.create_surface(&window) }
+        .map_err(|e| format!("failed to create surface: {e}"))?;
     let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
         power_preference: wgpu::PowerPreference::HighPerformance,
         compatible_surface: Some(&surface),
         force_fallback_adapter: false,
     }))
-    .expect("no suitable GPU adapters");
+    .ok_or("no suitable GPU adapter found")?;
     let (device, queue) = pollster::block_on(adapter.request_device(
         &wgpu::DeviceDescriptor {
             label: Some("velox-device"),
@@ -2449,7 +2539,7 @@ pub fn run_window(title: &str) {
         },
         None,
     ))
-    .expect("request device");
+    .map_err(|e| format!("failed to request device: {e}"))?;
 
     let mut size = window.inner_size();
     if size.width == 0 || size.height == 0 {
@@ -2752,7 +2842,7 @@ pub fn run_window(title: &str) {
 }
 
 #[cfg(feature = "wgpu")]
-pub fn run_window_counter<F>(title: &str, mut on_change: F)
+pub fn run_window_counter<F>(title: &str, mut on_change: F) -> Result<(), String>
 where
     F: FnMut(i32) + 'static,
 {
@@ -2766,19 +2856,18 @@ where
         .with_title(title)
         .with_inner_size(PhysicalSize::new(800, 600))
         .build(&event_loop)
-        .expect("window");
+        .map_err(|e| format!("failed to create window: {e}"))?;
     let title_owned = title.to_string();
 
-    // Reuse the rendering path
-    // Minimal re-init by calling into `run_window`-like setup inline to avoid refactor
     let instance = wgpu::Instance::default();
-    let surface = unsafe { instance.create_surface(&window) }.expect("surface");
+    let surface = unsafe { instance.create_surface(&window) }
+        .map_err(|e| format!("failed to create surface: {e}"))?;
     let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
         power_preference: wgpu::PowerPreference::HighPerformance,
         compatible_surface: Some(&surface),
         force_fallback_adapter: false,
     }))
-    .expect("adapter");
+    .ok_or("no suitable GPU adapter found")?;
     let (device, queue) = pollster::block_on(adapter.request_device(
         &wgpu::DeviceDescriptor {
             label: Some("velox-device"),
@@ -2787,7 +2876,7 @@ where
         },
         None,
     ))
-    .expect("device");
+    .map_err(|e| format!("failed to request device: {e}"))?;
     let mut size = window.inner_size();
     if size.width == 0 || size.height == 0 {
         size = PhysicalSize::new(800, 600);
@@ -3041,7 +3130,7 @@ where
 }
 
 #[cfg(feature = "wgpu")]
-pub fn run_counter_window() {
+pub fn run_counter_window() -> Result<(), String> {
     use winit::event::{ElementState, Event, MouseButton, WindowEvent};
     use winit::event_loop::{ControlFlow, EventLoop};
     use winit::window::WindowBuilder;
@@ -3050,7 +3139,7 @@ pub fn run_counter_window() {
     let window = WindowBuilder::new()
         .with_title("Velox - Count: 0 (click to increment)")
         .build(&event_loop)
-        .expect("create window");
+        .map_err(|e| format!("failed to create window: {e}"))?;
 
     let mut count: i32 = 0;
     let mut update_title = move |c: i32| {

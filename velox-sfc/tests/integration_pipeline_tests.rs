@@ -264,7 +264,7 @@ fn diff_and_event_dispatch_integration() {
 
     // Mount new vnode and dispatch event
     let r = velox_renderer::new_selected_renderer();
-    let tree = r.mount(&new_vnode);
+    let tree = r.mount(&new_vnode).expect("mount should succeed");
 
     let count = Rc::new(RefCell::new(0));
     let mut reg = EventRegistry::new();

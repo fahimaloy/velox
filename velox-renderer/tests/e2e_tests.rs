@@ -49,7 +49,7 @@ fn end_to_end_reactive_updates_and_mount() {
 
     // Mount returns a summary tree (in-memory)
     let r = velox_renderer::new_selected_renderer();
-    let mounted = r.mount(&current.borrow());
+    let mounted = r.mount(&current.borrow()).expect("mount should succeed");
     assert_eq!(mounted.node_count, 2);
     assert_eq!(mounted.text_count, 1);
 

@@ -49,15 +49,15 @@ pub fn on_mounted(f: impl FnOnce() + 'static) {
     CURRENT_COMPONENT.with(|c| {
         if let Some(id) = *c.borrow() {
             MOUNTED_HOOKS.with(|h| {
-                if h.borrow().contains_key(&id) {
-                    h.borrow_mut().get_mut(&id).unwrap().push(Box::new(f));
-                } else {
-                    h.borrow_mut().insert(id, vec![Box::new(f)]);
-                }
+                h.borrow_mut().entry(id).or_default().push(Box::new(f));
             });
         } else {
-            eprintln!("[velox-core] WARNING: on_mounted called without a current component context. ");
-            eprintln!("Did you forget to call set_current_component()? The hook will not be registered.");
+            eprintln!(
+                "[velox-core] WARNING: on_mounted called without a current component context. "
+            );
+            eprintln!(
+                "Did you forget to call set_current_component()? The hook will not be registered."
+            );
         }
     });
 }
@@ -78,14 +78,15 @@ pub fn before_destroy(f: impl FnOnce() + 'static) {
     CURRENT_COMPONENT.with(|c| {
         if let Some(id) = *c.borrow() {
             DESTROY_HOOKS.with(|h| {
-                h.borrow_mut()
-                    .entry(id)
-                    .or_default()
-                    .push(Box::new(f));
+                h.borrow_mut().entry(id).or_default().push(Box::new(f));
             });
         } else {
-            eprintln!("[velox-core] WARNING: before_destroy called without a current component context.");
-            eprintln!("Did you forget to call set_current_component()? The hook will not be registered.");
+            eprintln!(
+                "[velox-core] WARNING: before_destroy called without a current component context."
+            );
+            eprintln!(
+                "Did you forget to call set_current_component()? The hook will not be registered."
+            );
         }
     });
 }

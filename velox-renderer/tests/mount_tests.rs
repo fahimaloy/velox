@@ -9,7 +9,7 @@ fn mount_counts_nodes_and_texts() {
         vec![text("hi"), h("span", Props::new(), vec![text("there")])],
     );
     let r = velox_renderer::new_selected_renderer();
-    let tree = r.mount(&vnode);
+    let tree = r.mount(&vnode).expect("mount should succeed");
     assert_eq!(tree.node_count, 4, "div + text + span + text");
     assert_eq!(tree.text_count, 2);
 }

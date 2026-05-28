@@ -1,5 +1,6 @@
 use pest::Parser;
 use pest::iterators::Pair;
+use pest::error::ErrorVariant;
 
 #[derive(pest_derive::Parser)]
 #[grammar = "grammar.pest"]
@@ -38,12 +39,111 @@ pub struct Sfc {
     pub style: Option<StyleBlock>,
 }
 
+/// Format a Pest parse error into a human-readable message with line number
+/// and context about which SFC block was being parsed.
+fn format_pest_error(err: pest::error::Error<Rule>, source: &str) -> String {
+    // Extract the line number from the error's location.
+    let (line, _col) = err.line_col();
+
+    // Determine what kind of parsing failure occurred and produce a
+    // human-readable summary.
+    let description = match &err.variant {
+        ErrorVariant::ParsingError {
+            positives,
+            negatives,
+        } => {
+            let expected = positives
+                .iter()
+                .map(|r| rule_to_block_name(r))
+                .collect::<Vec<_>>();
+            let unexpected = negatives
+                .iter()
+                .map(|r| rule_to_block_name(r))
+                .collect::<Vec<_>>();
+
+            if expected.is_empty() {
+                "unexpected token found while parsing the SFC".to_string()
+            } else {
+                format!(
+                    "expected {} but found {}",
+                    expected.join(", "),
+                    if unexpected.is_empty() {
+                        "an unexpected token"
+                    } else {
+                        &unexpected.join(", ")
+                    }
+                )
+            }
+        }
+        ErrorVariant::CustomError { message } => message.clone(),
+    };
+
+    // Try to infer which block the error falls in by examining the source
+    // up to the error position.
+    let block_context = infer_block_context(source, line);
+
+    format!(
+        "SFC parse error at line {}: {}\nContext: parsing {} block",
+        line, description, block_context
+    )
+}
+
+/// Map a Pest `Rule` to a human-readable name (block-level where possible).
+fn rule_to_block_name(rule: &Rule) -> String {
+    match rule {
+        Rule::template | Rule::template_open | Rule::template_body => "<template>",
+        Rule::script | Rule::script_open | Rule::script_body => "<script>",
+        Rule::style | Rule::style_open | Rule::style_body => "<style>",
+        Rule::attribute => "attribute",
+        Rule::ident => "identifier",
+        Rule::quoted | Rule::dq | Rule::sq => "quoted value",
+        Rule::block => "SFC block (<template>, <script>, or <style>)",
+        Rule::file => "SFC file",
+        Rule::WS => "whitespace",
+        Rule::EOI => "end of input",
+        Rule::SOI => "start of input",
+        _ => format!("{:?}", rule),
+    }
+}
+
+/// Given the full source text and a line number, try to infer which SFC block
+/// the error occurred in by scanning for the most recent block-opening tag
+/// before that line.
+fn infer_block_context(source: &str, error_line: usize) -> String {
+    let lines: Vec<&str> = source.lines().collect();
+    let mut last_block = "top-level";
+
+    for (idx, line) in lines.iter().enumerate() {
+        let ln = idx + 1;
+        if ln > error_line {
+            break;
+        }
+        let trimmed = line.trim();
+        if trimmed.starts_with("<template") {
+            last_block = "template";
+        } else if trimmed.starts_with("<script") {
+            last_block = "script";
+        } else if trimmed.starts_with("<style") {
+            last_block = "style";
+        } else if trimmed.starts_with("</template") {
+            last_block = "top-level";
+        } else if trimmed.starts_with("</script") {
+            last_block = "top-level";
+        } else if trimmed.starts_with("</style") {
+            last_block = "top-level";
+        }
+    }
+
+    last_block
+}
+
 pub fn parse_sfc(source: &str) -> Result<Sfc, String> {
     let mut sfc = Sfc::default();
 
     // Parse the root and immediately descend into the `file` node.
-    let mut pairs = SfcParser::parse(Rule::file, source).map_err(|e| e.to_string())?;
-    let file = pairs.next().ok_or_else(|| "empty SFC".to_string())?;
+    let mut pairs = SfcParser::parse(Rule::file, source)
+        .map_err(|e| format_pest_error(e, source))?;
+    let file = pairs.next().ok_or_else(|| "SFC parse error: input is empty".to_string())?;
     debug_assert!(file.as_rule() == Rule::file);
 
     // Walk children of `file`: they will be `block` nodes (and nothing else,

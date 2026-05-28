@@ -50,56 +50,18 @@ pub enum EmitMode {
 }
 
 /// Build a .vx/.vue file into a Rust module written to `out_dir`.
+///
+/// In `Render` mode, this recursively compiles the input .vx file and all
+/// its imported component dependencies. Each component is written to a
+/// separate `.rs` file in `out_dir`.
+///
+/// In `Stub` mode, only the single input file is compiled (no recursive imports).
+///
+/// After compilation, `cargo:rerun-if-changed` directives are emitted for
+/// all .vx files that were read, so Cargo knows when to re-run the build script.
 pub fn build_cmd(input: &Path, out_dir: Option<&Path>, emit: EmitMode) -> Result<()> {
     use anyhow::Context;
     use std::fs;
-
-    let src =
-        fs::read_to_string(input).with_context(|| format!("failed to read {}", input.display()))?;
-
-    let sfc = velox_sfc::parse_sfc(&src).map_err(|e| anyhow::anyhow!(e))?;
-
-    let name = input
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or("component");
-
-    let mut code = String::new();
-
-    match emit {
-        EmitMode::Stub => {
-            code.push_str(&velox_sfc::to_stub_rs(&sfc, name));
-        }
-        EmitMode::Render => {
-            let tpl_src = sfc
-                .template
-                .as_ref()
-                .map(|t| t.content.as_str())
-                .unwrap_or("");
-            let render_fn = velox_sfc::compile_template_to_rs(tpl_src, name, None)
-                .map_err(|e| anyhow::anyhow!(e))?;
-            let stub = velox_sfc::to_stub_rs(&sfc, name);
-            let indented = render_fn
-                .lines()
-                .map(|l| format!("    {}", l))
-                .collect::<Vec<_>>()
-                .join("\n");
-            if let Some(pos) = stub.rfind("\n}\n") {
-                let before = &stub[..pos + 1];
-                let after = &stub[pos + 1..];
-                code.push_str(before);
-                code.push('\n');
-                code.push_str(&indented);
-                code.push('\n');
-                code.push_str(after);
-            } else {
-                code.push_str(&stub);
-                code.push('\n');
-                code.push_str(&render_fn);
-                code.push('\n');
-            }
-        }
-    }
 
     let out_dir = out_dir
         .map(|p| p.to_path_buf())
@@ -107,11 +69,35 @@ pub fn build_cmd(input: &Path, out_dir: Option<&Path>, emit: EmitMode) -> Result
     fs::create_dir_all(&out_dir)
         .with_context(|| format!("failed to create {}", out_dir.display()))?;
 
-    let out_path = out_dir.join(format!("{}.rs", name));
-    fs::write(&out_path, code)
-        .with_context(|| format!("failed to write {}", out_path.display()))?;
+    match emit {
+        EmitMode::Stub => {
+            // Stub mode: single-file compilation, no recursive imports
+            let src = fs::read_to_string(input)
+                .with_context(|| format!("failed to read {}", input.display()))?;
+            let sfc = velox_sfc::parse_sfc(&src).map_err(|e| anyhow::anyhow!(e))?;
+            let name = input
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("component");
 
-    println!("Generated: {}", out_path.display());
+            let code = velox_sfc::to_stub_rs(&sfc, name);
+            let out_path = out_dir.join(format!("{}.rs", name));
+            fs::write(&out_path, code)
+                .with_context(|| format!("failed to write {}", out_path.display()))?;
+            println!("Generated: {}", out_path.display());
+        }
+        EmitMode::Render => {
+            // Render mode: recursively compile the input and all imported components
+            let result = commands::build::build_vx(input, Some(&out_dir))
+                .with_context(|| "failed to compile component tree")?;
+
+            // Emit cargo:rerun-if-changed for every .vx file that was read
+            for vx_file in &result.vx_files {
+                println!("cargo:rerun-if-changed={}", vx_file.display());
+            }
+        }
+    }
+
     Ok(())
 }
 

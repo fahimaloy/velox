@@ -83,17 +83,15 @@ where
         }
     }
 
-    let previous = INJECTION_CONTEXT.with(|ctx| {
-        ctx.borrow_mut().replace(new_map.clone())
-    });
-    
+    let previous = INJECTION_CONTEXT.with(|ctx| ctx.borrow_mut().replace(new_map.clone()));
+
     // Push previous context to stack so child can access parent values
     if let Some(parent) = previous.clone() {
         CONTEXT_STACK.with(|stack| {
             stack.borrow_mut().push(parent);
         });
     }
-    
+
     let _guard = ContextGuard(previous);
 
     // Run the closure

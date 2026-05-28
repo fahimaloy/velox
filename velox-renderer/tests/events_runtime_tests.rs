@@ -16,7 +16,7 @@ fn runtime_click_and_dblclick_and_hover() {
         vec![text("ok")],
     );
     let r = velox_renderer::new_selected_renderer();
-    let tree = r.mount(&vnode);
+    let tree = r.mount(&vnode).expect("mount should succeed");
     let mut rt = velox_renderer::EventRuntime::new(tree);
 
     let clicks = Rc::new(RefCell::new(0));

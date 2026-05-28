@@ -16,5 +16,6 @@ pub use template_ast::{AttrKind, Node, TemplateAttr};
 pub use template_codegen::compile_template_to_rs;
 pub use template_parse::parse_template_to_ast;
 
-// NEW: re-export so velox_sfc::to_stub_rs works in the CLI
 pub use codegen::to_stub_rs;
+pub use codegen::to_stub_rs_with_base;
+pub use codegen::to_stub_rs_unwrapped;

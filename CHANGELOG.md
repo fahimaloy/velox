@@ -49,4 +49,3 @@
 
 ### Removed
 - Removed `examples/` directory with outdated example projects (`todo`, `gallery`, `myapp`, `interactive_skia`, `vx_demo`)
-

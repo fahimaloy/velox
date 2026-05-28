@@ -1,0 +1,47 @@
+<template>
+  <div class="todo-item" :class="{ completed: completed }">
+    <span class="todo-text">{{ text }}</span>
+    <button class="btn btn-small" @click="on_toggle">✓</button>
+    <button class="btn btn-danger btn-small" @click="on_remove">×</button>
+  </div>
+</template>
+
+<script setup>
+pub struct Props {
+    pub todo: String,
+    pub completed: bool,
+}
+
+pub struct State {
+    pub props: Props,
+}
+
+impl State {
+    pub fn new() -> Self {
+        Self {
+            props: Props {
+                todo: String::new(),
+                completed: false,
+            }
+        }
+    }
+
+    pub fn text(&self) -> String {
+        self.props.todo.clone()
+    }
+
+    pub fn completed(&self) -> bool {
+        self.props.completed
+    }
+
+    pub fn on_toggle(&self) {}
+    pub fn on_remove(&self) {}
+}
+</script>
+
+<style>
+.todo-item { display: flex; align-items: center; padding: 8px 12px; gap: 8px; }
+.todo-text { flex: 1; font-size: 14px; }
+.btn-small { padding: 4px 8px; font-size: 12px; }
+.btn-danger { background-color: #ef4444; color: #ffffff; }
+</style>

@@ -19,8 +19,11 @@ pub use fonts::{FontDescriptor, FontFamily, FontMetrics, FontStyle, GenericFamil
 // Avoid collision with properties::BoxShadow by aliasing visual effects type.
 pub use visual_effects::{BorderRadius, BoxShadow as VisualBoxShadow, TextShadow};
 
+use cssparser::ToCss;
 use std::collections::HashMap;
 use velox_dom::{Props, VNode};
+
+// --- CSS Parser types (module-level for rust-analyzer compatibility) ---
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum SimpleSelectorKind {
@@ -43,6 +46,131 @@ pub struct Rule {
     pub decls: HashMap<String, String>,
 }
 
+struct SheetParser {
+    rules: Vec<Rule>,
+}
+
+impl<'i> cssparser::QualifiedRuleParser<'i> for &mut SheetParser {
+    type Prelude = String;
+    type QualifiedRule = ();
+    type Error = ();
+
+    fn parse_prelude<'t>(
+        &mut self,
+        input: &mut cssparser::Parser<'i, 't>,
+    ) -> Result<String, cssparser::ParseError<'i, ()>> {
+        let mut selector = String::new();
+        while let Ok(token) = input.next_including_whitespace() {
+            let _ = token.to_css(&mut selector);
+        }
+        Ok(selector.trim().to_string())
+    }
+
+    fn parse_block<'t>(
+        &mut self,
+        prelude: String,
+        _start: &cssparser::ParserState,
+        input: &mut cssparser::Parser<'i, 't>,
+    ) -> Result<(), cssparser::ParseError<'i, ()>> {
+        let mut decls = HashMap::new();
+        for (name, value) in
+            cssparser::DeclarationListParser::new(input, DeclarationParser).flatten()
+        {
+            if !name.is_empty() {
+                decls.insert(name, value);
+            }
+        }
+        if decls.is_empty() {
+            return Ok(());
+        }
+        for selector in parse_selector_list(&prelude) {
+            self.rules.push(Rule {
+                selector,
+                decls: decls.clone(),
+            });
+        }
+        Ok(())
+    }
+}
+
+impl<'i> cssparser::AtRuleParser<'i> for &mut SheetParser {
+    type Prelude = ();
+    type AtRule = ();
+    type Error = ();
+}
+
+struct DeclarationParser;
+
+impl<'i> cssparser::DeclarationParser<'i> for DeclarationParser {
+    type Declaration = (String, String);
+    type Error = ();
+
+    fn parse_value<'t>(
+        &mut self,
+        name: cssparser::CowRcStr<'i>,
+        input: &mut cssparser::Parser<'i, 't>,
+    ) -> Result<(String, String), cssparser::ParseError<'i, ()>> {
+        let mut value = String::new();
+        while let Ok(token) = input.next_including_whitespace() {
+            let _ = token.to_css(&mut value);
+        }
+        Ok((name.to_string(), value.trim().to_string()))
+    }
+}
+
+impl<'i> cssparser::AtRuleParser<'i> for DeclarationParser {
+    type Prelude = ();
+    type AtRule = (String, String);
+    type Error = ();
+}
+
+fn parse_selector_list(selector: &str) -> Vec<SimpleSelector> {
+    let mut out = Vec::new();
+    for part in selector.split(',') {
+        let raw = part.trim();
+        if raw.is_empty() {
+            continue;
+        }
+        let (name_raw, hover) = if let Some((base, pseudo)) = raw.split_once(':') {
+            (base.trim(), pseudo.trim() == "hover")
+        } else {
+            (raw, false)
+        };
+        if let Some(rest) = name_raw.strip_prefix('.') {
+            let name = rest.trim();
+            if !name.is_empty() {
+                out.push(SimpleSelector {
+                    kind: SimpleSelectorKind::Class,
+                    tag: String::new(),
+                    class: name.to_string(),
+                    hover,
+                });
+            }
+        } else if let Some((tag, class)) = name_raw.split_once('.') {
+            let tag = tag.trim();
+            let class = class.trim();
+            if !tag.is_empty() && !class.is_empty() {
+                out.push(SimpleSelector {
+                    kind: SimpleSelectorKind::TagClass,
+                    tag: tag.to_string(),
+                    class: class.to_string(),
+                    hover,
+                });
+            }
+        } else if !name_raw.is_empty() {
+            out.push(SimpleSelector {
+                kind: SimpleSelectorKind::Tag,
+                tag: name_raw.to_string(),
+                class: String::new(),
+                hover,
+            });
+        }
+    }
+    out
+}
+
+// --- Stylesheet ---
+
 #[derive(Debug, Default, Clone, PartialEq)]
 pub struct Stylesheet {
     pub rules: Vec<Rule>,
@@ -50,129 +178,7 @@ pub struct Stylesheet {
 
 impl Stylesheet {
     pub fn parse(css: &str) -> Self {
-        use cssparser::{Parser, ParserInput, RuleListParser, ToCss};
-
-        struct SheetParser {
-            rules: Vec<Rule>,
-        }
-
-        impl<'i> cssparser::QualifiedRuleParser<'i> for &mut SheetParser {
-            type Prelude = String;
-            type QualifiedRule = ();
-            type Error = ();
-
-            fn parse_prelude<'t>(
-                &mut self,
-                input: &mut Parser<'i, 't>,
-            ) -> Result<Self::Prelude, cssparser::ParseError<'i, Self::Error>> {
-                let mut selector = String::new();
-                while let Ok(token) = input.next_including_whitespace() {
-                    let _ = token.to_css(&mut selector);
-                }
-                Ok(selector.trim().to_string())
-            }
-
-            fn parse_block<'t>(
-                &mut self,
-                prelude: Self::Prelude,
-                _start: &cssparser::ParserState,
-                input: &mut Parser<'i, 't>,
-            ) -> Result<Self::QualifiedRule, cssparser::ParseError<'i, Self::Error>> {
-                let mut decls = HashMap::new();
-                for (name, value) in
-                    cssparser::DeclarationListParser::new(input, DeclarationParser).flatten()
-                {
-                    if !name.is_empty() {
-                        decls.insert(name, value);
-                    }
-                }
-                if decls.is_empty() {
-                    return Ok(());
-                }
-                for selector in parse_selector_list(&prelude) {
-                    self.rules.push(Rule {
-                        selector,
-                        decls: decls.clone(),
-                    });
-                }
-                Ok(())
-            }
-        }
-
-        impl<'i> cssparser::AtRuleParser<'i> for &mut SheetParser {
-            type Prelude = ();
-            type AtRule = ();
-            type Error = ();
-        }
-
-        struct DeclarationParser;
-        impl<'i> cssparser::DeclarationParser<'i> for DeclarationParser {
-            type Declaration = (String, String);
-            type Error = ();
-
-            fn parse_value<'t>(
-                &mut self,
-                name: cssparser::CowRcStr<'i>,
-                input: &mut Parser<'i, 't>,
-            ) -> Result<Self::Declaration, cssparser::ParseError<'i, Self::Error>> {
-                let mut value = String::new();
-                while let Ok(token) = input.next_including_whitespace() {
-                    let _ = token.to_css(&mut value);
-                }
-                Ok((name.to_string(), value.trim().to_string()))
-            }
-        }
-
-        impl<'i> cssparser::AtRuleParser<'i> for DeclarationParser {
-            type Prelude = ();
-            type AtRule = (String, String);
-            type Error = ();
-        }
-
-        fn parse_selector_list(selector: &str) -> Vec<SimpleSelector> {
-            let mut out = Vec::new();
-            for part in selector.split(',') {
-                let raw = part.trim();
-                if raw.is_empty() {
-                    continue;
-                }
-                let (name_raw, hover) = if let Some((base, pseudo)) = raw.split_once(':') {
-                    (base.trim(), pseudo.trim() == "hover")
-                } else {
-                    (raw, false)
-                };
-                if let Some(rest) = name_raw.strip_prefix('.') {
-                    let name = rest.trim();
-                    if !name.is_empty() {
-                        out.push(SimpleSelector {
-                            kind: SimpleSelectorKind::Class,
-                            tag: String::new(),
-                            class: name.to_string(),
-                            hover,
-                        });
-                    }
-                } else if let Some((tag, class)) = name_raw.split_once('.') {
-                    let tag = tag.trim();
-                    let class = class.trim();
-                    if !tag.is_empty() && !class.is_empty() {
-                        out.push(SimpleSelector {
-                            kind: SimpleSelectorKind::TagClass,
-                            tag: tag.to_string(),
-                            class: class.to_string(),
-                            hover,
-                        });
-                    }
-                } else if !name_raw.is_empty() {
-                    out.push(SimpleSelector {
-                        kind: SimpleSelectorKind::Tag,
-                        tag: name_raw.to_string(),
-                        class: String::new(),
-                        hover,
-                    });
-                }
-            }
-            out
-        }
+        use cssparser::{Parser, ParserInput, RuleListParser};
 
         let mut input = ParserInput::new(css);
         let mut parser = Parser::new(&mut input);

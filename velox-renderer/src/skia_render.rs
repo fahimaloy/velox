@@ -1172,14 +1172,18 @@ pub mod skia_impl {
                 vec![
                     h(
                         "div",
-                        vec![("style", "background-color:#FF0000;width:40px;height:40px;z-index:1")],
+                        vec![(
+                            "style",
+                            "background-color:#FF0000;width:40px;height:40px;z-index:1",
+                        )],
                         vec![],
                     ),
                     h(
                         "div",
-                        vec![
-                            ("style", "background-color:#0000FF;width:40px;height:40px;margin-top:-20px;z-index:0"),
-                        ],
+                        vec![(
+                            "style",
+                            "background-color:#0000FF;width:40px;height:40px;margin-top:-20px;z-index:0",
+                        )],
                         vec![],
                     ),
                 ],

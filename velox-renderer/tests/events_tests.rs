@@ -13,7 +13,7 @@ fn dispatch_invokes_registered_callback() {
         vec![text("+1")],
     );
     let r = velox_renderer::new_selected_renderer();
-    let tree = r.mount(&vnode);
+    let tree = r.mount(&vnode).expect("mount should succeed");
 
     let count = Rc::new(RefCell::new(0));
     let mut reg = events::EventRegistry::new();
@@ -40,7 +40,7 @@ fn dispatch_handles_multiple_targets() {
         ],
     );
     let r = velox_renderer::new_selected_renderer();
-    let tree = r.mount(&vnode);
+    let tree = r.mount(&vnode).expect("mount should succeed");
 
     let count = Rc::new(RefCell::new(0));
     let mut reg = events::EventRegistry::new();

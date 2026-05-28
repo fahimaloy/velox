@@ -33,7 +33,8 @@ fn cli_build_emits_render_fn() {
     velox_cli::build_cmd(&input, Some(out_dir.as_path()), velox_cli::EmitMode::Render)
         .expect("build render");
 
-    let out_file = out_dir.join("App.rs");
+    // Output file uses sanitized (lowercase) module name per Rust conventions
+    let out_file = out_dir.join("app.rs");
     let content = fs::read_to_string(&out_file).expect("read render output");
     assert!(
         content.contains("pub fn render()"),

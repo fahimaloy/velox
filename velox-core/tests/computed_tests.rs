@@ -1,5 +1,5 @@
 use std::rc::Rc;
-use velox_core::signal::{computed, Signal};
+use velox_core::signal::{Signal, computed};
 
 #[test]
 fn computed_derives_value_from_source() {
@@ -8,7 +8,7 @@ fn computed_derives_value_from_source() {
         let source = source.clone();
         move || source.get() * 2
     });
-    
+
     assert_eq!(comp.get(), 20);
 }
 
@@ -19,9 +19,9 @@ fn computed_updates_when_source_changes() {
         let source = source.clone();
         move || source.get() * 3
     });
-    
+
     assert_eq!(comp.get(), 15);
-    
+
     source.set(10);
     assert_eq!(comp.get(), 30);
 }
@@ -35,12 +35,12 @@ fn computed_with_multiple_dependencies() {
         let b = b.clone();
         move || a.get() + b.get()
     });
-    
+
     assert_eq!(comp.get(), 5);
-    
+
     a.set(10);
     assert_eq!(comp.get(), 13);
-    
+
     b.set(20);
     assert_eq!(comp.get(), 30);
 }
@@ -56,9 +56,9 @@ fn computed_chained() {
         let double = double.clone();
         move || double.get() * 2
     });
-    
+
     assert_eq!(quadruple.get(), 4);
-    
+
     base.set(5);
     assert_eq!(double.get(), 10);
     assert_eq!(quadruple.get(), 20);

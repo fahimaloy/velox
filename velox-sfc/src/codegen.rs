@@ -1,8 +1,43 @@
+use std::path::Path;
+
 use crate::sfc::Sfc;
 
 /// Extremely simple stub codegen that emits a Rust module with raw blocks.
 /// Later, you'll compile `<template>` into VNodes and `<style>` into native styles.
 pub fn to_stub_rs(sfc: &Sfc, component_name: &str) -> String {
+    to_stub_rs_inner(sfc, component_name, None, true)
+}
+
+/// Same as `to_stub_rs` but accepts an optional base path for import resolution.
+/// When provided, relative imports are resolved from this path instead of CWD.
+///
+/// The output is wrapped in `pub mod {name} { ... }`, suitable for `include!()`
+/// in a standalone build script context.
+pub fn to_stub_rs_with_base(
+    sfc: &Sfc,
+    component_name: &str,
+    base_path: Option<&Path>,
+) -> String {
+    to_stub_rs_inner(sfc, component_name, base_path, true)
+}
+
+/// Same as `to_stub_rs_with_base` but emits the module body *without* the
+/// `pub mod {name} { ... }` wrapper. Use this when the caller already manages
+/// module declarations (e.g., via `#[path]` attributes in a component tree).
+pub fn to_stub_rs_unwrapped(
+    sfc: &Sfc,
+    component_name: &str,
+    base_path: Option<&Path>,
+) -> String {
+    to_stub_rs_inner(sfc, component_name, base_path, false)
+}
+
+fn to_stub_rs_inner(
+    sfc: &Sfc,
+    component_name: &str,
+    base_path: Option<&Path>,
+    wrap_module: bool,
+) -> String {
     let t = sfc
         .template
         .as_ref()
@@ -24,29 +59,58 @@ pub fn to_stub_rs(sfc: &Sfc, component_name: &str) -> String {
     let open = "{";
     let close = "}";
 
-    // Create resolver for component imports
-    let mut resolver = crate::component_resolver::ComponentResolver::new(
-        std::env::current_dir().unwrap_or_default(),
-    );
+    // Create resolver for component imports using the provided base path.
+    // If no base path is given, fall back to the current working directory.
+    let resolver_base = base_path
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+    let mut resolver = crate::component_resolver::ComponentResolver::new(resolver_base);
     if let Some(script_setup) = &sfc.script_setup {
         resolver.parse_imports(&script_setup.content);
     }
 
-    // Generate component imports
-    let component_imports = if !resolver.component_names().is_empty() {
-        let imports: Vec<String> = resolver
-            .component_names()
-            .iter()
-            .map(|comp| format!("    pub mod {};", comp))
-            .collect();
-        format!("\n{}\n", imports.join("\n"))
-    } else {
-        String::new()
-    };
+    // NOTE: We intentionally do NOT generate `pub mod {name};` declarations here.
+    // The caller (e.g., compile_component_tree in velox-cli) is responsible for
+    // generating `#[path = "..."] pub mod ...;` declarations with correct file paths.
+    // Generating bare `pub mod` here would conflict with the caller's declarations
+    // and cause "file not found for module" errors.
+
+    // Check if style is scoped
+    let style_is_scoped = sfc
+        .style
+        .as_ref()
+        .map(|b| b.attrs.iter().any(|a| a.name == "scoped"))
+        .unwrap_or(false);
 
     // Check if the template has any component @event listeners to determine
     // if we need emit infrastructure
     let needs_emit_infra = template_needs_emit_infra(sfc);
+
+    // Generate scope ID for scoped styles
+    let scope_id = if style_is_scoped {
+        let id = format!("data-v-{}", generate_scope_hash(name.as_str()));
+        Some(id)
+    } else {
+        None
+    };
+
+    // Transform scopedoped styles with scope selector
+    let processed_style = if let Some(ref scope_id) = scope_id {
+        transform_scoped_css(st, scope_id)
+    } else {
+        st.to_string()
+    };
+
+    // Transform scopedoped template with scope attribute
+    let processed_template = if let Some(ref scope_id) = scope_id {
+        add_scope_to_template(t, scope_id)
+    } else {
+        t.to_string()
+    };
+
+    // Indent level: 4 spaces when wrapped in a module, 0 when unwrapped.
+    let indent = if wrap_module { "    " } else { "" };
+    let inner_indent = if wrap_module { "        " } else { "    " };
 
     // Build output manually to allow embedding script_setup as raw Rust.
     let mut out = String::new();
@@ -54,48 +118,192 @@ pub fn to_stub_rs(sfc: &Sfc, component_name: &str) -> String {
 
     // If any component in the template uses @event, we need the emit module
     if needs_emit_infra {
-        out.push_str("    use std::cell::RefCell;\n");
-        out.push_str("    use std::collections::HashMap;\n\n");
-        out.push_str(&generate_emit_infrastructure());
+        out.push_str(&format!("{indent}use std::cell::RefCell;\n"));
+        out.push_str(&format!("{indent}use std::collections::HashMap;\n\n"));
+        // Emit infrastructure is already indented for module-level (4 spaces).
+        // When unwrapped, strip that indentation.
+        let emit_code = generate_emit_infrastructure();
+        if wrap_module {
+            out.push_str(&emit_code);
+        } else {
+            for line in emit_code.lines() {
+                let stripped = line.strip_prefix("    ").unwrap_or(line);
+                out.push_str(stripped);
+                out.push('\n');
+            }
+        }
         out.push('\n');
     }
 
-    out.push_str(&format!("pub mod {} {}\n", name, open));
-    out.push_str(&format!("    pub const TEMPLATE: &str = r#\"{}\"#;\n", escape_raw_string(t)));
+    if wrap_module {
+        out.push_str(&format!("pub mod {} {}\n", name, open));
+    }
     out.push_str(&format!(
-        "    pub const SCRIPT_SETUP: &str = r#\"{}\"#;\n",
+        "{indent}pub const TEMPLATE: &str = r#\"{}\"#;\n",
+        escape_raw_string(&processed_template)
+    ));
+    out.push_str(&format!(
+        "{indent}pub const SCRIPT_SETUP: &str = r#\"{}\"#;\n",
         escape_raw_string(ss)
     ));
-    out.push_str(&format!("    pub const SCRIPT: &str = r#\"{}\"#;\n", escape_raw_string(s)));
-    out.push_str(&format!("    pub const STYLE: &str = r#\"{}\"#;\n", escape_raw_string(st)));
+    out.push_str(&format!(
+        "{indent}pub const SCRIPT: &str = r#\"{}\"#;\n",
+        escape_raw_string(s)
+    ));
+    out.push_str(&format!(
+        "{indent}pub const STYLE: &str = r#\"{}\"#;\n",
+        escape_raw_string(&processed_style)
+    ));
     if !ss.is_empty() {
-        out.push_str("    pub mod script_rs {\n        #![allow(unused_variables, unused_imports, unused_mut, unused_assignments)]\n");
-        out.push_str("        use super::*;\n");
+        out.push_str(&format!("{indent}pub mod script_rs {{\n{inner_indent}#![allow(unused_variables, unused_imports, unused_mut, unused_assignments)]\n"));
+        out.push_str(&format!("{inner_indent}use super::*;\n"));
 
         // If this component itself needs emit infrastructure (parent uses @event on it),
         // add the callback type and emit helper
         if ss.contains("define_emits") || ss.contains("emit(") {
-            out.push_str(&generate_component_emit_helpers());
+            let helpers = generate_component_emit_helpers();
+            // helpers are indented for module-level; adjust for inner_indent
+            for line in helpers.lines() {
+                // Strip the 8-space prefix that was designed for the wrapped format
+                let stripped = line.strip_prefix("        ").unwrap_or(line.strip_prefix("    ").unwrap_or(line));
+                out.push_str(&format!("{inner_indent}{stripped}\n"));
+            }
         }
 
-        // Insert user code as-is; they are writing Rust.
+        // Insert user code as-is, BUT skip import lines (e.g., `import X from 'Y.vx'`).
+        // Import lines are a Velox DSL, not valid Rust. They are already stored
+        // in the SCRIPT_SETUP constant above. The caller handles module declarations
+        // for imported components via #[path] attributes.
         for line in ss.lines() {
-            out.push_str("        ");
-            out.push_str(line);
-            out.push('\n');
+            if is_import_line(line) {
+                continue;
+            }
+            out.push_str(&format!("{inner_indent}{line}\n"));
         }
-        out.push_str("    }\n");
+        out.push_str(&format!("{indent}}}\n"));
     }
-    out.push_str(&component_imports);
 
     // Generate render_with_callbacks if the component has emit declarations
     if ss.contains("define_emits") || ss.contains("emit(") {
-        out.push_str(&generate_render_with_callbacks_inside_module());
+        let render_cb = generate_render_with_callbacks_inside_module();
+        // The template has 4-space indentation; adjust to indent level
+        for line in render_cb.lines() {
+            let stripped = line.strip_prefix("    ").unwrap_or(line);
+            out.push_str(&format!("{indent}{stripped}\n"));
+        }
     }
 
-    out.push_str(close);
-    out.push('\n');
+    if wrap_module {
+        out.push_str(close);
+        out.push('\n');
+    }
     out
+}
+
+/// Check if a line is a Velox component import statement.
+/// Matches patterns like:
+///   import MyButton from './components/Button.vx'
+///   import { Button, Card } from './components.vx'
+fn is_import_line(line: &str) -> bool {
+    let trimmed = line.trim();
+    trimmed.starts_with("import ") && trimmed.contains(" from ")
+}
+
+/// Generate a short hash for the scope ID based on component name.
+fn generate_scope_hash(name: &str) -> String {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    let mut hasher = DefaultHasher::new();
+    name.hash(&mut hasher);
+    format!("{:08x}", hasher.finish())
+}
+
+/// Add scope attribute to all root-level elements in the template.
+fn add_scope_to_template(template: &str, scope_id: &str) -> String {
+    let mut result = String::with_capacity(template.len() + 100);
+    let mut chars = template.chars().peekable();
+
+    while let Some(ch) = chars.next() {
+        if ch == '<' {
+            // Check if it's a closing tag or comment
+            if chars.peek() == Some(&'/') || chars.peek() == Some(&'!') {
+                result.push(ch);
+                result.push(chars.next().unwrap());
+                continue;
+            }
+
+            // It's an opening tag - add the scope attribute
+            result.push('<');
+            // Read tag name
+            while let Some(&next) = chars.peek() {
+                if next.is_whitespace() || next == '>' || next == '/' {
+                    break;
+                }
+                result.push(chars.next().unwrap());
+            }
+            // Add scope attribute
+            result.push_str(&format!(" {}=\"\"", scope_id));
+            // Continue with rest of tag
+            while let Some(&next) = chars.peek() {
+                if next == '>' {
+                    result.push(chars.next().unwrap());
+                    break;
+                }
+                result.push(chars.next().unwrap());
+            }
+        } else {
+            result.push(ch);
+        }
+    }
+
+    result
+}
+
+/// Transform scopedoped CSS by adding scope selector to all rules.
+fn transform_scoped_css(css: &str, scope_id: &str) -> String {
+    let mut result = String::with_capacity(css.len() + 500);
+    let mut in_block = false;
+    let mut selector = String::new();
+
+    for ch in css.chars() {
+        if ch == '{' && !in_block {
+            // End of selector, start of block
+            in_block = true;
+            // Add scope to the selector
+            let selector_trimmed = selector.trim();
+            if !selector_trimmed.is_empty() && !selector_trimmed.starts_with('@') {
+                // Transform each selector (comma-separated)
+                let selectors: Vec<&str> = selector_trimmed.split(',').collect();
+                let scoped_selectors: Vec<String> = selectors
+                    .iter()
+                    .map(|s| {
+                        let s = s.trim();
+                        if s.is_empty() {
+                            return String::new();
+                        }
+                        format!("{}[{}]", s, scope_id)
+                    })
+                    .collect();
+                result.push_str(&scoped_selectors.join(", "));
+            } else {
+                result.push_str(&selector);
+            }
+            result.push('{');
+            selector = String::new();
+        } else if ch == '}' && in_block {
+            // End of block
+            in_block = false;
+            result.push('}');
+        } else if in_block {
+            // Inside a rule block
+            result.push(ch);
+        } else {
+            // Building selector
+            selector.push(ch);
+        }
+    }
+
+    result
 }
 
 /// Check if the template contains component tags with @event listeners.

@@ -686,6 +686,27 @@ pub fn compute_layout(node: &VNode, viewport_w: i32, viewport_h: i32) -> LayoutN
                 );
                 let is_root = matches!(tag.as_str(), "body" | "html");
 
+                // Check if element has height: 100vh or min-height: 100vh (viewport-relative)
+                let has_viewport_height = style_lookup_len_full(
+                    style,
+                    "height",
+                    vh_f,
+                    parent_font_size,
+                    root_font_size,
+                    vw_f,
+                    vh_f,
+                ).map(|h| h as f32 == vh_f).unwrap_or(false);
+                let min_height_vh = style_lookup_len_full(
+                    style,
+                    "min-height",
+                    vh_f,
+                    parent_font_size,
+                    root_font_size,
+                    vw_f,
+                    vh_f,
+                ).map(|h| h as f32 == vh_f).unwrap_or(false);
+                let is_viewport_height = is_root || has_viewport_height || min_height_vh;
+
                 // Element outer position with margins
                 let elem_x = x + ml;
                 let elem_y = y + mt;
@@ -704,6 +725,23 @@ pub fn compute_layout(node: &VNode, viewport_w: i32, viewport_h: i32) -> LayoutN
                     (avail_w - ml - mr).max(1)
                 } else {
                     declared_w.unwrap_or(avail_w)
+                };
+
+                // Determine height: handle viewport-relative heights (100vh, min-height: 100vh)
+                let declared_h = style_lookup_len_full(
+                    style,
+                    "height",
+                    avail_h as f32,
+                    parent_font_size,
+                    root_font_size,
+                    vw_f,
+                    vh_f,
+                );
+                // For viewport-height elements, use viewport height as the base
+                let _rect_h = if is_viewport_height {
+                    (avail_h - mt - mb).max(1)
+                } else {
+                    declared_h.unwrap_or(avail_h)
                 };
 
                 // Content box
@@ -1373,11 +1411,13 @@ pub fn compute_layout(node: &VNode, viewport_w: i32, viewport_h: i32) -> LayoutN
 
                                 // Set final position
                                 if is_column {
-                                    ln.rect.x = content_x_scrolled;
+                                    ln.rect.x =
+                                        (content_x_scrolled as f32 + cross_pos).round() as i32;
                                     ln.rect.y = main_pos as i32;
                                 } else {
                                     ln.rect.x = main_pos as i32;
-                                    ln.rect.y = cross_pos as i32;
+                                    ln.rect.y =
+                                        (content_y_scrolled as f32 + cross_pos).round() as i32;
                                 }
 
                                 // Handle reverse directions

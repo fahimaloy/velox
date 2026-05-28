@@ -5,7 +5,6 @@
 
 use std::fmt;
 
-
 /// A CSS length value with unit
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub enum Length {
@@ -32,44 +31,44 @@ impl Length {
     /// Parse a CSS length string
     pub fn parse(s: &str) -> Option<Self> {
         let s = s.trim();
-        
+
         if s == "auto" {
             return Some(Length::Auto);
         }
-        
+
         if s == "0" {
             return Some(Length::Zero);
         }
-        
+
         // Try to parse with units
         if let Some(val) = s.strip_suffix("px") {
             return val.trim().parse::<f32>().ok().map(Length::Px);
         }
-        
+
         if let Some(val) = s.strip_suffix('%') {
             return val.trim().parse::<f32>().ok().map(Length::Percent);
         }
-        
+
         if let Some(val) = s.strip_suffix("rem") {
             return val.trim().parse::<f32>().ok().map(Length::Rem);
         }
-        
+
         if let Some(val) = s.strip_suffix("em") {
             return val.trim().parse::<f32>().ok().map(Length::Em);
         }
-        
+
         if let Some(val) = s.strip_suffix("vw") {
             return val.trim().parse::<f32>().ok().map(Length::Vw);
         }
-        
+
         if let Some(val) = s.strip_suffix("vh") {
             return val.trim().parse::<f32>().ok().map(Length::Vh);
         }
-        
+
         // Try plain number as pixels
         s.parse::<f32>().ok().map(Length::Px)
     }
-    
+
     /// Convert to pixels given context values
     pub fn to_px(&self, parent_size: f32, root_size: f32, viewport: (f32, f32)) -> f32 {
         match *self {
@@ -83,7 +82,7 @@ impl Length {
             Length::Zero => 0.0,
         }
     }
-    
+
     /// Check if length is auto
     pub fn is_auto(&self) -> bool {
         matches!(self, Length::Auto)
@@ -116,35 +115,95 @@ pub struct Color {
 
 impl Color {
     /// Transparent color
-    pub const TRANSPARENT: Color = Color { r: 0, g: 0, b: 0, a: 0 };
+    pub const TRANSPARENT: Color = Color {
+        r: 0,
+        g: 0,
+        b: 0,
+        a: 0,
+    };
     /// Black
-    pub const BLACK: Color = Color { r: 0, g: 0, b: 0, a: 255 };
+    pub const BLACK: Color = Color {
+        r: 0,
+        g: 0,
+        b: 0,
+        a: 255,
+    };
     /// White
-    pub const WHITE: Color = Color { r: 255, g: 255, b: 255, a: 255 };
+    pub const WHITE: Color = Color {
+        r: 255,
+        g: 255,
+        b: 255,
+        a: 255,
+    };
     /// Red
-    pub const RED: Color = Color { r: 255, g: 0, b: 0, a: 255 };
+    pub const RED: Color = Color {
+        r: 255,
+        g: 0,
+        b: 0,
+        a: 255,
+    };
     /// Green
-    pub const GREEN: Color = Color { r: 0, g: 255, b: 0, a: 255 };
+    pub const GREEN: Color = Color {
+        r: 0,
+        g: 255,
+        b: 0,
+        a: 255,
+    };
     /// Blue
-    pub const BLUE: Color = Color { r: 0, g: 0, b: 255, a: 255 };
-    
+    pub const BLUE: Color = Color {
+        r: 0,
+        g: 0,
+        b: 255,
+        a: 255,
+    };
+
     /// Modern dark theme colors
-    pub const DARK_BG: Color = Color { r: 26, g: 26, b: 26, a: 255 };         // #1a1a1a
-    pub const DARK_TEXT: Color = Color { r: 224, g: 224, b: 224, a: 255 };    // #e0e0e0
-    pub const DARK_CARD: Color = Color { r: 38, g: 38, b: 38, a: 255 };       // #262626
-    pub const ACCENT_BLUE: Color = Color { r: 52, g: 120, b: 246, a: 255 };   // #3478f6
-    pub const ACCENT_GREEN: Color = Color { r: 34, g: 197, b: 94, a: 255 };   // #22c55e
-    pub const BORDER_DARK: Color = Color { r: 55, g: 65, b: 81, a: 255 };     // #374151
-    
+    pub const DARK_BG: Color = Color {
+        r: 26,
+        g: 26,
+        b: 26,
+        a: 255,
+    }; // #1a1a1a
+    pub const DARK_TEXT: Color = Color {
+        r: 224,
+        g: 224,
+        b: 224,
+        a: 255,
+    }; // #e0e0e0
+    pub const DARK_CARD: Color = Color {
+        r: 38,
+        g: 38,
+        b: 38,
+        a: 255,
+    }; // #262626
+    pub const ACCENT_BLUE: Color = Color {
+        r: 52,
+        g: 120,
+        b: 246,
+        a: 255,
+    }; // #3478f6
+    pub const ACCENT_GREEN: Color = Color {
+        r: 34,
+        g: 197,
+        b: 94,
+        a: 255,
+    }; // #22c55e
+    pub const BORDER_DARK: Color = Color {
+        r: 55,
+        g: 65,
+        b: 81,
+        a: 255,
+    }; // #374151
+
     /// Create a new color
     pub fn new(r: u8, g: u8, b: u8, a: u8) -> Self {
         Color { r, g, b, a }
     }
-    
+
     /// Parse a CSS color string (hex, rgb, rgba, named)
     pub fn parse(s: &str) -> Option<Self> {
         let s = s.trim();
-        
+
         // Named colors
         let named = match s.to_lowercase().as_str() {
             "transparent" => return Some(Color::TRANSPARENT),
@@ -153,21 +212,96 @@ impl Color {
             "red" => Color::RED,
             "green" => Color::GREEN,
             "blue" => Color::BLUE,
-            "yellow" => Color { r: 255, g: 255, b: 0, a: 255 },
-            "cyan" => Color { r: 0, g: 255, b: 255, a: 255 },
-            "magenta" => Color { r: 255, g: 0, b: 255, a: 255 },
-            "silver" => Color { r: 192, g: 192, b: 192, a: 255 },
-            "gray" | "grey" => Color { r: 128, g: 128, b: 128, a: 255 },
-            "maroon" => Color { r: 128, g: 0, b: 0, a: 255 },
-            "olive" => Color { r: 128, g: 128, b: 0, a: 255 },
-            "lime" => Color { r: 0, g: 255, b: 0, a: 255 },
-            "aqua" => Color { r: 0, g: 255, b: 255, a: 255 },
-            "teal" => Color { r: 0, g: 128, b: 128, a: 255 },
-            "navy" => Color { r: 0, g: 0, b: 128, a: 255 },
-            "fuchsia" => Color { r: 255, g: 0, b: 255, a: 255 },
-            "purple" => Color { r: 128, g: 0, b: 128, a: 255 },
-            "orange" => Color { r: 255, g: 165, b: 0, a: 255 },
-            "pink" => Color { r: 255, g: 192, b: 203, a: 255 },
+            "yellow" => Color {
+                r: 255,
+                g: 255,
+                b: 0,
+                a: 255,
+            },
+            "cyan" => Color {
+                r: 0,
+                g: 255,
+                b: 255,
+                a: 255,
+            },
+            "magenta" => Color {
+                r: 255,
+                g: 0,
+                b: 255,
+                a: 255,
+            },
+            "silver" => Color {
+                r: 192,
+                g: 192,
+                b: 192,
+                a: 255,
+            },
+            "gray" | "grey" => Color {
+                r: 128,
+                g: 128,
+                b: 128,
+                a: 255,
+            },
+            "maroon" => Color {
+                r: 128,
+                g: 0,
+                b: 0,
+                a: 255,
+            },
+            "olive" => Color {
+                r: 128,
+                g: 128,
+                b: 0,
+                a: 255,
+            },
+            "lime" => Color {
+                r: 0,
+                g: 255,
+                b: 0,
+                a: 255,
+            },
+            "aqua" => Color {
+                r: 0,
+                g: 255,
+                b: 255,
+                a: 255,
+            },
+            "teal" => Color {
+                r: 0,
+                g: 128,
+                b: 128,
+                a: 255,
+            },
+            "navy" => Color {
+                r: 0,
+                g: 0,
+                b: 128,
+                a: 255,
+            },
+            "fuchsia" => Color {
+                r: 255,
+                g: 0,
+                b: 255,
+                a: 255,
+            },
+            "purple" => Color {
+                r: 128,
+                g: 0,
+                b: 128,
+                a: 255,
+            },
+            "orange" => Color {
+                r: 255,
+                g: 165,
+                b: 0,
+                a: 255,
+            },
+            "pink" => Color {
+                r: 255,
+                g: 192,
+                b: 203,
+                a: 255,
+            },
             _ => {
                 // Try hex
                 if let Some(hex) = s.strip_prefix('#') {
@@ -180,10 +314,10 @@ impl Color {
                 return None;
             }
         };
-        
+
         Some(named)
     }
-    
+
     fn parse_hex(hex: &str) -> Option<Self> {
         let hex = hex.trim();
         match hex.len() {
@@ -209,17 +343,20 @@ impl Color {
             _ => None,
         }
     }
-    
+
     fn parse_rgb(s: &str) -> Option<Self> {
-        let inner = s.trim_start_matches("rgb(").trim_start_matches("rgba(")
-            .trim_end_matches(')').trim();
-        
+        let inner = s
+            .trim_start_matches("rgb(")
+            .trim_start_matches("rgba(")
+            .trim_end_matches(')')
+            .trim();
+
         let parts: Vec<&str> = inner.split(',').map(|p| p.trim()).collect();
-        
+
         if parts.len() < 3 {
             return None;
         }
-        
+
         let r = parts[0].parse::<u8>().ok()?;
         let g = parts[1].parse::<u8>().ok()?;
         let b = parts[2].parse::<u8>().ok()?;
@@ -238,15 +375,15 @@ impl Color {
         } else {
             255
         };
-        
+
         Some(Color::new(r, g, b, a))
     }
-    
+
     /// Convert to RGBA tuple (0-255)
     pub fn to_rgba(&self) -> (u8, u8, u8, u8) {
         (self.r, self.g, self.b, self.a)
     }
-    
+
     /// Convert to normalized RGBA (0.0-1.0)
     pub fn to_normalized(&self) -> (f32, f32, f32, f32) {
         (
@@ -263,7 +400,14 @@ impl fmt::Display for Color {
         if self.a == 255 {
             write!(f, "#{:02x}{:02x}{:02x}", self.r, self.g, self.b)
         } else {
-            write!(f, "rgba({}, {}, {}, {})", self.r, self.g, self.b, self.a as f32 / 255.0)
+            write!(
+                f,
+                "rgba({}, {}, {}, {})",
+                self.r,
+                self.g,
+                self.b,
+                self.a as f32 / 255.0
+            )
         }
     }
 }
@@ -447,7 +591,7 @@ impl Overflow {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     #[test]
     fn test_length_parsing() {
         assert_eq!(Length::parse("10px"), Some(Length::Px(10.0)));
@@ -457,7 +601,7 @@ mod tests {
         assert_eq!(Length::parse("auto"), Some(Length::Auto));
         assert_eq!(Length::parse("0"), Some(Length::Zero));
     }
-    
+
     #[test]
     fn test_color_parsing() {
         assert_eq!(Color::parse("#ff0000"), Some(Color::RED));

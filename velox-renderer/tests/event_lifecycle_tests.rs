@@ -27,7 +27,7 @@ fn dispatch_multiple_event_types() {
         ],
     );
     let r = velox_renderer::new_selected_renderer();
-    let tree = r.mount(&vnode);
+    let tree = r.mount(&vnode).expect("mount should succeed");
 
     let click_count = Rc::new(RefCell::new(0));
     let hover_count = Rc::new(RefCell::new(0));
@@ -63,7 +63,7 @@ fn dispatch_no_matching_handlers() {
         vec![h("button", Props::new().set("on:click", "onClick"), vec![])],
     );
     let r = velox_renderer::new_selected_renderer();
-    let tree = r.mount(&vnode);
+    let tree = r.mount(&vnode).expect("mount should succeed");
 
     let mut reg = EventRegistry::new();
     // No handlers registered
@@ -83,7 +83,7 @@ fn dispatch_unregistered_handler_name() {
         )],
     );
     let r = velox_renderer::new_selected_renderer();
-    let tree = r.mount(&vnode);
+    let tree = r.mount(&vnode).expect("mount should succeed");
 
     let count = Rc::new(RefCell::new(0));
     let mut reg = EventRegistry::new();
@@ -144,7 +144,7 @@ fn dispatch_deeply_nested_handlers() {
         )],
     );
     let r = velox_renderer::new_selected_renderer();
-    let tree = r.mount(&vnode);
+    let tree = r.mount(&vnode).expect("mount should succeed");
 
     let count = Rc::new(RefCell::new(0));
     let mut reg = EventRegistry::new();
@@ -184,7 +184,7 @@ fn dispatch_same_handler_on_multiple_elements() {
         ],
     );
     let r = velox_renderer::new_selected_renderer();
-    let tree = r.mount(&vnode);
+    let tree = r.mount(&vnode).expect("mount should succeed");
 
     let count = Rc::new(RefCell::new(0));
     let mut reg = EventRegistry::new();
@@ -213,7 +213,7 @@ fn dispatch_mixed_handler_names() {
         ],
     );
     let r = velox_renderer::new_selected_renderer();
-    let tree = r.mount(&vnode);
+    let tree = r.mount(&vnode).expect("mount should succeed");
 
     let a_count = Rc::new(RefCell::new(0));
     let b_count = Rc::new(RefCell::new(0));
@@ -245,7 +245,7 @@ fn dispatch_mixed_handler_names() {
 fn mount_creates_render_tree() {
     let vnode = h("div", (), vec![text("hello")]);
     let r = velox_renderer::new_selected_renderer();
-    let tree = r.mount(&vnode);
+    let tree = r.mount(&vnode).expect("mount should succeed");
 
     assert_eq!(tree.node_count, 2); // div + text
     assert_eq!(tree.text_count, 1);
@@ -263,7 +263,7 @@ fn mount_nested_tree_counts_nodes() {
         ],
     );
     let r = velox_renderer::new_selected_renderer();
-    let tree = r.mount(&vnode);
+    let tree = r.mount(&vnode).expect("mount should succeed");
 
     // 1 div + 3 span + 3 text = 7
     assert_eq!(tree.node_count, 7);
@@ -274,7 +274,7 @@ fn mount_nested_tree_counts_nodes() {
 fn mount_empty_element() {
     let vnode = h("div", (), vec![]);
     let r = velox_renderer::new_selected_renderer();
-    let tree = r.mount(&vnode);
+    let tree = r.mount(&vnode).expect("mount should succeed");
 
     assert_eq!(tree.node_count, 1);
     assert_eq!(tree.text_count, 0);
@@ -284,7 +284,7 @@ fn mount_empty_element() {
 fn mount_text_only() {
     let vnode = text("plain text");
     let r = velox_renderer::new_selected_renderer();
-    let tree = r.mount(&vnode);
+    let tree = r.mount(&vnode).expect("mount should succeed");
 
     assert_eq!(tree.node_count, 1);
     assert_eq!(tree.text_count, 1);
@@ -301,7 +301,7 @@ fn mount_deep_tree() {
     }
     let vnode = make_tree(10);
     let r = velox_renderer::new_selected_renderer();
-    let tree = r.mount(&vnode);
+    let tree = r.mount(&vnode).expect("mount should succeed");
 
     // 10 divs + 1 text = 11
     assert_eq!(tree.node_count, 11);
@@ -315,7 +315,7 @@ fn mount_wide_tree() {
         .collect();
     let vnode = h("div", (), children);
     let r = velox_renderer::new_selected_renderer();
-    let tree = r.mount(&vnode);
+    let tree = r.mount(&vnode).expect("mount should succeed");
 
     // 1 div + 50 span + 50 text = 101
     assert_eq!(tree.node_count, 101);
@@ -334,7 +334,7 @@ fn runtime_mouse_click_invokes_handler() {
         vec![text("click me")],
     );
     let r = velox_renderer::new_selected_renderer();
-    let tree = r.mount(&vnode);
+    let tree = r.mount(&vnode).expect("mount should succeed");
 
     let count = Rc::new(RefCell::new(0));
     let mut rt = events::Runtime::new(tree);
@@ -353,7 +353,7 @@ fn runtime_mouse_click_invokes_handler() {
 fn runtime_double_click_detection() {
     let vnode = h("button", Props::new().set("on:dblclick", "onDbl"), vec![]);
     let r = velox_renderer::new_selected_renderer();
-    let tree = r.mount(&vnode);
+    let tree = r.mount(&vnode).expect("mount should succeed");
 
     let dbl_count = Rc::new(RefCell::new(0));
     let mut rt = events::Runtime::new(tree);
@@ -375,7 +375,7 @@ fn runtime_double_click_detection() {
 fn runtime_hover_sent_once() {
     let vnode = h("button", Props::new().set("on:hover", "onHover"), vec![]);
     let r = velox_renderer::new_selected_renderer();
-    let tree = r.mount(&vnode);
+    let tree = r.mount(&vnode).expect("mount should succeed");
 
     let hover_count = Rc::new(RefCell::new(0));
     let mut rt = events::Runtime::new(tree);

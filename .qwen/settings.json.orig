@@ -1,7 +1,12 @@
 {
   "permissions": {
     "allow": [
-      "Bash(cargo build)"
+      "Bash(cargo build *)",
+      "Bash(cargo test *)",
+      "Bash(cargo install *)",
+      "Bash(mkdir *)",
+      "Bash(velox *)"
     ]
-  }
+  },
+  "$version": 3
 }

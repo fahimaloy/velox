@@ -49,7 +49,12 @@ impl ComponentResolver {
             if let Some(rest) = line.strip_prefix("import ")
                 && let Some((import_part, source)) = rest.split_once(" from ")
             {
-                let source = source.trim().trim_matches('"').trim_matches('\'');
+                let source = source
+                    .trim()
+                    .trim_end_matches(';')
+                    .trim()
+                    .trim_matches('"')
+                    .trim_matches('\'');
 
                 // Handle single default import
                 let name = import_part.trim().to_string();
@@ -60,7 +65,12 @@ impl ComponentResolver {
             if let Some(rest) = line.strip_prefix("import {")
                 && let Some((names, source)) = rest.split_once("} from ")
             {
-                let source = source.trim().trim_matches('"').trim_matches('\'');
+                let source = source
+                    .trim()
+                    .trim_end_matches(';')
+                    .trim()
+                    .trim_matches('"')
+                    .trim_matches('\'');
                 for name in names.split(',') {
                     let name = name.trim();
                     if !name.is_empty() {

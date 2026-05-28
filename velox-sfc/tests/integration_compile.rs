@@ -77,8 +77,8 @@ velox-renderer = {{ path = "{}" }}
     fs::write(proj.join("Cargo.toml"), cargo_toml).expect("write Cargo.toml");
 
     // Write generated module and main
-    fs::write(src.join("App.rs"), module_code).expect("write App.rs");
-    let main = r#"include!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/App.rs"));
+    fs::write(src.join("app.rs"), module_code).expect("write app.rs");
+    let main = r#"include!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/app.rs"));
 fn main() { let _ = app::render(); }
 "#;
     fs::write(src.join("main.rs"), main).expect("write main.rs");
@@ -160,8 +160,8 @@ impl State { pub fn new() -> Self { Self { count: 0 } } }
     let render_fn = velox_sfc::compile_template_to_rs(tpl_src, name, Some(&resolver))
         .expect("compile template");
 
-    // Generate stub with imports
-    let mut stub = velox_sfc::to_stub_rs(&sfc, name);
+    // Generate stub with correct base path for import resolution
+    let mut stub = velox_sfc::to_stub_rs_with_base(&sfc, name, Some(&tmp));
 
     // Add component module import
     if !resolver.component_names().is_empty() {

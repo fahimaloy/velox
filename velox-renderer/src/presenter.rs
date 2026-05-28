@@ -21,8 +21,7 @@ impl SoftbufferPresenter {
     /// Returns an error if softbuffer context or surface creation fails.
     pub fn new(window: &Window, width: u32, height: u32) -> Result<Self, String> {
         let context = unsafe {
-            Context::new(window)
-                .map_err(|e| format!("softbuffer context failed: {}", e))?
+            Context::new(window).map_err(|e| format!("softbuffer context failed: {}", e))?
         };
         let mut surface = unsafe {
             Surface::new(&context, window)
@@ -32,8 +31,8 @@ impl SoftbufferPresenter {
         let h = height.max(1);
         surface
             .resize(
-                std::num::NonZeroU32::new(w).unwrap(),
-                std::num::NonZeroU32::new(h).unwrap(),
+                std::num::NonZeroU32::new(w).expect("w >= 1 guaranteed by .max(1)"),
+                std::num::NonZeroU32::new(h).expect("h >= 1 guaranteed by .max(1)"),
             )
             .map_err(|e| format!("softbuffer resize failed: {}", e))?;
         Ok(Self {
@@ -56,8 +55,8 @@ impl SoftbufferPresenter {
         }
         self.surface
             .resize(
-                std::num::NonZeroU32::new(w).unwrap(),
-                std::num::NonZeroU32::new(h).unwrap(),
+                std::num::NonZeroU32::new(w).expect("w >= 1 guaranteed by .max(1)"),
+                std::num::NonZeroU32::new(h).expect("h >= 1 guaranteed by .max(1)"),
             )
             .map_err(|e| format!("softbuffer resize failed: {}", e))?;
         self.width = w;
@@ -103,7 +102,10 @@ impl SoftbufferPresenter {
             let r = self.rgba[base] as u32;
             let g = self.rgba[base + 1] as u32;
             let b = self.rgba[base + 2] as u32;
-            *pixel = (r << 16) | (g << 8) | b;
+            let a = self.rgba[base + 3] as u32;
+            // Softbuffer uses ABGR format (little-endian: 0xAABBGGRR)
+            // Skia outputs RGBA with premultiplied alpha
+            *pixel = (a << 24) | (b << 16) | (g << 8) | r;
         }
         buffer
             .present()

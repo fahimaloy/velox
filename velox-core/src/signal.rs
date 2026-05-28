@@ -18,10 +18,10 @@ thread_local! {
     static EFFECT_QUEUE: RefCell<VecDeque<Effect>> = RefCell::new(VecDeque::new());
     static QUEUED: RefCell<HashSet<usize>> = RefCell::new(HashSet::new());
     static IS_FLUSHING: Cell<bool> = const { Cell::new(false) };
-    
+
     // Keep effects alive - they clean themselves up when dropped
     static EFFECT_STORAGE: RefCell<Vec<Effect>> = RefCell::new(Vec::new());
-    
+
     // Track stopped effect IDs so they can be skipped in flush_queue
     static STOPPED_EFFECTS: RefCell<HashSet<usize>> = RefCell::new(HashSet::new());
 }
@@ -54,16 +54,14 @@ fn flush_queue() {
         let Some(eff) = next else { break };
 
         let id = ptr_id(&eff);
-        
+
         // Mark as not queued before running, so re-enqueues are allowed.
         QUEUED.with(|set| {
             set.borrow_mut().remove(&id);
         });
-        
+
         // Skip if this effect has been stopped
-        let is_stopped = STOPPED_EFFECTS.with(|stopped| {
-            stopped.borrow().contains(&id)
-        });
+        let is_stopped = STOPPED_EFFECTS.with(|stopped| stopped.borrow().contains(&id));
         if is_stopped {
             continue;
         }
@@ -122,6 +120,8 @@ impl Drop for EffectHandle {
 /// A reactive signal wrapping a `T: Clone`.
 pub struct Signal<T> {
     value: RefCell<T>,
+    /// Stores a deferred update when `set()` is called while `value` is borrowed.
+    pending: RefCell<Option<T>>,
     subscribers: RefCell<Vec<WeakEffect>>,
     /// Effect handle for computed signals - keeps the internal effect alive
     _effect_handle: RefCell<Option<EffectHandle>>,
@@ -135,22 +135,34 @@ where
     pub fn new(initial: T) -> Self {
         Self {
             value: RefCell::new(initial),
+            pending: RefCell::new(None),
             subscribers: RefCell::new(Vec::new()),
             _effect_handle: RefCell::new(None),
         }
     }
 
     /// Read the value, and if inside an `effect`, register that effect as a subscriber.
+    /// Applies any pending deferred update before reading.
     pub fn get(&self) -> T {
+        // Apply any pending deferred update before returning the value.
+        if let Some(pending) = self.pending.borrow_mut().take() {
+            if let Ok(mut v) = self.value.try_borrow_mut() {
+                *v = pending;
+            } else {
+                // Still borrowed — put pending back, read will return stale value.
+                // This is extremely unlikely since we're about to borrow it ourselves.
+                *self.pending.borrow_mut() = Some(pending);
+            }
+        }
         CURRENT_EFFECT.with(|current| {
             if let Some(effect_rc) = current.borrow().as_ref() {
                 let mut subs = self.subscribers.borrow_mut();
                 // Prune dead weak references first
                 subs.retain(|w| w.upgrade().is_some());
                 // Check if already subscribed
-                let already_subscribed = subs.iter().any(|w| {
-                    w.upgrade().is_some_and(|rc| Rc::ptr_eq(&rc, effect_rc))
-                });
+                let already_subscribed = subs
+                    .iter()
+                    .any(|w| w.upgrade().is_some_and(|rc| Rc::ptr_eq(&rc, effect_rc)));
                 if !already_subscribed {
                     subs.push(Rc::downgrade(effect_rc));
                 }
@@ -161,16 +173,20 @@ where
 
     /// Update the value and notify all subscribers via the scheduler.
     pub fn set(&self, new: T) {
-        *self.value.borrow_mut() = new;
+        match self.value.try_borrow_mut() {
+            Ok(mut v) => *v = new,
+            Err(_) => {
+                // Value is currently borrowed (likely by an active effect reading this signal).
+                // Store the new value as pending; it will be applied on the next `get()` call.
+                *self.pending.borrow_mut() = Some(new);
+            }
+        }
 
         // Snapshot subscribers before enqueuing, filtering out dead references.
         let subscribers: Vec<Effect> = {
             let mut subs = self.subscribers.borrow_mut();
             // Clean up dead weak references and upgrade living ones
-            let living: Vec<Effect> = subs
-                .drain(..)
-                .filter_map(|w| w.upgrade())
-                .collect();
+            let living: Vec<Effect> = subs.drain(..).filter_map(|w| w.upgrade()).collect();
             // Put living weak refs back
             for eff in &living {
                 subs.push(Rc::downgrade(eff));
@@ -217,7 +233,7 @@ where
     F: FnMut() + 'static,
 {
     let eff = Rc::new(RefCell::new(Box::new(f) as Box<dyn FnMut()>));
-    
+
     let handle = EffectHandle {
         effect: eff.clone(),
         active: Cell::new(true),
@@ -247,13 +263,13 @@ where
     F: Fn() -> T + 'static,
 {
     use std::cell::RefCell;
-    
+
     let compute_rc = Rc::new(RefCell::new(compute));
     let signal = Rc::new(Signal::new((compute_rc.borrow())()));
-    
+
     // Create an effect that re-runs the computation when dependencies change
     let signal_weak = Rc::downgrade(&signal);
-    
+
     let handle = effect({
         let compute_rc = compute_rc.clone();
         move || {
@@ -267,9 +283,9 @@ where
             }
         }
     });
-    
+
     // Store the effect handle in the signal to keep the effect alive
     *signal._effect_handle.borrow_mut() = Some(handle);
-    
+
     signal
 }

@@ -250,18 +250,22 @@ pub(crate) fn emit_children(children: &[Node]) -> String {
     format!("vec![{}]", items.join(", "))
 }
 
-fn rewrite_if_expr(expr: &str) -> String {
+#[cfg_attr(test, allow(non_snake_case))]
+pub(crate) fn rewrite_if_expr(expr: &str) -> String {
     let has_cmp = expr.contains("==")
         || expr.contains("!=")
         || expr.contains(">=")
         || expr.contains("<=")
         || expr.contains('>')
         || expr.contains('<');
+    let has_logic = expr.contains("&&") || expr.contains("||");
+    let has_negation = expr.contains('!');
+
     let mut out = String::new();
     let mut ident = String::new();
     let mut chars = expr.chars().peekable();
 
-    fn flush_ident(out: &mut String, ident: &mut String, has_cmp: bool) {
+    fn flush_ident(out: &mut String, ident: &mut String, has_cmp: bool, has_logic: bool) {
         if ident.is_empty() {
             return;
         }
@@ -270,7 +274,8 @@ fn rewrite_if_expr(expr: &str) -> String {
             || token == "false"
             || token == "resolve"
             || token == "state"
-            || token.contains('.');
+            || token.contains('.')
+            || token.contains('(');
         if keep {
             out.push_str(token);
         } else if has_cmp {
@@ -278,8 +283,20 @@ fn rewrite_if_expr(expr: &str) -> String {
                 "resolve({}).parse::<f64>().unwrap_or(0.0)",
                 string_lit(token)
             ));
+        } else if has_logic {
+            out.push_str(&format!(
+                "(resolve({}) == \"true\" || (!resolve({}).is_empty() && resolve({}) != \"false\"))",
+                string_lit(token),
+                string_lit(token),
+                string_lit(token)
+            ));
         } else {
-            out.push_str(&format!("!resolve({}).is_empty()", string_lit(token)));
+            out.push_str(&format!(
+                "(resolve({}) == \"true\" || (!resolve({}).is_empty() && resolve({}) != \"false\"))",
+                string_lit(token),
+                string_lit(token),
+                string_lit(token)
+            ));
         }
         ident.clear();
     }
@@ -295,7 +312,7 @@ fn rewrite_if_expr(expr: &str) -> String {
                     break;
                 }
             }
-            flush_ident(&mut out, &mut ident, has_cmp);
+            flush_ident(&mut out, &mut ident, has_cmp, has_logic);
         } else if has_cmp && ch.is_ascii_digit() {
             let mut num = String::new();
             num.push(ch);
@@ -311,12 +328,85 @@ fn rewrite_if_expr(expr: &str) -> String {
                 num.push_str(".0");
             }
             out.push_str(&num);
+        } else if ch == '!' && has_negation {
+            // `!` operator: if followed by an identifier, negate the truthy check
+            // e.g., `!is_positive` -> !(resolve("is_positive") == "true" || ...)
+            out.push_str("!(");
+            // The next token will be collected by the ident loop and flushed,
+            // but we need to close the paren after it. We'll handle this by
+            // tracking that we need a closing paren after the next ident flush.
+            // Instead, let's handle ! more carefully: consume the ident after !
+            let mut neg_ident = String::new();
+            while let Some(&next) = chars.peek() {
+                if next.is_ascii_alphanumeric() || next == '_' {
+                    neg_ident.push(next);
+                    chars.next();
+                } else {
+                    break;
+                }
+            }
+            if neg_ident.is_empty() {
+                // standalone !, just emit it
+                out.pop(); // remove the "(" we just pushed
+                out.push('!');
+            } else if neg_ident == "true" || neg_ident == "false" {
+                out.push_str(&neg_ident);
+                out.push(')');
+            } else {
+                out.push_str(&format!(
+                    "resolve({}) == \"true\" || (!resolve({}).is_empty() && resolve({}) != \"false\"))",
+                    string_lit(&neg_ident),
+                    string_lit(&neg_ident),
+                    string_lit(&neg_ident)
+                ));
+            }
         } else {
             out.push(ch);
         }
     }
-    flush_ident(&mut out, &mut ident, has_cmp);
+    flush_ident(&mut out, &mut ident, has_cmp, has_logic);
     out
+}
+
+/// Extract v-model directive from attrs and convert to :value + @input.
+/// Returns (remaining_attrs, optiona_vmodel_handler).
+fn extract_vmodel(attrs: &[TemplateAttr], _tag: &str) -> (Vec<TemplateAttr>, Option<String>) {
+    let vmodel_pos = attrs
+        .iter()
+        .position(|a| matches!(a.kind, AttrKind::Directive) && a.name == "model");
+
+    if let Some(pos) = vmodel_pos {
+        let vmodel_attr = &attrs[pos];
+        let model_expr = vmodel_attr.value.clone().unwrap_or_default();
+
+        // Build remaining attrs without v-model
+        let mut remaining: Vec<TemplateAttr> = attrs.to_vec();
+        remaining.remove(pos);
+
+        // Add :value binding for v-model
+        remaining.push(TemplateAttr {
+            name: "value".to_string(),
+            value: Some(model_expr.clone()),
+            kind: AttrKind::Bind,
+        });
+
+        // Add @input handler for two-way binding
+        // Generates: @input="|payload| { model_expr = payload.unwrap_or_default().to_string() }"
+        // For now, we use a simple string assignment
+        let _handler_name = format!("__vmodel_set_{}", model_expr.replace('.', "_"));
+        remaining.push(TemplateAttr {
+            name: "input".to_string(),
+            value: Some(format!(
+                "|payload| {{ /* v-model: {} = payload */ }}",
+                model_expr
+            )),
+            kind: AttrKind::On,
+        });
+
+        (remaining, Some(model_expr))
+    } else {
+        (attrs.to_vec(), None)
+    }
 }
 
 fn emit_node_with(n: &Node) -> String {
@@ -332,6 +422,10 @@ fn emit_node_with(n: &Node) -> String {
             children,
             ..
         } => {
+            // Handle v-model directive: convert to :value + @input
+            let (attrs2, _v_model_handler) = extract_vmodel(attrs, tag);
+            let attrs = &attrs2;
+
             // handle directive `v-if` (simple implementation)
             if let Some(pos) = attrs
                 .iter()
@@ -368,15 +462,13 @@ fn emit_node_with(n: &Node) -> String {
 
                 // Extract bind/on attrs and generate props HashMap
                 let (_has_props, props_expr) = generate_component_props_expr(&clean_attrs);
-                let _kids = emit_children_with(children);
 
                 // Collect @event handlers as callbacks
                 let callbacks = collect_component_callbacks(&clean_attrs);
 
                 if callbacks.is_empty() {
                     return format!(
-                        r#"{{ let __props = {props_expr}; let component_vnode = {comp_name}::render_with_props(__props); h("div", Props::new().set("data-component", "{}"), vec![component_vnode]) }}"#,
-                        comp_name
+                        r#"{{ let __props = {props_expr}; {comp_name}::render_with_props(__props) }}"#,
                     );
                 }
 
@@ -388,8 +480,7 @@ fn emit_node_with(n: &Node) -> String {
                     .collect();
 
                 return format!(
-                    r#"{{ let __props = {props_expr}; let __callbacks = {callback_map}; let component_vnode = {comp_name}::render_with_callbacks(__props, &__callbacks, &[{callback_names}]); h("div", Props::new().set("data-component", "{}"), vec![component_vnode]) }}"#,
-                    comp_name,
+                    r#"{{ let __props = {props_expr}; let __callbacks = {callback_map}; {comp_name}::render_with_callbacks(__props, &__callbacks, &[{callback_names}]) }}"#,
                     callback_names = callback_names
                         .iter()
                         .map(|n| format!("\"{}\"", n))
@@ -416,7 +507,7 @@ fn emit_node_with(n: &Node) -> String {
                 let key_attr_pos = attrs_f
                     .iter()
                     .position(|a| a.kind == AttrKind::Bind && a.name == "key");
-                let _key_expr = if let Some(kp) = key_attr_pos {
+                let key_expr = if let Some(kp) = key_attr_pos {
                     let key_val = attrs_f[kp].value.clone();
                     attrs_f.remove(kp);
                     key_val
@@ -467,6 +558,17 @@ fn emit_node_with(n: &Node) -> String {
                     // emit inner content using ctx to handle dot notation in interpolations
                     let inner = emit_node_with_ctx_for_loop(&tmp_elem, &for_info);
 
+                    // Wrap with key attribute if :key was provided
+                    let inner_with_key = if let Some(ref key_val) = key_expr {
+                        format!(
+                            "{{ let mut __node = {}; if let velox_dom::VNode::Element {{ ref mut props, .. }} = __node {{ props.attrs.insert(\"key\".to_string(), resolve({}).to_string()); }} __node }}",
+                            inner,
+                            rewrite_if_expr(key_val)
+                        )
+                    } else {
+                        inner
+                    };
+
                     // Handle v-for + v-if: wrap inner in v-if check inside the loop
                     if let Some(if_pos) = v_if_pos {
                         let dir_if = &attrs[if_pos];
@@ -474,10 +576,10 @@ fn emit_node_with(n: &Node) -> String {
                         loop_code.push_str(&format!(
                             "    if ({}) {{\n        __children.push({});\n    }}\n",
                             expr_if.trim(),
-                            inner
+                            inner_with_key
                         ));
                     } else {
-                        loop_code.push_str(&format!("    __children.push({});\n", inner));
+                        loop_code.push_str(&format!("    __children.push({});\n", inner_with_key));
                     }
 
                     loop_code.push_str("}\n");
@@ -682,7 +784,7 @@ fn emit_children_with(children: &[Node]) -> String {
                     let key_attr_pos = attrs_f
                         .iter()
                         .position(|a| a.kind == AttrKind::Bind && a.name == "key");
-                    let _key_expr = if let Some(kp) = key_attr_pos {
+                    let key_expr = if let Some(kp) = key_attr_pos {
                         let key_val = attrs_f[kp].value.clone();
                         attrs_f.remove(kp);
                         Some(key_val)
@@ -717,6 +819,17 @@ fn emit_children_with(children: &[Node]) -> String {
 
                         let inner = emit_node_with_ctx_for_loop(&tmp_elem, &for_info);
 
+                        // Wrap with key attribute if :key was provided
+                        let inner_with_key = if let Some(Some(key_val)) = &key_expr {
+                            format!(
+                                "{{ let mut __node = {}; if let velox_dom::VNode::Element {{ ref mut props, .. }} = __node {{ props.attrs.insert(\"key\".to_string(), resolve({}).to_string()); }} __node }}",
+                                inner,
+                                rewrite_if_expr(key_val)
+                            )
+                        } else {
+                            inner.clone()
+                        };
+
                         // Handle v-for + v-if: wrap inner in v-if check inside the loop
                         if let Some(if_pos) = v_if_pos {
                             let dir_if = &attrs[if_pos];
@@ -725,10 +838,10 @@ fn emit_children_with(children: &[Node]) -> String {
                             out.push_str(&format!(
                                 "    if ({}) {{\n        __children.push({});\n    }}\n",
                                 expr_if.trim(),
-                                inner
+                                inner_with_key
                             ));
                         } else {
-                            out.push_str(&format!("    __children.push({});\n", inner));
+                            out.push_str(&format!("    __children.push({});\n", inner_with_key));
                         }
 
                         out.push_str("}\n");
@@ -873,7 +986,7 @@ fn emit_children_with_state(children: &[Node]) -> String {
                     let key_attr_pos = attrs_f
                         .iter()
                         .position(|a| a.kind == AttrKind::Bind && a.name == "key");
-                    let _key_expr = if let Some(kp) = key_attr_pos {
+                    let key_expr = if let Some(kp) = key_attr_pos {
                         let key_val = attrs_f[kp].value.clone();
                         attrs_f.remove(kp);
                         Some(key_val)
@@ -889,14 +1002,15 @@ fn emit_children_with_state(children: &[Node]) -> String {
                             self_closing: *self_closing,
                         };
 
-                        // iterate over state.<expr> with proper empty collection handling
+                        // iterate over state.<expr> — support both direct Vec fields and Signal<Vec<T>>
+                        // If the field is a Signal, call .get() to read the current value.
                         out.push_str(&format!(
-                            "if let Some(__col) = state.{}.as_ref() {{\n",
+                            "let __col = state.{}.get();\n",
                             for_info.expr
                         ));
-                        out.push_str("    if !__col.is_empty() {\n");
+                        out.push_str("if !__col.is_empty() {\n");
                         out.push_str(&format!(
-                            "        for ({idx_var}, {item_var}) in __col.iter().enumerate() {{\n",
+                            "    for ({idx_var}, {item_var}) in __col.iter().enumerate() {{\n",
                             idx_var = for_info.index_name,
                             item_var = for_info.item_name
                         ));
@@ -908,21 +1022,39 @@ fn emit_children_with_state(children: &[Node]) -> String {
                             Some(&for_info.index_name),
                         );
 
+                        // Wrap with key attribute if :key was provided
+                        let inner_with_key = if let Some(Some(key_val)) = &key_expr {
+                            let key_path_str = key_val
+                                .strip_prefix(&for_info.item_name)
+                                .map(|s| s.trim_start_matches('.'))
+                                .unwrap_or("id");
+                            format!(
+                                "{{ let mut __node = {}; if let velox_dom::VNode::Element {{ ref mut props, .. }} = __node {{ props.attrs.insert(\"key\".to_string(), {item_var}.{key_path}.to_string()); }} __node }}",
+                                inner,
+                                item_var = for_info.item_name,
+                                key_path = key_path_str
+                            )
+                        } else {
+                            inner.clone()
+                        };
+
                         // Handle v-for + v-if: wrap inner in v-if check inside the loop
                         if let Some(if_pos) = v_if_pos {
                             let dir_if = &attrs[if_pos];
                             let expr_if =
                                 rewrite_if_expr(&dir_if.value.clone().unwrap_or_default());
                             out.push_str(&format!(
-                                "            if ({}) {{\n                __children.push({});\n            }}\n",
+                                "    if ({}) {{\n        __children.push({});\n    }}\n",
                                 expr_if.trim(),
-                                inner
+                                inner_with_key
                             ));
                         } else {
-                            out.push_str(&format!("            __children.push({});\n", inner));
+                            out.push_str(&format!(
+                                "    __children.push({});\n",
+                                inner_with_key
+                            ));
                         }
 
-                        out.push_str("        }\n");
                         out.push_str("    }\n");
                         out.push_str("}\n");
                         i += 1;
@@ -959,6 +1091,10 @@ fn emit_node_with_state(n: &Node) -> String {
             children,
             ..
         } => {
+            // Handle v-model directive: convert to :value + @input
+            let (attrs2, _v_model_handler) = extract_vmodel(attrs, tag);
+            let attrs = &attrs2;
+
             // handle v-for directive in render_with_state path
             if let Some(pos_for) = attrs
                 .iter()
@@ -976,7 +1112,7 @@ fn emit_node_with_state(n: &Node) -> String {
                 let key_attr_pos = attrs_f
                     .iter()
                     .position(|a| a.kind == AttrKind::Bind && a.name == "key");
-                let _key_expr = if let Some(kp) = key_attr_pos {
+                let key_expr = if let Some(kp) = key_attr_pos {
                     let key_val = attrs_f[kp].value.clone();
                     attrs_f.remove(kp);
                     Some(key_val)
@@ -996,12 +1132,12 @@ fn emit_node_with_state(n: &Node) -> String {
                     loop_code
                         .push_str("{ let mut __children: Vec<velox_dom::VNode> = Vec::new();\n");
                     loop_code.push_str(&format!(
-                        "if let Some(__col) = state.{}.as_ref() {{\n",
+                        "let __col = state.{}.get();\n",
                         for_info.expr
                     ));
-                    loop_code.push_str("    if !__col.is_empty() {\n");
+                    loop_code.push_str("if !__col.is_empty() {\n");
                     loop_code.push_str(&format!(
-                        "        for ({idx_var}, {item_var}) in __col.iter().enumerate() {{\n",
+                        "    for ({idx_var}, {item_var}) in __col.iter().enumerate() {{\n",
                         idx_var = for_info.index_name,
                         item_var = for_info.item_name
                     ));
@@ -1012,20 +1148,38 @@ fn emit_node_with_state(n: &Node) -> String {
                         Some(&for_info.index_name),
                     );
 
+                    // Wrap with key attribute if :key was provided
+                    let inner_with_key = if let Some(Some(key_val)) = &key_expr {
+                        let key_path_str = key_val
+                            .strip_prefix(&for_info.item_name)
+                            .map(|s| s.trim_start_matches('.'))
+                            .unwrap_or("id");
+                        format!(
+                            "{{ let mut __node = {}; if let velox_dom::VNode::Element {{ ref mut props, .. }} = __node {{ props.attrs.insert(\"key\".to_string(), {item_var}.{key_path}.to_string()); }} __node }}",
+                            inner,
+                            item_var = for_info.item_name,
+                            key_path = key_path_str
+                        )
+                    } else {
+                        inner.clone()
+                    };
+
                     // Handle v-for + v-if
                     if let Some(if_pos) = v_if_pos {
                         let dir_if = &attrs[if_pos];
                         let expr_if = rewrite_if_expr(&dir_if.value.clone().unwrap_or_default());
                         loop_code.push_str(&format!(
-                            "            if ({}) {{\n                __children.push({});\n            }}\n",
+                            "    if ({}) {{\n        __children.push({});\n    }}\n",
                             expr_if.trim(),
-                            inner
+                            inner_with_key
                         ));
                     } else {
-                        loop_code.push_str(&format!("            __children.push({});\n", inner));
+                        loop_code.push_str(&format!(
+                            "    __children.push({});\n",
+                            inner_with_key
+                        ));
                     }
 
-                    loop_code.push_str("        }\n");
                     loop_code.push_str("    }\n");
                     loop_code.push_str("}\n");
                     loop_code.push_str("__children }");
@@ -1046,15 +1200,13 @@ fn emit_node_with_state(n: &Node) -> String {
 
                 // Extract bind/on attrs and generate props HashMap
                 let (_has_props, props_expr) = generate_component_props_expr(&clean_attrs);
-                let _kids = emit_children_with_state(children);
 
                 // Collect @event handlers as callbacks
                 let callbacks = collect_component_callbacks(&clean_attrs);
 
                 if callbacks.is_empty() {
                     return format!(
-                        r#"{{ let __props = {props_expr}; let component_vnode = {comp_name}::render_with_props(__props); h("div", Props::new().set("data-component", "{}"), vec![component_vnode]) }}"#,
-                        comp_name
+                        r#"{{ let __props = {props_expr}; {comp_name}::render_with_props(__props) }}"#,
                     );
                 }
 
@@ -1066,8 +1218,7 @@ fn emit_node_with_state(n: &Node) -> String {
                     .collect();
 
                 return format!(
-                    r#"{{ let __props = {props_expr}; let __callbacks = {callback_map}; let component_vnode = {comp_name}::render_with_callbacks(__props, &__callbacks, &[{callback_names}]); h("div", Props::new().set("data-component", "{}"), vec![component_vnode]) }}"#,
-                    comp_name,
+                    r#"{{ let __props = {props_expr}; let __callbacks = {callback_map}; {comp_name}::render_with_callbacks(__props, &__callbacks, &[{callback_names}]) }}"#,
                     callback_names = callback_names
                         .iter()
                         .map(|n| format!("\"{}\"", n))
