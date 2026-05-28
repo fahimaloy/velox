@@ -43,7 +43,11 @@ pub struct Sfc {
 /// and context about which SFC block was being parsed.
 fn format_pest_error(err: pest::error::Error<Rule>, source: &str) -> String {
     // Extract the line number from the error's location.
-    let (line, _col) = err.line_col();
+    // Pest provides either a single position or a span (start, end).
+    let line = match err.line_col {
+        pest::error::LineColLocation::Pos((l, _)) => l,
+        pest::error::LineColLocation::Span((l, _), _) => l,
+    };
 
     // Determine what kind of parsing failure occurred and produce a
     // human-readable summary.
@@ -64,14 +68,15 @@ fn format_pest_error(err: pest::error::Error<Rule>, source: &str) -> String {
             if expected.is_empty() {
                 "unexpected token found while parsing the SFC".to_string()
             } else {
+                let unexpected_str = if unexpected.is_empty() {
+                    "an unexpected token".to_string()
+                } else {
+                    unexpected.join(", ")
+                };
                 format!(
                     "expected {} but found {}",
                     expected.join(", "),
-                    if unexpected.is_empty() {
-                        "an unexpected token"
-                    } else {
-                        &unexpected.join(", ")
-                    }
+                    unexpected_str
                 )
             }
         }
@@ -91,18 +96,16 @@ fn format_pest_error(err: pest::error::Error<Rule>, source: &str) -> String {
 /// Map a Pest `Rule` to a human-readable name (block-level where possible).
 fn rule_to_block_name(rule: &Rule) -> String {
     match rule {
-        Rule::template | Rule::template_open | Rule::template_body => "<template>",
-        Rule::script | Rule::script_open | Rule::script_body => "<script>",
-        Rule::style | Rule::style_open | Rule::style_body => "<style>",
-        Rule::attribute => "attribute",
-        Rule::ident => "identifier",
-        Rule::quoted | Rule::dq | Rule::sq => "quoted value",
-        Rule::block => "SFC block (<template>, <script>, or <style>)",
-        Rule::file => "SFC file",
-        Rule::WS => "whitespace",
-        Rule::EOI => "end of input",
-        Rule::SOI => "start of input",
-        _ => format!("{:?}", rule),
+        Rule::template | Rule::template_open | Rule::template_body => "<template>".to_string(),
+        Rule::script | Rule::script_open | Rule::script_body => "<script>".to_string(),
+        Rule::style | Rule::style_open | Rule::style_body => "<style>".to_string(),
+        Rule::attribute => "attribute".to_string(),
+        Rule::ident => "identifier".to_string(),
+        Rule::quoted | Rule::dq | Rule::sq => "quoted value".to_string(),
+        Rule::block => "SFC block (<template>, <script>, or <style>)".to_string(),
+        Rule::file => "SFC file".to_string(),
+        Rule::WS => "whitespace".to_string(),
+        Rule::EOI => "end of input".to_string(),
     }
 }
 
@@ -134,7 +137,7 @@ fn infer_block_context(source: &str, error_line: usize) -> String {
         }
     }
 
-    last_block
+    last_block.to_string()
 }
 
 pub fn parse_sfc(source: &str) -> Result<Sfc, String> {
@@ -283,4 +286,26 @@ fn strip_quotes(s: &str) -> String {
 
 fn has_bool_attr(attrs: &[Attr], key: &str) -> bool {
     attrs.iter().any(|a| a.name == key)
+}
+
+/// Validate a parsed SFC for structural issues that go beyond grammar-level
+/// parsing errors. Returns a list of error messages (empty if valid).
+///
+/// Checks:
+/// - A `<template>` block without any `<script>` or `<script setup>` block
+///   is likely incomplete and cannot produce a functional component.
+pub fn validate_sfc(sfc: &Sfc) -> Vec<String> {
+    let mut errors: Vec<String> = Vec::new();
+
+    // Template without any script block: the component will have no state
+    // or logic, which means render_with_state and event handlers cannot work.
+    if sfc.template.is_some() && sfc.script_setup.is_none() && sfc.script.is_none() {
+        errors.push(
+            "SFC has a <template> block but no <script> or <script setup> block — \
+             the component will lack state and event handling"
+                .to_string(),
+        );
+    }
+
+    errors
 }

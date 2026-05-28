@@ -40,6 +40,7 @@ egl = { version = "0.2", optional = true }
 glow = { version = "0.12", optional = true }
 velox-dom = { path = "../velox-dom" }
 velox-style = { path = "../velox-style" }
+log = "0.4"
 pollster = "0.3"
 bytemuck = { version = "1", features = ["derive"] }
 wgpu_glyph = "0.20"

@@ -9,3 +9,4 @@ repository = "https://github.com/fahimaloy/velox"
 publish = false
 
 [dependencies]
+log = "0.4"

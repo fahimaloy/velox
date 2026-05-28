@@ -49,7 +49,7 @@ fn spawn_app() -> Result<Option<Child>> {
     match cmd.spawn() {
         Ok(c) => Ok(Some(c)),
         Err(e) => {
-            eprintln!("Start failed: {}", e);
+            log::error!("Start failed: {}", e);
             Ok(None)
         }
     }

@@ -54,6 +54,84 @@ fn parse_v_for(value: &str) -> Option<VForInfo> {
     })
 }
 
+/// Validate the parsed template AST and collect structural errors.
+/// Returns a list of error/warning messages (empty if the template is valid).
+fn validate_template(nodes: &[Node]) -> Vec<String> {
+    let mut errors: Vec<String> = Vec::new();
+
+    // 1. Multiple root template nodes
+    // A well-formed SFC template should have exactly one root element.
+    // (Whitespace-only text nodes are already trimmed by the parser, so
+    //  any remaining root nodes are real elements.)
+    let root_elements: Vec<&Node> = nodes
+        .iter()
+        .filter(|n| matches!(n, Node::Element { .. }))
+        .collect();
+    if root_elements.len() > 1 {
+        let tags: Vec<String> = root_elements
+            .iter()
+            .filter_map(|n| match n {
+                Node::Element { tag, .. } => Some(tag.clone()),
+                _ => None,
+            })
+            .collect();
+        errors.push(format!(
+            "template has multiple root elements: <{}> — a valid SFC template must have exactly one root element",
+            tags.join(", ")
+        ));
+    }
+
+    // 2. Stray v-else / v-else-if without preceding v-if
+    // Walk the tree checking that every v-else or v-else-if is immediately
+    // preceded by a sibling with v-if or v-else-if (part of a valid chain).
+    fn check_stray_else(nodes: &[Node], errors: &mut Vec<String>) {
+        for i in 0..nodes.len() {
+            if let Node::Element { attrs, tag, .. } = &nodes[i] {
+                if let Some(dir) = attrs.iter().find(|a| {
+                    matches!(a.kind, AttrKind::Directive)
+                        && (a.name == "else" || a.name == "else-if" || a.name == "elseif")
+                }) {
+                    // Check that the nearest preceding element sibling has
+                    // v-if or v-else-if (i.e., is part of a conditional chain).
+                    let has_valid_preceding = if i > 0 {
+                        // Walk backwards to find the nearest element sibling
+                        // (text nodes between v-if and v-else are valid in Vue)
+                        let mut found = false;
+                        for j in (0..i).rev() {
+                            if let Node::Element { attrs: prev_attrs, .. } = &nodes[j] {
+                                found = prev_attrs.iter().any(|a| {
+                                    matches!(a.kind, AttrKind::Directive)
+                                        && (a.name == "if"
+                                            || a.name == "else-if"
+                                            || a.name == "elseif")
+                                });
+                                break;
+                            }
+                        }
+                        found
+                    } else {
+                        false
+                    };
+
+                    if !has_valid_preceding {
+                        errors.push(format!(
+                            "stray v-{} on <{}> without a preceding v-if — v-else/v-else-if must follow an element with v-if",
+                            dir.name, tag
+                        ));
+                    }
+                }
+            }
+            // Recurse into children
+            if let Node::Element { children, .. } = &nodes[i] {
+                check_stray_else(children, errors);
+            }
+        }
+    }
+    check_stray_else(nodes, &mut errors);
+
+    errors
+}
+
 /// Public API: compile `<template>` string to a Rust module body with `render()`.
 pub fn compile_template_to_rs(
     template_src: &str,
@@ -61,6 +139,12 @@ pub fn compile_template_to_rs(
     resolver: Option<&ComponentResolver>,
 ) -> Result<String, String> {
     let nodes = crate::template_parse::parse_template_to_ast(template_src)?;
+
+    // Validate template structure before codegen.
+    let validation_errors = validate_template(&nodes);
+    if !validation_errors.is_empty() {
+        return Err(validation_errors.join("\n"));
+    }
 
     // For MVP, assume a single root node.
     let mut nodes = nodes;

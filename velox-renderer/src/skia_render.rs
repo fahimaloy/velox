@@ -1102,8 +1102,8 @@ pub mod skia_impl {
             collect_debug_hit_rects(vnode, &layout_root, &mut rects);
             if debug_log {
                 for r in &rects {
-                    eprintln!(
-                        "[skia debug] hit rect: x={} y={} w={} h={}",
+                    log::debug!(
+                        "hit rect: x={} y={} w={} h={}",
                         r.x, r.y, r.w, r.h
                     );
                 }

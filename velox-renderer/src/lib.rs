@@ -259,7 +259,7 @@ pub mod wgpu_backend {
             })) {
                 Some(a) => a,
                 None => {
-                    eprintln!("wgpu backend: no adapter found; retrying with fallback adapter...");
+                    log::warn!("wgpu backend: no adapter found; retrying with fallback adapter...");
                     match pollster::block_on(instance.request_adapter(
                         &wgpu::RequestAdapterOptions {
                             power_preference: _wgpu::PowerPreference::HighPerformance,
@@ -269,7 +269,7 @@ pub mod wgpu_backend {
                     )) {
                         Some(a2) => a2,
                         None => {
-                            eprintln!(
+                            log::error!(
                                 "wgpu backend: no adapter found even with fallback (init skipped)"
                             );
                             return;
@@ -288,10 +288,10 @@ pub mod wgpu_backend {
         )) {
             Ok((_device, _queue)) => {
                 let info = adapter.get_info();
-                eprintln!("wgpu backend: init OK — adapter='{}'", info.name);
+                log::info!("wgpu backend: init OK — adapter='{}'", info.name);
             }
             Err(e) => {
-                eprintln!("wgpu backend: failed to request device: {:?}", e);
+                log::error!("wgpu backend: failed to request device: {:?}", e);
             }
         }
     }
@@ -306,7 +306,7 @@ pub mod wgpu_backend {
             #[cfg(all(feature = "skia-native", unix))]
             {
                 if let Err(e) = crate::skia_gl::draw_gpu_test_frame(256, 256) {
-                    eprintln!("skia backend: GPU present failed: {}", e);
+                    log::error!("skia backend: GPU present failed: {}", e);
                 }
             }
             Ok(crate::build_render_tree(vnode))
@@ -331,7 +331,7 @@ pub mod skia_backend {
         match skia_gl::create_context() {
             Ok(gl_ctx) => match gl_ctx.into_direct_context() {
                 Some(_dctx) => {
-                    eprintln!("skia backend: init OK (DirectContext created)");
+                    log::info!("skia backend: init OK (DirectContext created)");
                     Ok(())
                 }
                 None => Err("skia backend: init failed: couldn't create DirectContext".to_string()),
@@ -816,10 +816,10 @@ where
                     });
                     recompute_targets(&vnode, vw, vh, &mut click_targets, &mut hover_targets);
                     if let Err(e) = crate::skia_render::skia_impl::render_frame(s, &vnode, &sheet) {
-                        eprintln!("skia render error: {}", e);
+                        log::error!("skia render error: {}", e);
                     }
                     if let Err(e) = presenter.present(s) {
-                        eprintln!("skia present error: {}", e);
+                        log::error!("skia present error: {}", e);
                     }
                 }
             }
@@ -964,7 +964,7 @@ where
                                 let (vnode_raw, _) = make_view(vw, vh);
                                 let new_vnode = vnode_raw;
                                 if let Err(e) = HmrRenderer::hot_update(&mut renderer, new_vnode) {
-                                    eprintln!("hot_update failed: {}", e);
+                                    log::error!("hot_update failed: {}", e);
                                 }
                                 window.request_redraw();
                             }
@@ -1130,10 +1130,10 @@ where
                     _last_vnode = Some(vnode.clone());
                     recompute_targets(&vnode, vw, vh, &mut click_targets, &mut hover_targets);
                     if let Err(e) = crate::skia_render::skia_impl::render_frame(s, &vnode, &sheet) {
-                        eprintln!("skia render error: {}", e);
+                        log::error!("skia render error: {}", e);
                     }
                     if let Err(e) = presenter.present(s) {
-                        eprintln!("softbuffer present error: {}", e);
+                        log::error!("softbuffer present error: {}", e);
                     }
                 }
             }

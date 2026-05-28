@@ -10,7 +10,7 @@ pub mod template_parse;
 mod codegen_unit_tests;
 
 pub use component_resolver::{ComponentImport, ComponentResolver, transform_components};
-pub use sfc::{Attr, ScriptBlock, Sfc, StyleBlock, TemplateBlock, parse_sfc};
+pub use sfc::{Attr, ScriptBlock, Sfc, StyleBlock, TemplateBlock, parse_sfc, validate_sfc};
 
 pub use template_ast::{AttrKind, Node, TemplateAttr};
 pub use template_codegen::compile_template_to_rs;

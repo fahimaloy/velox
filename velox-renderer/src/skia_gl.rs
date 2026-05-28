@@ -100,14 +100,14 @@ mod unix_impl {
         // Initialize EGL display
         let display = egl::get_display(egl::EGL_DEFAULT_DISPLAY).ok_or_else(|| {
             let msg = "egl: no display".to_string();
-            eprintln!("[skia_gl] {}", msg);
+            log::error!("{}", msg);
             msg
         })?;
         let mut major: egl::EGLint = 0;
         let mut minor: egl::EGLint = 0;
         if !egl::initialize(display, &mut major, &mut minor) {
-            eprintln!(
-                "[skia_gl] egl: failed to initialize (major={}, minor={})",
+            log::error!(
+                "egl: failed to initialize (major={}, minor={})",
                 major, minor
             );
             return Err("egl: failed to initialize".into());
@@ -115,7 +115,7 @@ mod unix_impl {
 
         let config = choose_egl_config(display).ok_or_else(|| {
             let msg = "egl: no config".to_string();
-            eprintln!("[skia_gl] {}", msg);
+            log::error!("{}", msg);
             msg
         })?;
 
@@ -173,14 +173,14 @@ mod unix_impl {
     pub fn create_headless_context() -> Result<SkiaGlContext, String> {
         let display = egl::get_display(egl::EGL_DEFAULT_DISPLAY).ok_or_else(|| {
             let msg = "egl: no display".to_string();
-            eprintln!("[skia_gl] {}", msg);
+            log::error!("{}", msg);
             msg
         })?;
         let mut major: egl::EGLint = 0;
         let mut minor: egl::EGLint = 0;
         if !egl::initialize(display, &mut major, &mut minor) {
-            eprintln!(
-                "[skia_gl] egl: failed to initialize (major={}, minor={})",
+            log::error!(
+                "egl: failed to initialize (major={}, minor={})",
                 major, minor
             );
             return Err("egl: failed to initialize".into());
@@ -188,7 +188,7 @@ mod unix_impl {
 
         let config = choose_egl_config(display).ok_or_else(|| {
             let msg = "egl: no config".to_string();
-            eprintln!("[skia_gl] {}", msg);
+            log::error!("{}", msg);
             msg
         })?;
 
@@ -307,7 +307,7 @@ mod unix_impl {
         };
 
         if surface.is_none() {
-            eprintln!("[skia_gl] GPU surface creation failed; falling back to raster");
+            log::warn!("GPU surface creation failed; falling back to raster");
             surface = skia_safe::surfaces::raster_n32_premul((width, height));
         }
 

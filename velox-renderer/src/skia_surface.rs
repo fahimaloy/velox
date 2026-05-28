@@ -158,7 +158,7 @@ mod native {
             Ok(gl_ctx) => {
                 // Try to make a DirectContext from the GL interface.
                 if let Some(mut dctx) = gl_ctx.into_direct_context() {
-                    eprintln!("[skia_surface] DirectContext created (GPU path available)");
+                    log::info!("DirectContext created (GPU path available)");
                     // Attempt to build a GPU-backed Skia surface from the DirectContext.
                     // If successful, return a SkiaSurface that owns both the DirectContext
                     // and the native GL context so they are kept alive for the lifetime
@@ -191,13 +191,11 @@ mod native {
                         _gl_ctx: Some(gl_ctx),
                     });
                 } else {
-                    eprintln!(
-                        "[skia_surface] Could not make DirectContext; falling back to raster"
-                    );
+                    log::warn!("Could not make DirectContext; falling back to raster");
                 }
             }
             Err(e) => {
-                eprintln!("[skia_surface] create_context_from_winit failed: {}", e);
+                log::error!("create_context_from_winit failed: {}", e);
             }
         }
 
@@ -252,12 +250,12 @@ mod native {
             );
 
             if surface.is_some() {
-                eprintln!(
-                    "[skia_surface] created GPU-backed Surface (fbo={})",
+                log::info!(
+                    "created GPU-backed Surface (fbo={})",
                     fb_binding
                 );
             } else {
-                eprintln!("[skia_surface] Surface::from_backend_render_target returned None");
+                log::warn!("Surface::from_backend_render_target returned None");
             }
 
             surface

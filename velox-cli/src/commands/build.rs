@@ -123,8 +123,8 @@ fn compile_component_tree(
                     }
                 }
             } else {
-                eprintln!(
-                    "[velox] Warning: component file not found: {} (imported as {})",
+                log::warn!(
+                    "component file not found: {} (imported as {})",
                     source_path.display(),
                     import.source
                 );

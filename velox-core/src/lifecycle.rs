@@ -52,11 +52,9 @@ pub fn on_mounted(f: impl FnOnce() + 'static) {
                 h.borrow_mut().entry(id).or_default().push(Box::new(f));
             });
         } else {
-            eprintln!(
-                "[velox-core] WARNING: on_mounted called without a current component context. "
-            );
-            eprintln!(
-                "Did you forget to call set_current_component()? The hook will not be registered."
+            log::warn!(
+                "on_mounted called without a current component context. \
+                 Did you forget to call set_current_component()? The hook will not be registered."
             );
         }
     });
@@ -81,11 +79,9 @@ pub fn before_destroy(f: impl FnOnce() + 'static) {
                 h.borrow_mut().entry(id).or_default().push(Box::new(f));
             });
         } else {
-            eprintln!(
-                "[velox-core] WARNING: before_destroy called without a current component context."
-            );
-            eprintln!(
-                "Did you forget to call set_current_component()? The hook will not be registered."
+            log::warn!(
+                "before_destroy called without a current component context. \
+                 Did you forget to call set_current_component()? The hook will not be registered."
             );
         }
     });
