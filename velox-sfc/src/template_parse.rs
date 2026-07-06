@@ -152,7 +152,7 @@ pub fn parse_template_to_ast(input: &str) -> Result<Vec<Node>, String> {
     Ok(roots)
 }
 
-fn is_all_ws(s: &str) -> bool {
+pub fn is_all_ws(s: &str) -> bool {
     s.chars().all(|c| c.is_whitespace())
 }
 

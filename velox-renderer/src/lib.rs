@@ -5,7 +5,7 @@ use std::collections::{HashMap, HashSet};
 use velox_dom::VNode;
 
 #[cfg(feature = "skia-native")]
-use velox_style::{Stylesheet, apply_styles_with_hover};
+use velox_style::{apply_styles_with_hover, Stylesheet};
 
 pub mod event_binding;
 pub mod events;
@@ -55,7 +55,9 @@ pub enum HmrMessage {
 
 pub trait HmrRenderer {
     /// Initialize the rendering backend (e.g. create DirectContext, verify GPU).
-    fn init() -> Result<(), String> where Self: Sized;
+    fn init() -> Result<(), String>
+    where
+        Self: Sized;
 
     /// Mount a VNode into the renderer for display.
     fn mount(&mut self, vnode: VNode) -> Result<(), String>;
@@ -72,7 +74,9 @@ pub trait HmrRenderer {
 /// instead of panicking on failure.
 pub trait VeloxRenderer {
     /// Construct a new renderer instance.
-    fn new() -> Result<Self, String> where Self: Sized;
+    fn new() -> Result<Self, String>
+    where
+        Self: Sized;
 
     /// Mount a VNode tree for rendering, returning an error on failure.
     fn mount(&mut self, vnode: VNode) -> Result<(), String>;
@@ -240,7 +244,7 @@ pub trait Renderer {
 #[cfg(feature = "wgpu")]
 pub mod wgpu_backend {
     use wgpu as _wgpu;
-    use winit as _winit;
+    // use winit as _winit; // TODO: re-enable when wgpu is used
 
     pub fn init() {
         // Attempt headless WGPU initialization to verify adapter/device availability.
@@ -317,12 +321,12 @@ pub mod wgpu_backend {
 // Real Skia backend only when `skia-native` is enabled.
 #[cfg(feature = "skia-native")]
 pub mod skia_backend {
-    use crate::HmrRenderer;
-    use crate::VeloxRenderer;
     #[cfg(feature = "skia-native")]
     use crate::skia_gl;
     #[cfg(feature = "skia-native")]
     use crate::skia_surface;
+    use crate::HmrRenderer;
+    use crate::VeloxRenderer;
     #[cfg(feature = "skia-native")]
     use raw_window_handle::HasRawWindowHandle;
     use velox_dom::VNode;
@@ -429,7 +433,9 @@ pub mod skia_backend {
 // Skia stub backend to allow compiling with `--features skia` without native deps.
 #[cfg(all(feature = "skia", not(feature = "skia-native")))]
 pub mod skia_backend {
-    pub fn init() -> Result<(), String> { Ok(()) }
+    pub fn init() -> Result<(), String> {
+        Ok(())
+    }
 
     pub struct SkiaRenderer;
     impl crate::Renderer for SkiaRenderer {
@@ -441,15 +447,29 @@ pub mod skia_backend {
         }
     }
     impl crate::HmrRenderer for SkiaRenderer {
-        fn init() -> Result<(), String> { Ok(()) }
-        fn mount(&mut self, _vnode: velox_dom::VNode) -> Result<(), String> { Ok(()) }
-        fn hot_update(&mut self, _new_vnode: velox_dom::VNode) -> Result<(), String> { Ok(()) }
-        fn get_window_handle(&self) -> *mut std::ffi::c_void { std::ptr::null_mut() }
+        fn init() -> Result<(), String> {
+            Ok(())
+        }
+        fn mount(&mut self, _vnode: velox_dom::VNode) -> Result<(), String> {
+            Ok(())
+        }
+        fn hot_update(&mut self, _new_vnode: velox_dom::VNode) -> Result<(), String> {
+            Ok(())
+        }
+        fn get_window_handle(&self) -> *mut std::ffi::c_void {
+            std::ptr::null_mut()
+        }
     }
     impl crate::VeloxRenderer for SkiaRenderer {
-        fn new() -> Result<Self, String> { Ok(SkiaRenderer) }
-        fn mount(&mut self, _vnode: velox_dom::VNode) -> Result<(), String> { Ok(()) }
-        fn hot_update(&mut self, _new_vnode: velox_dom::VNode) -> Result<(), String> { Ok(()) }
+        fn new() -> Result<Self, String> {
+            Ok(SkiaRenderer)
+        }
+        fn mount(&mut self, _vnode: velox_dom::VNode) -> Result<(), String> {
+            Ok(())
+        }
+        fn hot_update(&mut self, _new_vnode: velox_dom::VNode) -> Result<(), String> {
+            Ok(())
+        }
     }
 }
 
@@ -494,16 +514,30 @@ impl Renderer for StubRenderer {
 }
 #[cfg(all(not(feature = "wgpu"), not(feature = "skia")))]
 impl HmrRenderer for StubRenderer {
-    fn init() -> Result<(), String> { Ok(()) }
-    fn mount(&mut self, _vnode: VNode) -> Result<(), String> { Ok(()) }
-    fn hot_update(&mut self, _new_vnode: VNode) -> Result<(), String> { Ok(()) }
-    fn get_window_handle(&self) -> *mut std::ffi::c_void { std::ptr::null_mut() }
+    fn init() -> Result<(), String> {
+        Ok(())
+    }
+    fn mount(&mut self, _vnode: VNode) -> Result<(), String> {
+        Ok(())
+    }
+    fn hot_update(&mut self, _new_vnode: VNode) -> Result<(), String> {
+        Ok(())
+    }
+    fn get_window_handle(&self) -> *mut std::ffi::c_void {
+        std::ptr::null_mut()
+    }
 }
 #[cfg(all(not(feature = "wgpu"), not(feature = "skia")))]
 impl VeloxRenderer for StubRenderer {
-    fn new() -> Result<Self, String> { Ok(StubRenderer) }
-    fn mount(&mut self, _vnode: VNode) -> Result<(), String> { Ok(()) }
-    fn hot_update(&mut self, _new_vnode: VNode) -> Result<(), String> { Ok(()) }
+    fn new() -> Result<Self, String> {
+        Ok(StubRenderer)
+    }
+    fn mount(&mut self, _vnode: VNode) -> Result<(), String> {
+        Ok(())
+    }
+    fn hot_update(&mut self, _new_vnode: VNode) -> Result<(), String> {
+        Ok(())
+    }
 }
 
 /// Construct the feature-selected renderer.
@@ -594,6 +628,10 @@ where
     let mut click_targets: Vec<crate::events::ClickTarget> = Vec::new();
     let mut hover_targets: Vec<crate::events::HoverTarget> = Vec::new();
 
+    // Render first frame immediately before entering the event loop.
+    // This ensures the window has content even on platforms where
+    // request_redraw() from NewEvents(StartCause::Init) may not trigger
+    // a RedrawRequested event (e.g. certain Wayland/X11 compositors).
     fn logical_size(width: i32, height: i32, scale_factor: f32) -> (u32, u32) {
         let w = ((width as f32) / scale_factor).round().max(1.0) as u32;
         let h = ((height as f32) / scale_factor).round().max(1.0) as u32;
@@ -658,6 +696,13 @@ where
                 .unwrap_or(false)
         });
         recompute_targets(&vnode, vw, vh, &mut click_targets, &mut hover_targets);
+        // Render and present the initial frame so the window has immediate content.
+        if let Err(e) = crate::skia_render::skia_impl::render_frame(s, &vnode, &sheet) {
+            log::error!("skia initial render error: {}", e);
+        }
+        if let Err(e) = presenter.present(s) {
+            log::error!("skia initial present error: {}", e);
+        }
     }
 
     event_loop.run(move |event, _, control_flow| {
@@ -828,7 +873,6 @@ where
     });
 }
 
-
 #[cfg(feature = "skia-native")]
 pub fn run_window_vnode_skia_with_hmr<F, G, H>(
     title: &str,
@@ -899,6 +943,35 @@ where
     let mut click_targets: Vec<crate::events::ClickTarget> = Vec::new();
     let mut hover_targets: Vec<crate::events::HoverTarget> = Vec::new();
     let mut _last_vnode: Option<velox_dom::VNode> = None;
+
+    // Render first frame immediately before entering the event loop.
+    // This ensures the window has content even on platforms where
+    // request_redraw() from NewEvents(StartCause::Init) may not trigger
+    // a RedrawRequested event (e.g. certain Wayland/X11 compositors).
+    if let Some(s) = &mut renderer.surface {
+        s.set_scale_factor(scale_factor);
+        let (vw, vh) = logical_size(s.width, s.height, scale_factor);
+        let (vnode_raw, sheet) = make_view(vw, vh);
+        let mut next_id = 1u32;
+        let vnode_tagged = with_hover_ids(&vnode_raw, &mut next_id);
+        let vnode = apply_styles_with_hover(&vnode_tagged, &sheet, &|_tag, props| {
+            props
+                .attrs
+                .get("data-hover-id")
+                .and_then(|v| v.parse::<u32>().ok())
+                .map(|id| Some(id) == hovered_id)
+                .unwrap_or(false)
+        });
+        _last_vnode = Some(vnode.clone());
+        recompute_targets(&vnode, vw, vh, &mut click_targets, &mut hover_targets);
+        // Render and present the initial frame so the window has immediate content.
+        if let Err(e) = crate::skia_render::skia_impl::render_frame(s, &vnode, &sheet) {
+            log::error!("skia initial render error: {}", e);
+        }
+        if let Err(e) = presenter.present(s) {
+            log::error!("skia initial present error: {}", e);
+        }
+    }
 
     fn logical_size(width: i32, height: i32, scale_factor: f32) -> (u32, u32) {
         let w = ((width as f32) / scale_factor).round().max(1.0) as u32;
@@ -1142,7 +1215,6 @@ where
     });
 }
 
-
 #[cfg(feature = "wgpu")]
 fn load_system_font() -> Option<ab_glyph::FontArc> {
     use std::fs;
@@ -1165,7 +1237,12 @@ fn load_system_font() -> Option<ab_glyph::FontArc> {
 }
 
 #[cfg(feature = "wgpu")]
-pub fn run_window_vnode<F, G, H>(title: &str, mut make_view: F, mut on_event: G, mut get_title: H) -> Result<(), String>
+pub fn run_window_vnode<F, G, H>(
+    title: &str,
+    mut make_view: F,
+    mut on_event: G,
+    mut get_title: H,
+) -> Result<(), String>
 where
     F: FnMut(u32, u32) -> (velox_dom::VNode, Stylesheet) + 'static,
     G: FnMut(&str, Option<&str>) + 'static,
@@ -2236,12 +2313,10 @@ where
                             screen_position: (label_pos.0 + ox, label_pos.1 + oy),
                             bounds,
                             layout,
-                            text: vec![
-                                Text::new(&label)
-                                    .with_color(btn_text_color)
-                                    .with_scale(btn_font_size)
-                                    .with_font_id(FontId(btn_font_id)),
-                            ],
+                            text: vec![Text::new(&label)
+                                .with_color(btn_text_color)
+                                .with_scale(btn_font_size)
+                                .with_font_id(FontId(btn_font_id))],
                             ..Default::default()
                         });
                     }
@@ -2320,12 +2395,10 @@ where
                             screen_position: (count_pos.0 + ox, count_pos.1 + oy),
                             bounds: count_bounds,
                             layout,
-                            text: vec![
-                                Text::new(&count_text)
-                                    .with_color(text_color)
-                                    .with_scale(count_font_size)
-                                    .with_font_id(FontId(count_font_id)),
-                            ],
+                            text: vec![Text::new(&count_text)
+                                .with_color(text_color)
+                                .with_scale(count_font_size)
+                                .with_font_id(FontId(count_font_id))],
                             ..Default::default()
                         });
                     }

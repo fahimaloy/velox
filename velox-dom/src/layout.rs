@@ -695,7 +695,9 @@ pub fn compute_layout(node: &VNode, viewport_w: i32, viewport_h: i32) -> LayoutN
                     root_font_size,
                     vw_f,
                     vh_f,
-                ).map(|h| h as f32 == vh_f).unwrap_or(false);
+                )
+                .map(|h| h as f32 == vh_f)
+                .unwrap_or(false);
                 let min_height_vh = style_lookup_len_full(
                     style,
                     "min-height",
@@ -704,8 +706,9 @@ pub fn compute_layout(node: &VNode, viewport_w: i32, viewport_h: i32) -> LayoutN
                     root_font_size,
                     vw_f,
                     vh_f,
-                ).map(|h| h as f32 == vh_f).unwrap_or(false);
-                let is_viewport_height = is_root || has_viewport_height || min_height_vh;
+                )
+                .map(|h| h as f32 == vh_f)
+                .unwrap_or(false);
 
                 // Element outer position with margins
                 let elem_x = x + ml;
@@ -721,11 +724,6 @@ pub fn compute_layout(node: &VNode, viewport_w: i32, viewport_h: i32) -> LayoutN
                     vw_f,
                     vh_f,
                 );
-                let rect_w = if is_root {
-                    (avail_w - ml - mr).max(1)
-                } else {
-                    declared_w.unwrap_or(avail_w)
-                };
 
                 // Determine height: handle viewport-relative heights (100vh, min-height: 100vh)
                 let declared_h = style_lookup_len_full(
@@ -737,6 +735,27 @@ pub fn compute_layout(node: &VNode, viewport_w: i32, viewport_h: i32) -> LayoutN
                     vw_f,
                     vh_f,
                 );
+
+                // Check for percentage-based viewport filling
+                // An element with width: 100% and height: 100% should behave like root
+                let has_100p_width = declared_w
+                    .map(|w| w as f32 == avail_w as f32)
+                    .unwrap_or(false);
+                let has_100p_height = declared_h
+                    .map(|h| h as f32 == avail_h as f32)
+                    .unwrap_or(false);
+                let is_viewport_filling = has_100p_width && has_100p_height;
+
+                let rect_w = if is_root || is_viewport_filling {
+                    (avail_w - ml - mr).max(1)
+                } else {
+                    declared_w.unwrap_or(avail_w)
+                };
+
+                // Update is_viewport_height to include viewport-filling elements
+                let is_viewport_height =
+                    is_root || is_viewport_filling || has_viewport_height || min_height_vh;
+
                 // For viewport-height elements, use viewport height as the base
                 let _rect_h = if is_viewport_height {
                     (avail_h - mt - mb).max(1)
@@ -1413,7 +1432,8 @@ pub fn compute_layout(node: &VNode, viewport_w: i32, viewport_h: i32) -> LayoutN
                                 if is_column {
                                     ln.rect.x =
                                         (content_x_scrolled as f32 + cross_pos).round() as i32;
-                                    ln.rect.y = main_pos as i32;
+                                    ln.rect.y =
+                                        (content_y_scrolled as f32 + main_pos).round() as i32;
                                 } else {
                                     ln.rect.x = main_pos as i32;
                                     ln.rect.y =
@@ -1709,7 +1729,7 @@ pub fn compute_layout(node: &VNode, viewport_w: i32, viewport_h: i32) -> LayoutN
                     .max()
                     .map(|max_y| (max_y - content_y_start).max(0))
                     .unwrap_or(0);
-                let mut rect_h = if is_root {
+                let mut rect_h = if is_root || is_viewport_filling || is_viewport_height {
                     (avail_h - mt - mb).max(1)
                 } else {
                     declared_h.unwrap_or(content_h + pt + pb)

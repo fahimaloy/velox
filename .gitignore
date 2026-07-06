@@ -43,3 +43,5 @@ RELEASE_V1_PLAN.yml
 
 plan.txt
 todo.txt
+.opencode/
+tmp/test_app/

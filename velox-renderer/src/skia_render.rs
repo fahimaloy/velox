@@ -500,7 +500,7 @@ pub mod skia_impl {
         let mut surface = sk::surfaces::raster_n32_premul((width, height))
             .ok_or_else(|| "skia: failed to create raster surface".to_string())?;
         let canvas = surface.canvas();
-        canvas.clear(sk::Color::WHITE);
+        canvas.clear(sk::Color::TRANSPARENT);
 
         let mut fonts = FontCache::new();
         let mut images = ImageCache::new();
@@ -867,7 +867,7 @@ pub mod skia_impl {
         let layout_root = velox_dom::layout::compute_layout(vnode, width_i, height_i);
 
         let canvas = surface.canvas();
-        canvas.clear(sk::Color::WHITE);
+        canvas.clear(sk::Color::TRANSPARENT);
         canvas.save();
         canvas.scale((scale, scale));
 
@@ -1102,10 +1102,7 @@ pub mod skia_impl {
             collect_debug_hit_rects(vnode, &layout_root, &mut rects);
             if debug_log {
                 for r in &rects {
-                    log::debug!(
-                        "hit rect: x={} y={} w={} h={}",
-                        r.x, r.y, r.w, r.h
-                    );
+                    log::debug!("hit rect: x={} y={} w={} h={}", r.x, r.y, r.w, r.h);
                 }
             }
             if debug_overlay {

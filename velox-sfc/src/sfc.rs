@@ -1,6 +1,6 @@
 use pest::Parser;
-use pest::iterators::Pair;
 use pest::error::ErrorVariant;
+use pest::iterators::Pair;
 
 #[derive(pest_derive::Parser)]
 #[grammar = "grammar.pest"]
@@ -56,14 +56,8 @@ fn format_pest_error(err: pest::error::Error<Rule>, source: &str) -> String {
             positives,
             negatives,
         } => {
-            let expected = positives
-                .iter()
-                .map(|r| rule_to_block_name(r))
-                .collect::<Vec<_>>();
-            let unexpected = negatives
-                .iter()
-                .map(|r| rule_to_block_name(r))
-                .collect::<Vec<_>>();
+            let expected = positives.iter().map(rule_to_block_name).collect::<Vec<_>>();
+            let unexpected = negatives.iter().map(rule_to_block_name).collect::<Vec<_>>();
 
             if expected.is_empty() {
                 "unexpected token found while parsing the SFC".to_string()
@@ -128,11 +122,10 @@ fn infer_block_context(source: &str, error_line: usize) -> String {
             last_block = "script";
         } else if trimmed.starts_with("<style") {
             last_block = "style";
-        } else if trimmed.starts_with("</template") {
-            last_block = "top-level";
-        } else if trimmed.starts_with("</script") {
-            last_block = "top-level";
-        } else if trimmed.starts_with("</style") {
+        } else if trimmed.starts_with("</template")
+            || trimmed.starts_with("</script")
+            || trimmed.starts_with("</style")
+        {
             last_block = "top-level";
         }
     }
@@ -144,9 +137,11 @@ pub fn parse_sfc(source: &str) -> Result<Sfc, String> {
     let mut sfc = Sfc::default();
 
     // Parse the root and immediately descend into the `file` node.
-    let mut pairs = SfcParser::parse(Rule::file, source)
-        .map_err(|e| format_pest_error(e, source))?;
-    let file = pairs.next().ok_or_else(|| "SFC parse error: input is empty".to_string())?;
+    let mut pairs =
+        SfcParser::parse(Rule::file, source).map_err(|e| format_pest_error(e, source))?;
+    let file = pairs
+        .next()
+        .ok_or_else(|| "SFC parse error: input is empty".to_string())?;
     debug_assert!(file.as_rule() == Rule::file);
 
     // Walk children of `file`: they will be `block` nodes (and nothing else,

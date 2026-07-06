@@ -1,5 +1,6 @@
 pub mod codegen;
 pub mod component_resolver;
+pub mod expr;
 pub mod sfc;
 
 pub mod template_ast;

@@ -13,22 +13,14 @@ pub fn to_stub_rs(sfc: &Sfc, component_name: &str) -> String {
 ///
 /// The output is wrapped in `pub mod {name} { ... }`, suitable for `include!()`
 /// in a standalone build script context.
-pub fn to_stub_rs_with_base(
-    sfc: &Sfc,
-    component_name: &str,
-    base_path: Option<&Path>,
-) -> String {
+pub fn to_stub_rs_with_base(sfc: &Sfc, component_name: &str, base_path: Option<&Path>) -> String {
     to_stub_rs_inner(sfc, component_name, base_path, true)
 }
 
 /// Same as `to_stub_rs_with_base` but emits the module body *without* the
 /// `pub mod {name} { ... }` wrapper. Use this when the caller already manages
 /// module declarations (e.g., via `#[path]` attributes in a component tree).
-pub fn to_stub_rs_unwrapped(
-    sfc: &Sfc,
-    component_name: &str,
-    base_path: Option<&Path>,
-) -> String {
+pub fn to_stub_rs_unwrapped(sfc: &Sfc, component_name: &str, base_path: Option<&Path>) -> String {
     to_stub_rs_inner(sfc, component_name, base_path, false)
 }
 
@@ -75,38 +67,17 @@ fn to_stub_rs_inner(
     // Generating bare `pub mod` here would conflict with the caller's declarations
     // and cause "file not found for module" errors.
 
-    // Check if style is scoped
-    let style_is_scoped = sfc
-        .style
-        .as_ref()
-        .map(|b| b.attrs.iter().any(|a| a.name == "scoped"))
-        .unwrap_or(false);
-
     // Check if the template has any component @event listeners to determine
     // if we need emit infrastructure
     let needs_emit_infra = template_needs_emit_infra(sfc);
 
-    // Generate scope ID for scoped styles
-    let scope_id = if style_is_scoped {
-        let id = format!("data-v-{}", generate_scope_hash(name.as_str()));
-        Some(id)
-    } else {
-        None
-    };
-
-    // Transform scopedoped styles with scope selector
-    let processed_style = if let Some(ref scope_id) = scope_id {
-        transform_scoped_css(st, scope_id)
-    } else {
-        st.to_string()
-    };
-
-    // Transform scopedoped template with scope attribute
-    let processed_template = if let Some(ref scope_id) = scope_id {
-        add_scope_to_template(t, scope_id)
-    } else {
-        t.to_string()
-    };
+    // NOTE: Scoped CSS is currently passed through as-is because the CSS parser
+    // (`parse_selector_list` in velox-style) does not understand `[attr]` selectors
+    // or compound selectors. For now, scoped styles work globally (unscoped).
+    // TODO: Implement proper scoped CSS by enhancing the CSS parser to handle
+    // attribute selectors and adding scope identifiers to rendered VNodes.
+    let processed_style = st.to_string();
+    let processed_template = t.to_string();
 
     // Indent level: 4 spaces when wrapped in a module, 0 when unwrapped.
     let indent = if wrap_module { "    " } else { "" };
@@ -165,7 +136,9 @@ fn to_stub_rs_inner(
             // helpers are indented for module-level; adjust for inner_indent
             for line in helpers.lines() {
                 // Strip the 8-space prefix that was designed for the wrapped format
-                let stripped = line.strip_prefix("        ").unwrap_or(line.strip_prefix("    ").unwrap_or(line));
+                let stripped = line
+                    .strip_prefix("        ")
+                    .unwrap_or(line.strip_prefix("    ").unwrap_or(line));
                 out.push_str(&format!("{inner_indent}{stripped}\n"));
             }
         }
@@ -209,6 +182,7 @@ fn is_import_line(line: &str) -> bool {
     trimmed.starts_with("import ") && trimmed.contains(" from ")
 }
 
+#[allow(dead_code)]
 /// Generate a short hash for the scope ID based on component name.
 fn generate_scope_hash(name: &str) -> String {
     use std::collections::hash_map::DefaultHasher;
@@ -218,6 +192,7 @@ fn generate_scope_hash(name: &str) -> String {
     format!("{:08x}", hasher.finish())
 }
 
+#[allow(dead_code)]
 /// Add scope attribute to all root-level elements in the template.
 fn add_scope_to_template(template: &str, scope_id: &str) -> String {
     let mut result = String::with_capacity(template.len() + 100);
@@ -259,6 +234,7 @@ fn add_scope_to_template(template: &str, scope_id: &str) -> String {
     result
 }
 
+#[allow(dead_code)]
 /// Transform scopedoped CSS by adding scope selector to all rules.
 fn transform_scoped_css(css: &str, scope_id: &str) -> String {
     let mut result = String::with_capacity(css.len() + 500);

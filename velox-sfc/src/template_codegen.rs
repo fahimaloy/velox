@@ -1,5 +1,6 @@
 use crate::component_resolver::ComponentResolver;
 use crate::template_ast::{AttrKind, Node, TemplateAttr};
+use crate::template_parse::is_all_ws;
 use std::collections::HashSet;
 
 /// Parsed v-for directive information.
@@ -828,6 +829,13 @@ fn emit_children_with(children: &[Node]) -> String {
                                 break;
                             }
                         }
+                        // Skip whitespace-only text nodes when looking for v-else/v-else-if siblings
+                        if let Node::Text(t) = &children[j] {
+                            if is_all_ws(t) {
+                                j += 1;
+                                continue;
+                            }
+                        }
                         break;
                     }
 
@@ -1030,6 +1038,13 @@ fn emit_children_with_state(children: &[Node]) -> String {
                                 else_part = Some(format!(r#"else {{ {} }}"#, inner_e));
                                 j += 1;
                                 break;
+                            }
+                        }
+                        // Skip whitespace-only text nodes when looking for v-else/v-else-if siblings
+                        if let Node::Text(t) = &children[j] {
+                            if is_all_ws(t) {
+                                j += 1;
+                                continue;
                             }
                         }
                         break;
