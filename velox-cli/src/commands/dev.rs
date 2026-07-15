@@ -35,6 +35,35 @@ fn clear_screen() {
     let _ = std::io::stdout().flush();
 }
 
+/// Read the `[package] name` from a project's Cargo.toml so we can target
+/// the right binary with `cargo run --bin <name>` (robust even inside a
+/// multi-binary workspace where a bare `cargo run` would be ambiguous).
+fn project_bin_name(project_dir: &Path) -> Option<String> {
+    let manifest = project_dir.join("Cargo.toml");
+    let content = std::fs::read_to_string(&manifest).ok()?;
+    let mut in_package = false;
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed == "[package]" {
+            in_package = true;
+            continue;
+        }
+        // Leaving the [package] table.
+        if in_package && trimmed.starts_with('[') && trimmed != "[package]" {
+            break;
+        }
+        if in_package && trimmed.starts_with("name") {
+            if let Some(eq) = trimmed.find('=') {
+                let value = trimmed[eq + 1..].trim().trim_matches('"').to_string();
+                if !value.is_empty() {
+                    return Some(value);
+                }
+            }
+        }
+    }
+    None
+}
+
 #[derive(Clone)]
 enum DevCmd {
     Reload,
@@ -68,7 +97,7 @@ pub fn dev_current(project_dir: &Path, release: bool) -> Result<()> {
                 if let Some(mut c) = child.take() {
                     let _ = c.kill();
                 }
-                println!("\n{} {}", bold("👋"), "Dev server stopped.");
+                println!("\n{} Dev server stopped.", bold("👋"));
                 break;
             }
             Ok(DevCmd::Clear) => {
@@ -95,9 +124,9 @@ pub fn dev_current(project_dir: &Path, release: bool) -> Result<()> {
         // Detect file changes (debounced).
         if let Some(changed) = changed_file(&watch_dir, &mut last_check) {
             println!(
-                "{} {}",
+                "{} {} changed — rebuilding",
                 yellow("↻"),
-                format!("{} changed — rebuilding", changed.display())
+                changed.display()
             );
             if let Some(mut c) = child.take() {
                 let _ = c.kill();
@@ -173,6 +202,9 @@ fn spawn_stdin_reader(tx: mpsc::Sender<DevCmd>) {
 }
 
 fn spawn_app(project_dir: &Path, release: bool) -> Result<Option<Child>> {
+    // Resolve the binary name so `cargo run`/`cargo build` target the right
+    // crate even when invoked from inside a multi-binary workspace.
+    let bin = project_bin_name(project_dir);
     // Phase 1: build with piped output so we can surface compile errors
     // in a clean panel (Vite-style) without a crashing window.
     println!("{}", dim("⏳ Compiling..."));
@@ -182,6 +214,9 @@ fn spawn_app(project_dir: &Path, release: bool) -> Result<Option<Child>> {
     if release {
         build.arg("--release");
     }
+    if let Some(ref name) = bin {
+        build.arg("--bin").arg(name);
+    }
     build
         .current_dir(project_dir)
         .stdin(Stdio::null())
@@ -190,7 +225,7 @@ fn spawn_app(project_dir: &Path, release: bool) -> Result<Option<Child>> {
     let build_output = match build.output() {
         Ok(o) => o,
         Err(e) => {
-            println!("{} {}", red("✗"), format!("Failed to invoke cargo: {}", e));
+            println!("{} Failed to invoke cargo: {}", red("✗"), e);
             return Ok(None);
         }
     };
@@ -202,7 +237,7 @@ fn spawn_app(project_dir: &Path, release: bool) -> Result<Option<Child>> {
         return Ok(None);
     }
 
-    println!("{} {}", green("✓"), format!("Compiled in {:.1}s", elapsed));
+    println!("{} Compiled in {:.1}s", green("✓"), elapsed);
 
     // Phase 2: run the freshly built binary with inherited stdio so the
     // GUI window appears and stays alive while we watch for changes.
@@ -210,6 +245,9 @@ fn spawn_app(project_dir: &Path, release: bool) -> Result<Option<Child>> {
     run.arg("run");
     if release {
         run.arg("--release");
+    }
+    if let Some(ref name) = bin {
+        run.arg("--bin").arg(name);
     }
     run.current_dir(project_dir)
         .stdin(Stdio::null())
@@ -222,7 +260,7 @@ fn spawn_app(project_dir: &Path, release: bool) -> Result<Option<Child>> {
         }
         Err(e) => {
             log::error!("Start failed: {}", e);
-            println!("{} {}", red("✗"), format!("Failed to start: {}", e));
+            println!("{} Failed to start: {}", red("✗"), e);
             Ok(None)
         }
     }

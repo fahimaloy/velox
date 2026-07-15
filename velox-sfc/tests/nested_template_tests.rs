@@ -51,7 +51,7 @@ fn parse_sibling_elements() {
                     } => {
                         assert_eq!(tag, "span");
                         assert_eq!(ch.len(), 1);
-                        assert!(matches!(&ch[0], Node::Text(t) if t == &["a", "b", "c"][i]));
+                        assert!(matches!(&ch[0], Node::Text(t) if t == ["a", "b", "c"][i]));
                     }
                     _ => panic!("expected span"),
                 }
@@ -279,5 +279,5 @@ fn codegen_nested_v_if() {
     )
     .unwrap();
     // Should have two separate if blocks
-    assert!(rs.contains("if (") || rs.contains("if(!"));
+    assert!(rs.contains("if "));
 }

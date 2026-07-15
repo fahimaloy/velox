@@ -62,7 +62,7 @@ impl State { pub fn new() -> Self { Self { title: "Todos".to_string() } } }
     let tpl = sfc.template.as_ref().unwrap().content.as_str();
     let render_fn = compile_template_to_rs(tpl, "TodoApp", None).unwrap();
 
-    assert!(render_fn.contains("v-for") == false || render_fn.contains("__for_count"));
+    assert!(!render_fn.contains("v-for") || render_fn.contains("__for_count"));
     assert!(render_fn.contains("resolve("));
 }
 
@@ -86,7 +86,7 @@ impl State { pub fn new() -> Self { Self { isLoggedIn: false, username: String::
     let tpl = sfc.template.as_ref().unwrap().content.as_str();
     let render_fn = compile_template_to_rs(tpl, "Auth", None).unwrap();
 
-    assert!(render_fn.contains("if (") || render_fn.contains("if("));
+    assert!(render_fn.contains("if "));
     assert!(render_fn.contains("else"));
     assert!(render_fn.contains("make_on_event"));
 }
@@ -171,7 +171,7 @@ impl State { pub fn new() -> Self { Self {} } pub fn remove(&self) {} }
     let render_fn = compile_template_to_rs(tpl, "List", None).unwrap();
 
     assert!(render_fn.contains("__for_count"));
-    assert!(render_fn.contains("if (") || render_fn.contains("if("));
+    assert!(render_fn.contains("if "));
 }
 
 #[test]

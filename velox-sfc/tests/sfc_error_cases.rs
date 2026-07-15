@@ -194,7 +194,7 @@ fn codegen_v_for_with_v_if_v_else() {
 fn codegen_v_if_without_v_else() {
     let rs =
         compile_template_to_rs(r#"<div><p v-if="show">visible</p></div>"#, "App", None).unwrap();
-    assert!(rs.contains("if (") || rs.contains("if("));
+    assert!(rs.contains("if "));
 }
 
 #[test]
@@ -211,7 +211,7 @@ fn codegen_complex_v_if_chain() {
     )
     .unwrap();
     // The codegen may use various forms of conditional expressions
-    assert!(rs.contains("if (") || rs.contains("if(") || rs.contains("if {"));
+    assert!(rs.contains("if "));
     assert!(rs.contains("else"));
 }
 

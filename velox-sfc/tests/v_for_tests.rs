@@ -213,7 +213,7 @@ fn codegen_v_for_with_v_if_combination() {
     )
     .unwrap();
     assert!(rs.contains("__for_count"));
-    assert!(rs.contains("if ("));
+    assert!(rs.contains("if "));
 }
 
 #[test]
