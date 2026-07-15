@@ -52,6 +52,7 @@ fn compile_component_tree(
     visited: &mut HashSet<String>,
     all_vx_files: &mut Vec<PathBuf>,
     is_root: bool,
+    child_styles: &mut Vec<String>,
 ) -> Result<Vec<(String, String)>> {
     let name = vx_file
         .file_stem()
@@ -90,6 +91,14 @@ fn compile_component_tree(
         resolver.parse_imports(&script_setup.content);
     }
 
+    // Collect this component's <style> for merging into the root app STYLE so
+    // child-component CSS actually applies (the root only parses app::STYLE).
+    if !is_root {
+        if let Some(style) = &sfc.style {
+            child_styles.push(style.content.clone());
+        }
+    }
+
     // First, recursively compile all imported components
     // Collect all descendant modules (children first, then grandchildren, etc.)
     let mut descendant_modules: Vec<(String, String)> = Vec::new();
@@ -111,8 +120,14 @@ fn compile_component_tree(
                     .unwrap_or_default();
                 if !seen_files.contains(&child_canonical) {
                     seen_files.insert(child_canonical);
-                    let child_modules =
-                        compile_component_tree(&source_path, out_dir, visited, all_vx_files, false)?;
+                    let child_modules = compile_component_tree(
+                        &source_path,
+                        out_dir,
+                        visited,
+                        all_vx_files,
+                        false,
+                        child_styles,
+                    )?;
                     for (cname, mname) in &child_modules {
                         if !descendant_modules
                             .iter()
@@ -138,15 +153,16 @@ fn compile_component_tree(
         .map(|t| t.content.as_str())
         .unwrap_or("");
 
-    let render_fn = velox_sfc::compile_template_to_rs(tpl_src, name, Some(&resolver))
-        .map_err(|e| anyhow::anyhow!("template compilation error in {}: {}", vx_file.display(), e))?;
+    let render_fn =
+        velox_sfc::compile_template_to_rs(tpl_src, name, Some(&resolver)).map_err(|e| {
+            anyhow::anyhow!("template compilation error in {}: {}", vx_file.display(), e)
+        })?;
 
     // Generate component stub, passing the base path for correct import resolution.
     // Use unwrapped mode so the output is the module body (no `pub mod {name} { ... }`
     // wrapper). This prevents double-nesting when child components are included via
     // #[path] attributes.
-    let mut stub =
-        velox_sfc::to_stub_rs_unwrapped(&sfc, name, Some(&base_path));
+    let mut stub = velox_sfc::to_stub_rs_unwrapped(&sfc, name, Some(&base_path));
 
     // Build module declarations for descendant components.
     // Each unique descendant component has its own .rs file in out_dir.
@@ -166,10 +182,7 @@ fn compile_component_tree(
                     .display()
                     .to_string();
                 // No indentation here — we'll add it when wrapping in pub mod {name} {}
-                mod_decls.push(format!(
-                    "#[path = \"{}\"]\npub mod {};",
-                    abs_path, mod_file
-                ));
+                mod_decls.push(format!("#[path = \"{}\"]\npub mod {};", abs_path, mod_file));
             }
             if comp_name != mod_file {
                 aliases.push(format!("pub use {} as {};", mod_file, comp_name));
@@ -196,6 +209,21 @@ fn compile_component_tree(
             stub.insert_str(pos + 1, &module_block);
         } else {
             stub.push_str(&module_block);
+        }
+    }
+
+    // Merge child-component styles into the root app's STYLE constant so the
+    // renderer applies them (main.rs only parses `app::STYLE`).
+    if is_root && !child_styles.is_empty() {
+        let merged = child_styles.join("\n");
+        if let Some(pos) = stub.find("pub const STYLE") {
+            // Insert just before the CLOSING `"#` of the raw string literal.
+            // (Raw string delimiters are `r#" ... "#`; the opening is `r#"`,
+            // the closing is `"#` — search for the closing to avoid matching
+            // the opening.)
+            if let Some(end) = stub[pos..].rfind("\"#") {
+                stub.insert_str(pos + end, &format!("\n{}", merged));
+            }
         }
     }
 
@@ -256,7 +284,8 @@ pub fn build_vx(input: &Path, out_dir: Option<&Path>) -> Result<CompileResult> {
 
     let mut visited = HashSet::new();
     let mut all_vx_files = Vec::new();
-    let modules = compile_component_tree(input, &out_dir, &mut visited, &mut all_vx_files, true)?;
+    let mut child_styles: Vec<String> = Vec::new();
+    let modules = compile_component_tree(input, &out_dir, &mut visited, &mut all_vx_files, true, &mut child_styles)?;
 
     Ok(CompileResult {
         modules,

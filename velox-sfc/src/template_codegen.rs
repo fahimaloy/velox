@@ -374,7 +374,7 @@ pub(crate) fn rewrite_if_expr(expr: &str) -> String {
             ));
         } else {
             out.push_str(&format!(
-                "(resolve({}) == \"true\" || (!resolve({}).is_empty() && resolve({}) != \"false\"))",
+                "resolve({}) == \"true\" || (!resolve({}).is_empty() && resolve({}) != \"false\")",
                 string_lit(token),
                 string_lit(token),
                 string_lit(token)
@@ -526,7 +526,7 @@ fn emit_node_with(n: &Node) -> String {
                 };
                 let inner = emit_node_with(&tmp);
                 return format!(
-                    r#"if ({}) {{ {} }} else {{ text("") }}"#,
+                    r#"if {} {{ {} }} else {{ text("") }}"#,
                     expr.trim(),
                     inner
                 );
@@ -656,7 +656,7 @@ fn emit_node_with(n: &Node) -> String {
                         let dir_if = &attrs[if_pos];
                         let expr_if = rewrite_if_expr(&dir_if.value.clone().unwrap_or_default());
                         loop_code.push_str(&format!(
-                            "    if ({}) {{\n        __children.push({});\n    }}\n",
+                            "    if {} {{\n        __children.push({});\n    }}\n",
                             expr_if.trim(),
                             inner_with_key
                         ));
@@ -802,7 +802,7 @@ fn emit_children_with(children: &[Node]) -> String {
                                 };
                                 let inner_ei = emit_node_with(&tmp_ei);
                                 chain_parts.push(format!(
-                                    r#"else if ({}) {{ {} }}"#,
+                                    r#"else if {} {{ {} }}"#,
                                     expr_ei.trim(),
                                     inner_ei
                                 ));
@@ -837,7 +837,7 @@ fn emit_children_with(children: &[Node]) -> String {
 
                     // build the conditional expression string and push into __children
                     let mut cond = String::new();
-                    cond.push_str(&format!(r#"{{ if ({}) {{ {} }}"#, expr_if.trim(), inner_if));
+                    cond.push_str(&format!(r#"{{ if {} {{ {} }}"#, expr_if.trim(), inner_if));
                     for part in chain_parts.iter() {
                         cond.push(' ');
                         cond.push_str(part);
@@ -924,7 +924,7 @@ fn emit_children_with(children: &[Node]) -> String {
                             let expr_if =
                                 rewrite_if_expr(&dir_if.value.clone().unwrap_or_default());
                             out.push_str(&format!(
-                                "    if ({}) {{\n        __children.push({});\n    }}\n",
+                                "    if {} {{\n        __children.push({});\n    }}\n",
                                 expr_if.trim(),
                                 inner_with_key
                             ));
@@ -1012,7 +1012,7 @@ fn emit_children_with_state(children: &[Node]) -> String {
                                 };
                                 let inner_ei = emit_node_with_state(&tmp_ei);
                                 chain_parts.push(format!(
-                                    r#"else if ({}) {{ {} }}"#,
+                                    r#"else if {} {{ {} }}"#,
                                     expr_ei.trim(),
                                     inner_ei
                                 ));
@@ -1045,7 +1045,7 @@ fn emit_children_with_state(children: &[Node]) -> String {
                         break;
                     }
                     let mut cond = String::new();
-                    cond.push_str(&format!(r#"{{ if ({}) {{ {} }}"#, expr_if.trim(), inner_if));
+                    cond.push_str(&format!(r#"{{ if {} {{ {} }}"#, expr_if.trim(), inner_if));
                     for part in chain_parts.iter() {
                         cond.push(' ');
                         cond.push_str(part);
@@ -1135,7 +1135,7 @@ fn emit_children_with_state(children: &[Node]) -> String {
                             let expr_if =
                                 rewrite_if_expr(&dir_if.value.clone().unwrap_or_default());
                             out.push_str(&format!(
-                                "    if ({}) {{\n        __children.push({});\n    }}\n",
+                                "    if {} {{\n        __children.push({});\n    }}\n",
                                 expr_if.trim(),
                                 inner_with_key
                             ));
@@ -1254,7 +1254,7 @@ fn emit_node_with_state(n: &Node) -> String {
                         let dir_if = &attrs[if_pos];
                         let expr_if = rewrite_if_expr(&dir_if.value.clone().unwrap_or_default());
                         loop_code.push_str(&format!(
-                            "    if ({}) {{\n        __children.push({});\n    }}\n",
+                            "    if {} {{\n        __children.push({});\n    }}\n",
                             expr_if.trim(),
                             inner_with_key
                         ));

@@ -182,106 +182,6 @@ fn is_import_line(line: &str) -> bool {
     trimmed.starts_with("import ") && trimmed.contains(" from ")
 }
 
-#[allow(dead_code)]
-/// Generate a short hash for the scope ID based on component name.
-fn generate_scope_hash(name: &str) -> String {
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
-    let mut hasher = DefaultHasher::new();
-    name.hash(&mut hasher);
-    format!("{:08x}", hasher.finish())
-}
-
-#[allow(dead_code)]
-/// Add scope attribute to all root-level elements in the template.
-fn add_scope_to_template(template: &str, scope_id: &str) -> String {
-    let mut result = String::with_capacity(template.len() + 100);
-    let mut chars = template.chars().peekable();
-
-    while let Some(ch) = chars.next() {
-        if ch == '<' {
-            // Check if it's a closing tag or comment
-            if chars.peek() == Some(&'/') || chars.peek() == Some(&'!') {
-                result.push(ch);
-                result.push(chars.next().unwrap());
-                continue;
-            }
-
-            // It's an opening tag - add the scope attribute
-            result.push('<');
-            // Read tag name
-            while let Some(&next) = chars.peek() {
-                if next.is_whitespace() || next == '>' || next == '/' {
-                    break;
-                }
-                result.push(chars.next().unwrap());
-            }
-            // Add scope attribute
-            result.push_str(&format!(" {}=\"\"", scope_id));
-            // Continue with rest of tag
-            while let Some(&next) = chars.peek() {
-                if next == '>' {
-                    result.push(chars.next().unwrap());
-                    break;
-                }
-                result.push(chars.next().unwrap());
-            }
-        } else {
-            result.push(ch);
-        }
-    }
-
-    result
-}
-
-#[allow(dead_code)]
-/// Transform scopedoped CSS by adding scope selector to all rules.
-fn transform_scoped_css(css: &str, scope_id: &str) -> String {
-    let mut result = String::with_capacity(css.len() + 500);
-    let mut in_block = false;
-    let mut selector = String::new();
-
-    for ch in css.chars() {
-        if ch == '{' && !in_block {
-            // End of selector, start of block
-            in_block = true;
-            // Add scope to the selector
-            let selector_trimmed = selector.trim();
-            if !selector_trimmed.is_empty() && !selector_trimmed.starts_with('@') {
-                // Transform each selector (comma-separated)
-                let selectors: Vec<&str> = selector_trimmed.split(',').collect();
-                let scoped_selectors: Vec<String> = selectors
-                    .iter()
-                    .map(|s| {
-                        let s = s.trim();
-                        if s.is_empty() {
-                            return String::new();
-                        }
-                        format!("{}[{}]", s, scope_id)
-                    })
-                    .collect();
-                result.push_str(&scoped_selectors.join(", "));
-            } else {
-                result.push_str(&selector);
-            }
-            result.push('{');
-            selector = String::new();
-        } else if ch == '}' && in_block {
-            // End of block
-            in_block = false;
-            result.push('}');
-        } else if in_block {
-            // Inside a rule block
-            result.push(ch);
-        } else {
-            // Building selector
-            selector.push(ch);
-        }
-    }
-
-    result
-}
-
 /// Check if the template contains component tags with @event listeners.
 fn template_needs_emit_infra(sfc: &Sfc) -> bool {
     let template = match &sfc.template {
@@ -299,8 +199,8 @@ fn generate_emit_infrastructure() -> String {
     r#"    /// Type alias for callback maps passed to child components.
     pub type Callbacks = std::collections::HashMap<&'static str, &'static str>;
 
-    /// Thread-local callback registry for emit system.
-    /// Stores event name -> handler function name mappings.
+    // Thread-local callback registry for emit system.
+    // Stores event name -> handler function name mappings.
     thread_local! {
         static EMIT_CALLBACKS: RefCell<HashMap<String, String>> = RefCell::new(HashMap::new());
     }
