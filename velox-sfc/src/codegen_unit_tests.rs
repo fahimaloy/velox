@@ -14,22 +14,23 @@ fn emit_node_text_and_interpolation() {
 
 #[test]
 fn emit_props_varieties() {
-    let mut attrs: Vec<TemplateAttr> = Vec::new();
-    attrs.push(TemplateAttr {
-        name: "class".into(),
-        value: Some("btn".into()),
-        kind: AttrKind::Static,
-    });
-    attrs.push(TemplateAttr {
-        name: "value".into(),
-        value: Some("42".into()),
-        kind: AttrKind::Bind,
-    });
-    attrs.push(TemplateAttr {
-        name: "click".into(),
-        value: Some("inc".into()),
-        kind: AttrKind::On,
-    });
+    let attrs: Vec<TemplateAttr> = vec![
+        TemplateAttr {
+            name: "class".into(),
+            value: Some("btn".into()),
+            kind: AttrKind::Static,
+        },
+        TemplateAttr {
+            name: "on:click".into(),
+            value: Some("increment".into()),
+            kind: AttrKind::On,
+        },
+        TemplateAttr {
+            name: "click".into(),
+            value: Some("inc".into()),
+            kind: AttrKind::On,
+        },
+    ];
 
     let out = crate::template_codegen::emit_props(&attrs);
     assert!(out.contains("set(\"class\", \"btn\")") || out.contains("class"));
@@ -97,4 +98,38 @@ fn rewrite_if_expr_comparison_with_logic() {
     assert!(out.contains("&&"));
     assert!(out.contains("resolve(\"count\")"));
     assert!(out.contains("parse::<f64>()"));
+}
+
+#[test]
+fn v_if_else_emits_block_push() {
+    let tpl = r#"<template>
+      <div class="app">
+        <p class="a">{{ x }}</p>
+        <p v-if="ok" class="b">yes</p>
+        <p v-else class="c">no</p>
+        <p class="d">{{ y }}</p>
+      </div>
+    </template>"#;
+    let rust = crate::compile_template_to_rs(tpl, "app", None)
+        .expect("compile should succeed");
+    // The conditional must NOT be pushed as a parenthesized value (the bug):
+    //   __children.push((if (...) { ... } else { ... }))
+    assert!(
+        !rust.contains("__children.push((if "),
+        "v-if/v-else must not be pushed as a parenthesized value: {}",
+        rust
+    );
+    // It must instead be pushed as a block that yields a single VNode:
+    //   __children.push({ if (...) { ... } else { ... } })
+    assert!(
+        rust.contains("__children.push({"),
+        "expected block push for conditional: {}",
+        rust
+    );
+    // Unconditional siblings must still be emitted:
+    assert!(
+        rust.contains("\"a\"") && rust.contains("\"d\""),
+        "siblings dropped by conditional codegen: {}",
+        rust
+    );
 }

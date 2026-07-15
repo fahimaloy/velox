@@ -87,8 +87,8 @@ fn validate_template(nodes: &[Node]) -> Vec<String> {
     // preceded by a sibling with v-if or v-else-if (part of a valid chain).
     fn check_stray_else(nodes: &[Node], errors: &mut Vec<String>) {
         for i in 0..nodes.len() {
-            if let Node::Element { attrs, tag, .. } = &nodes[i] {
-                if let Some(dir) = attrs.iter().find(|a| {
+            if let Node::Element { attrs, tag, .. } = &nodes[i]
+                && let Some(dir) = attrs.iter().find(|a| {
                     matches!(a.kind, AttrKind::Directive)
                         && (a.name == "else" || a.name == "else-if" || a.name == "elseif")
                 }) {
@@ -99,7 +99,10 @@ fn validate_template(nodes: &[Node]) -> Vec<String> {
                         // (text nodes between v-if and v-else are valid in Vue)
                         let mut found = false;
                         for j in (0..i).rev() {
-                            if let Node::Element { attrs: prev_attrs, .. } = &nodes[j] {
+                            if let Node::Element {
+                                attrs: prev_attrs, ..
+                            } = &nodes[j]
+                            {
                                 found = prev_attrs.iter().any(|a| {
                                     matches!(a.kind, AttrKind::Directive)
                                         && (a.name == "if"
@@ -121,7 +124,6 @@ fn validate_template(nodes: &[Node]) -> Vec<String> {
                         ));
                     }
                 }
-            }
             // Recurse into children
             if let Node::Element { children, .. } = &nodes[i] {
                 check_stray_else(children, errors);
@@ -190,7 +192,8 @@ pub fn render_with<F>(mut resolve: F) -> velox_dom::VNode where F: FnMut(&str) -
     // Also emit render_with_state that accepts a `state: Arc<script_rs::State>`
     out.push_str("\n\n");
     out.push_str(&format!(
-        r#"pub fn render_with_state<F>(state: std::sync::Arc<script_rs::State>, mut resolve: F) -> velox_dom::VNode where F: FnMut(&str) -> String {{
+        r#"#[allow(clippy::arc_with_non_send_sync)]
+pub fn render_with_state<F>(_state: std::sync::Arc<script_rs::State>, mut resolve: F) -> velox_dom::VNode where F: FnMut(&str) -> String {{
     use velox_dom::*;
     {body_with_state}
 }}"#,
@@ -257,7 +260,8 @@ fn generate_make_on_event(handlers: &[String]) -> String {
     }
 
     format!(
-        r#"pub fn make_on_event(state: std::sync::Arc<script_rs::State>) -> impl FnMut(&str, Option<&str>) + 'static {{
+        r#"#[allow(clippy::arc_with_non_send_sync)]
+pub fn make_on_event(state: std::sync::Arc<script_rs::State>) -> impl FnMut(&str, Option<&str>) + 'static {{
     move |name: &str, _payload: Option<&str>| {{
         match name {{
 {arms}            _ => {{}}
@@ -350,7 +354,7 @@ pub(crate) fn rewrite_if_expr(expr: &str) -> String {
     let mut ident = String::new();
     let mut chars = expr.chars().peekable();
 
-    fn flush_ident(out: &mut String, ident: &mut String, has_cmp: bool, has_logic: bool) {
+    fn flush_ident(out: &mut String, ident: &mut String, has_cmp: bool, _has_logic: bool) {
         if ident.is_empty() {
             return;
         }
@@ -366,13 +370,6 @@ pub(crate) fn rewrite_if_expr(expr: &str) -> String {
         } else if has_cmp {
             out.push_str(&format!(
                 "resolve({}).parse::<f64>().unwrap_or(0.0)",
-                string_lit(token)
-            ));
-        } else if has_logic {
-            out.push_str(&format!(
-                "(resolve({}) == \"true\" || (!resolve({}).is_empty() && resolve({}) != \"false\"))",
-                string_lit(token),
-                string_lit(token),
                 string_lit(token)
             ));
         } else {
@@ -830,18 +827,17 @@ fn emit_children_with(children: &[Node]) -> String {
                             }
                         }
                         // Skip whitespace-only text nodes when looking for v-else/v-else-if siblings
-                        if let Node::Text(t) = &children[j] {
-                            if is_all_ws(t) {
+                        if let Node::Text(t) = &children[j]
+                            && is_all_ws(t) {
                                 j += 1;
                                 continue;
                             }
-                        }
                         break;
                     }
 
                     // build the conditional expression string and push into __children
                     let mut cond = String::new();
-                    cond.push_str(&format!(r#"(if ({}) {{ {} }}"#, expr_if.trim(), inner_if));
+                    cond.push_str(&format!(r#"{{ if ({}) {{ {} }}"#, expr_if.trim(), inner_if));
                     for part in chain_parts.iter() {
                         cond.push(' ');
                         cond.push_str(part);
@@ -852,7 +848,7 @@ fn emit_children_with(children: &[Node]) -> String {
                     } else {
                         cond.push_str(r#" else { text("") }"#);
                     }
-                    cond.push(')');
+                    cond.push_str(" }");
                     out.push_str(&format!("__children.push({});\n", cond));
                     i = if j > i { j } else { i + 1 };
                     continue;
@@ -1041,16 +1037,15 @@ fn emit_children_with_state(children: &[Node]) -> String {
                             }
                         }
                         // Skip whitespace-only text nodes when looking for v-else/v-else-if siblings
-                        if let Node::Text(t) = &children[j] {
-                            if is_all_ws(t) {
+                        if let Node::Text(t) = &children[j]
+                            && is_all_ws(t) {
                                 j += 1;
                                 continue;
                             }
-                        }
                         break;
                     }
                     let mut cond = String::new();
-                    cond.push_str(&format!(r#"(if ({}) {{ {} }}"#, expr_if.trim(), inner_if));
+                    cond.push_str(&format!(r#"{{ if ({}) {{ {} }}"#, expr_if.trim(), inner_if));
                     for part in chain_parts.iter() {
                         cond.push(' ');
                         cond.push_str(part);
@@ -1061,7 +1056,7 @@ fn emit_children_with_state(children: &[Node]) -> String {
                     } else {
                         cond.push_str(r#" else { text("") }"#);
                     }
-                    cond.push(')');
+                    cond.push_str(" }");
                     out.push_str(&format!("__children.push({});\n", cond));
                     i = if j > i { j } else { i + 1 };
                     continue;
@@ -1103,10 +1098,7 @@ fn emit_children_with_state(children: &[Node]) -> String {
 
                         // iterate over state.<expr> — support both direct Vec fields and Signal<Vec<T>>
                         // If the field is a Signal, call .get() to read the current value.
-                        out.push_str(&format!(
-                            "let __col = state.{}.get();\n",
-                            for_info.expr
-                        ));
+                        out.push_str(&format!("let __col = state.{}.get();\n", for_info.expr));
                         out.push_str("if !__col.is_empty() {\n");
                         out.push_str(&format!(
                             "    for ({idx_var}, {item_var}) in __col.iter().enumerate() {{\n",
@@ -1148,10 +1140,7 @@ fn emit_children_with_state(children: &[Node]) -> String {
                                 inner_with_key
                             ));
                         } else {
-                            out.push_str(&format!(
-                                "    __children.push({});\n",
-                                inner_with_key
-                            ));
+                            out.push_str(&format!("    __children.push({});\n", inner_with_key));
                         }
 
                         out.push_str("    }\n");
@@ -1230,10 +1219,7 @@ fn emit_node_with_state(n: &Node) -> String {
                     let mut loop_code = String::new();
                     loop_code
                         .push_str("{ let mut __children: Vec<velox_dom::VNode> = Vec::new();\n");
-                    loop_code.push_str(&format!(
-                        "let __col = state.{}.get();\n",
-                        for_info.expr
-                    ));
+                    loop_code.push_str(&format!("let __col = state.{}.get();\n", for_info.expr));
                     loop_code.push_str("if !__col.is_empty() {\n");
                     loop_code.push_str(&format!(
                         "    for ({idx_var}, {item_var}) in __col.iter().enumerate() {{\n",
@@ -1273,10 +1259,7 @@ fn emit_node_with_state(n: &Node) -> String {
                             inner_with_key
                         ));
                     } else {
-                        loop_code.push_str(&format!(
-                            "    __children.push({});\n",
-                            inner_with_key
-                        ));
+                        loop_code.push_str(&format!("    __children.push({});\n", inner_with_key));
                     }
 
                     loop_code.push_str("    }\n");
