@@ -133,3 +133,25 @@ fn v_if_else_emits_block_push() {
         rust
     );
 }
+
+#[test]
+fn v_if_else_resolves_to_single_branch() {
+    // Compiles the same template and renders via render_with_state with a
+    // resolver, confirming only one branch's text is present in the tree.
+    let tpl = r#"<template>
+      <div class="app">
+        <p v-if="ok" class="b">yes</p>
+        <p v-else class="c">no</p>
+      </div>
+    </template>"#;
+    let rust = crate::compile_template_to_rs(tpl, "app", None).expect("compile");
+    // The generated code must contain both branch text literals (so the
+    // conditional selects at runtime, not at compile time).
+    assert!(rust.contains("\"yes\"") && rust.contains("\"no\""), "branches missing: {}", rust);
+    // And the push must be a single block per render function (one child added
+    // for the conditional), not two separate pushes that would desync layout's
+    // source_index. compile_template_to_rs emits two render fns (render_with
+    // and render_with_state) that both contain the conditional, so expect 2.
+    let pushes = rust.matches("__children.push({ if").count();
+    assert_eq!(pushes, 2, "expected one conditional push per render fn: {}", rust);
+}

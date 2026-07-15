@@ -45,9 +45,12 @@ enum Commands {
     /// Development server with hot reload
     #[command(about = "Start dev server with file watching")]
     Dev {
-        /// Watch directory
+        /// Watch directory (project root; builds with cargo run)
         #[arg(long, short = 'w')]
         watch: Option<PathBuf>,
+        /// Release mode build
+        #[arg(long)]
+        release: bool,
     },
 
     /// Lint .vx files for syntax errors
@@ -98,11 +101,9 @@ fn main() -> Result<()> {
             velox_cli::commands::run_current(release)?;
         }
 
-        Commands::Dev { watch } => {
-            let dir = watch.unwrap_or_else(|| PathBuf::from("src"));
-            println!("👀 Watching {} for changes...", dir.display());
-            println!("Press 'r' to reload, 'q' to quit\n");
-            velox_cli::commands::dev_current(&dir)?;
+        Commands::Dev { watch, release } => {
+            let dir = watch.unwrap_or_else(|| PathBuf::from("."));
+            velox_cli::commands::dev_current(&dir, release)?;
         }
 
         Commands::Lint { target } => {
