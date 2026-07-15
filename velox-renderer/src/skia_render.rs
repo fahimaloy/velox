@@ -7,7 +7,7 @@
 #![allow(unused)]
 
 use velox_dom::VNode;
-use velox_style::Stylesheet;
+use velox_style::{apply_styles, Stylesheet};
 
 #[cfg(feature = "skia-native")]
 pub mod skia_impl {
@@ -493,10 +493,14 @@ pub mod skia_impl {
     /// - Returns PNG bytes
     pub fn render_vnode_to_raster_png(
         vnode: &VNode,
-        _sheet: &Stylesheet,
+        sheet: &Stylesheet,
         width: i32,
         height: i32,
     ) -> Result<Vec<u8>, String> {
+        // Apply stylesheet declarations to inline style attrs before drawing,
+        // so backgrounds/colors from the sheet are actually painted.
+        let styled = apply_styles(vnode, sheet);
+        let vnode = &styled;
         let mut surface = sk::surfaces::raster_n32_premul((width, height))
             .ok_or_else(|| "skia: failed to create raster surface".to_string())?;
         let canvas = surface.canvas();
@@ -513,6 +517,7 @@ pub mod skia_impl {
         };
         let mut paints = RenderPaints::new();
 
+        #[allow(clippy::too_many_arguments)]
         fn draw_node(
             canvas: &sk::Canvas,
             node: &VNode,
@@ -539,7 +544,6 @@ pub mod skia_impl {
                     if let Some(s) = props.attrs.get("style") {
                         let (bg, border, radius, overflow, inset, alpha, filter_spec, _z) =
                             parse_style_attr(s);
-                        let rect = rect;
                         let rrect = radius.map(|r| sk::RRect::new_rect_xy(rect, r, r));
                         if let Some(rrect) = rrect {
                             clip_rrect = Some(rrect);
@@ -586,7 +590,6 @@ pub mod skia_impl {
                     // Naive child layout: stack children vertically
                     let child_count = children.len().max(1);
                     let child_h = rect.height() / (child_count as f32);
-                    let rect = rect;
                     let did_clip =
                         apply_clips(canvas, rect, clip_rrect, overflow_hidden, clip_inset);
                     let mut ordered: Vec<(i32, usize, &VNode)> = children
@@ -702,6 +705,33 @@ pub mod skia_impl {
             .encode_to_data(skia_safe::EncodedImageFormat::PNG)
             .ok_or_else(|| "skia: failed to encode image".to_string())?;
         Ok(data.as_bytes().to_vec())
+    }
+
+    /// Render `vnode` into a raw RGBA8888 byte buffer (premultiplied, opaque
+    /// alpha) of size `width * height * 4`. Useful for pixel-level assertions
+    /// in tests without decoding a PNG.
+    pub fn render_vnode_to_rgba(
+        vnode: &VNode,
+        sheet: &Stylesheet,
+        width: i32,
+        height: i32,
+    ) -> Result<Vec<u8>, String> {
+        let styled = apply_styles(vnode, sheet);
+        let vnode = &styled;
+        let mut surface = crate::skia_surface::SkiaSurface::new_raster(width, height)?;
+        render_frame(&mut surface, vnode, sheet)?;
+
+        let info = sk::ImageInfo::new(
+            (width, height),
+            sk::ColorType::RGBA8888,
+            sk::AlphaType::Premul,
+            None,
+        );
+        let mut rgba = vec![0u8; (width * height * 4) as usize];
+        if !surface.read_pixels(&info, &mut rgba, (width * 4) as usize, (0, 0)) {
+            return Err("skia: read_pixels failed".to_string());
+        }
+        Ok(rgba)
     }
 
     /// Render `vnode` into a PNG-encoded raster image with a scale factor applied.

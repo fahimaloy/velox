@@ -23,7 +23,11 @@ mod skia_surface;
 #[cfg(feature = "skia-native")]
 mod presenter;
 #[cfg(feature = "skia-native")]
-pub use skia_render::{render_vnode_to_raster_png, render_vnode_to_raster_png_with_scale};
+pub use skia_render::{
+    render_vnode_to_raster_png, render_vnode_to_raster_png_with_scale,
+};
+#[cfg(feature = "skia-native")]
+pub use skia_render::skia_impl::render_vnode_to_rgba;
 
 /// In-memory representation of a mounted tree (stubbed for now).
 pub struct RenderTree {
@@ -47,6 +51,7 @@ pub struct A11yTree {
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[non_exhaustive]
 pub enum HmrMessage {
     FullReload,
     HotReload { module_path: String },
@@ -896,19 +901,11 @@ where
     let hmr_rx_for_thread = std::sync::Arc::clone(&hmr_rx);
     let hmr_rx_for_loop = std::sync::Arc::clone(&hmr_rx);
     std::thread::spawn(move || {
-        loop {
-            match hmr_rx_for_thread.lock() {
-                Ok(rx) => {
-                    if rx.recv().is_ok() {
-                        let _ = proxy.send_event(());
-                    } else {
-                        break;
-                    }
-                }
-                Err(_) => {
-                    // Mutex poisoned - exit thread gracefully
-                    break;
-                }
+        while let Ok(rx) = hmr_rx_for_thread.lock() {
+            if rx.recv().is_ok() {
+                let _ = proxy.send_event(());
+            } else {
+                break;
             }
         }
     });
@@ -1026,23 +1023,27 @@ where
         *control_flow = ControlFlow::Wait;
         match event {
             Event::UserEvent(()) => {
-                if let Ok(msg) = hmr_rx_for_loop.lock().unwrap().try_recv() {
-                    match msg {
-                        HmrMessage::FullReload => {
-                            *control_flow = ControlFlow::Exit;
-                        }
-                        HmrMessage::HotReload { module_path: _ } => {
-                            if let Some(s) = &renderer.surface {
-                                let (vw, vh) = logical_size(s.width, s.height, scale_factor);
-                                let (vnode_raw, _) = make_view(vw, vh);
-                                let new_vnode = vnode_raw;
-                                if let Err(e) = HmrRenderer::hot_update(&mut renderer, new_vnode) {
-                                    log::error!("hot_update failed: {}", e);
-                                }
-                                window.request_redraw();
+                if let Ok(guard) = hmr_rx_for_loop.lock() {
+                    if let Ok(msg) = guard.try_recv() {
+                        match msg {
+                            HmrMessage::FullReload => {
+                                *control_flow = ControlFlow::Exit;
                             }
+                            HmrMessage::HotReload { module_path: _ } => {
+                                if let Some(s) = &renderer.surface {
+                                    let (vw, vh) = logical_size(s.width, s.height, scale_factor);
+                                    let (vnode_raw, _) = make_view(vw, vh);
+                                    let new_vnode = vnode_raw;
+                                    if let Err(e) =
+                                        HmrRenderer::hot_update(&mut renderer, new_vnode)
+                                    {
+                                        log::error!("hot_update failed: {}", e);
+                                    }
+                                    window.request_redraw();
+                                }
+                            }
+                            HmrMessage::KeepWindow => {}
                         }
-                        HmrMessage::KeepWindow => {}
                     }
                 }
             }
