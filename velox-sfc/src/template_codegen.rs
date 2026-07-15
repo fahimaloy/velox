@@ -278,7 +278,7 @@ pub(crate) fn emit_node(n: &Node) -> String {
         Node::Text(t) => format!(r#"text({})"#, string_lit(t)),
         Node::Interpolation(expr) => {
             let key = string_lit(expr.trim());
-            format!(r#"text(&resolve({}))"#, key)
+            format!(r#"text(resolve({}))"#, key)
         }
         Node::Element {
             tag,
@@ -496,7 +496,7 @@ fn emit_node_with(n: &Node) -> String {
         Node::Text(t) => format!(r#"text({})"#, string_lit(t)),
         Node::Interpolation(expr) => {
             let key = string_lit(expr.trim());
-            format!(r#"text(&resolve({}))"#, key)
+            format!(r#"text(resolve({}))"#, key)
         }
         Node::Element {
             tag,
@@ -1171,7 +1171,7 @@ fn emit_node_with_state(n: &Node) -> String {
         Node::Text(t) => format!(r#"text({})"#, string_lit(t)),
         Node::Interpolation(expr) => {
             let key = string_lit(expr.trim());
-            format!(r#"text(&resolve({}))"#, key)
+            format!(r#"text(resolve({}))"#, key)
         }
         Node::Element {
             tag,
@@ -1323,7 +1323,7 @@ fn emit_node_with_ctx_state(n: &Node, item_name: Option<&str>, idx_name: Option<
             let key = expr.trim();
             if let Some(item) = item_name {
                 if key == item {
-                    return "text(&format!(\"{}\", __item))".to_string();
+                    return "text(format!(\"{}\", __item))".to_string();
                 }
                 // Handle dot notation: item.property or item.nested.property
                 if key.starts_with(item)
@@ -1332,7 +1332,7 @@ fn emit_node_with_ctx_state(n: &Node, item_name: Option<&str>, idx_name: Option<
                 {
                     let prop_path = &key[item.len()..];
                     return format!(
-                        r#"text(&{{ let __obj = &__item; __obj{}.to_string() }})"#,
+                        r#"text({{ let __obj = &__item; __obj{}.to_string() }})"#,
                         prop_path
                     );
                 }
@@ -1340,10 +1340,10 @@ fn emit_node_with_ctx_state(n: &Node, item_name: Option<&str>, idx_name: Option<
             if let Some(idx) = idx_name
                 && key == idx
             {
-                return "text(&__idx.to_string())".to_string();
+                return "text(__idx.to_string())".to_string();
             }
             let key_lit = string_lit(key);
-            format!(r#"text(&resolve({}))"#, key_lit)
+            format!(r#"text(resolve({}))"#, key_lit)
         }
         Node::Element {
             tag,
@@ -1370,7 +1370,7 @@ fn emit_node_with_ctx(n: &Node, loop_var: Option<&str>) -> String {
             let key = expr.trim();
             if let Some(var) = loop_var {
                 if key == var {
-                    return "text(&__i.to_string())".to_string();
+                    return "text(__i.to_string())".to_string();
                 }
                 // Handle dot notation: item.property or item.nested.property
                 if key.starts_with(var)
@@ -1379,13 +1379,13 @@ fn emit_node_with_ctx(n: &Node, loop_var: Option<&str>) -> String {
                 {
                     let prop_path = &key[var.len()..];
                     return format!(
-                        r#"text(&{{ let __obj = __i; __obj{}.to_string() }})"#,
+                        r#"text({{ let __obj = __i; __obj{}.to_string() }})"#,
                         prop_path
                     );
                 }
             }
             let key_lit = string_lit(key);
-            format!(r#"text(&resolve({}))"#, key_lit)
+            format!(r#"text(resolve({}))"#, key_lit)
         }
         Node::Element {
             tag,
@@ -1418,7 +1418,7 @@ fn emit_node_with_ctx_for_loop(n: &Node, for_info: &VForInfo) -> String {
             if key == for_info.item_name {
                 // Direct item reference: use indexed access via resolve
                 return format!(
-                    r#"text(&resolve(&format!("{}[{{}}]", {})))"#,
+                    r#"text(resolve(&format!("{}[{{}}]", {})))"#,
                     for_info.expr, for_info.index_name
                 );
             }
@@ -1429,16 +1429,16 @@ fn emit_node_with_ctx_for_loop(n: &Node, for_info: &VForInfo) -> String {
             {
                 let prop_path = &key[for_info.item_name.len()..];
                 return format!(
-                    r#"text(&resolve(&format!("{expr}[{{}}]{prop_path}", {idx})))"#,
+                    r#"text(resolve(&format!("{expr}[{{}}]{prop_path}", {idx})))"#,
                     expr = for_info.expr,
                     idx = for_info.index_name,
                 );
             }
             if key == for_info.index_name {
-                return format!(r#"text(&{}.to_string())"#, for_info.index_name);
+                return format!(r#"text({}.to_string())"#, for_info.index_name);
             }
             let key_lit = string_lit(key);
-            format!(r#"text(&resolve({}))"#, key_lit)
+            format!(r#"text(resolve({}))"#, key_lit)
         }
         Node::Element {
             tag,

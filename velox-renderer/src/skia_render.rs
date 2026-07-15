@@ -912,6 +912,7 @@ pub mod skia_impl {
         let default_family = fonts.default_family();
         let mut paints = RenderPaints::new();
 
+        #[allow(clippy::too_many_arguments)]
         fn render_with_layout(
             canvas: &sk::Canvas,
             node: &VNode,
