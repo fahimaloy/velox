@@ -1,0 +1,17 @@
+[package]
+name = "velox-example-counter"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "counter"
+path = "src/main.rs"
+
+[dependencies]
+velox-dom = { path = "../../velox-dom" }
+velox-style = { path = "../../velox-style" }
+velox-renderer = { path = "../../velox-renderer", features = ["skia-native"] }
+velox-core = { path = "../../velox-core" }
+
+[build-dependencies]
+velox-cli = { path = "../../velox-cli" }

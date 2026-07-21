@@ -7,4 +7,6 @@ members = [
     "velox-renderer",
     "velox-style",
     "velox-cli",
+    "examples/counter",
+    "examples/todo",
 ]

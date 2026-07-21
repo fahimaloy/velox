@@ -159,7 +159,7 @@ impl State {
 </script>
 
 <style>
-  .app { display: flex; flex-direction: column; padding: 20px; }
+  .app { display: flex; flex-direction: column; padding: 20px; background: #1a1a2e; color: #e6edf3; font-family: system-ui, sans-serif; }
   .btn { background: #3478f6; color: white; padding: 10px 20px; margin: 5px; }
   .count { margin-top: 12px; font-size: 24px; }
 </style>
@@ -180,7 +180,7 @@ impl State {
     let main_rs = r#"use velox_dom::VNode;
 use velox_style::Stylesheet;
 
-include!(concat!(env!("OUT_DIR"), "/app.rs"));
+include!(concat!(env!("OUT_DIR"), "/App.rs"));
 
 fn main() {
     let state = app::script_rs::State::new();
@@ -259,9 +259,9 @@ fn generate_main_rs() -> String {
 use velox_dom::VNode;
 use velox_style::Stylesheet;
 
-include!(concat!(env!("OUT_DIR"), "/app.rs"));
+include!(concat!(env!("OUT_DIR"), "/App.rs"));
 
-fn main() -> Result<(), String> {
+fn main() {
     println!("Starting {}...", env!("CARGO_PKG_NAME"));
 
     let state = Arc::new(app::script_rs::State::new());
@@ -286,7 +286,7 @@ fn main() -> Result<(), String> {
         move || state.get_title()
     };
 
-    velox_renderer::run_window_vnode_skia("Velox App", make_view, on_event, get_title)
+    let _ = velox_renderer::run_window_vnode_skia("Velox App", make_view, on_event, get_title);
 }
 "#
     .to_string()

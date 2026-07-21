@@ -7,8 +7,8 @@
 //! - `to_stub_rs_with_base` resolves imports from the correct base path
 //! - `is_import_line` correctly identifies Velox import statements
 
-use velox_sfc::{parse_sfc, to_stub_rs, to_stub_rs_with_base};
 use std::path::Path;
+use velox_sfc::{parse_sfc, to_stub_rs, to_stub_rs_with_base};
 
 /// Test that import lines are stripped from the script_rs module body.
 /// This is the core fix for the E0762 error.
@@ -30,7 +30,9 @@ impl State { pub fn new() -> Self { Self { count: Cell::new(0) } } }
 
     // The import line should NOT appear in the script_rs module body
     // (it would cause E0762: unterminated character literal)
-    let script_rs_start = rs.find("pub mod script_rs").expect("should have script_rs module");
+    let script_rs_start = rs
+        .find("pub mod script_rs")
+        .expect("should have script_rs module");
     let script_rs_section = &rs[script_rs_start..];
 
     assert!(

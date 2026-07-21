@@ -22,6 +22,7 @@ mod unix_impl {
     use glow::HasContext;
     use raw_window_handle::{HasRawWindowHandle, RawWindowHandle};
     use skia_safe as sk;
+    use velox_dom::VeloxError;
 
     pub struct SkiaGlContext {
         // EGL handles
@@ -32,6 +33,7 @@ mod unix_impl {
     }
 
     impl SkiaGlContext {
+        #[allow(clippy::wrong_self_convention)]
         pub fn into_direct_context(&self) -> Option<skia_safe::gpu::DirectContext> {
             let iface = match &self.interface {
                 Some(i) => i,
@@ -41,7 +43,7 @@ mod unix_impl {
             skia_safe::gpu::direct_contexts::make_gl(iface, None)
         }
 
-        pub fn make_current(&self) -> Result<(), String> {
+        pub fn make_current(&self) -> Result<(), VeloxError> {
             if egl::make_current(
                 self.egl_display,
                 self.egl_surface,
@@ -50,7 +52,7 @@ mod unix_impl {
             ) {
                 Ok(())
             } else {
-                Err("egl: make_current failed".into())
+                Err(VeloxError::Render("egl: make_current failed".into()))
             }
         }
     }
@@ -108,7 +110,8 @@ mod unix_impl {
         if !egl::initialize(display, &mut major, &mut minor) {
             log::error!(
                 "egl: failed to initialize (major={}, minor={})",
-                major, minor
+                major,
+                minor
             );
             return Err("egl: failed to initialize".into());
         }
@@ -181,7 +184,8 @@ mod unix_impl {
         if !egl::initialize(display, &mut major, &mut minor) {
             log::error!(
                 "egl: failed to initialize (major={}, minor={})",
-                major, minor
+                major,
+                minor
             );
             return Err("egl: failed to initialize".into());
         }
@@ -241,16 +245,13 @@ mod unix_impl {
     /// `DirectContext` is available; otherwise fall back to a CPU raster surface.
     pub fn draw_test_frame() -> Result<(), String> {
         // Try to create a DirectContext; if it fails, continue with raster fallback.
-        let dctx = match skia_safe::gpu::direct_contexts::make_gl(
+        let dctx = skia_safe::gpu::direct_contexts::make_gl(
             &create_headless_context()?
                 .interface
                 .clone()
                 .ok_or_else(|| "no gl interface".to_string())?,
             None,
-        ) {
-            Some(dc) => Some(dc),
-            None => None,
-        };
+        );
 
         // Create a small raster surface and draw a colored rect into it.
         let mut surface = skia_safe::surfaces::raster_n32_premul((64, 64))

@@ -33,7 +33,7 @@ fn reconcile_reorders_and_reuses_by_key() {
             assert_eq!(props.attrs.get("key").map(|s| s.as_str()), Some("b"));
             assert_eq!(props.attrs.get("uid").map(|s| s.as_str()), Some("old-b"));
             // since we reused the old node, its child text remains the original "B"
-            assert!(matches!(children.get(0), Some(VNode::Text(t)) if t == "B"));
+            assert!(matches!(children.first(), Some(VNode::Text(t)) if t == "B"));
         }
         _ => panic!("expected element at old[0]"),
     }
@@ -51,7 +51,7 @@ fn reconcile_reorders_and_reuses_by_key() {
     match &old[2] {
         VNode::Element { props, .. } => {
             assert_eq!(props.attrs.get("key").map(|s| s.as_str()), Some("d"));
-            assert!(props.attrs.get("uid").is_none());
+            assert!(!props.attrs.contains_key("uid"));
         }
         _ => panic!("expected element at old[2]"),
     }

@@ -145,7 +145,7 @@ impl TextMeasurer {
 
         // Very rough approximation: average character width = 0.5 * font_size
         let char_width = config.font_size * 0.5;
-        let width = text.len() as f32 * char_width;
+        let width = text.chars().count() as f32 * char_width;
         let height = config.line_height.to_pixels(config.font_size);
 
         (width, height)
@@ -172,7 +172,7 @@ impl TextMeasurer {
             };
         }
 
-        // Multi-line with wrapping
+        // Multi-line with wrapping — safe to unwrap: None case handled above
         let max_width = config.max_width.unwrap();
         let _char_width = config.font_size * 0.5;
         let mut lines = Vec::new();
@@ -261,8 +261,10 @@ mod tests {
 
     #[test]
     fn test_line_height() {
-        let mut config = TextRenderConfig::default();
-        config.line_height = LineHeight::Number(1.5);
+        let config = TextRenderConfig {
+            line_height: LineHeight::Number(1.5),
+            ..Default::default()
+        };
 
         let (_, h) = TextMeasurer::measure("Hello", &config);
         assert_eq!(h, 24.0); // 1.5 * 16.0

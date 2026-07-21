@@ -311,7 +311,7 @@ fn mount_deep_tree() {
 #[test]
 fn mount_wide_tree() {
     let children: Vec<velox_dom::VNode> = (0..50)
-        .map(|i| h("span", (), vec![text(&i.to_string())]))
+        .map(|i| h("span", (), vec![text(i.to_string())]))
         .collect();
     let vnode = h("div", (), children);
     let r = velox_renderer::new_selected_renderer();
@@ -389,14 +389,14 @@ fn runtime_hover_sent_once() {
     rt.cursor_moved();
     assert_eq!(*hover_count.borrow(), 1);
 
-    // Second hover should not fire (hover_sent flag)
-    rt.cursor_moved();
-    assert_eq!(*hover_count.borrow(), 1);
-
-    // Reset allows another hover
-    rt.reset_hover();
+    // Hover fires on every cursor movement now
     rt.cursor_moved();
     assert_eq!(*hover_count.borrow(), 2);
+
+    // Reset clears hover_sent flag (for testing/leaving window)
+    rt.reset_hover();
+    rt.cursor_moved();
+    assert_eq!(*hover_count.borrow(), 3);
 }
 
 // =============================================================================

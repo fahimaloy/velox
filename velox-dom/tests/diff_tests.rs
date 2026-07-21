@@ -1,5 +1,5 @@
 use velox_dom::{
-    Props, VNode,
+    Props,
     diff::{Patch, diff},
     h, text,
 };

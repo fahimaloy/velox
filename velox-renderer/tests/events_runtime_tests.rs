@@ -46,13 +46,16 @@ fn runtime_click_and_dblclick_and_hover() {
     assert!(n >= 1);
     assert_eq!(*dbls.borrow(), 1);
 
-    // Hover fires once until reset
+    // Hover fires on every cursor movement
     let n = rt.cursor_moved();
     assert_eq!(n, 1);
     assert_eq!(*hovs.borrow(), 1);
     let n2 = rt.cursor_moved();
-    assert_eq!(n2, 0);
+    assert_eq!(n2, 1);
+    assert_eq!(*hovs.borrow(), 2);
+    // Reset clears hover_sent flag
     rt.reset_hover();
     let n3 = rt.cursor_moved();
     assert_eq!(n3, 1);
+    assert_eq!(*hovs.borrow(), 3);
 }

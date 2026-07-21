@@ -6,7 +6,7 @@
 #[test]
 #[ignore]
 fn render_simple_vnode_to_png() {
-    use velox_dom::{h, text, VNode};
+    use velox_dom::{h, text};
     use velox_style::Stylesheet;
 
     // Build a small vnode: a green background div with a text child.

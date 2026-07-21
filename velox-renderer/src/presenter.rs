@@ -3,6 +3,7 @@
 //! Bridges Skia raster surfaces to the display via softbuffer.
 
 use softbuffer::{Context, Surface};
+use velox_dom::VeloxError;
 use winit::window::Window;
 
 /// Presents Skia-rendered content to a window using softbuffer.
@@ -19,13 +20,14 @@ impl SoftbufferPresenter {
     ///
     /// # Errors
     /// Returns an error if softbuffer context or surface creation fails.
-    pub fn new(window: &Window, width: u32, height: u32) -> Result<Self, String> {
+    pub fn new(window: &Window, width: u32, height: u32) -> Result<Self, VeloxError> {
         let context = unsafe {
-            Context::new(window).map_err(|e| format!("softbuffer context failed: {}", e))?
+            Context::new(window)
+                .map_err(|e| VeloxError::Render(format!("softbuffer context failed: {e}")))?
         };
         let mut surface = unsafe {
             Surface::new(&context, window)
-                .map_err(|e| format!("softbuffer surface failed: {}", e))?
+                .map_err(|e| VeloxError::Render(format!("softbuffer surface failed: {e}")))?
         };
         let w = width.max(1);
         let h = height.max(1);
@@ -47,7 +49,7 @@ impl SoftbufferPresenter {
     /// Resizes the presenter to new dimensions.
     ///
     /// No-op if dimensions haven't changed.
-    pub fn resize(&mut self, width: u32, height: u32) -> Result<(), String> {
+    pub fn resize(&mut self, width: u32, height: u32) -> Result<(), VeloxError> {
         let w = width.max(1);
         let h = height.max(1);
         if w == self.width && h == self.height {
@@ -72,7 +74,7 @@ impl SoftbufferPresenter {
     pub fn present(
         &mut self,
         skia_surface: &mut crate::skia_surface::SkiaSurface,
-    ) -> Result<(), String> {
+    ) -> Result<(), VeloxError> {
         let width = skia_surface.width.max(1) as u32;
         let height = skia_surface.height.max(1) as u32;
         self.resize(width, height)?;
@@ -85,7 +87,7 @@ impl SoftbufferPresenter {
         );
         let row_bytes = (self.width * 4) as usize;
         if !skia_surface.read_pixels(&info, &mut self.rgba, row_bytes, (0, 0)) {
-            return Err("skia: read_pixels failed".to_string());
+            return Err(VeloxError::Render("skia: read_pixels failed".into()));
         }
 
         let mut buffer = self
@@ -95,7 +97,9 @@ impl SoftbufferPresenter {
         let pixels: &mut [u32] = &mut buffer;
         let pixel_count = (self.width as usize) * (self.height as usize);
         if pixels.len() < pixel_count {
-            return Err("softbuffer: buffer smaller than expected".to_string());
+            return Err(VeloxError::Render(
+                "softbuffer: buffer smaller than expected".into(),
+            ));
         }
         for (i, pixel) in pixels.iter_mut().take(pixel_count).enumerate() {
             let base = i * 4;

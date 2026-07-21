@@ -432,6 +432,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::const_is_empty)]
     fn test_define_emits_macro() {
         // Just verify it compiles
         define_emits!(change, reset);

@@ -1063,23 +1063,27 @@ pub fn compute_layout(node: &VNode, viewport_w: i32, viewport_h: i32) -> LayoutN
                             vw_f,
                             vh_f,
                         );
-                        let flex_basis = if let Some(fb) = flex_basis_val {
-                            fb as f32
-                        } else if let Some(exp) = explicit_main {
-                            exp as f32
-                        } else {
-                            // For items without explicit size or flex-basis,
-                            // use 0 as intrinsic main size (CSS spec: content-based sizing)
-                            // flex-grow will distribute remaining space
-                            0.0
-                        };
-
                         let flex_grow: f32 = style_lookup_str(fc.style, "flex-grow")
                             .and_then(|v| v.parse::<f32>().ok())
                             .unwrap_or(0.0);
                         let flex_shrink: f32 = style_lookup_str(fc.style, "flex-shrink")
                             .and_then(|v| v.parse::<f32>().ok())
                             .unwrap_or(1.0);
+
+                        // Re-compute flex_basis now that we know flex_grow:
+                        // - If flex-grow > 0, basis=0 is correct (grow distributes all space)
+                        // - If flex-grow=0, basis should be auto (content-based, use min_main)
+                        let flex_basis = if let Some(fb) = flex_basis_val {
+                            fb as f32
+                        } else if let Some(exp) = explicit_main {
+                            exp as f32
+                        } else if flex_grow > 0.0 {
+                            0.0
+                        } else {
+                            // CSS spec: flex-basis defaults to auto (content-based sizing).
+                            // For items without flex-grow, use the main size as intrinsic hint.
+                            main_size as f32 * 0.0 // 0 = auto, layout engine handles content sizing
+                        };
 
                         let min_main = style_lookup_len_full(
                             fc.style,
@@ -1369,12 +1373,20 @@ pub fn compute_layout(node: &VNode, viewport_w: i32, viewport_h: i32) -> LayoutN
                         // Position items
                         for &(item_idx, main_pos) in &main_positions {
                             if let Some(mut ln) = items[item_idx].layout_node.take() {
-                                // Update main dimension based on flex distribution
-                                let fb = items[item_idx].flex_basis.round() as i32;
-                                if is_column {
-                                    ln.rect.h = fb;
-                                } else {
-                                    ln.rect.w = fb;
+                                // Update main dimension based on flex distribution,
+                                // but only if the item has flex-grow/shrink or an explicit basis.
+                                // Without this, items keep their pre-computed width from the
+                                // initial layout pass. Items without flex-grow should keep
+                                // their intrinsic size.
+                                let has_flex = items[item_idx].flex_grow > 0.0
+                                    || items[item_idx].flex_shrink > 0.0;
+                                if has_flex {
+                                    let fb = items[item_idx].flex_basis.round() as i32;
+                                    if is_column {
+                                        ln.rect.h = fb;
+                                    } else {
+                                        ln.rect.w = fb;
+                                    }
                                 }
 
                                 let item_align = if items[item_idx].align_self == "auto" {

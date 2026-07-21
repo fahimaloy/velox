@@ -345,9 +345,10 @@ impl Color {
     }
 
     fn parse_rgb(s: &str) -> Option<Self> {
+        // Try rgba first (longer prefix), then rgb — strip_prefix is exact match
         let inner = s
-            .trim_start_matches("rgb(")
-            .trim_start_matches("rgba(")
+            .strip_prefix("rgba(")
+            .or_else(|| s.strip_prefix("rgb("))?
             .trim_end_matches(')')
             .trim();
 

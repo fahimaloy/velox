@@ -328,11 +328,9 @@ impl Runtime {
         }
     }
 
-    /// Call on cursor moved; fires a one-shot hover event.
+    /// Call on cursor moved; fires hover events on every movement.
+    /// This enables continuous hover tracking for UI interactions.
     pub fn cursor_moved(&mut self) -> usize {
-        if self.hover_sent {
-            return 0;
-        }
         self.hover_sent = true;
         dispatch("hover", &self.tree, &mut self.registry)
     }

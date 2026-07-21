@@ -9,6 +9,7 @@ use std::rc::Rc;
 
 /// Event type
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum EventType {
     Click,
     DoubleClick,

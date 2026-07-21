@@ -70,29 +70,35 @@ where
     let new_map: InjectionMap = Rc::new(RefCell::new(HashMap::new()));
 
     // Scope guard to ensure restoration even on panic
-    struct ContextGuard(Option<InjectionMap>);
+    struct ContextGuard {
+        saved_context: Option<InjectionMap>,
+        pushed_to_stack: bool,
+    }
     impl Drop for ContextGuard {
         fn drop(&mut self) {
             INJECTION_CONTEXT.with(|ctx| {
-                *ctx.borrow_mut() = self.0.take();
+                *ctx.borrow_mut() = self.saved_context.take();
             });
-            // Also pop from context stack
-            CONTEXT_STACK.with(|stack| {
-                stack.borrow_mut().pop();
-            });
+            // Only pop from context stack if we pushed to it
+            if self.pushed_to_stack {
+                CONTEXT_STACK.with(|stack| {
+                    stack.borrow_mut().pop();
+                });
+            }
         }
     }
 
     let previous = INJECTION_CONTEXT.with(|ctx| ctx.borrow_mut().replace(new_map.clone()));
 
     // Push previous context to stack so child can access parent values
+    let pushed_to_stack = previous.is_some();
     if let Some(parent) = previous.clone() {
         CONTEXT_STACK.with(|stack| {
             stack.borrow_mut().push(parent);
         });
     }
 
-    let _guard = ContextGuard(previous);
+    let _guard = ContextGuard { saved_context: previous, pushed_to_stack };
 
     // Run the closure
     f()

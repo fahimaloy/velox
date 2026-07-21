@@ -2,6 +2,25 @@ use velox_dom::{h, text, Props, VNode};
 use velox_style::{apply_styles, Stylesheet};
 
 #[test]
+fn class_rule_applies_background() {
+    let css = ".app { background: #1a1a2e; color: #e6edf3; }";
+    let ss = Stylesheet::parse(css);
+    assert_eq!(ss.rules.len(), 1, "expected one rule for .app");
+    let node = h("div", Props::new().set("class", "app"), vec![]);
+    let styled = apply_styles(&node, &ss);
+    if let VNode::Element { props, .. } = &styled {
+        let s = props.attrs.get("style").expect("style attr applied");
+        assert!(
+            s.contains("background") && s.contains("#1a1a2e"),
+            "background not applied: {}",
+            s
+        );
+    } else {
+        panic!("expected element");
+    }
+}
+
+#[test]
 fn applies_tag_and_class_rules() {
     let css = r#"
 div { color: red; }

@@ -250,10 +250,7 @@ mod native {
             );
 
             if surface.is_some() {
-                log::info!(
-                    "created GPU-backed Surface (fbo={})",
-                    fb_binding
-                );
+                log::info!("created GPU-backed Surface (fbo={})", fb_binding);
             } else {
                 log::warn!("Surface::from_backend_render_target returned None");
             }

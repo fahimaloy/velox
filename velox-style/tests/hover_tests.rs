@@ -13,7 +13,7 @@ div:hover { color: blue; }
     // Not hovered
     let styled = apply_styles_with_hover(&vnode, &ss, &|_, _| false);
     if let VNode::Element { props, .. } = styled {
-        assert!(props.attrs.get("style").is_none());
+        assert!(!props.attrs.contains_key("style"));
     }
 
     // Hovered

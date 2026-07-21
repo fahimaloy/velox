@@ -138,7 +138,7 @@ fn flex_grow_distributes_space() {
         w1
     );
     assert!(
-        w0 >= 190 && w0 <= 210,
+        (190..=210).contains(&w0),
         "Item width should be ~200px, got {}",
         w0
     );

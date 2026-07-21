@@ -22,7 +22,6 @@ velox-sfc = { path = "../velox-sfc" }
 velox-style = { path = "../velox-style" }
 
 serde = { version = "1.0", features = ["derive"] }
-crossterm = "0.29.0"
 serde_json = "1.0.149"
 velox-renderer = { version = "0.1.0", path = "../velox-renderer" }
 

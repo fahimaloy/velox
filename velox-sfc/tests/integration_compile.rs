@@ -36,7 +36,7 @@ impl State { pub fn new() -> Self { Self { count: Cell::new(0) } } pub fn inc(&s
     if let Some(pos) = module_code.rfind('}') {
         module_code.insert_str(pos, &format!("\n{}\n", render_fn));
     } else {
-        module_code.push_str("\n");
+        module_code.push('\n');
         module_code.push_str(&render_fn);
     }
 
@@ -181,13 +181,13 @@ impl State { pub fn new() -> Self { Self { count: 0 } } }
     let mut module_code = String::new();
     if let Some(pos) = stub.rfind('}') {
         module_code.push_str(&stub[..pos]);
-        module_code.push_str("\n");
+        module_code.push('\n');
         module_code.push_str(&render_fn);
-        module_code.push_str("\n");
+        module_code.push('\n');
         module_code.push_str(&stub[pos..]);
     } else {
         module_code.push_str(&stub);
-        module_code.push_str("\n");
+        module_code.push('\n');
         module_code.push_str(&render_fn);
     }
 

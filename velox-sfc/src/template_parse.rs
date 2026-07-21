@@ -112,10 +112,15 @@ pub fn parse_template_to_ast(input: &str) -> Result<Vec<Node>, String> {
             while i + 1 < bytes.len() && !(bytes[i] == b'}' && bytes[i + 1] == b'}') {
                 i += 1;
             }
+            if i + 1 >= bytes.len() {
+                // Unclosed interpolation — emit as text instead of silent truncation
+                eprintln!("velox: warning: unclosed '{{{{' at position {}, treating as text", start - 2);
+                let text_content = input[start - 2..].to_string();
+                push_child(&mut stack, &mut roots, Node::Text(text_content));
+                break;
+            }
             let expr = input[start..i].trim().to_string();
-            if i + 1 < bytes.len() {
-                i += 2;
-            } // skip "}}"
+            i += 2; // skip "}}"
             push_child(&mut stack, &mut roots, Node::Interpolation(expr));
         } else {
             // text until next '<' or '{{'

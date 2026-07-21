@@ -385,7 +385,7 @@ fn diff_large_tree_deep() {
 fn diff_large_tree_wide() {
     fn make_wide_tree(width: usize) -> VNode {
         let children: Vec<VNode> = (0..width)
-            .map(|i| h("span", (), vec![text(&i.to_string())]))
+            .map(|i| h("span", (), vec![text(i.to_string())]))
             .collect();
         h("div", (), children)
     }
@@ -401,7 +401,7 @@ fn diff_large_tree_wide() {
 fn diff_large_tree_text_change() {
     fn make_wide_tree_with_prefix(width: usize, prefix: &str) -> VNode {
         let children: Vec<VNode> = (0..width)
-            .map(|i| h("span", (), vec![text(&format!("{}{}", prefix, i))]))
+            .map(|i| h("span", (), vec![text(format!("{}{}", prefix, i))]))
             .collect();
         h("div", (), children)
     }

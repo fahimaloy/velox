@@ -1,0 +1,82 @@
+<template>
+  <div class="app">
+    <h1 class="title">{{ title }}</h1>
+    <div class="card">
+      <p class="count">{{ count }}</p>
+      <div class="buttons">
+        <button class="btn inc" @click="increment">+1</button>
+        <button class="btn dec" @click="decrement">-1</button>
+        <button class="btn reset" @click="reset">Reset</button>
+      </div>
+    </div>
+  </div>
+</template>
+
+<script setup>
+use std::cell::Cell;
+
+pub struct State {
+    counter: Cell<i32>,
+}
+
+impl State {
+    pub fn new() -> Self {
+        Self { counter: Cell::new(0) }
+    }
+    pub fn get_counter(&self) -> i32 { self.counter.get() }
+    pub fn increment(&self) { self.counter.set(self.counter.get() + 1); }
+    pub fn decrement(&self) { self.counter.set(self.counter.get() - 1); }
+    pub fn reset(&self) { self.counter.set(0); }
+}
+</script>
+
+<style scoped>
+.app {
+    width: 100%;
+    height: 100%;
+    display: block;
+    background: #0f172a;
+    color: #f8fafc;
+    font-family: system-ui, -apple-system, sans-serif;
+}
+.title {
+    text-align: center;
+    font-size: 32px;
+    font-weight: bold;
+    padding: 32px 0 16px;
+    margin: 0;
+}
+.card {
+    background: #1e293b;
+    border-radius: 16px;
+    padding: 40px;
+    text-align: center;
+    margin: 0 32px;
+}
+.count {
+    font-size: 64px;
+    font-weight: bold;
+    color: #38bdf8;
+    margin: 0 0 24px;
+}
+.buttons {
+    display: flex;
+    gap: 16px;
+    justify-content: center;
+}
+.btn {
+    padding: 12px 24px;
+    font-size: 18px;
+    font-weight: 600;
+    border: none;
+    border-radius: 8px;
+    cursor: pointer;
+    color: #ffffff;
+}
+.inc { background: #22c55e; }
+.inc:hover { background: #16a34a; }
+.dec { background: #ef4444; }
+.dec:hover { background: #dc2626; }
+.reset { background: #64748b; }
+.reset:hover { background: #475569; }
+</style>
