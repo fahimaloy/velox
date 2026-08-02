@@ -8,15 +8,13 @@
 //! - Style inheritance and cascading
 
 pub mod fonts;
-pub mod properties;
-pub mod units;
 pub mod visual_effects;
 
 // Re-export types from velox-dom
 pub use velox_dom::style::*;
 // Re-export non-conflicting font types.
 pub use fonts::{FontDescriptor, FontFamily, FontMetrics, FontStyle, GenericFamily, LineHeight};
-// Avoid collision with properties::BoxShadow by aliasing visual effects type.
+// Avoid collision with velox_dom::style::BoxShadow by aliasing visual effects type.
 pub use visual_effects::{BorderRadius, BoxShadow as VisualBoxShadow, TextShadow};
 
 use cssparser::ToCss;

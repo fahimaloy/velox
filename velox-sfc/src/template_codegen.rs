@@ -3,6 +3,15 @@ use crate::template_ast::{AttrKind, Node, TemplateAttr};
 use crate::template_parse::is_all_ws;
 use std::collections::HashSet;
 
+/// Determines how identifiers are resolved in generated code.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum TransformMode {
+    /// Wrap identifiers in `resolve()` calls — used by `render_with()`.
+    Resolve,
+    /// Reference `state.field.get()` directly — used by `render_with_state()`.
+    State,
+}
+
 /// Parsed v-for directive information.
 #[allow(dead_code)]
 struct VForInfo {
@@ -389,10 +398,9 @@ pub(crate) fn rewrite_if_expr(expr: &str) -> String {
                 string_lit(token)
             ));
         } else {
+            // Use a let binding to avoid calling resolve() multiple times
             out.push_str(&format!(
-                "resolve({}) == \"true\" || (!resolve({}).is_empty() && resolve({}) != \"false\")",
-                string_lit(token),
-                string_lit(token),
+                "{{ let __v = resolve({}); __v == \"true\" || (!__v.is_empty() && __v != \"false\") }}",
                 string_lit(token)
             ));
         }
@@ -451,10 +459,9 @@ pub(crate) fn rewrite_if_expr(expr: &str) -> String {
                 out.push_str(&neg_ident);
                 out.push(')');
             } else {
+                // Use a let binding to avoid calling resolve() multiple times
                 out.push_str(&format!(
-                    "resolve({}) == \"true\" || (!resolve({}).is_empty() && resolve({}) != \"false\"))",
-                    string_lit(&neg_ident),
-                    string_lit(&neg_ident),
+                    "{{ let __v = resolve({}); __v == \"true\" || (!__v.is_empty() && __v != \"false\") }})",
                     string_lit(&neg_ident)
                 ));
             }
@@ -504,7 +511,7 @@ fn extract_vmodel(attrs: &[TemplateAttr], _tag: &str) -> (Vec<TemplateAttr>, Opt
     }
 }
 
-fn emit_node_with(n: &Node) -> String {
+fn emit_node_with_mode(n: &Node, mode: TransformMode) -> String {
     match n {
         Node::Text(t) => format!(r#"text({})"#, string_lit(t)),
         Node::Interpolation(expr) => {
@@ -521,23 +528,21 @@ fn emit_node_with(n: &Node) -> String {
             let (attrs2, _v_model_handler) = extract_vmodel(attrs, tag);
             let attrs = &attrs2;
 
-            // handle directive `v-if` (simple implementation)
+            // handle directive `v-if`
             if let Some(pos) = attrs
                 .iter()
                 .position(|a| matches!(a.kind, AttrKind::Directive) && a.name == "if")
             {
-                // clone attrs and remove the directive so it does not become a prop
                 let mut attrs2 = attrs.clone();
                 let dir = attrs2.remove(pos);
                 let expr = rewrite_if_expr(&dir.value.unwrap_or_default());
-                // construct a temporary element node with remaining attrs
                 let tmp = Node::Element {
                     tag: tag.clone(),
                     attrs: attrs2,
                     children: children.clone(),
                     self_closing: false,
                 };
-                let inner = emit_node_with(&tmp);
+                let inner = emit_node_with_mode(&tmp, mode);
                 return format!(r#"if {} {{ {} }} else {{ text("") }}"#, expr.trim(), inner);
             }
 
@@ -547,14 +552,10 @@ fn emit_node_with(n: &Node) -> String {
                 .find(|a| a.name == "data-velox-component" && a.kind == AttrKind::Static)
                 && let Some(comp_name) = &component_attr.value
             {
-                // Remove the marker attribute from props
                 let mut clean_attrs = attrs.clone();
                 clean_attrs.retain(|a| a.name != "data-velox-component");
 
-                // Extract bind/on attrs and generate props HashMap
                 let (_has_props, props_expr) = generate_component_props_expr(&clean_attrs);
-
-                // Collect @event handlers as callbacks
                 let callbacks = collect_component_callbacks(&clean_attrs);
 
                 if callbacks.is_empty() {
@@ -563,7 +564,6 @@ fn emit_node_with(n: &Node) -> String {
                     );
                 }
 
-                // Generate callback map and use render_with_callbacks
                 let callback_map = format_callback_map(&callbacks);
                 let callback_names: Vec<String> = callbacks
                     .iter()
@@ -580,12 +580,11 @@ fn emit_node_with(n: &Node) -> String {
                 );
             }
 
-            // handle v-for directive: emit loop at parent level with proper collection support
+            // handle v-for directive
             if let Some(pos_for) = attrs
                 .iter()
                 .position(|a| matches!(a.kind, AttrKind::Directive) && a.name == "for")
             {
-                // Also check for v-if on the same element (v-for + v-if combination)
                 let v_if_pos = attrs
                     .iter()
                     .position(|a| matches!(a.kind, AttrKind::Directive) && a.name == "if");
@@ -594,20 +593,18 @@ fn emit_node_with(n: &Node) -> String {
                 let dir = attrs_f.remove(pos_for);
                 let val = dir.value.unwrap_or_default();
 
-                // Extract :key attribute if present
                 let key_attr_pos = attrs_f
                     .iter()
                     .position(|a| a.kind == AttrKind::Bind && a.name == "key");
-                let key_expr = if let Some(kp) = key_attr_pos {
+                let key_expr: Option<Option<String>> = if let Some(kp) = key_attr_pos {
                     let key_val = attrs_f[kp].value.clone();
                     attrs_f.remove(kp);
-                    key_val
+                    Some(key_val)
                 } else {
                     None
                 };
 
                 if let Some(for_info) = parse_v_for(&val) {
-                    // Build a temporary node with v-for (and :key) removed for inner emission
                     let tmp_elem = Node::Element {
                         tag: tag.clone(),
                         attrs: attrs_f.clone(),
@@ -615,71 +612,117 @@ fn emit_node_with(n: &Node) -> String {
                         self_closing: false,
                     };
 
-                    // Generate loop code that works with both numeric counts AND collections.
-                    // Strategy: try numeric parse first, then comma-separated string split.
                     let mut loop_code = String::new();
                     loop_code
                         .push_str("{ let mut __children: Vec<velox_dom::VNode> = Vec::new();\n");
-                    loop_code.push_str(&format!(
-                        "let __for_expr = resolve(\"{}\");\n",
-                        for_info.expr
-                    ));
-                    // Try to parse as a number first (for numeric counts like "5"),
-                    // then split by comma for collection strings (for "a,b,c" → 3 items),
-                    // with a minimum of 1 to avoid empty loops on empty strings.
-                    loop_code.push_str(
-                        "let __for_count = if let Ok(n) = __for_expr.parse::<usize>() {\n",
-                    );
-                    loop_code.push_str("    n\n");
-                    loop_code.push_str("} else if __for_expr.is_empty() {\n");
-                    loop_code.push_str("    0\n");
-                    loop_code.push_str("} else {\n");
-                    loop_code.push_str("    __for_expr.split(',').count()\n");
-                    loop_code.push_str("};\n");
-                    loop_code.push_str(&format!(
-                        "for {idx_var} in 0..__for_count {{\n",
-                        idx_var = for_info.index_name
-                    ));
 
-                    // emit inner content using ctx to handle dot notation in interpolations
-                    let inner = emit_node_with_ctx_for_loop(&tmp_elem, &for_info);
+                    match mode {
+                        TransformMode::Resolve => {
+                            // String-based iteration via resolve()
+                            loop_code.push_str(&format!(
+                                "let __for_expr = resolve(\"{}\");\n",
+                                for_info.expr
+                            ));
+                            loop_code.push_str(
+                                "let __for_count = if let Ok(n) = __for_expr.parse::<usize>() {\n",
+                            );
+                            loop_code.push_str("    n\n");
+                            loop_code.push_str("} else if __for_expr.is_empty() {\n");
+                            loop_code.push_str("    0\n");
+                            loop_code.push_str("} else {\n");
+                            loop_code.push_str("    __for_expr.split(',').count()\n");
+                            loop_code.push_str("};\n");
+                            loop_code.push_str(&format!(
+                                "for {idx_var} in 0..__for_count {{\n",
+                                idx_var = for_info.index_name
+                            ));
 
-                    // Wrap with key attribute if :key was provided
-                    let inner_with_key = if let Some(ref key_val) = key_expr {
-                        format!(
-                            "{{ let mut __node = {}; if let velox_dom::VNode::Element {{ ref mut props, .. }} = __node {{ props.attrs.insert(\"key\".to_string(), resolve({}).to_string()); }} __node }}",
-                            inner,
-                            rewrite_if_expr(key_val)
-                        )
-                    } else {
-                        inner
-                    };
+                            let inner = emit_node_with_ctx_for_loop(&tmp_elem, &for_info);
 
-                    // Handle v-for + v-if: wrap inner in v-if check inside the loop
-                    if let Some(if_pos) = v_if_pos {
-                        let dir_if = &attrs[if_pos];
-                        let expr_if = rewrite_if_expr(&dir_if.value.clone().unwrap_or_default());
-                        loop_code.push_str(&format!(
-                            "    if {} {{\n        __children.push({});\n    }}\n",
-                            expr_if.trim(),
-                            inner_with_key
-                        ));
-                    } else {
-                        loop_code.push_str(&format!("    __children.push({});\n", inner_with_key));
+                            let inner_with_key = if let Some(Some(key_val)) = &key_expr {
+                                format!(
+                                    "{{ let mut __node = {}; if let velox_dom::VNode::Element {{ ref mut props, .. }} = __node {{ props.attrs.insert(\"key\".to_string(), resolve({}).to_string()); }} __node }}",
+                                    inner,
+                                    rewrite_if_expr(key_val)
+                                )
+                            } else {
+                                inner
+                            };
+
+                            if let Some(if_pos) = v_if_pos {
+                                let dir_if = &attrs[if_pos];
+                                let expr_if = rewrite_if_expr(&dir_if.value.clone().unwrap_or_default());
+                                loop_code.push_str(&format!(
+                                    "    if {} {{\n        __children.push({});\n    }}\n",
+                                    expr_if.trim(),
+                                    inner_with_key
+                                ));
+                            } else {
+                                loop_code.push_str(&format!("    __children.push({});\n", inner_with_key));
+                            }
+                        }
+                        TransformMode::State => {
+                            // Collection-based iteration via state.{expr}.get()
+                            loop_code.push_str(&format!("let __col = state.{}.get();\n", for_info.expr));
+                            loop_code.push_str("if !__col.is_empty() {\n");
+                            loop_code.push_str(&format!(
+                                "    for ({idx_var}, {item_var}) in __col.iter().enumerate() {{\n",
+                                idx_var = for_info.index_name,
+                                item_var = for_info.item_name
+                            ));
+
+                            let inner = emit_node_with_ctx_state(
+                                &tmp_elem,
+                                Some(&for_info.item_name),
+                                Some(&for_info.index_name),
+                            );
+
+                            let inner_with_key = if let Some(Some(key_val)) = &key_expr {
+                                let key_path_str = key_val
+                                    .strip_prefix(&for_info.item_name)
+                                    .map(|s| s.trim_start_matches('.'))
+                                    .unwrap_or("id");
+                                format!(
+                                    "{{ let mut __node = {}; if let velox_dom::VNode::Element {{ ref mut props, .. }} = __node {{ props.attrs.insert(\"key\".to_string(), {item_var}.{key_path}.to_string()); }} __node }}",
+                                    inner,
+                                    item_var = for_info.item_name,
+                                    key_path = key_path_str
+                                )
+                            } else {
+                                inner.clone()
+                            };
+
+                            if let Some(if_pos) = v_if_pos {
+                                let dir_if = &attrs[if_pos];
+                                let expr_if = rewrite_if_expr(&dir_if.value.clone().unwrap_or_default());
+                                loop_code.push_str(&format!(
+                                    "    if {} {{\n        __children.push({});\n    }}\n",
+                                    expr_if.trim(),
+                                    inner_with_key
+                                ));
+                            } else {
+                                loop_code.push_str(&format!("    __children.push({});\n", inner_with_key));
+                            }
+
+                            loop_code.push_str("    }\n");
+                            loop_code.push_str("}\n");
+                        }
                     }
 
-                    loop_code.push_str("}\n");
                     loop_code.push_str("__children; }");
-
                     return loop_code;
                 }
             }
 
             let props = emit_props_with(attrs);
-            let kids = emit_children_with(children);
+            let kids = emit_children_with_mode(children, mode);
             format!(r#"h("{}", {props}, {kids})"#, tag)
         }
     }
+}
+
+fn emit_node_with(n: &Node) -> String {
+    emit_node_with_mode(n, TransformMode::Resolve)
 }
 
 /// Generate code that builds a `HashMap<&str, String>` of component props
@@ -778,9 +821,7 @@ fn emit_props_with(attrs: &[TemplateAttr]) -> String {
     parts.join("")
 }
 
-fn emit_children_with(children: &[Node]) -> String {
-    // Emit a block that constructs and returns a Vec<velox_dom::VNode> so we can
-    // support constructs like v-for that push multiple nodes at runtime.
+fn emit_children_with_mode(children: &[Node], mode: TransformMode) -> String {
     if children.is_empty() {
         return "vec![]".to_string();
     }
@@ -795,7 +836,7 @@ fn emit_children_with(children: &[Node]) -> String {
                 children: ch,
                 self_closing,
             } => {
-                // v-if chain handling (unchanged)
+                // v-if chain handling
                 if let Some(pos) = attrs
                     .iter()
                     .position(|a| matches!(a.kind, AttrKind::Directive) && a.name == "if")
@@ -809,9 +850,8 @@ fn emit_children_with(children: &[Node]) -> String {
                         children: ch.clone(),
                         self_closing: *self_closing,
                     };
-                    let inner_if = emit_node_with(&tmp_if);
+                    let inner_if = emit_node_with_mode(&tmp_if, mode);
 
-                    // collect else-if chain
                     let mut chain_parts: Vec<String> = Vec::new();
                     let mut j = i + 1;
                     let mut else_part: Option<String> = None;
@@ -836,7 +876,7 @@ fn emit_children_with(children: &[Node]) -> String {
                                     children: ch2.clone(),
                                     self_closing: *sc2,
                                 };
-                                let inner_ei = emit_node_with(&tmp_ei);
+                                let inner_ei = emit_node_with_mode(&tmp_ei, mode);
                                 chain_parts.push(format!(
                                     r#"else if {} {{ {} }}"#,
                                     expr_ei.trim(),
@@ -856,13 +896,12 @@ fn emit_children_with(children: &[Node]) -> String {
                                     children: ch2.clone(),
                                     self_closing: *sc2,
                                 };
-                                let inner_e = emit_node_with(&tmp_e);
+                                let inner_e = emit_node_with_mode(&tmp_e, mode);
                                 else_part = Some(format!(r#"else {{ {} }}"#, inner_e));
                                 j += 1;
                                 break;
                             }
                         }
-                        // Skip whitespace-only text nodes when looking for v-else/v-else-if siblings
                         if let Node::Text(t) = &children[j]
                             && is_all_ws(t)
                         {
@@ -872,7 +911,6 @@ fn emit_children_with(children: &[Node]) -> String {
                         break;
                     }
 
-                    // build the conditional expression string and push into __children
                     let mut cond = String::new();
                     cond.push_str(&format!(r#"{{ if {} {{ {} }}"#, expr_if.trim(), inner_if));
                     for part in chain_parts.iter() {
@@ -891,12 +929,11 @@ fn emit_children_with(children: &[Node]) -> String {
                     continue;
                 }
 
-                // v-for handling: syntax `item in expr` or `(item, index) in expr`
+                // v-for handling
                 if let Some(posf) = attrs
                     .iter()
                     .position(|a| matches!(a.kind, AttrKind::Directive) && a.name == "for")
                 {
-                    // Also check for v-if on the same element (v-for + v-if combination)
                     let v_if_pos = attrs
                         .iter()
                         .position(|a| matches!(a.kind, AttrKind::Directive) && a.name == "if");
@@ -905,7 +942,6 @@ fn emit_children_with(children: &[Node]) -> String {
                     let dir = attrs_f.remove(posf);
                     let val = dir.value.unwrap_or_default();
 
-                    // Extract :key attribute if present
                     let key_attr_pos = attrs_f
                         .iter()
                         .position(|a| a.kind == AttrKind::Bind && a.name == "key");
@@ -925,278 +961,112 @@ fn emit_children_with(children: &[Node]) -> String {
                             self_closing: *self_closing,
                         };
 
-                        // Generate loop code that works with both numeric counts AND collections
-                        out.push_str(&format!(
-                            "let __for_expr = resolve(\"{}\");\n",
-                            for_info.expr
-                        ));
-                        out.push_str(
-                            "let __for_count = if let Ok(n) = __for_expr.parse::<usize>() {\n",
-                        );
-                        out.push_str("    n\n");
-                        out.push_str("} else if __for_expr.is_empty() {\n");
-                        out.push_str("    0\n");
-                        out.push_str("} else {\n");
-                        out.push_str("    __for_expr.split(',').count()\n");
-                        out.push_str("};\n");
-                        out.push_str(&format!(
-                            "for {idx_var} in 0..__for_count {{\n",
-                            idx_var = for_info.index_name
-                        ));
-
-                        let inner = emit_node_with_ctx_for_loop(&tmp_elem, &for_info);
-
-                        // Wrap with key attribute if :key was provided
-                        let inner_with_key = if let Some(Some(key_val)) = &key_expr {
-                            format!(
-                                "{{ let mut __node = {}; if let velox_dom::VNode::Element {{ ref mut props, .. }} = __node {{ props.attrs.insert(\"key\".to_string(), resolve({}).to_string()); }} __node }}",
-                                inner,
-                                rewrite_if_expr(key_val)
-                            )
-                        } else {
-                            inner.clone()
-                        };
-
-                        // Handle v-for + v-if: wrap inner in v-if check inside the loop
-                        if let Some(if_pos) = v_if_pos {
-                            let dir_if = &attrs[if_pos];
-                            let expr_if =
-                                rewrite_if_expr(&dir_if.value.clone().unwrap_or_default());
-                            out.push_str(&format!(
-                                "    if {} {{\n        __children.push({});\n    }}\n",
-                                expr_if.trim(),
-                                inner_with_key
-                            ));
-                        } else {
-                            out.push_str(&format!("    __children.push({});\n", inner_with_key));
-                        }
-
-                        out.push_str("}\n");
-                        i += 1;
-                        continue;
-                    }
-                }
-
-                // not an if-directive or for-directive element
-                let expr = emit_node_with(&children[i]);
-                out.push_str(&format!("__children.push({});\n", expr));
-                i += 1;
-            }
-            _ => {
-                let expr = emit_node_with(&children[i]);
-                out.push_str(&format!("__children.push({});\n", expr));
-                i += 1;
-            }
-        }
-    }
-    out.push_str("__children\n}");
-    out
-}
-
-// Variant of children emitter that generates code targeting a `state` variable
-fn emit_children_with_state(children: &[Node]) -> String {
-    if children.is_empty() {
-        return "vec![]".to_string();
-    }
-    let mut out = String::new();
-    out.push_str("{ let mut __children: Vec<velox_dom::VNode> = Vec::new();\n");
-    let mut i = 0usize;
-    while i < children.len() {
-        match &children[i] {
-            Node::Element {
-                tag,
-                attrs,
-                children: ch,
-                self_closing,
-            } => {
-                // v-if handling (same as before)
-                if let Some(pos) = attrs
-                    .iter()
-                    .position(|a| matches!(a.kind, AttrKind::Directive) && a.name == "if")
-                {
-                    let mut attrs_if = attrs.clone();
-                    let dir = attrs_if.remove(pos);
-                    let expr_if = rewrite_if_expr(&dir.value.unwrap_or_default());
-                    let tmp_if = Node::Element {
-                        tag: tag.clone(),
-                        attrs: attrs_if,
-                        children: ch.clone(),
-                        self_closing: *self_closing,
-                    };
-                    let inner_if = emit_node_with_state(&tmp_if);
-                    // collect else-if/else chain
-                    let mut chain_parts: Vec<String> = Vec::new();
-                    let mut j = i + 1;
-                    let mut else_part: Option<String> = None;
-                    while j < children.len() {
-                        if let Node::Element {
-                            tag: tag2,
-                            attrs: attrs2,
-                            children: ch2,
-                            self_closing: sc2,
-                        } = &children[j]
-                        {
-                            if let Some(pos2) = attrs2.iter().position(|a| {
-                                matches!(a.kind, AttrKind::Directive)
-                                    && (a.name == "else-if" || a.name == "elseif")
-                            }) {
-                                let mut attrs_ei = attrs2.clone();
-                                let dir_ei = attrs_ei.remove(pos2);
-                                let expr_ei = rewrite_if_expr(&dir_ei.value.unwrap_or_default());
-                                let tmp_ei = Node::Element {
-                                    tag: tag2.clone(),
-                                    attrs: attrs_ei,
-                                    children: ch2.clone(),
-                                    self_closing: *sc2,
-                                };
-                                let inner_ei = emit_node_with_state(&tmp_ei);
-                                chain_parts.push(format!(
-                                    r#"else if {} {{ {} }}"#,
-                                    expr_ei.trim(),
-                                    inner_ei
+                        match mode {
+                            TransformMode::Resolve => {
+                                out.push_str(&format!(
+                                    "let __for_expr = resolve(\"{}\");\n",
+                                    for_info.expr
                                 ));
-                                j += 1;
-                                continue;
-                            }
-                            if let Some(pos3) = attrs2.iter().position(|a| {
-                                matches!(a.kind, AttrKind::Directive) && a.name == "else"
-                            }) {
-                                let mut attrs_e = attrs2.clone();
-                                attrs_e.remove(pos3);
-                                let tmp_e = Node::Element {
-                                    tag: tag2.clone(),
-                                    attrs: attrs_e,
-                                    children: ch2.clone(),
-                                    self_closing: *sc2,
+                                out.push_str(
+                                    "let __for_count = if let Ok(n) = __for_expr.parse::<usize>() {\n",
+                                );
+                                out.push_str("    n\n");
+                                out.push_str("} else if __for_expr.is_empty() {\n");
+                                out.push_str("    0\n");
+                                out.push_str("} else {\n");
+                                out.push_str("    __for_expr.split(',').count()\n");
+                                out.push_str("};\n");
+                                out.push_str(&format!(
+                                    "for {idx_var} in 0..__for_count {{\n",
+                                    idx_var = for_info.index_name
+                                ));
+
+                                let inner = emit_node_with_ctx_for_loop(&tmp_elem, &for_info);
+
+                                let inner_with_key = if let Some(Some(key_val)) = &key_expr {
+                                    format!(
+                                        "{{ let mut __node = {}; if let velox_dom::VNode::Element {{ ref mut props, .. }} = __node {{ props.attrs.insert(\"key\".to_string(), resolve({}).to_string()); }} __node }}",
+                                        inner,
+                                        rewrite_if_expr(key_val)
+                                    )
+                                } else {
+                                    inner.clone()
                                 };
-                                let inner_e = emit_node_with_state(&tmp_e);
-                                else_part = Some(format!(r#"else {{ {} }}"#, inner_e));
-                                j += 1;
-                                break;
+
+                                if let Some(if_pos) = v_if_pos {
+                                    let dir_if = &attrs[if_pos];
+                                    let expr_if =
+                                        rewrite_if_expr(&dir_if.value.clone().unwrap_or_default());
+                                    out.push_str(&format!(
+                                        "    if {} {{\n        __children.push({});\n    }}\n",
+                                        expr_if.trim(),
+                                        inner_with_key
+                                    ));
+                                } else {
+                                    out.push_str(&format!("    __children.push({});\n", inner_with_key));
+                                }
+                            }
+                            TransformMode::State => {
+                                out.push_str(&format!("let __col = state.{}.get();\n", for_info.expr));
+                                out.push_str("if !__col.is_empty() {\n");
+                                out.push_str(&format!(
+                                    "    for ({idx_var}, {item_var}) in __col.iter().enumerate() {{\n",
+                                    idx_var = for_info.index_name,
+                                    item_var = for_info.item_name
+                                ));
+
+                                let inner = emit_node_with_ctx_state(
+                                    &tmp_elem,
+                                    Some(&for_info.item_name),
+                                    Some(&for_info.index_name),
+                                );
+
+                                let inner_with_key = if let Some(Some(key_val)) = &key_expr {
+                                    let key_path_str = key_val
+                                        .strip_prefix(&for_info.item_name)
+                                        .map(|s| s.trim_start_matches('.'))
+                                        .unwrap_or("id");
+                                    format!(
+                                        "{{ let mut __node = {}; if let velox_dom::VNode::Element {{ ref mut props, .. }} = __node {{ props.attrs.insert(\"key\".to_string(), {item_var}.{key_path}.to_string()); }} __node }}",
+                                        inner,
+                                        item_var = for_info.item_name,
+                                        key_path = key_path_str
+                                    )
+                                } else {
+                                    inner.clone()
+                                };
+
+                                if let Some(if_pos) = v_if_pos {
+                                    let dir_if = &attrs[if_pos];
+                                    let expr_if =
+                                        rewrite_if_expr(&dir_if.value.clone().unwrap_or_default());
+                                    out.push_str(&format!(
+                                        "    if {} {{\n        __children.push({});\n    }}\n",
+                                        expr_if.trim(),
+                                        inner_with_key
+                                    ));
+                                } else {
+                                    out.push_str(&format!("    __children.push({});\n", inner_with_key));
+                                }
+
+                                out.push_str("    }\n");
+                                out.push_str("}\n");
                             }
                         }
-                        // Skip whitespace-only text nodes when looking for v-else/v-else-if siblings
-                        if let Node::Text(t) = &children[j]
-                            && is_all_ws(t)
-                        {
-                            j += 1;
-                            continue;
-                        }
-                        break;
-                    }
-                    let mut cond = String::new();
-                    cond.push_str(&format!(r#"{{ if {} {{ {} }}"#, expr_if.trim(), inner_if));
-                    for part in chain_parts.iter() {
-                        cond.push(' ');
-                        cond.push_str(part);
-                    }
-                    if let Some(e) = else_part {
-                        cond.push(' ');
-                        cond.push_str(&e);
-                    } else {
-                        cond.push_str(r#" else { text("") }"#);
-                    }
-                    cond.push_str(" }");
-                    out.push_str(&format!("__children.push({});\n", cond));
-                    i = if j > i { j } else { i + 1 };
-                    continue;
-                }
 
-                // v-for handling for state collections: `item in items` or `(item, idx) in items`
-                if let Some(posf) = attrs
-                    .iter()
-                    .position(|a| matches!(a.kind, AttrKind::Directive) && a.name == "for")
-                {
-                    // Also check for v-if on the same element (v-for + v-if combination)
-                    let v_if_pos = attrs
-                        .iter()
-                        .position(|a| matches!(a.kind, AttrKind::Directive) && a.name == "if");
-
-                    let mut attrs_f = attrs.clone();
-                    let dir = attrs_f.remove(posf);
-                    let val = dir.value.unwrap_or_default();
-
-                    // Extract :key attribute if present
-                    let key_attr_pos = attrs_f
-                        .iter()
-                        .position(|a| a.kind == AttrKind::Bind && a.name == "key");
-                    let key_expr = if let Some(kp) = key_attr_pos {
-                        let key_val = attrs_f[kp].value.clone();
-                        attrs_f.remove(kp);
-                        Some(key_val)
-                    } else {
-                        None
-                    };
-
-                    if let Some(for_info) = parse_v_for(&val) {
-                        let tmp_elem = Node::Element {
-                            tag: tag.clone(),
-                            attrs: attrs_f,
-                            children: ch.clone(),
-                            self_closing: *self_closing,
-                        };
-
-                        // iterate over state.<expr> — support both direct Vec fields and Signal<Vec<T>>
-                        // If the field is a Signal, call .get() to read the current value.
-                        out.push_str(&format!("let __col = state.{}.get();\n", for_info.expr));
-                        out.push_str("if !__col.is_empty() {\n");
-                        out.push_str(&format!(
-                            "    for ({idx_var}, {item_var}) in __col.iter().enumerate() {{\n",
-                            idx_var = for_info.index_name,
-                            item_var = for_info.item_name
-                        ));
-
-                        // emit inner with ctx mapping
-                        let inner = emit_node_with_ctx_state(
-                            &tmp_elem,
-                            Some(&for_info.item_name),
-                            Some(&for_info.index_name),
-                        );
-
-                        // Wrap with key attribute if :key was provided
-                        let inner_with_key = if let Some(Some(key_val)) = &key_expr {
-                            let key_path_str = key_val
-                                .strip_prefix(&for_info.item_name)
-                                .map(|s| s.trim_start_matches('.'))
-                                .unwrap_or("id");
-                            format!(
-                                "{{ let mut __node = {}; if let velox_dom::VNode::Element {{ ref mut props, .. }} = __node {{ props.attrs.insert(\"key\".to_string(), {item_var}.{key_path}.to_string()); }} __node }}",
-                                inner,
-                                item_var = for_info.item_name,
-                                key_path = key_path_str
-                            )
-                        } else {
-                            inner.clone()
-                        };
-
-                        // Handle v-for + v-if: wrap inner in v-if check inside the loop
-                        if let Some(if_pos) = v_if_pos {
-                            let dir_if = &attrs[if_pos];
-                            let expr_if =
-                                rewrite_if_expr(&dir_if.value.clone().unwrap_or_default());
-                            out.push_str(&format!(
-                                "    if {} {{\n        __children.push({});\n    }}\n",
-                                expr_if.trim(),
-                                inner_with_key
-                            ));
-                        } else {
-                            out.push_str(&format!("    __children.push({});\n", inner_with_key));
-                        }
-
-                        out.push_str("    }\n");
                         out.push_str("}\n");
                         i += 1;
                         continue;
                     }
                 }
 
-                // default
-                let expr = emit_node_with_state(&children[i]);
+                // default element
+                let expr = emit_node_with_mode(&children[i], mode);
                 out.push_str(&format!("__children.push({});\n", expr));
                 i += 1;
             }
             _ => {
-                let expr = emit_node_with_state(&children[i]);
+                let expr = emit_node_with_mode(&children[i], mode);
                 out.push_str(&format!("__children.push({});\n", expr));
                 i += 1;
             }
@@ -1207,153 +1077,7 @@ fn emit_children_with_state(children: &[Node]) -> String {
 }
 
 fn emit_node_with_state(n: &Node) -> String {
-    match n {
-        Node::Text(t) => format!(r#"text({})"#, string_lit(t)),
-        Node::Interpolation(expr) => {
-            let key = string_lit(expr.trim());
-            format!(r#"text(resolve({}))"#, key)
-        }
-        Node::Element {
-            tag,
-            attrs,
-            children,
-            ..
-        } => {
-            // Handle v-model directive: convert to :value + @input
-            let (attrs2, _v_model_handler) = extract_vmodel(attrs, tag);
-            let attrs = &attrs2;
-
-            // handle v-for directive in render_with_state path
-            if let Some(pos_for) = attrs
-                .iter()
-                .position(|a| matches!(a.kind, AttrKind::Directive) && a.name == "for")
-            {
-                let v_if_pos = attrs
-                    .iter()
-                    .position(|a| matches!(a.kind, AttrKind::Directive) && a.name == "if");
-
-                let mut attrs_f = attrs.clone();
-                let dir = attrs_f.remove(pos_for);
-                let val = dir.value.unwrap_or_default();
-
-                // Extract :key attribute if present
-                let key_attr_pos = attrs_f
-                    .iter()
-                    .position(|a| a.kind == AttrKind::Bind && a.name == "key");
-                let key_expr = if let Some(kp) = key_attr_pos {
-                    let key_val = attrs_f[kp].value.clone();
-                    attrs_f.remove(kp);
-                    Some(key_val)
-                } else {
-                    None
-                };
-
-                if let Some(for_info) = parse_v_for(&val) {
-                    let tmp_elem = Node::Element {
-                        tag: tag.clone(),
-                        attrs: attrs_f,
-                        children: children.clone(),
-                        self_closing: false,
-                    };
-
-                    let mut loop_code = String::new();
-                    loop_code
-                        .push_str("{ let mut __children: Vec<velox_dom::VNode> = Vec::new();\n");
-                    loop_code.push_str(&format!("let __col = state.{}.get();\n", for_info.expr));
-                    loop_code.push_str("if !__col.is_empty() {\n");
-                    loop_code.push_str(&format!(
-                        "    for ({idx_var}, {item_var}) in __col.iter().enumerate() {{\n",
-                        idx_var = for_info.index_name,
-                        item_var = for_info.item_name
-                    ));
-
-                    let inner = emit_node_with_ctx_state(
-                        &tmp_elem,
-                        Some(&for_info.item_name),
-                        Some(&for_info.index_name),
-                    );
-
-                    // Wrap with key attribute if :key was provided
-                    let inner_with_key = if let Some(Some(key_val)) = &key_expr {
-                        let key_path_str = key_val
-                            .strip_prefix(&for_info.item_name)
-                            .map(|s| s.trim_start_matches('.'))
-                            .unwrap_or("id");
-                        format!(
-                            "{{ let mut __node = {}; if let velox_dom::VNode::Element {{ ref mut props, .. }} = __node {{ props.attrs.insert(\"key\".to_string(), {item_var}.{key_path}.to_string()); }} __node }}",
-                            inner,
-                            item_var = for_info.item_name,
-                            key_path = key_path_str
-                        )
-                    } else {
-                        inner.clone()
-                    };
-
-                    // Handle v-for + v-if
-                    if let Some(if_pos) = v_if_pos {
-                        let dir_if = &attrs[if_pos];
-                        let expr_if = rewrite_if_expr(&dir_if.value.clone().unwrap_or_default());
-                        loop_code.push_str(&format!(
-                            "    if {} {{\n        __children.push({});\n    }}\n",
-                            expr_if.trim(),
-                            inner_with_key
-                        ));
-                    } else {
-                        loop_code.push_str(&format!("    __children.push({});\n", inner_with_key));
-                    }
-
-                    loop_code.push_str("    }\n");
-                    loop_code.push_str("}\n");
-                    loop_code.push_str("__children }");
-
-                    return loop_code;
-                }
-            }
-
-            // Check if this is a component (has data-velox-component marker)
-            if let Some(component_attr) = attrs
-                .iter()
-                .find(|a| a.name == "data-velox-component" && a.kind == AttrKind::Static)
-                && let Some(comp_name) = &component_attr.value
-            {
-                // Remove the marker attribute from props
-                let mut clean_attrs = attrs.clone();
-                clean_attrs.retain(|a| a.name != "data-velox-component");
-
-                // Extract bind/on attrs and generate props HashMap
-                let (_has_props, props_expr) = generate_component_props_expr(&clean_attrs);
-
-                // Collect @event handlers as callbacks
-                let callbacks = collect_component_callbacks(&clean_attrs);
-
-                if callbacks.is_empty() {
-                    return format!(
-                        r#"{{ let __props = {props_expr}; {comp_name}::render_with_props(__props) }}"#,
-                    );
-                }
-
-                // Generate callback map and use render_with_callbacks
-                let callback_map = format_callback_map(&callbacks);
-                let callback_names: Vec<String> = callbacks
-                    .iter()
-                    .map(|(_, handler)| handler.clone())
-                    .collect();
-
-                return format!(
-                    r#"{{ let __props = {props_expr}; let __callbacks = {callback_map}; {comp_name}::render_with_callbacks(__props, &__callbacks, &[{callback_names}]) }}"#,
-                    callback_names = callback_names
-                        .iter()
-                        .map(|n| format!("\"{}\"", n))
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                );
-            }
-
-            let props = emit_props_with(attrs);
-            let kids = emit_children_with_state(children);
-            format!(r#"h("{}", {props}, {kids})"#, tag)
-        }
-    }
+    emit_node_with_mode(n, TransformMode::State)
 }
 
 fn emit_node_with_ctx_state(n: &Node, item_name: Option<&str>, idx_name: Option<&str>) -> String {

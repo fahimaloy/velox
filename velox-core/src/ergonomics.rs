@@ -124,12 +124,13 @@ pub fn from_signal<T: Clone + 'static>(signal: Rc<Signal<T>>) -> Ref<T> {
     Ref(signal)
 }
 
-/// Create a reactive reference from a `Cell<T>` (non-reactive, for internal state).
+/// Create a reactive reference from a `Signal<T>`.
 ///
-/// Use this for values that don't need reactive updates.
+/// This is useful when you already have a `Signal` and want the Ref API.
+/// Alias for `from_signal()`.
 #[inline]
 pub fn cell_ref<T: Clone + 'static>(signal: Rc<Signal<T>>) -> Ref<T> {
-    Ref(signal)
+    from_signal(signal)
 }
 
 /// Convert a `Ref<T>` back to `Rc<Signal<T>>` for use with effects.
@@ -275,8 +276,10 @@ macro_rules! define_emits {
 
 /// Emit an event to the parent component.
 ///
-/// This is a placeholder - the actual emit mechanism depends on
-/// whether the component was rendered with `render_with_callbacks`.
+/// This is a no-op placeholder for standalone usage.
+/// When a component is rendered via `render_with_callbacks`, the SFC compiler
+/// generates a local `emit()` function that replaces this one via module scoping.
+/// Users should call `emit!()` macro or the code-generated version, not this function directly.
 ///
 /// # Examples
 ///
