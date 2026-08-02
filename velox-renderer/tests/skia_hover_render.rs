@@ -4,7 +4,7 @@
 
 #[cfg(all(feature = "skia-native", unix))]
 #[test]
-#[ignore]
+#[ignore = "requires skia-native feature and GPU hardware"]
 fn render_hover_styles_checksum() {
     use velox_dom::h;
     use velox_style::{Stylesheet, apply_styles_with_hover};

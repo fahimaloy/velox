@@ -4,7 +4,7 @@
 
 #[cfg(all(feature = "skia-native", unix))]
 #[test]
-#[ignore]
+#[ignore = "requires skia-native feature and GPU hardware"]
 fn render_many_boxes_checksum() {
     use velox_dom::h;
     use velox_style::Stylesheet;

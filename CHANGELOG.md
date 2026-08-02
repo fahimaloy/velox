@@ -27,7 +27,6 @@
 
 ### Changed
 - Removed `syn` and `quote` dependencies from `velox-sfc` (were unused)
-- Removed `examples/` directory (outdated code); replaced with clean templates
 - Simplified project template `App.vx` to self-contained counter example
 - Simplified `Counter.vx` component template
 - Updated `test_project/src/App.vx` with clean stable syntax
@@ -45,7 +44,7 @@
   - `velox-core`: provide/inject, next_tick, signal edge cases (multiple effects, type variants)
   - `velox-dom`: diff edge cases, keyed children, large tree performance, props diff
   - `velox-renderer`: event lifecycle, dispatch, reconciliation integration
-- Total test count: 263 tests (up from ~98)
+- Total test count: 205 tests across all crates
 
 ### Removed
-- Removed `examples/` directory with outdated example projects (`todo`, `gallery`, `myapp`, `interactive_skia`, `vx_demo`)
+- Removed outdated example projects (`gallery`, `myapp`, `interactive_skia`, `vx_demo`); retained `counter` and `todo`

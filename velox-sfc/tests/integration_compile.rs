@@ -7,7 +7,7 @@ use std::process::Command;
 // It is ignored by default because it runs an external `cargo` build and is slow.
 
 #[test]
-#[ignore]
+#[ignore = "slow: runs external cargo build against full workspace"]
 fn compile_generated_app_crate() {
     // Sample SFC with template and script setup
     let sfc_src = r#"<template>
@@ -99,7 +99,7 @@ fn main() { let _ = app::render(); }
 }
 
 #[test]
-#[ignore]
+#[ignore = "slow: runs external cargo build with component imports"]
 fn compile_component_import_test() {
     // Create temporary directory for component test
     let unique = std::time::SystemTime::now()

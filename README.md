@@ -166,7 +166,7 @@ velox version
 
 # Output should be:
 # velox 0.1.0
-# Edition: 2021
+# Edition: 2024
 # Platform: Linux (or your OS)
 ```
 
@@ -453,7 +453,7 @@ velox version
 **Output:**
 ```
 velox 0.1.0
-Edition: 2021
+Edition: 2024
 Platform: Linux
 ```
 
@@ -580,10 +580,10 @@ cargo test -p velox-renderer
 cd /path/to/velox
 
 # Build and run the counter app
-cargo run --example counter
+cargo run -p velox-example-counter
 
 # Build and run the todo app
-cargo run --example todo
+cargo run -p velox-example-todo
 ```
 
 ---

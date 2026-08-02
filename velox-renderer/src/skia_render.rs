@@ -1328,7 +1328,7 @@ pub mod skia_impl {
         use velox_style::Stylesheet;
 
         #[test]
-        #[ignore]
+        #[ignore = "requires skia-native feature and GPU hardware"]
         fn render_overflow_hidden_clips_children() {
             let vnode = h(
                 "div",
@@ -1358,7 +1358,7 @@ pub mod skia_impl {
         }
 
         #[test]
-        #[ignore]
+        #[ignore = "requires skia-native feature and GPU hardware"]
         fn render_z_index_overlap_checksum() {
             let vnode = h(
                 "div",

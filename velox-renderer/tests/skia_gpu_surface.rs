@@ -2,7 +2,7 @@
 #![cfg(all(feature = "skia-native", unix))]
 
 #[test]
-#[ignore]
+#[ignore = "requires skia-native feature and GPU hardware"]
 fn gpu_surface_present() {
     // Try to draw a GPU test frame (headless). This function will create
     // a headless EGL context and a DirectContext; it currently falls back

@@ -4,7 +4,7 @@
 
 #[cfg(all(feature = "skia-native", unix))]
 #[test]
-#[ignore]
+#[ignore = "requires skia-native feature and GPU hardware"]
 fn render_wrapped_text_checksum() {
     use velox_dom::{h, text};
     use velox_style::Stylesheet;

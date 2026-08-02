@@ -1,6 +1,6 @@
 #[cfg(feature = "wgpu")]
 #[test]
-#[ignore]
+#[ignore = "requires wgpu feature and GPU hardware"]
 fn smoke_wgpu_init() {
     // Ignored by default because CI or dev machines may not have a usable GPU/Vulkan environment.
     // Run locally with `cargo test -p velox-renderer -- --ignored` when you have a headless GPU environment.
