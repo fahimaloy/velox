@@ -107,9 +107,9 @@ impl SoftbufferPresenter {
             let g = self.rgba[base + 1] as u32;
             let b = self.rgba[base + 2] as u32;
             let a = self.rgba[base + 3] as u32;
-            // Softbuffer uses ABGR format (little-endian: 0xAABBGGRR)
+            // Softbuffer uses ARGB8888 format (u32: 0xAARRGGBB, memory byte order: BGRA)
             // Skia outputs RGBA with premultiplied alpha
-            *pixel = (a << 24) | (b << 16) | (g << 8) | r;
+            *pixel = (a << 24) | (r << 16) | (g << 8) | b;
         }
         buffer
             .present()

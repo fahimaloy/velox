@@ -180,7 +180,7 @@ impl State {
     let main_rs = r#"use velox_dom::VNode;
 use velox_style::Stylesheet;
 
-include!(concat!(env!("OUT_DIR"), "/App.rs"));
+include!(concat!(env!("OUT_DIR"), "/app.rs"));
 
 fn main() {
     let state = app::script_rs::State::new();
@@ -259,7 +259,7 @@ fn generate_main_rs() -> String {
 use velox_dom::VNode;
 use velox_style::Stylesheet;
 
-include!(concat!(env!("OUT_DIR"), "/App.rs"));
+include!(concat!(env!("OUT_DIR"), "/app.rs"));
 
 fn main() {
     println!("Starting {}...", env!("CARGO_PKG_NAME"));
@@ -306,10 +306,15 @@ fn generate_app_vx() -> String {
       <button class="btn" @click="decrement">-1</button>
       <button class="btn" @click="reset">Reset</button>
     </div>
+    <div class="card">
+      <h2>Todo List</h2>
+      <TodoItem />
+    </div>
   </div>
 </template>
 
 <script setup>
+import TodoItem from './components/TodoItem.vx'
 use std::cell::{Cell, RefCell};
 
 pub struct State {
@@ -335,7 +340,7 @@ impl State {
 <style>
 .app { display: flex; flex-direction: column; width: 100%; height: 100%; background: #1a1a2e; color: #e6edf3; font-family: system-ui, sans-serif; padding: 20px; }
 .header { padding: 20px; text-align: center; }
-.card { background: #16213e; padding: 24px; border-radius: 12px; text-align: center; }
+.card { background: #16213e; padding: 24px; border-radius: 12px; text-align: center; margin-bottom: 16px; }
 .count { font-size: 48px; font-weight: bold; margin: 0; }
 .positive { color: #3fb950; margin: 8px 0; }
 .neutral { color: #8b949e; margin: 8px 0; }
