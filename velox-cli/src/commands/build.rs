@@ -201,9 +201,18 @@ fn compile_component_tree(
         }
     }
 
-    // Insert module declarations after the comment header line in the stub
+    // Insert module declarations after the #![allow] inner attribute (or comment header).
+    // Inner attributes must come before any items in a module.
     if !module_block.is_empty() {
-        if let Some(pos) = stub.find('\n') {
+        if let Some(pos) = stub.find("#![allow(") {
+            // Find the end of the #![allow(...)] line
+            if let Some(eol) = stub[pos..].find('\n') {
+                stub.insert_str(pos + eol + 1, &module_block);
+            } else {
+                stub.push('\n');
+                stub.push_str(&module_block);
+            }
+        } else if let Some(pos) = stub.find('\n') {
             stub.insert_str(pos + 1, &module_block);
         } else {
             stub.push_str(&module_block);
