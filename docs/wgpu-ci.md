@@ -40,6 +40,6 @@ Skia-native CI notes ⚠️
 
 - The project now includes headless Skia smoke tests guarded by `--features skia-native`.
 - These tests attempt to create an EGL context and a `skia_safe::gpu::DirectContext`; they require Mesa/EGL dev packages on the test runner.
-- A GitHub Actions workflow `./github/workflows/skia-native.yml` installs the required packages on `ubuntu-latest` and runs the ignored Skia tests.
+- A GitHub Actions workflow `.github/workflows/skia-native.yml` installs the required packages on `ubuntu-latest` and runs the ignored Skia tests.
 - For local reproduction, run `./ci/run-skia-tests.sh` (Debian/Ubuntu) to install deps and run the ignored Skia tests.
 - If `skia-native` tests fail due to missing native binaries, consider using `skia-safe` prebuilt binaries, or use a custom Docker image with Skia libs installed.
