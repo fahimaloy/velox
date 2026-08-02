@@ -4,6 +4,7 @@ pub mod next_tick;
 pub mod provide_inject;
 pub mod ref_cell;
 pub mod signal;
+pub mod vmodel;
 pub mod watch;
 
 // Re-export ergonomics for convenient access

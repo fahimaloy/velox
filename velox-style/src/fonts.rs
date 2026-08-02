@@ -90,23 +90,23 @@ impl LineHeight {
             return Some(LineHeight::Normal);
         }
 
-        if let Some(num_str) = s.strip_suffix("px") {
-            if let Ok(v) = num_str.trim().parse::<f32>() {
-                return Some(LineHeight::Pixels(v));
-            }
+        if let Some(num_str) = s.strip_suffix("px")
+            && let Ok(v) = num_str.trim().parse::<f32>()
+        {
+            return Some(LineHeight::Pixels(v));
         }
 
-        if let Some(pct_str) = s.strip_suffix('%') {
-            if let Ok(v) = pct_str.trim().parse::<f32>() {
-                return Some(LineHeight::Percentage(v / 100.0));
-            }
+        if let Some(pct_str) = s.strip_suffix('%')
+            && let Ok(v) = pct_str.trim().parse::<f32>()
+        {
+            return Some(LineHeight::Percentage(v / 100.0));
         }
 
         // Try plain number
-        if let Ok(v) = s.parse::<f32>() {
-            if v > 0.0 {
-                return Some(LineHeight::Number(v));
-            }
+        if let Ok(v) = s.parse::<f32>()
+            && v > 0.0
+        {
+            return Some(LineHeight::Number(v));
         }
 
         None

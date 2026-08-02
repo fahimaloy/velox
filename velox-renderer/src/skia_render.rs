@@ -7,7 +7,7 @@
 #![allow(unused)]
 
 use velox_dom::VNode;
-use velox_style::{apply_styles, Stylesheet};
+use velox_style::{Stylesheet, apply_styles};
 
 #[cfg(feature = "skia-native")]
 pub mod skia_impl {
@@ -40,6 +40,8 @@ pub mod skia_impl {
         align: TextAlign,
         underline: bool,
         font_size: f32,
+        bold: bool,
+        line_height: f32,
     }
 
     #[derive(Clone, Copy)]
@@ -57,19 +59,66 @@ pub mod skia_impl {
     }
 
     fn parse_color_hex(value: &str) -> Option<sk::Color> {
-        let hex = value.strip_prefix('#')?;
-        if hex.len() == 6 {
-            let r = u8::from_str_radix(&hex[0..2], 16).ok()?;
-            let g = u8::from_str_radix(&hex[2..4], 16).ok()?;
-            let b = u8::from_str_radix(&hex[4..6], 16).ok()?;
-            return Some(sk::Color::from_argb(255, r, g, b));
+        let value = value.trim();
+        let hex = value.strip_prefix('#');
+        if let Some(hex) = hex {
+            if hex.len() == 6 {
+                let r = u8::from_str_radix(&hex[0..2], 16).ok()?;
+                let g = u8::from_str_radix(&hex[2..4], 16).ok()?;
+                let b = u8::from_str_radix(&hex[4..6], 16).ok()?;
+                return Some(sk::Color::from_argb(255, r, g, b));
+            }
+            if hex.len() == 8 {
+                let r = u8::from_str_radix(&hex[0..2], 16).ok()?;
+                let g = u8::from_str_radix(&hex[2..4], 16).ok()?;
+                let b = u8::from_str_radix(&hex[4..6], 16).ok()?;
+                let a = u8::from_str_radix(&hex[6..8], 16).ok()?;
+                return Some(sk::Color::from_argb(a, r, g, b));
+            }
         }
-        if hex.len() == 8 {
-            let r = u8::from_str_radix(&hex[0..2], 16).ok()?;
-            let g = u8::from_str_radix(&hex[2..4], 16).ok()?;
-            let b = u8::from_str_radix(&hex[4..6], 16).ok()?;
-            let a = u8::from_str_radix(&hex[6..8], 16).ok()?;
-            return Some(sk::Color::from_argb(a, r, g, b));
+        // Try rgb(r, g, b) and rgba(r, g, b, a) formats
+        if let Some(inner) = value
+            .strip_prefix("rgb(")
+            .or_else(|| value.strip_prefix("rgba("))
+        {
+            let inner = inner.trim_end_matches(')').trim();
+            let parts: Vec<&str> = inner.split(',').map(|p| p.trim()).collect();
+            if parts.len() >= 3
+                && let (Ok(r), Ok(g), Ok(b)) = (
+                    parts[0].parse::<u8>(),
+                    parts[1].parse::<u8>(),
+                    parts[2].parse::<u8>(),
+                )
+            {
+                let a = if parts.len() >= 4 {
+                    parts[3]
+                        .parse::<f32>()
+                        .map(|v| (v * 255.0) as u8)
+                        .unwrap_or(255)
+                } else {
+                    255
+                };
+                return Some(sk::Color::from_argb(a, r, g, b));
+            }
+        }
+        // Try named colors
+        let named = match value.trim().to_lowercase().as_str() {
+            "red" => Some(sk::Color::from_argb(255, 255, 0, 0)),
+            "green" | "lime" => Some(sk::Color::from_argb(255, 0, 128, 0)),
+            "blue" => Some(sk::Color::from_argb(255, 0, 0, 255)),
+            "white" => Some(sk::Color::from_argb(255, 255, 255, 255)),
+            "black" => Some(sk::Color::from_argb(255, 0, 0, 0)),
+            "yellow" => Some(sk::Color::from_argb(255, 255, 255, 0)),
+            "cyan" => Some(sk::Color::from_argb(255, 0, 255, 255)),
+            "magenta" | "fuchsia" => Some(sk::Color::from_argb(255, 255, 0, 255)),
+            "gray" | "grey" => Some(sk::Color::from_argb(255, 128, 128, 128)),
+            "orange" => Some(sk::Color::from_argb(255, 255, 165, 0)),
+            "purple" => Some(sk::Color::from_argb(255, 128, 0, 128)),
+            "transparent" => Some(sk::Color::from_argb(0, 0, 0, 0)),
+            _ => None,
+        };
+        if named.is_some() {
+            return named;
         }
         None
     }
@@ -181,7 +230,10 @@ pub mod skia_impl {
                 let key = k.trim();
                 let val = v.trim();
                 if key == "background-color" || key == "background" {
-                    bg = parse_color_hex(val);
+                    bg = parse_color_hex(val).or_else(|| {
+                        velox_dom::style::Color::parse(val)
+                            .map(|c| sk::Color::from_argb(c.a, c.r, c.g, c.b))
+                    });
                 } else if key == "border" {
                     border = parse_border_value(val);
                 } else if key == "border-radius" {
@@ -203,20 +255,20 @@ pub mod skia_impl {
                         if part.is_empty() {
                             continue;
                         }
-                        if let Some(value) = part.strip_prefix("blur(") {
-                            if let Some(px) = parse_px_value(value.trim()) {
-                                filters.blur_sigma = Some(px.max(0.0));
-                            }
-                        } else if let Some(value) = part.strip_prefix("brightness(") {
-                            if let Some(f) = parse_float_value(value.trim()) {
-                                filters.brightness = Some(f.max(0.0));
-                            }
+                        if let Some(value) = part.strip_prefix("blur(")
+                            && let Some(px) = parse_px_value(value.trim())
+                        {
+                            filters.blur_sigma = Some(px.max(0.0));
+                        } else if let Some(value) = part.strip_prefix("brightness(")
+                            && let Some(f) = parse_float_value(value.trim())
+                        {
+                            filters.brightness = Some(f.max(0.0));
                         }
                     }
-                } else if key == "z-index" {
-                    if let Ok(z) = val.parse::<i32>() {
-                        z_index = z;
-                    }
+                } else if key == "z-index"
+                    && let Ok(z) = val.parse::<i32>()
+                {
+                    z_index = z;
                 }
             }
         }
@@ -240,12 +292,11 @@ pub mod skia_impl {
                 if d.is_empty() {
                     continue;
                 }
-                if let Some((k, v)) = d.split_once(':') {
-                    if k.trim() == "z-index" {
-                        if let Ok(z) = v.trim().parse::<i32>() {
-                            return z;
-                        }
-                    }
+                if let Some((k, v)) = d.split_once(':')
+                    && k.trim() == "z-index"
+                    && let Ok(z) = v.trim().parse::<i32>()
+                {
+                    return z;
                 }
             }
         }
@@ -264,7 +315,10 @@ pub mod skia_impl {
                 let key = k.trim();
                 let val = v.trim();
                 if key == "color" {
-                    if let Some(color) = parse_color_hex(val) {
+                    if let Some(color) = parse_color_hex(val).or_else(|| {
+                        velox_dom::style::Color::parse(val)
+                            .map(|c| sk::Color::from_argb(c.a, c.r, c.g, c.b))
+                    }) {
                         text_style.color = color;
                     }
                 } else if key == "text-align" {
@@ -287,6 +341,15 @@ pub mod skia_impl {
                 } else if key == "font-family" {
                     if let Some(family) = parse_font_family(val) {
                         font_family = family;
+                    }
+                } else if key == "font-weight" {
+                    text_style.bold = val.trim().eq_ignore_ascii_case("bold")
+                        || val.trim().parse::<u16>().map(|w| w >= 700).unwrap_or(false);
+                } else if key == "line-height" {
+                    if let Ok(lh) = val.trim().parse::<f32>() {
+                        text_style.line_height = lh;
+                    } else if let Some(px) = parse_px_value(val.trim()) {
+                        text_style.line_height = px / text_style.font_size;
                     }
                 }
             }
@@ -341,10 +404,10 @@ pub mod skia_impl {
     }
 
     fn apply_filters_to_paint(paint: &mut sk::Paint, filters: FilterSpec) {
-        if let Some(sigma) = filters.blur_sigma {
-            if sigma > 0.0 {
-                paint.set_image_filter(sk::image_filters::blur((sigma, sigma), None, None, None));
-            }
+        if let Some(sigma) = filters.blur_sigma
+            && sigma > 0.0
+        {
+            paint.set_image_filter(sk::image_filters::blur((sigma, sigma), None, None, None));
         }
         if let Some(brightness) = filters.brightness {
             let b = brightness.max(0.0);
@@ -419,10 +482,10 @@ pub mod skia_impl {
                     if child_layout.display_none {
                         continue;
                     }
-                    if let Some(src_idx) = child_layout.source_index {
-                        if let Some(child) = children.get(src_idx) {
-                            collect_debug_hit_rects(child, child_layout, out);
-                        }
+                    if let Some(src_idx) = child_layout.source_index
+                        && let Some(child) = children.get(src_idx)
+                    {
+                        collect_debug_hit_rects(child, child_layout, out);
                     }
                 }
             }
@@ -514,6 +577,8 @@ pub mod skia_impl {
             align: TextAlign::Left,
             underline: false,
             font_size: 14.0,
+            bold: false,
+            line_height: 1.2,
         };
         let mut paints = RenderPaints::new();
 
@@ -633,7 +698,10 @@ pub mod skia_impl {
                         .text
                         .set_color(color_with_opacity(text_style.color, inherited_opacity));
                     let font_size = text_style.font_size;
-                    let font = fonts.font(font_family, font_size);
+                    let mut font = fonts.font(font_family, font_size);
+                    if text_style.bold {
+                        font.set_embolden(true);
+                    }
                     let lines = layout_text_lines(
                         t.as_str(),
                         container_rect.width(),
@@ -641,7 +709,7 @@ pub mod skia_impl {
                         font_family,
                         font_size,
                     );
-                    let line_height = font_size * 1.2;
+                    let line_height = font_size * text_style.line_height;
                     let layout_rect =
                         sk::Rect::from_xywh(rect.left, rect.top, rect.width(), rect.height());
                     let align_rect = if layout_rect.width() >= container_rect.width() - 0.5 {
@@ -833,10 +901,10 @@ pub mod skia_impl {
 
         let font_mgr = sk::FontMgr::default();
         for p in CANDIDATES {
-            if let Ok(bytes) = fs::read(p) {
-                if let Some(tf) = font_mgr.new_from_data(&bytes, None) {
-                    return Some(tf);
-                }
+            if let Ok(bytes) = fs::read(p)
+                && let Some(tf) = font_mgr.new_from_data(&bytes, None)
+            {
+                return Some(tf);
             }
         }
 
@@ -908,6 +976,8 @@ pub mod skia_impl {
             align: TextAlign::Left,
             underline: false,
             font_size: 14.0,
+            bold: false,
+            line_height: 1.2,
         };
         let default_family = fonts.default_family();
         let mut paints = RenderPaints::new();
@@ -927,8 +997,17 @@ pub mod skia_impl {
         ) {
             match node {
                 VNode::Element {
-                    props, children, ..
+                    props,
+                    children,
+                    tag,
+                    ..
                 } => {
+                    // Check visibility:hidden
+                    if let Some(s) = props.attrs.get("style")
+                        && (s.contains("visibility: hidden") || s.contains("visibility:hidden"))
+                    {
+                        return;
+                    }
                     let mut clip_rrect = None;
                     let mut overflow_hidden = false;
                     let mut clip_inset = None;
@@ -993,6 +1072,91 @@ pub mod skia_impl {
                         }
                     }
 
+                    // Handle <input> elements - draw a text field
+                    if tag == "input" {
+                        let input_type = props
+                            .attrs
+                            .get("type")
+                            .map(|s| s.as_str())
+                            .unwrap_or("text");
+                        let value = props.attrs.get("value").map(|s| s.as_str()).unwrap_or("");
+
+                        // Draw input background (white or light gray)
+                        let input_bg = sk::Color::from_argb(255, 255, 255, 255);
+                        let border_color = sk::Color::from_argb(255, 200, 200, 200);
+
+                        let rect = sk::Rect::from_xywh(
+                            layout.rect.x as f32,
+                            layout.rect.y as f32,
+                            layout.rect.w as f32,
+                            layout.rect.h as f32,
+                        );
+
+                        if input_type == "checkbox" {
+                            // Draw checkbox
+                            let size = rect.width().min(rect.height()).min(18.0);
+                            let check_rect = sk::Rect::from_xywh(
+                                rect.left + (rect.width() - size) / 2.0,
+                                rect.top + (rect.height() - size) / 2.0,
+                                size,
+                                size,
+                            );
+                            // Background
+                            paints.fill.set_color(input_bg);
+                            canvas.draw_rect(check_rect, &paints.fill);
+                            // Border
+                            paints.stroke.set_stroke_width(1.0);
+                            paints.stroke.set_color(border_color);
+                            canvas.draw_rect(check_rect, &paints.stroke);
+                            // Check mark if checked
+                            if value == "true" || value == "checked" {
+                                paints
+                                    .fill
+                                    .set_color(sk::Color::from_argb(255, 52, 120, 246));
+                                let inset = size * 0.2_f32;
+                                let inner = sk::RRect::new_rect_xy(
+                                    sk::Rect::from_xywh(
+                                        check_rect.left + inset,
+                                        check_rect.top + inset,
+                                        size - inset * 2.0,
+                                        size - inset * 2.0,
+                                    ),
+                                    2.0,
+                                    2.0,
+                                );
+                                canvas.draw_rrect(inner, &paints.fill);
+                            }
+                        } else {
+                            // Text input - draw border and value
+                            let input_rect = sk::Rect::from_xywh(
+                                rect.left + 1.0,
+                                rect.top + 1.0,
+                                (rect.width() - 2.0).max(0.0),
+                                (rect.height() - 2.0).max(0.0),
+                            );
+                            paints.fill.set_color(input_bg);
+                            canvas.draw_rect(input_rect, &paints.fill);
+                            paints.stroke.set_stroke_width(1.0);
+                            paints.stroke.set_color(border_color);
+                            canvas.draw_rect(input_rect, &paints.stroke);
+                            // Draw value text
+                            if !value.is_empty() {
+                                paints.text.set_color(sk::Color::from_argb(255, 0, 0, 0));
+                                let font_size = text_style.font_size;
+                                let font = fonts.font(font_family, font_size);
+                                let ty = input_rect.top
+                                    + font_size
+                                    + (input_rect.height() - font_size) / 2.0;
+                                let _ = canvas.draw_str(
+                                    value,
+                                    (input_rect.left + 4.0, ty),
+                                    &font,
+                                    &paints.text,
+                                );
+                            }
+                        }
+                    }
+
                     // Render children in order using their layout nodes
                     let rect = sk::Rect::from_xywh(
                         layout.rect.x as f32,
@@ -1015,23 +1179,22 @@ pub mod skia_impl {
                         .collect();
                     ordered.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
                     for (_, layout_idx) in ordered {
-                        if let Some(child_layout) = layout.children.get(layout_idx) {
-                            if let Some(src_idx) = child_layout.source_index {
-                                if let Some(child) = children.get(src_idx) {
-                                    render_with_layout(
-                                        canvas,
-                                        child,
-                                        child_layout,
-                                        rect,
-                                        fonts,
-                                        child_text_style,
-                                        &child_family,
-                                        paints,
-                                        images,
-                                        opacity,
-                                    );
-                                }
-                            }
+                        if let Some(child_layout) = layout.children.get(layout_idx)
+                            && let Some(src_idx) = child_layout.source_index
+                            && let Some(child) = children.get(src_idx)
+                        {
+                            render_with_layout(
+                                canvas,
+                                child,
+                                child_layout,
+                                rect,
+                                fonts,
+                                child_text_style,
+                                &child_family,
+                                paints,
+                                images,
+                                opacity,
+                            );
                         }
                     }
                     if did_clip {
@@ -1043,7 +1206,10 @@ pub mod skia_impl {
                         .text
                         .set_color(color_with_opacity(text_style.color, inherited_opacity));
                     let font_size = text_style.font_size;
-                    let font = fonts.font(font_family, font_size);
+                    let mut font = fonts.font(font_family, font_size);
+                    if text_style.bold {
+                        font.set_embolden(true);
+                    }
                     let lines = layout_text_lines(
                         t.as_str(),
                         container_rect.width(),
@@ -1051,7 +1217,7 @@ pub mod skia_impl {
                         font_family,
                         font_size,
                     );
-                    let line_height = font_size * 1.2;
+                    let line_height = font_size * text_style.line_height;
                     let layout_rect = sk::Rect::from_xywh(
                         layout.rect.x as f32,
                         layout.rect.y as f32,

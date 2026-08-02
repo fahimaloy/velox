@@ -1,4 +1,4 @@
-use velox_dom::{h, text, Props};
+use velox_dom::{Props, h, text};
 use velox_renderer::Renderer;
 
 #[test]

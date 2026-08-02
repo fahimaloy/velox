@@ -1,5 +1,5 @@
-use velox_dom::{h, text, Props, VNode};
-use velox_style::{apply_styles_with_hover, Stylesheet};
+use velox_dom::{Props, VNode, h, text};
+use velox_style::{Stylesheet, apply_styles_with_hover};
 
 #[test]
 fn hover_selector_applies_conditionally() {

@@ -1,10 +1,10 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use velox_core::signal::{effect, Signal};
-use velox_dom::{diff::diff, h, text, Props, VNode};
+use velox_core::signal::{Signal, effect};
+use velox_dom::{Props, VNode, diff::diff, h, text};
 use velox_renderer::Renderer;
-use velox_style::{apply_styles, Stylesheet};
+use velox_style::{Stylesheet, apply_styles};
 
 fn view(count: i32) -> VNode {
     h(
@@ -63,7 +63,9 @@ fn end_to_end_reactive_updates_and_mount() {
         }
         _ => panic!("expected element children"),
     };
-    assert!(patches
-        .iter()
-        .any(|p| matches!(p, velox_dom::diff::Patch::Replace(_))));
+    assert!(
+        patches
+            .iter()
+            .any(|p| matches!(p, velox_dom::diff::Patch::Replace(_)))
+    );
 }

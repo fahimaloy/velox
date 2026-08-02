@@ -31,6 +31,7 @@ fn render_text_styles_checksum() {
     assert_eq!(checksum, EXPECTED_TEXT_CHECKSUM);
 }
 
+#[cfg(all(feature = "skia-native", unix))]
 fn fnv1a(bytes: &[u8]) -> u32 {
     let mut hash: u32 = 0x811c9dc5;
     for b in bytes {

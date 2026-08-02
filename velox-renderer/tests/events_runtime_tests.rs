@@ -1,7 +1,7 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use velox_dom::{h, text, Props};
+use velox_dom::{Props, h, text};
 use velox_renderer::Renderer;
 
 #[test]
@@ -25,15 +25,15 @@ fn runtime_click_and_dblclick_and_hover() {
 
     {
         let c = clicks.clone();
-        rt.registry.on("inc", move || *c.borrow_mut() += 1);
+        rt.registry.on("inc", move |_| *c.borrow_mut() += 1);
     }
     {
         let d = dbls.clone();
-        rt.registry.on("boom", move || *d.borrow_mut() += 1);
+        rt.registry.on("boom", move |_| *d.borrow_mut() += 1);
     }
     {
         let h = hovs.clone();
-        rt.registry.on("hov", move || *h.borrow_mut() += 1);
+        rt.registry.on("hov", move |_| *h.borrow_mut() += 1);
     }
 
     // First click

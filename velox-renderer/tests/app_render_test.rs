@@ -4,7 +4,7 @@
 #[cfg(feature = "skia-native")]
 #[test]
 fn render_app_template() {
-    use velox_dom::{h, text, Props};
+    use velox_dom::{Props, h, text};
     use velox_style::Stylesheet;
 
     // Build vnode matching the generated app template structure

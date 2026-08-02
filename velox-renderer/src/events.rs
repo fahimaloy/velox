@@ -4,8 +4,10 @@ use velox_dom::VNode;
 
 use crate::RenderTree;
 
+type EventHandler = Box<dyn FnMut(Option<&str>)>;
+
 pub struct EventRegistry {
-    handlers: HashMap<String, Box<dyn FnMut()>>,
+    handlers: HashMap<String, EventHandler>,
 }
 
 impl Default for EventRegistry {
@@ -20,7 +22,7 @@ impl EventRegistry {
             handlers: HashMap::new(),
         }
     }
-    pub fn on<F: FnMut() + 'static>(&mut self, name: impl Into<String>, f: F) {
+    pub fn on<F: FnMut(Option<&str>) + 'static>(&mut self, name: impl Into<String>, f: F) {
         self.handlers.insert(name.into(), Box::new(f));
     }
     pub fn remove(&mut self, name: &str) {
@@ -129,12 +131,11 @@ pub fn collect_click_targets(
                 .collect();
             ordered.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
             for (_, idx) in ordered {
-                if let Some(child_layout) = layout.children.get(idx) {
-                    if let Some(src_idx) = child_layout.source_index {
-                        if let Some(child) = children.get(src_idx) {
-                            collect_click_targets(child, child_layout, next_clip, order, out);
-                        }
-                    }
+                if let Some(child_layout) = layout.children.get(idx)
+                    && let Some(src_idx) = child_layout.source_index
+                    && let Some(child) = children.get(src_idx)
+                {
+                    collect_click_targets(child, child_layout, next_clip, order, out);
                 }
             }
         }
@@ -196,12 +197,11 @@ pub fn collect_hover_targets(
                 .collect();
             ordered.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
             for (_, idx) in ordered {
-                if let Some(child_layout) = layout.children.get(idx) {
-                    if let Some(src_idx) = child_layout.source_index {
-                        if let Some(child) = children.get(src_idx) {
-                            collect_hover_targets(child, child_layout, next_clip, order, out);
-                        }
-                    }
+                if let Some(child_layout) = layout.children.get(idx)
+                    && let Some(src_idx) = child_layout.source_index
+                    && let Some(child) = children.get(src_idx)
+                {
+                    collect_hover_targets(child, child_layout, next_clip, order, out);
                 }
             }
         }
@@ -260,30 +260,33 @@ pub fn hit_test_hover(targets: &[HoverTarget], x: f32, y: f32) -> Option<u32> {
 
 /// Dispatches an event by scanning the VNode tree for props of the form
 /// `on:<event>` and invoking registered callbacks with the string value.
+/// Also collects `on:<event>-payload` values and forwards them.
 /// Returns the number of callbacks invoked.
 pub fn dispatch(event: &str, tree: &RenderTree, registry: &mut EventRegistry) -> usize {
     let mut invoked = 0;
     let key = format!("on:{}", event);
-    fn walk(node: &VNode, key: &str, out: &mut Vec<String>) {
+    let payload_key = format!("on:{}-payload", event);
+    fn walk(node: &VNode, key: &str, payload_key: &str, out: &mut Vec<(String, Option<String>)>) {
         match node {
             VNode::Text(_) => {}
             VNode::Element {
                 props, children, ..
             } => {
                 if let Some(v) = props.attrs.get(key) {
-                    out.push(v.clone());
+                    let payload = props.attrs.get(payload_key).cloned();
+                    out.push((v.clone(), payload));
                 }
                 for c in children {
-                    walk(c, key, out);
+                    walk(c, key, payload_key, out);
                 }
             }
         }
     }
     let mut targets = Vec::new();
-    walk(&tree.root, &key, &mut targets);
-    for name in targets {
+    walk(&tree.root, &key, &payload_key, &mut targets);
+    for (name, payload) in targets {
         if let Some(cb) = registry.handlers.get_mut(&name) {
-            cb();
+            cb(payload.as_deref());
             invoked += 1;
         }
     }

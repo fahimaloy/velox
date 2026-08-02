@@ -52,12 +52,13 @@ fn project_bin_name(project_dir: &Path) -> Option<String> {
         if in_package && trimmed.starts_with('[') && trimmed != "[package]" {
             break;
         }
-        if in_package && trimmed.starts_with("name") {
-            if let Some(eq) = trimmed.find('=') {
-                let value = trimmed[eq + 1..].trim().trim_matches('"').to_string();
-                if !value.is_empty() {
-                    return Some(value);
-                }
+        if in_package
+            && trimmed.starts_with("name")
+            && let Some(eq) = trimmed.find('=')
+        {
+            let value = trimmed[eq + 1..].trim().trim_matches('"').to_string();
+            if !value.is_empty() {
+                return Some(value);
             }
         }
     }
@@ -104,7 +105,11 @@ pub fn dev_current(project_dir: &Path, release: bool) -> Result<()> {
                 clear_screen();
                 print_banner(project_dir, release, &watch_dir);
                 if crashed {
-                    println!("{} {}\n", red("✗ App crashed."), dim("Fix the error and save to rebuild."));
+                    println!(
+                        "{} {}\n",
+                        red("✗ App crashed."),
+                        dim("Fix the error and save to rebuild.")
+                    );
                 }
             }
             Ok(DevCmd::Reload) => {
@@ -123,11 +128,7 @@ pub fn dev_current(project_dir: &Path, release: bool) -> Result<()> {
 
         // Detect file changes (debounced).
         if let Some(changed) = changed_file(&watch_dir, &mut last_check) {
-            println!(
-                "{} {} changed — rebuilding",
-                yellow("↻"),
-                changed.display()
-            );
+            println!("{} {} changed — rebuilding", yellow("↻"), changed.display());
             if let Some(mut c) = child.take() {
                 let _ = c.kill();
                 let _ = c.wait();
@@ -137,12 +138,15 @@ pub fn dev_current(project_dir: &Path, release: bool) -> Result<()> {
         }
 
         // If the app exited, report but keep watching (Vite-like resilience).
-        if let Some(ref mut c) = child {
-            if c.try_wait()?.is_some() {
-                println!("{}", dim("App exited. Press 'r' to restart, or save a file to rebuild."));
-                child = None;
-                crashed = true;
-            }
+        if let Some(ref mut c) = child
+            && c.try_wait()?.is_some()
+        {
+            println!(
+                "{}",
+                dim("App exited. Press 'r' to restart, or save a file to rebuild.")
+            );
+            child = None;
+            crashed = true;
         }
 
         thread::sleep(Duration::from_millis(400));
@@ -158,7 +162,11 @@ fn print_banner(project_dir: &Path, release: bool, watch_dir: &Path) {
         .and_then(|p| p.file_name().map(|f| f.to_string_lossy().to_string()))
         .unwrap_or_else(|| "velox-app".into());
     println!();
-    println!("  {} {}", bold(&cyan("⚡ Velox dev server")), dim(&format!("v{}", env!("CARGO_PKG_VERSION"))));
+    println!(
+        "  {} {}",
+        bold(&cyan("⚡ Velox dev server")),
+        dim(&format!("v{}", env!("CARGO_PKG_VERSION")))
+    );
     println!("  {} {}", bold("➤ Project:"), name);
     println!("  {} {}", bold("➤ Watching:"), watch_dir.display());
     println!(
@@ -166,10 +174,7 @@ fn print_banner(project_dir: &Path, release: bool, watch_dir: &Path) {
         bold("➤ Build:"),
         if release { "release" } else { "debug" }
     );
-    println!(
-        "  {}",
-        dim("  r: reload   c: clear   q: quit")
-    );
+    println!("  {}", dim("  r: reload   c: clear   q: quit"));
     println!();
 }
 
@@ -271,7 +276,12 @@ fn print_build_error(stderr: &str) {
     let errors: Vec<&str> = lines
         .iter()
         .copied()
-        .filter(|l| l.contains("error[") || l.contains("error:") || l.contains("cannot find") || l.contains("expected"))
+        .filter(|l| {
+            l.contains("error[")
+                || l.contains("error:")
+                || l.contains("cannot find")
+                || l.contains("expected")
+        })
         .collect();
     println!();
     println!("{}", red("──────────── ✗ Build failed ────────────"));
@@ -305,12 +315,11 @@ fn changed_file(dir: &Path, last_check: &mut SystemTime) -> Option<std::path::Pa
                     if let Some(f) = walk(&path, t, base) {
                         return Some(f);
                     }
-                } else if let Ok(md) = e.metadata() {
-                    if let Ok(m) = md.modified() {
-                        if m > t {
-                            return Some(path.strip_prefix(base).unwrap_or(&path).to_path_buf());
-                        }
-                    }
+                } else if let Ok(md) = e.metadata()
+                    && let Ok(m) = md.modified()
+                    && m > t
+                {
+                    return Some(path.strip_prefix(base).unwrap_or(&path).to_path_buf());
                 }
             }
         }

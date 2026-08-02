@@ -98,7 +98,10 @@ where
         });
     }
 
-    let _guard = ContextGuard { saved_context: previous, pushed_to_stack };
+    let _guard = ContextGuard {
+        saved_context: previous,
+        pushed_to_stack,
+    };
 
     // Run the closure
     f()

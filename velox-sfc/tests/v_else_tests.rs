@@ -21,7 +21,7 @@ fn codegen_v_if_else_with_classes() {
     </div>"#;
     let rs = compile_template_to_rs(tpl, "App", None).unwrap();
     println!("Generated code for v-if/else with classes:\n{}", rs);
-    
+
     // Basic checks
     assert!(rs.contains(r#"resolve("positive")"#));
     assert!(rs.contains("else"));
@@ -37,28 +37,34 @@ fn debug_our_specific_case() {
       <p v-if="positive" class="positive">positive</p>
       <p v-else class="neutral">not positive</p>
     </div>"#;
-    
+
     let rs = compile_template_to_rs(tpl, "test", None).unwrap();
     println!("Generated code:");
     println!("{}", rs);
-    
+
     // The key thing to check is whether we get a proper if/else structure
     // Looking at the counter example, it should generate something like:
     // { if condition { ... } else { ... } }
-    
+
     // Count the braces to see structure
     let open_braces: usize = rs.matches("{").count();
     let close_braces: usize = rs.matches("}").count();
-    
+
     println!("{{ count: {}, }} count: {}", open_braces, close_braces);
-    
+
     // Should have the if/else pattern
     assert!(rs.contains("if"), "Should contain 'if'");
     assert!(rs.contains("else"), "Should contain 'else'");
-    
+
     // Check for the specific text outputs
-    assert!(rs.contains(r#"text("positive")"#) || rs.contains(r#"text("positive" )"#), "Should have positive text");
-    assert!(rs.contains(r#"text("not positive")"#) || rs.contains(r#"text("not positive" )"#), "Should have not positive text");
+    assert!(
+        rs.contains(r#"text("positive")"#) || rs.contains(r#"text("positive" )"#),
+        "Should have positive text"
+    );
+    assert!(
+        rs.contains(r#"text("not positive")"#) || rs.contains(r#"text("not positive" )"#),
+        "Should have not positive text"
+    );
 }
 
 #[test]
@@ -77,11 +83,11 @@ fn debug_with_header_and_buttons() {
         <button class="btn" @click="reset">Reset</button>
       </div>
     </div>"#;
-    
+
     let rs = compile_template_to_rs(tpl, "test", None).unwrap();
     println!("\nFull template generated code:");
     println!("{}", rs);
-    
+
     // Should still have proper if/else
     assert!(rs.contains("if"), "Should contain 'if'");
     assert!(rs.contains("else"), "Should contain 'else'");

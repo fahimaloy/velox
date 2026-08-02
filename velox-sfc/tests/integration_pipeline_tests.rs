@@ -270,7 +270,7 @@ fn diff_and_event_dispatch_integration() {
     let mut reg = EventRegistry::new();
     {
         let c = count.clone();
-        reg.on("newHandler", move || {
+        reg.on("newHandler", move |_| {
             *c.borrow_mut() += 1;
         });
     }

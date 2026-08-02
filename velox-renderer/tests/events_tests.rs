@@ -1,8 +1,8 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use velox_dom::{h, text, Props};
-use velox_renderer::{events, Renderer};
+use velox_dom::{Props, h, text};
+use velox_renderer::{Renderer, events};
 
 #[test]
 fn dispatch_invokes_registered_callback() {
@@ -19,7 +19,7 @@ fn dispatch_invokes_registered_callback() {
     let mut reg = events::EventRegistry::new();
     {
         let count = count.clone();
-        reg.on("inc", move || {
+        reg.on("inc", move |_| {
             *count.borrow_mut() += 1;
         });
     }
@@ -46,7 +46,7 @@ fn dispatch_handles_multiple_targets() {
     let mut reg = events::EventRegistry::new();
     {
         let count = count.clone();
-        reg.on("inc", move || {
+        reg.on("inc", move |_| {
             *count.borrow_mut() += 1;
         });
     }

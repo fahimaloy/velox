@@ -1,8 +1,8 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use velox_dom::{h, text, Props};
-use velox_renderer::{events, events::EventRegistry, Renderer};
+use velox_dom::{Props, h, text};
+use velox_renderer::{Renderer, events, events::EventRegistry};
 
 // =============================================================================
 // Event handler integration tests
@@ -34,13 +34,13 @@ fn dispatch_multiple_event_types() {
     let mut reg = EventRegistry::new();
     {
         let cc = click_count.clone();
-        reg.on("onClick", move || {
+        reg.on("onClick", move |_| {
             *cc.borrow_mut() += 1;
         });
     }
     {
         let hc = hover_count.clone();
-        reg.on("onHover", move || {
+        reg.on("onHover", move |_| {
             *hc.borrow_mut() += 1;
         });
     }
@@ -90,7 +90,7 @@ fn dispatch_unregistered_handler_name() {
     // Register a different handler name
     {
         let c = count.clone();
-        reg.on("otherHandler", move || {
+        reg.on("otherHandler", move |_| {
             *c.borrow_mut() += 1;
         });
     }
@@ -106,7 +106,7 @@ fn event_registry_remove_handler() {
     let count = Rc::new(RefCell::new(0));
     {
         let c = count.clone();
-        reg.on("test", move || {
+        reg.on("test", move |_| {
             *c.borrow_mut() += 1;
         });
     }
@@ -119,7 +119,7 @@ fn event_registry_remove_handler() {
 fn event_registry_has_method() {
     let mut reg = EventRegistry::new();
     assert!(!reg.has("nonexistent"));
-    reg.on("foo", || {});
+    reg.on("foo", |_| {});
     assert!(reg.has("foo"));
     assert!(!reg.has("bar"));
 }
@@ -150,7 +150,7 @@ fn dispatch_deeply_nested_handlers() {
     let mut reg = EventRegistry::new();
     {
         let c = count.clone();
-        reg.on("deepClick", move || {
+        reg.on("deepClick", move |_| {
             *c.borrow_mut() += 1;
         });
     }
@@ -190,7 +190,7 @@ fn dispatch_same_handler_on_multiple_elements() {
     let mut reg = EventRegistry::new();
     {
         let c = count.clone();
-        reg.on("shared", move || {
+        reg.on("shared", move |_| {
             *c.borrow_mut() += 1;
         });
     }
@@ -220,13 +220,13 @@ fn dispatch_mixed_handler_names() {
     let mut reg = EventRegistry::new();
     {
         let ac = a_count.clone();
-        reg.on("handlerOne", move || {
+        reg.on("handlerOne", move |_| {
             *ac.borrow_mut() += 1;
         });
     }
     {
         let bc = b_count.clone();
-        reg.on("handlerTwo", move || {
+        reg.on("handlerTwo", move |_| {
             *bc.borrow_mut() += 1;
         });
     }
@@ -340,7 +340,7 @@ fn runtime_mouse_click_invokes_handler() {
     let mut rt = events::Runtime::new(tree);
     {
         let c = count.clone();
-        rt.registry.on("onClick", move || {
+        rt.registry.on("onClick", move |_| {
             *c.borrow_mut() += 1;
         });
     }
@@ -359,7 +359,7 @@ fn runtime_double_click_detection() {
     let mut rt = events::Runtime::new(tree);
     {
         let dc = dbl_count.clone();
-        rt.registry.on("onDbl", move || {
+        rt.registry.on("onDbl", move |_| {
             *dc.borrow_mut() += 1;
         });
     }
@@ -381,7 +381,7 @@ fn runtime_hover_sent_once() {
     let mut rt = events::Runtime::new(tree);
     {
         let hc = hover_count.clone();
-        rt.registry.on("onHover", move || {
+        rt.registry.on("onHover", move |_| {
             *hc.borrow_mut() += 1;
         });
     }

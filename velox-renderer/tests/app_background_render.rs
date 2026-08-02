@@ -4,8 +4,8 @@
 
 #![cfg(feature = "skia-native")]
 
-use velox_dom::{h, Props, VNode};
-use velox_style::{apply_styles, apply_styles_with_hover, Stylesheet};
+use velox_dom::{Props, VNode, h};
+use velox_style::{Stylesheet, apply_styles, apply_styles_with_hover};
 
 const STYLE: &str = r#"
 .app { display: flex; flex-direction: column; width: 100%; height: 100%; background: #1a1a2e; color: #e6edf3; font-family: system-ui, sans-serif; padding: 20px; }
@@ -60,8 +60,8 @@ fn app_root_background_paints_navy_not_brown() {
 
     let w = 200i32;
     let hgt = 150i32;
-    let rgba = velox_renderer::render_vnode_to_rgba(&styled, &sheet, w, hgt)
-        .expect("render to rgba");
+    let rgba =
+        velox_renderer::render_vnode_to_rgba(&styled, &sheet, w, hgt).expect("render to rgba");
 
     let (r, g, b) = sample_center(&rgba, w, hgt);
     println!("center pixel rgb = ({}, {}, {})", r, g, b);
@@ -86,8 +86,8 @@ fn live_render_frame_paints_navy() {
     let styled = apply_styles_with_hover(&raw, &sheet, &|_, _| false);
     let w = 200i32;
     let hgt = 150i32;
-    let rgba = velox_renderer::render_vnode_to_rgba(&styled, &sheet, w, hgt)
-        .expect("render to rgba");
+    let rgba =
+        velox_renderer::render_vnode_to_rgba(&styled, &sheet, w, hgt).expect("render to rgba");
     let (r, g, b) = sample_center(&rgba, w, hgt);
     println!("LIVE center pixel rgb = ({}, {}, {})", r, g, b);
     assert!(

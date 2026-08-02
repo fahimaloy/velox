@@ -5,7 +5,7 @@ use std::collections::{HashMap, HashSet};
 use velox_dom::VNode;
 
 #[cfg(feature = "skia-native")]
-use velox_style::{apply_styles_with_hover, Stylesheet};
+use velox_style::{Stylesheet, apply_styles_with_hover};
 
 pub mod event_binding;
 pub mod events;
@@ -23,11 +23,9 @@ mod skia_surface;
 #[cfg(feature = "skia-native")]
 mod presenter;
 #[cfg(feature = "skia-native")]
-pub use skia_render::{
-    render_vnode_to_raster_png, render_vnode_to_raster_png_with_scale,
-};
-#[cfg(feature = "skia-native")]
 pub use skia_render::skia_impl::render_vnode_to_rgba;
+#[cfg(feature = "skia-native")]
+pub use skia_render::{render_vnode_to_raster_png, render_vnode_to_raster_png_with_scale};
 
 /// In-memory representation of a mounted tree (stubbed for now).
 pub struct RenderTree {
@@ -153,10 +151,10 @@ fn a11y_name_for(tag: &str, props: &velox_dom::Props, node: &VNode) -> String {
     if let Some(label) = props.attrs.get("aria-label") {
         return label.clone();
     }
-    if tag == "img" {
-        if let Some(alt) = props.attrs.get("alt") {
-            return alt.clone();
-        }
+    if tag == "img"
+        && let Some(alt) = props.attrs.get("alt")
+    {
+        return alt.clone();
     }
     vnode_text_content(node)
 }
@@ -187,10 +185,10 @@ fn build_a11y_tree_with_layout(
                 if ch_layout.display_none {
                     continue;
                 }
-                if let Some(src_idx) = ch_layout.source_index {
-                    if let Some(ch) = children.get(src_idx) {
-                        child_nodes.push(build_a11y_tree_with_layout(ch, ch_layout, next_id));
-                    }
+                if let Some(src_idx) = ch_layout.source_index
+                    && let Some(ch) = children.get(src_idx)
+                {
+                    child_nodes.push(build_a11y_tree_with_layout(ch, ch_layout, next_id));
                 }
             }
             A11yNode {
@@ -217,23 +215,22 @@ pub fn build_a11y_tree(vnode: &VNode, width: i32, height: i32) -> A11yTree {
 pub fn reconcile_keyed_children(old: &mut Vec<VNode>, new: &[VNode]) {
     let mut key_to_index: HashMap<String, usize> = HashMap::new();
     for (i, n) in old.iter().enumerate() {
-        if let VNode::Element { props, .. } = n {
-            if let Some(k) = props.attrs.get("key") {
-                key_to_index.insert(k.clone(), i);
-            }
+        if let VNode::Element { props, .. } = n
+            && let Some(k) = props.attrs.get("key")
+        {
+            key_to_index.insert(k.clone(), i);
         }
     }
     let mut used: HashSet<usize> = HashSet::new();
     let mut out: Vec<VNode> = Vec::with_capacity(new.len());
     for nn in new.iter() {
-        if let VNode::Element { props: nprops, .. } = nn {
-            if let Some(k) = nprops.attrs.get("key") {
-                if let Some(&idx) = key_to_index.get(k) {
-                    out.push(old[idx].clone());
-                    used.insert(idx);
-                    continue;
-                }
-            }
+        if let VNode::Element { props: nprops, .. } = nn
+            && let Some(k) = nprops.attrs.get("key")
+            && let Some(&idx) = key_to_index.get(k)
+        {
+            out.push(old[idx].clone());
+            used.insert(idx);
+            continue;
         }
         out.push(nn.clone());
     }
@@ -326,12 +323,12 @@ pub mod wgpu_backend {
 // Real Skia backend only when `skia-native` is enabled.
 #[cfg(feature = "skia-native")]
 pub mod skia_backend {
+    use crate::HmrRenderer;
+    use crate::VeloxRenderer;
     #[cfg(feature = "skia-native")]
     use crate::skia_gl;
     #[cfg(feature = "skia-native")]
     use crate::skia_surface;
-    use crate::HmrRenderer;
-    use crate::VeloxRenderer;
     #[cfg(feature = "skia-native")]
     use raw_window_handle::HasRawWindowHandle;
     use velox_dom::VNode;
@@ -833,18 +830,18 @@ where
             } => {
                 // Handle keyboard shortcuts
                 use winit::event::VirtualKeyCode;
-                if let Some(keycode) = input.virtual_keycode {
-                    if input.state == ElementState::Pressed {
-                        match keycode {
-                            VirtualKeyCode::R => {
-                                // Trigger reload (app will exit, dev server will restart it)
-                                *control_flow = ControlFlow::Exit;
-                            }
-                            VirtualKeyCode::Q => {
-                                *control_flow = ControlFlow::Exit;
-                            }
-                            _ => {}
+                if let Some(keycode) = input.virtual_keycode
+                    && input.state == ElementState::Pressed
+                {
+                    match keycode {
+                        VirtualKeyCode::R => {
+                            // Trigger reload (app will exit, dev server will restart it)
+                            *control_flow = ControlFlow::Exit;
                         }
+                        VirtualKeyCode::Q => {
+                            *control_flow = ControlFlow::Exit;
+                        }
+                        _ => {}
                     }
                 }
             }
@@ -1023,27 +1020,25 @@ where
         *control_flow = ControlFlow::Wait;
         match event {
             Event::UserEvent(()) => {
-                if let Ok(guard) = hmr_rx_for_loop.lock() {
-                    if let Ok(msg) = guard.try_recv() {
-                        match msg {
-                            HmrMessage::FullReload => {
-                                *control_flow = ControlFlow::Exit;
-                            }
-                            HmrMessage::HotReload { module_path: _ } => {
-                                if let Some(s) = &renderer.surface {
-                                    let (vw, vh) = logical_size(s.width, s.height, scale_factor);
-                                    let (vnode_raw, _) = make_view(vw, vh);
-                                    let new_vnode = vnode_raw;
-                                    if let Err(e) =
-                                        HmrRenderer::hot_update(&mut renderer, new_vnode)
-                                    {
-                                        log::error!("hot_update failed: {}", e);
-                                    }
-                                    window.request_redraw();
-                                }
-                            }
-                            HmrMessage::KeepWindow => {}
+                if let Ok(guard) = hmr_rx_for_loop.lock()
+                    && let Ok(msg) = guard.try_recv()
+                {
+                    match msg {
+                        HmrMessage::FullReload => {
+                            *control_flow = ControlFlow::Exit;
                         }
+                        HmrMessage::HotReload { module_path: _ } => {
+                            if let Some(s) = &renderer.surface {
+                                let (vw, vh) = logical_size(s.width, s.height, scale_factor);
+                                let (vnode_raw, _) = make_view(vw, vh);
+                                let new_vnode = vnode_raw;
+                                if let Err(e) = HmrRenderer::hot_update(&mut renderer, new_vnode) {
+                                    log::error!("hot_update failed: {}", e);
+                                }
+                                window.request_redraw();
+                            }
+                        }
+                        HmrMessage::KeepWindow => {}
                     }
                 }
             }
@@ -1170,18 +1165,18 @@ where
             } => {
                 // Handle keyboard shortcuts
                 use winit::event::VirtualKeyCode;
-                if let Some(keycode) = input.virtual_keycode {
-                    if input.state == ElementState::Pressed {
-                        match keycode {
-                            VirtualKeyCode::R => {
-                                // Trigger reload (app will exit, dev server will restart it)
-                                *control_flow = ControlFlow::Exit;
-                            }
-                            VirtualKeyCode::Q => {
-                                *control_flow = ControlFlow::Exit;
-                            }
-                            _ => {}
+                if let Some(keycode) = input.virtual_keycode
+                    && input.state == ElementState::Pressed
+                {
+                    match keycode {
+                        VirtualKeyCode::R => {
+                            // Trigger reload (app will exit, dev server will restart it)
+                            *control_flow = ControlFlow::Exit;
                         }
+                        VirtualKeyCode::Q => {
+                            *control_flow = ControlFlow::Exit;
+                        }
+                        _ => {}
                     }
                 }
             }
@@ -2314,10 +2309,12 @@ where
                             screen_position: (label_pos.0 + ox, label_pos.1 + oy),
                             bounds,
                             layout,
-                            text: vec![Text::new(&label)
-                                .with_color(btn_text_color)
-                                .with_scale(btn_font_size)
-                                .with_font_id(FontId(btn_font_id))],
+                            text: vec![
+                                Text::new(&label)
+                                    .with_color(btn_text_color)
+                                    .with_scale(btn_font_size)
+                                    .with_font_id(FontId(btn_font_id)),
+                            ],
                             ..Default::default()
                         });
                     }
@@ -2396,10 +2393,12 @@ where
                             screen_position: (count_pos.0 + ox, count_pos.1 + oy),
                             bounds: count_bounds,
                             layout,
-                            text: vec![Text::new(&count_text)
-                                .with_color(text_color)
-                                .with_scale(count_font_size)
-                                .with_font_id(FontId(count_font_id))],
+                            text: vec![
+                                Text::new(&count_text)
+                                    .with_color(text_color)
+                                    .with_scale(count_font_size)
+                                    .with_font_id(FontId(count_font_id)),
+                            ],
                             ..Default::default()
                         });
                     }

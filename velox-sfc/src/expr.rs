@@ -878,6 +878,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::approx_constant)]
     fn parse_number_literal() {
         assert_eq!(parse_expr("42").unwrap(), Expr::NumberLit(42.0));
         assert_eq!(parse_expr("3.14").unwrap(), Expr::NumberLit(3.14));

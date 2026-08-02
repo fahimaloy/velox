@@ -2,9 +2,9 @@ name: Skia-native CI
 
 on:
   push:
-    branches: [ main, master ]
+    branches: [ main, master, alpha ]
   pull_request:
-    branches: [ main, master ]
+    branches: [ main, master, alpha ]
 
 jobs:
   skia-tests:

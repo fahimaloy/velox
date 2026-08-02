@@ -25,7 +25,7 @@ It provides:
 
 Before starting, ensure you have:
 
-- **Rust 1.70+** — Install from [rustup.rs](https://rustup.rs)
+- **Rust 1.85+** — Install from [rustup.rs](https://rustup.rs)
   ```bash
   rustup --version
   cargo --version
@@ -50,12 +50,8 @@ The Velox repository is organized into modular crates:
 - **`velox-cli`** — Developer workflow commands
 
 Plus examples:
-- `examples/counter-app`
+- `examples/counter`
 - `examples/todo`
-- `examples/gallery`
-- `examples/myapp`
-- `examples/vx_demo`
-- `examples/interactive_skia`
 
 ---
 
@@ -265,14 +261,14 @@ velox dev
 ### Run Examples
 
 ```bash
-# From anywhere, test the counter app example:
+# From anywhere, test the counter example:
 velox init temp-counter
 cd temp-counter
 
 # Or build an example from the Velox repository:
 cd /path/to/velox
-velox build examples/counter-app/src/App.vx
-cargo run --example counter-app
+velox build examples/counter/src/App.vx
+cargo run --example counter
 ```
 
 ---
@@ -352,7 +348,7 @@ velox build src/App.vx
 velox build src/App.vx -o my_generated
 
 # Build from examples
-velox build examples/counter-app/src/App.vx
+velox build examples/counter/src/App.vx
 ```
 
 **Output:**
@@ -584,16 +580,10 @@ cargo test -p velox-renderer
 cd /path/to/velox
 
 # Build and run the counter app
-cargo run --example counter-app
+cargo run --example counter
 
 # Build and run the todo app
 cargo run --example todo
-
-# Run the gallery
-cargo run --example gallery
-
-# Run the demo
-cargo run --example vx_demo
 ```
 
 ---
@@ -672,7 +662,7 @@ velox build src/App.vx
 cd ..
 
 # 4. Build and test examples
-cd examples/counter-app
+cd examples/counter
 velox lint src/
 cargo run
 

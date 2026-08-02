@@ -25,24 +25,72 @@ use velox_dom::{Props, VNode};
 
 // --- CSS Parser types (module-level for rust-analyzer compatibility) ---
 
+/// A single part of a CSS selector (e.g., `h1`, `.class`, `h1.class`).
 #[derive(Debug, Clone, PartialEq)]
-pub enum SimpleSelectorKind {
-    Tag,
-    Class,
-    TagClass,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct SimpleSelector {
-    pub kind: SimpleSelectorKind,
+pub struct SelectorPart {
     pub tag: String,
     pub class: String,
     pub hover: bool,
 }
 
+impl SelectorPart {
+    fn matches_element(&self, tag: &str, class_attr: Option<&str>, hovered: bool) -> bool {
+        if self.hover && !hovered {
+            return false;
+        }
+        let tag_ok = self.tag.is_empty() || self.tag == tag;
+        let class_ok = if self.class.is_empty() {
+            true
+        } else if let Some(classes) = class_attr {
+            classes.split_whitespace().any(|x| x == self.class)
+        } else {
+            false
+        };
+        tag_ok && class_ok
+    }
+
+    #[allow(dead_code)]
+    fn is_simple_tag(&self) -> bool {
+        !self.tag.is_empty() && self.class.is_empty()
+    }
+
+    #[allow(dead_code)]
+    fn is_class_only(&self) -> bool {
+        self.tag.is_empty() && !self.class.is_empty()
+    }
+}
+
+/// A compound CSS selector — a chain of `SelectorPart`s connected by
+/// descendant combinators (spaces). The rightmost part matches the
+/// target element; preceding parts must match ancestors.
+///
+/// Example: `.header h1` → `[SelectorPart(class="header"), SelectorPart(tag="h1")]`
+#[derive(Debug, Clone, PartialEq)]
+pub struct CompoundSelector {
+    pub parts: Vec<SelectorPart>,
+}
+
+impl CompoundSelector {
+    fn new(parts: Vec<SelectorPart>) -> Self {
+        Self { parts }
+    }
+
+    /// True when the selector is a simple tag-only selector (e.g., `button`).
+    #[allow(dead_code)]
+    fn is_simple_tag(&self) -> bool {
+        self.parts.len() == 1 && self.parts[0].is_simple_tag()
+    }
+
+    /// True when the selector is a simple class-only selector (e.g., `.app`).
+    #[allow(dead_code)]
+    fn is_class_only(&self) -> bool {
+        self.parts.len() == 1 && self.parts[0].is_class_only()
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Rule {
-    pub selector: SimpleSelector,
+    pub selector: CompoundSelector,
     pub decls: HashMap<String, String>,
 }
 
@@ -124,46 +172,72 @@ impl<'i> cssparser::AtRuleParser<'i> for DeclarationParser {
     type Error = ();
 }
 
-fn parse_selector_list(selector: &str) -> Vec<SimpleSelector> {
+/// Parse a single selector part (tag, .class, or tag.class) with optional :hover.
+fn parse_selector_part(raw: &str) -> Option<SelectorPart> {
+    let (name_raw, hover) = if let Some((base, pseudo)) = raw.split_once(':') {
+        (base.trim(), pseudo.trim() == "hover")
+    } else {
+        (raw, false)
+    };
+    if name_raw.is_empty() {
+        return None;
+    }
+    if let Some(rest) = name_raw.strip_prefix('.') {
+        let class = rest.trim();
+        if class.is_empty() {
+            return None;
+        }
+        Some(SelectorPart {
+            tag: String::new(),
+            class: class.to_string(),
+            hover,
+        })
+    } else if let Some((tag, class)) = name_raw.split_once('.') {
+        let tag = tag.trim();
+        let class = class.trim();
+        if tag.is_empty() || class.is_empty() {
+            return None;
+        }
+        Some(SelectorPart {
+            tag: tag.to_string(),
+            class: class.to_string(),
+            hover,
+        })
+    } else {
+        Some(SelectorPart {
+            tag: name_raw.to_string(),
+            class: String::new(),
+            hover,
+        })
+    }
+}
+
+fn parse_selector_list(selector: &str) -> Vec<CompoundSelector> {
     let mut out = Vec::new();
     for part in selector.split(',') {
         let raw = part.trim();
         if raw.is_empty() {
             continue;
         }
-        let (name_raw, hover) = if let Some((base, pseudo)) = raw.split_once(':') {
-            (base.trim(), pseudo.trim() == "hover")
-        } else {
-            (raw, false)
-        };
-        if let Some(rest) = name_raw.strip_prefix('.') {
-            let name = rest.trim();
-            if !name.is_empty() {
-                out.push(SimpleSelector {
-                    kind: SimpleSelectorKind::Class,
-                    tag: String::new(),
-                    class: name.to_string(),
-                    hover,
-                });
+        // Split by whitespace to get compound selector parts (descendant combinators).
+        // Each whitespace-separated token is one part of the chain.
+        let mut parts = Vec::new();
+        let mut valid = true;
+        for token in raw.split_whitespace() {
+            if token == ">" {
+                // Child combinator — for now treat as descendant (full > support later).
+                continue;
             }
-        } else if let Some((tag, class)) = name_raw.split_once('.') {
-            let tag = tag.trim();
-            let class = class.trim();
-            if !tag.is_empty() && !class.is_empty() {
-                out.push(SimpleSelector {
-                    kind: SimpleSelectorKind::TagClass,
-                    tag: tag.to_string(),
-                    class: class.to_string(),
-                    hover,
-                });
+            match parse_selector_part(token) {
+                Some(sp) => parts.push(sp),
+                None => {
+                    valid = false;
+                    break;
+                }
             }
-        } else if !name_raw.is_empty() {
-            out.push(SimpleSelector {
-                kind: SimpleSelectorKind::Tag,
-                tag: name_raw.to_string(),
-                class: String::new(),
-                hover,
-            });
+        }
+        if valid && !parts.is_empty() {
+            out.push(CompoundSelector::new(parts));
         }
     }
     out
@@ -194,35 +268,55 @@ impl Stylesheet {
     }
 }
 
+/// Match a compound selector against a VNode element, walking ancestors as needed.
+///
+/// For a single-part selector (e.g., `.app`, `button`), only the target element is checked.
+/// For a multi-part selector (e.g., `.header h1`), the rightmost part matches the target
+/// and preceding parts must match ancestor VNodes (walking up the provided `ancestors` slice).
 fn matches_selector(
-    sel: &SimpleSelector,
+    sel: &CompoundSelector,
     tag: &str,
     class_attr: Option<&str>,
     hovered: bool,
+    ancestors: &[&VNode],
 ) -> bool {
-    if sel.hover && !hovered {
+    if sel.parts.is_empty() {
         return false;
     }
-    match sel.kind {
-        SimpleSelectorKind::Tag => sel.tag == tag,
-        SimpleSelectorKind::Class => {
-            if let Some(classes) = class_attr {
-                classes.split_whitespace().any(|x| x == sel.class)
-            } else {
-                false
+    let last = &sel.parts[sel.parts.len() - 1];
+    if !last.matches_element(tag, class_attr, hovered) {
+        return false;
+    }
+    // Single-part selector: no ancestor check needed.
+    if sel.parts.len() == 1 {
+        return true;
+    }
+    // Multi-part (compound/descendant) selector:
+    // Walk ancestors right-to-left matching earlier parts of the chain.
+    let mut ancestor_idx = ancestors.len(); // start from nearest ancestor
+    for part_idx in (0..sel.parts.len() - 1).rev() {
+        let part = &sel.parts[part_idx];
+        let mut found = false;
+        while ancestor_idx > 0 {
+            ancestor_idx -= 1;
+            if let VNode::Element {
+                tag: a_tag,
+                props: a_props,
+                ..
+            } = ancestors[ancestor_idx]
+            {
+                let a_class = a_props.attrs.get("class").map(|s| s.as_str());
+                if part.matches_element(a_tag, a_class, false) {
+                    found = true;
+                    break;
+                }
             }
         }
-        SimpleSelectorKind::TagClass => {
-            if sel.tag != tag {
-                return false;
-            }
-            if let Some(classes) = class_attr {
-                classes.split_whitespace().any(|x| x == sel.class)
-            } else {
-                false
-            }
+        if !found {
+            return false;
         }
     }
+    true
 }
 
 fn merge_styles(existing: Option<&str>, new_map: &HashMap<String, String>) -> String {
@@ -252,7 +346,7 @@ fn merge_styles(existing: Option<&str>, new_map: &HashMap<String, String>) -> St
         }
         out.push_str(k);
         out.push_str(": ");
-        out.push_str(map.get(k).unwrap());
+        out.push_str(&map[k]);
         out.push(';');
     }
     out
@@ -275,10 +369,10 @@ where
             if d.is_empty() {
                 continue;
             }
-            if let Some((k, _)) = d.split_once(':') {
-                if k.trim() == key {
-                    return true;
-                }
+            if let Some((k, _)) = d.split_once(':')
+                && k.trim() == key
+            {
+                return true;
             }
         }
         false
@@ -313,6 +407,7 @@ where
         sheet: &Stylesheet,
         is_hovered: &FN,
         inherited: &HashMap<String, String>,
+        ancestors: &[&VNode],
     ) -> VNode
     where
         FN: Fn(&str, &Props) -> bool,
@@ -327,17 +422,12 @@ where
                 let class_attr = props.attrs.get("class").map(|s| s.as_str());
                 let hovered = is_hovered(tag, props);
                 let mut acc: HashMap<String, String> = inherited.clone();
-                for pass in ["tag", "class"] {
-                    for rule in &sheet.rules {
-                        let is_tag = matches!(rule.selector.kind, SimpleSelectorKind::Tag);
-                        let pass_tag = (pass == "tag" && is_tag) || (pass == "class" && !is_tag);
-                        if !pass_tag {
-                            continue;
-                        }
-                        if matches_selector(&rule.selector, tag, class_attr, hovered) {
-                            for (k, v) in &rule.decls {
-                                acc.insert(k.clone(), v.clone());
-                            }
+                // Match all selectors against this element, passing the ancestor chain
+                // so compound selectors (e.g., `.header h1`) can walk up the tree.
+                for rule in &sheet.rules {
+                    if matches_selector(&rule.selector, tag, class_attr, hovered, ancestors) {
+                        for (k, v) in &rule.decls {
+                            acc.insert(k.clone(), v.clone());
                         }
                     }
                 }
@@ -361,9 +451,13 @@ where
                     new_props = new_props.set("style", final_style.clone());
                 }
                 let inherit_next = filter_inheritable(Some(&final_style));
+                // Build child ancestors: this element + current ancestors
+                let mut child_ancestors: Vec<&VNode> = Vec::with_capacity(ancestors.len() + 1);
+                child_ancestors.push(node);
+                child_ancestors.extend_from_slice(ancestors);
                 let new_children = children
                     .iter()
-                    .map(|c| apply_rec(c, sheet, is_hovered, &inherit_next))
+                    .map(|c| apply_rec(c, sheet, is_hovered, &inherit_next, &child_ancestors))
                     .collect();
                 VNode::Element {
                     tag: tag.clone(),
@@ -375,30 +469,32 @@ where
     }
 
     let inherited_root: HashMap<String, String> = HashMap::new();
-    apply_rec(node, sheet, is_hovered, &inherited_root)
+    apply_rec(node, sheet, is_hovered, &inherited_root, &[])
 }
 
 /// Compute styles for a VNode given inline styles and optional stylesheet
-/// Returns a ComputedStyle with all properties resolved
+/// Returns a ComputedStyle with all properties resolved.
+/// `ancestors` provides the VNode ancestor chain for compound selector matching.
 pub fn compute_styles_for_node(
     node: &VNode,
     inline_style: Option<&str>,
     sheet: Option<&Stylesheet>,
     is_hovered: bool,
+    ancestors: &[&VNode],
 ) -> ComputedStyle {
     let mut computed = ComputedStyle::new();
 
     // Apply stylesheet styles first (lower precedence)
-    if let Some(sheet) = sheet {
-        if let VNode::Element { tag, props, .. } = node {
-            let class_attr = props.attrs.get("class").map(|s| s.as_str());
+    if let Some(sheet) = sheet
+        && let VNode::Element { tag, props, .. } = node
+    {
+        let class_attr = props.attrs.get("class").map(|s| s.as_str());
 
-            // Apply matching rules from stylesheet
-            for rule in &sheet.rules {
-                if matches_selector(&rule.selector, tag, class_attr, is_hovered) {
-                    for (prop, value) in &rule.decls {
-                        computed.set_property(prop, value);
-                    }
+        // Apply matching rules from stylesheet
+        for rule in &sheet.rules {
+            if matches_selector(&rule.selector, tag, class_attr, is_hovered, ancestors) {
+                for (prop, value) in &rule.decls {
+                    computed.set_property(prop, value);
                 }
             }
         }

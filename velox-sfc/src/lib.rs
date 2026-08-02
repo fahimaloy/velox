@@ -14,9 +14,11 @@ pub use component_resolver::{ComponentImport, ComponentResolver, transform_compo
 pub use sfc::{Attr, ScriptBlock, Sfc, StyleBlock, TemplateBlock, parse_sfc, validate_sfc};
 
 pub use template_ast::{AttrKind, Node, TemplateAttr};
+pub use template_codegen::collect_vmodel_expressions;
 pub use template_codegen::compile_template_to_rs;
+pub use template_codegen::generate_vmodel_setters;
 pub use template_parse::parse_template_to_ast;
 
 pub use codegen::to_stub_rs;
-pub use codegen::to_stub_rs_with_base;
 pub use codegen::to_stub_rs_unwrapped;
+pub use codegen::to_stub_rs_with_base;

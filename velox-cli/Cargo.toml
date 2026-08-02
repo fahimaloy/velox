@@ -2,12 +2,13 @@
 [package]
 name = "velox-cli"
 version = "0.1.0"
-edition = "2021"
+edition = "2024"
 description = "CLI tools for building Velox applications"
 authors = ["fahimaloy"]
 license = "MIT"
 repository = "https://github.com/fahimaloy/velox"
 homepage = "https://velox.dev"
+publish = false
 
 [[bin]]
 name = "velox"

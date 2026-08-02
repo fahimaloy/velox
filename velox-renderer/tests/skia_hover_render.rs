@@ -7,7 +7,7 @@
 #[ignore]
 fn render_hover_styles_checksum() {
     use velox_dom::h;
-    use velox_style::{apply_styles_with_hover, Stylesheet};
+    use velox_style::{Stylesheet, apply_styles_with_hover};
 
     let vnode = h(
         "div",
@@ -45,6 +45,7 @@ fn render_hover_styles_checksum() {
     assert_eq!(checksum_hovered, EXPECTED_HOVER_CHECKSUM);
 }
 
+#[cfg(all(feature = "skia-native", unix))]
 fn fnv1a(bytes: &[u8]) -> u32 {
     let mut hash: u32 = 0x811c9dc5;
     for b in bytes {

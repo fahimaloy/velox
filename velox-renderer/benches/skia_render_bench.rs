@@ -1,4 +1,6 @@
-use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
+#[cfg(feature = "skia-native")]
+use criterion::BenchmarkId;
+use criterion::{Criterion, criterion_group, criterion_main};
 
 #[cfg(feature = "skia-native")]
 use velox_dom::h;

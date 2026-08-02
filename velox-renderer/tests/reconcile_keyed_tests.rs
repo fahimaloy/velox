@@ -1,4 +1,4 @@
-use velox_dom::{h, text, VNode};
+use velox_dom::{VNode, h, text};
 
 // Simple test to ensure `reconcile_keyed_children` reorders and prefers
 // reusing old nodes when the `key` prop matches. We encode a `uid`

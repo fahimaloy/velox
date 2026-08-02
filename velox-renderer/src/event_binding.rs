@@ -198,11 +198,11 @@ impl EventBinder {
         if let Some(bindings) = self.bindings.get(&event.target_id) {
             let mut handled = false;
             for binding in bindings {
-                if binding.event_type == event.event_type {
-                    if let Some(handler) = &binding.handler {
-                        handler.borrow()(event);
-                        handled = true;
-                    }
+                if binding.event_type == event.event_type
+                    && let Some(handler) = &binding.handler
+                {
+                    handler.borrow()(event);
+                    handled = true;
                 }
             }
             handled

@@ -93,10 +93,8 @@ fn compile_component_tree(
 
     // Collect this component's <style> for merging into the root app STYLE so
     // child-component CSS actually applies (the root only parses app::STYLE).
-    if !is_root {
-        if let Some(style) = &sfc.style {
-            child_styles.push(style.content.clone());
-        }
+    if !is_root && let Some(style) = &sfc.style {
+        child_styles.push(style.content.clone());
     }
 
     // First, recursively compile all imported components
@@ -285,7 +283,14 @@ pub fn build_vx(input: &Path, out_dir: Option<&Path>) -> Result<CompileResult> {
     let mut visited = HashSet::new();
     let mut all_vx_files = Vec::new();
     let mut child_styles: Vec<String> = Vec::new();
-    let modules = compile_component_tree(input, &out_dir, &mut visited, &mut all_vx_files, true, &mut child_styles)?;
+    let modules = compile_component_tree(
+        input,
+        &out_dir,
+        &mut visited,
+        &mut all_vx_files,
+        true,
+        &mut child_styles,
+    )?;
 
     Ok(CompileResult {
         modules,

@@ -91,39 +91,38 @@ fn validate_template(nodes: &[Node]) -> Vec<String> {
                 && let Some(dir) = attrs.iter().find(|a| {
                     matches!(a.kind, AttrKind::Directive)
                         && (a.name == "else" || a.name == "else-if" || a.name == "elseif")
-                }) {
-                    // Check that the nearest preceding element sibling has
-                    // v-if or v-else-if (i.e., is part of a conditional chain).
-                    let has_valid_preceding = if i > 0 {
-                        // Walk backwards to find the nearest element sibling
-                        // (text nodes between v-if and v-else are valid in Vue)
-                        let mut found = false;
-                        for j in (0..i).rev() {
-                            if let Node::Element {
-                                attrs: prev_attrs, ..
-                            } = &nodes[j]
-                            {
-                                found = prev_attrs.iter().any(|a| {
-                                    matches!(a.kind, AttrKind::Directive)
-                                        && (a.name == "if"
-                                            || a.name == "else-if"
-                                            || a.name == "elseif")
-                                });
-                                break;
-                            }
+                })
+            {
+                // Check that the nearest preceding element sibling has
+                // v-if or v-else-if (i.e., is part of a conditional chain).
+                let has_valid_preceding = if i > 0 {
+                    // Walk backwards to find the nearest element sibling
+                    // (text nodes between v-if and v-else are valid in Vue)
+                    let mut found = false;
+                    for j in (0..i).rev() {
+                        if let Node::Element {
+                            attrs: prev_attrs, ..
+                        } = &nodes[j]
+                        {
+                            found = prev_attrs.iter().any(|a| {
+                                matches!(a.kind, AttrKind::Directive)
+                                    && (a.name == "if" || a.name == "else-if" || a.name == "elseif")
+                            });
+                            break;
                         }
-                        found
-                    } else {
-                        false
-                    };
+                    }
+                    found
+                } else {
+                    false
+                };
 
-                    if !has_valid_preceding {
-                        errors.push(format!(
+                if !has_valid_preceding {
+                    errors.push(format!(
                             "stray v-{} on <{}> without a preceding v-if — v-else/v-else-if must follow an element with v-if",
                             dir.name, tag
                         ));
-                    }
                 }
+            }
             // Recurse into children
             if let Node::Element { children, .. } = &nodes[i] {
                 check_stray_else(children, errors);
@@ -234,6 +233,13 @@ fn collect_handlers(nodes: &[Node]) -> Vec<String> {
                 {
                     set.insert(v.clone());
                 }
+                // Collect v-model handlers: v-model="field" → __vmodel_set_field
+                if matches!(a.kind, AttrKind::Directive)
+                    && a.name == "model"
+                    && let Some(ref expr) = a.value
+                {
+                    set.insert(format!("__vmodel_set_{}", expr));
+                }
             }
             for c in children {
                 walk(c, set);
@@ -250,25 +256,35 @@ fn collect_handlers(nodes: &[Node]) -> Vec<String> {
 
 fn generate_make_on_event(handlers: &[String]) -> String {
     // Generate a simple dispatch helper that calls methods on `app::script_rs::State`.
-    // This assumes methods are zero-arg; handling payloads or arity will be added later.
+    // v-model handlers (`__vmodel_set_*`) receive the event payload; other handlers are zero-arg.
     let mut arms = String::new();
+    let has_vmodel = handlers.iter().any(|h| h.starts_with("__vmodel_set_"));
     for h in handlers {
-        arms.push_str(&format!(
-            "        \"{name}\" => {{ state.{name}(); }},\n",
-            name = h
-        ));
+        if h.starts_with("__vmodel_set_") {
+            arms.push_str(&format!(
+                "        \"{name}\" => {{ if let Some(p) = payload {{ state.{name}(p); }} }},\n",
+                name = h
+            ));
+        } else {
+            arms.push_str(&format!(
+                "        \"{name}\" => {{ state.{name}(); }},\n",
+                name = h
+            ));
+        }
     }
 
+    let param = if has_vmodel { "payload" } else { "_payload" };
     format!(
         r#"#[allow(clippy::arc_with_non_send_sync)]
 pub fn make_on_event(state: std::sync::Arc<script_rs::State>) -> impl FnMut(&str, Option<&str>) + 'static {{
-    move |name: &str, _payload: Option<&str>| {{
+    move |name: &str, {param}: Option<&str>| {{
         match name {{
 {arms}            _ => {{}}
         }}
     }}
 }}"#,
-        arms = arms
+        arms = arms,
+        param = param
     )
 }
 
@@ -451,7 +467,9 @@ pub(crate) fn rewrite_if_expr(expr: &str) -> String {
 }
 
 /// Extract v-model directive from attrs and convert to :value + @input.
-/// Returns (remaining_attrs, optiona_vmodel_handler).
+/// Returns (remaining_attrs, optional_vmodel_handler_name).
+/// The handler name follows the convention `__vmodel_set_{field}` so that
+/// `make_on_event` can dispatch to it and the codegen can emit the setter.
 fn extract_vmodel(attrs: &[TemplateAttr], _tag: &str) -> (Vec<TemplateAttr>, Option<String>) {
     let vmodel_pos = attrs
         .iter()
@@ -472,16 +490,11 @@ fn extract_vmodel(attrs: &[TemplateAttr], _tag: &str) -> (Vec<TemplateAttr>, Opt
             kind: AttrKind::Bind,
         });
 
-        // Add @input handler for two-way binding
-        // Generates: @input="|payload| { model_expr = payload.unwrap_or_default().to_string() }"
-        // For now, we use a simple string assignment
-        let _handler_name = format!("__vmodel_set_{}", model_expr.replace('.', "_"));
+        // Generate @input handler that calls state.__vmodel_set_{field}(payload)
+        let handler_name = format!("__vmodel_set_{}", model_expr.replace('.', "_"));
         remaining.push(TemplateAttr {
             name: "input".to_string(),
-            value: Some(format!(
-                "|payload| {{ /* v-model: {} = payload */ }}",
-                model_expr
-            )),
+            value: Some(handler_name.clone()),
             kind: AttrKind::On,
         });
 
@@ -525,11 +538,7 @@ fn emit_node_with(n: &Node) -> String {
                     self_closing: false,
                 };
                 let inner = emit_node_with(&tmp);
-                return format!(
-                    r#"if {} {{ {} }} else {{ text("") }}"#,
-                    expr.trim(),
-                    inner
-                );
+                return format!(r#"if {} {{ {} }} else {{ text("") }}"#, expr.trim(), inner);
             }
 
             // Check if this is a component (has data-velox-component marker)
@@ -606,9 +615,8 @@ fn emit_node_with(n: &Node) -> String {
                         self_closing: false,
                     };
 
-                    // Generate loop code that works with both numeric counts AND collections
-                    // Strategy: try to get the collection via resolve, use .len() for iteration,
-                    // and access items via indexing
+                    // Generate loop code that works with both numeric counts AND collections.
+                    // Strategy: try numeric parse first, then comma-separated string split.
                     let mut loop_code = String::new();
                     loop_code
                         .push_str("{ let mut __children: Vec<velox_dom::VNode> = Vec::new();\n");
@@ -616,21 +624,17 @@ fn emit_node_with(n: &Node) -> String {
                         "let __for_expr = resolve(\"{}\");\n",
                         for_info.expr
                     ));
-                    // Try to parse as a number first (for numeric counts like "5")
+                    // Try to parse as a number first (for numeric counts like "5"),
+                    // then split by comma for collection strings (for "a,b,c" → 3 items),
+                    // with a minimum of 1 to avoid empty loops on empty strings.
                     loop_code.push_str(
                         "let __for_count = if let Ok(n) = __for_expr.parse::<usize>() {\n",
                     );
                     loop_code.push_str("    n\n");
+                    loop_code.push_str("} else if __for_expr.is_empty() {\n");
+                    loop_code.push_str("    0\n");
                     loop_code.push_str("} else {\n");
-                    // For collections, we need to get length. In the render() path without state,
-                    // we rely on the resolve function to provide collection info.
-                    // For now, fall back to numeric parse, but structure code to support collections.
-                    loop_code
-                        .push_str("    // Collection path: use length from resolved expression\n");
-                    loop_code.push_str(
-                        "    // For collections, the expression name is used as-is for indexing\n",
-                    );
-                    loop_code.push_str("    __for_expr.parse::<usize>().unwrap_or(0)\n");
+                    loop_code.push_str("    __for_expr.split(',').count()\n");
                     loop_code.push_str("};\n");
                     loop_code.push_str(&format!(
                         "for {idx_var} in 0..__for_count {{\n",
@@ -723,8 +727,40 @@ fn emit_props_with(attrs: &[TemplateAttr]) -> String {
             }
             AttrKind::Bind => {
                 let expr = a.value.clone().unwrap_or_else(|| a.name.clone());
-                let key = string_lit(expr.trim());
-                parts.push(format!(r#".set("{}", &resolve({}))"#, a.name, key));
+                // Special handling for :class with object syntax: { className: condition, ... }
+                if a.name == "class" && expr.trim().starts_with('{') && expr.trim().ends_with('}') {
+                    let inner = &expr.trim()[1..expr.trim().len() - 1];
+                    let mut class_parts: Vec<String> = Vec::new();
+                    for pair in inner.split(',') {
+                        let pair = pair.trim();
+                        if pair.is_empty() {
+                            continue;
+                        }
+                        if let Some((cls, cond)) = pair.split_once(':') {
+                            let cls = cls.trim().to_string();
+                            let cond = cond.trim().to_string();
+                            if !cls.is_empty() && !cond.is_empty() {
+                                // Generate: if condition is true, add class
+                                let rewritten = rewrite_if_expr(&cond);
+                                class_parts.push(format!(
+                                    "if {} {{ __classes.push({}); }}",
+                                    rewritten,
+                                    string_lit(&cls)
+                                ));
+                            }
+                        }
+                    }
+                    if !class_parts.is_empty() {
+                        let code = format!(
+                            "{{ let mut __classes: Vec<&str> = Vec::new(); {} __classes.join(\" \") }}",
+                            class_parts.join(" ")
+                        );
+                        parts.push(format!(r#".set("class", {})"#, code));
+                    }
+                } else {
+                    let key = string_lit(expr.trim());
+                    parts.push(format!(r#".set("{}", &resolve({}))"#, a.name, key));
+                }
             }
             AttrKind::Directive => {
                 // do not emit directives as props
@@ -828,10 +864,11 @@ fn emit_children_with(children: &[Node]) -> String {
                         }
                         // Skip whitespace-only text nodes when looking for v-else/v-else-if siblings
                         if let Node::Text(t) = &children[j]
-                            && is_all_ws(t) {
-                                j += 1;
-                                continue;
-                            }
+                            && is_all_ws(t)
+                        {
+                            j += 1;
+                            continue;
+                        }
                         break;
                     }
 
@@ -897,8 +934,10 @@ fn emit_children_with(children: &[Node]) -> String {
                             "let __for_count = if let Ok(n) = __for_expr.parse::<usize>() {\n",
                         );
                         out.push_str("    n\n");
+                        out.push_str("} else if __for_expr.is_empty() {\n");
+                        out.push_str("    0\n");
                         out.push_str("} else {\n");
-                        out.push_str("    __for_expr.parse::<usize>().unwrap_or(0)\n");
+                        out.push_str("    __for_expr.split(',').count()\n");
                         out.push_str("};\n");
                         out.push_str(&format!(
                             "for {idx_var} in 0..__for_count {{\n",
@@ -1038,10 +1077,11 @@ fn emit_children_with_state(children: &[Node]) -> String {
                         }
                         // Skip whitespace-only text nodes when looking for v-else/v-else-if siblings
                         if let Node::Text(t) = &children[j]
-                            && is_all_ws(t) {
-                                j += 1;
-                                continue;
-                            }
+                            && is_all_ws(t)
+                        {
+                            j += 1;
+                            continue;
+                        }
                         break;
                     }
                     let mut cond = String::new();
@@ -1505,5 +1545,60 @@ fn string_lit(s: &str) -> String {
         }
     }
     out.push('"');
+    out
+}
+
+/// Collect all v-model expressions from a template AST.
+/// Returns a list of (model_expr, handler_name) pairs.
+/// For `v-model="counter"`, returns `("counter", "__vmodel_set_counter")`.
+pub fn collect_vmodel_expressions(nodes: &[Node]) -> Vec<(String, String)> {
+    let mut results = Vec::new();
+    fn walk(nodes: &[Node], out: &mut Vec<(String, String)>) {
+        for node in nodes {
+            if let Node::Element {
+                attrs, children, ..
+            } = node
+            {
+                for attr in attrs {
+                    if matches!(attr.kind, AttrKind::Directive)
+                        && attr.name == "model"
+                        && let Some(expr) = &attr.value
+                    {
+                        let handler = format!("__vmodel_set_{}", expr.replace('.', "_"));
+                        out.push((expr.clone(), handler));
+                    }
+                }
+                walk(children, out);
+            }
+        }
+    }
+    walk(nodes, &mut results);
+    results
+}
+
+/// Generate setter methods on the State struct for v-model fields.
+/// For `v-model="counter"` with State containing `counter: Cell<i32>`,
+/// generates:
+/// ```ignore
+/// pub fn __vmodel_set_counter(&self, payload: &str) {
+///     velox_core::vmodel::VModel::vmodel_set(&self.counter, payload);
+/// }
+/// ```
+pub fn generate_vmodel_setters(vmodels: &[(String, String)]) -> String {
+    if vmodels.is_empty() {
+        return String::new();
+    }
+    let mut out = String::new();
+    for (expr, handler) in vmodels {
+        let field_path = format!("self.{}", expr);
+        out.push_str(&format!(
+            r#"
+    pub fn {handler}(&self, payload: &str) {{
+        velox_core::vmodel::VModel::vmodel_set(&{field_path}, payload);
+    }}"#,
+            handler = handler,
+            field_path = field_path,
+        ));
+    }
     out
 }

@@ -114,7 +114,10 @@ pub fn parse_template_to_ast(input: &str) -> Result<Vec<Node>, String> {
             }
             if i + 1 >= bytes.len() {
                 // Unclosed interpolation — emit as text instead of silent truncation
-                eprintln!("velox: warning: unclosed '{{{{' at position {}, treating as text", start - 2);
+                eprintln!(
+                    "velox: warning: unclosed '{{{{' at position {}, treating as text",
+                    start - 2
+                );
                 let text_content = input[start - 2..].to_string();
                 push_child(&mut stack, &mut roots, Node::Text(text_content));
                 break;

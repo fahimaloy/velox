@@ -69,7 +69,7 @@ pub struct State {
 
         // Verify a rule was parsed
         let rule = &stylesheet.rules[0];
-        assert_eq!(rule.selector.class, "button");
+        assert_eq!(rule.selector.parts[0].class, "button");
 
         // Check that properties were captured
         assert!(rule.decls.contains_key("display"));
