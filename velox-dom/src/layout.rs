@@ -584,7 +584,18 @@ fn length_to_px(len: Length, parent_size: f32, root_size: f32, viewport: (f32, f
     }
 }
 
-/// Box sides (margin/padding) with full CSS unit support
+/// Box sides (margin/padding) with full CSS unit support.
+///
+/// Resolves CSS shorthand values (e.g. `padding: 10px 20px`) by splitting on
+/// whitespace and expanding into individual sides following the CSS shorthand
+/// rules:
+///   1 value  → all sides
+///   2 values → top/bottom, left/right
+///   3 values → top, left/right, bottom
+///   4 values → top, right, bottom, left
+///
+/// Individual longhand properties (e.g. `padding-top`) always take precedence
+/// over the shorthand.
 fn style_box_sides_full(
     style: Option<&str>,
     base: &str,
@@ -594,22 +605,59 @@ fn style_box_sides_full(
     viewport_w: f32,
     viewport_h: f32,
 ) -> (i32, i32, i32, i32) {
-    let get = |k: &str| -> Option<i32> {
-        style_lookup_len_full(
-            style,
-            k,
-            parent_size,
-            parent_font_size,
-            root_font_size,
-            viewport_w,
-            viewport_h,
-        )
+    let resolve = |val: &str| -> Option<i32> {
+        parse_length_value(val, parent_size, parent_font_size, root_font_size, (viewport_w, viewport_h))
+            .map(|f| f.round() as i32)
     };
-    let all = get(base).unwrap_or(0);
-    let l = get(&format!("{}-left", base)).unwrap_or(all);
-    let r = get(&format!("{}-right", base)).unwrap_or(all);
-    let t = get(&format!("{}-top", base)).unwrap_or(all);
-    let b = get(&format!("{}-bottom", base)).unwrap_or(all);
+
+    // Try expanding the shorthand value into individual sides.
+    // CSS shorthand rules: 1 val = all, 2 = v h, 3 = t h b, 4 = t r b l
+    let shorthand_sides: Option<(i32, i32, i32, i32)> = style.and_then(|s| {
+        // Find the shorthand declaration (e.g. "padding: 10px 20px")
+        let raw = s.split(';').find_map(|decl| {
+            let d = decl.trim();
+            if d.is_empty() { return None; }
+            let (k, v) = d.split_once(':')?;
+            if k.trim() == base { Some(v.trim()) } else { None }
+        })?;
+        let parts: Vec<&str> = raw.split_whitespace().collect();
+        match parts.len() {
+            0 => None,
+            1 => resolve(parts[0]).map(|v| (v, v, v, v)),
+            2 => {
+                let v = resolve(parts[0])?;
+                let h = resolve(parts[1])?;
+                Some((h, h, v, v)) // left, right, top, bottom
+            }
+            3 => {
+                let t = resolve(parts[0])?;
+                let h = resolve(parts[1])?;
+                let b = resolve(parts[2])?;
+                Some((h, h, t, b))
+            }
+            4 => {
+                let t = resolve(parts[0])?;
+                let r = resolve(parts[1])?;
+                let b = resolve(parts[2])?;
+                let l = resolve(parts[3])?;
+                Some((l, r, t, b))
+            }
+            _ => None,
+        }
+    });
+
+    // Destructure shorthand: (left, right, top, bottom)
+    let (sh_l, sh_r, sh_t, sh_b) = shorthand_sides.unwrap_or((0, 0, 0, 0));
+
+    // Individual longhand properties override the shorthand
+    let l = style_lookup_len_full(style, &format!("{}-left", base), parent_size, parent_font_size, root_font_size, viewport_w, viewport_h)
+        .unwrap_or(sh_l);
+    let r = style_lookup_len_full(style, &format!("{}-right", base), parent_size, parent_font_size, root_font_size, viewport_w, viewport_h)
+        .unwrap_or(sh_r);
+    let t = style_lookup_len_full(style, &format!("{}-top", base), parent_size, parent_font_size, root_font_size, viewport_w, viewport_h)
+        .unwrap_or(sh_t);
+    let b = style_lookup_len_full(style, &format!("{}-bottom", base), parent_size, parent_font_size, root_font_size, viewport_w, viewport_h)
+        .unwrap_or(sh_b);
     (l, r, t, b)
 }
 
@@ -832,6 +880,7 @@ pub fn compute_layout(node: &VNode, viewport_w: i32, viewport_h: i32) -> LayoutN
 
                 let mut laid_children: Vec<LayoutNode> = Vec::new();
                 let mut abs_children: Vec<LayoutNode> = Vec::new();
+                let mut max_y_end = content_y_start;
                 if display == "flex" {
                     // Full CSS Flexbox implementation
                     let flex_dir = style_lookup_str(style, "flex-direction")
@@ -1473,6 +1522,7 @@ pub fn compute_layout(node: &VNode, viewport_w: i32, viewport_h: i32) -> LayoutN
                                     vh_f,
                                 );
 
+                                max_y_end = max_y_end.max(ln.rect.y + ln.rect.h);
                                 laid_children.push(ln);
                             }
                         }
@@ -1492,7 +1542,6 @@ pub fn compute_layout(node: &VNode, viewport_w: i32, viewport_h: i32) -> LayoutN
                     let mut cur_y = content_y_scrolled;
                     let mut last_bottom_margin = 0;
                     let mut line_h = 0;
-                    let mut max_y_end = content_y_start;
                     for (idx, c) in children.iter().enumerate() {
                         let is_text = matches!(c, VNode::Text(_));
                         let child_style = match c {
@@ -1700,7 +1749,6 @@ pub fn compute_layout(node: &VNode, viewport_w: i32, viewport_h: i32) -> LayoutN
                     if line_h > 0 {
                         max_y_end = max_y_end.max(cur_y + line_h);
                     }
-                    let _cur_y_end = max_y_end;
                 }
 
                 // Height: declared or content height + paddings, clamped by min/max-height
@@ -1713,12 +1761,9 @@ pub fn compute_layout(node: &VNode, viewport_w: i32, viewport_h: i32) -> LayoutN
                     vw_f,
                     vh_f,
                 );
-                let content_h = laid_children
-                    .iter()
-                    .map(|c| c.rect.y + c.rect.h + scroll_y)
-                    .max()
-                    .map(|max_y| (max_y - content_y_start).max(0))
-                    .unwrap_or(0);
+                // Use max_y_end which correctly tracks the spatial extent of all children,
+                // including those positioned above content_y_start via negative margins/offsets.
+                let content_h = (max_y_end - content_y_start).max(0);
                 let mut rect_h = if is_root || is_viewport_filling || is_viewport_height {
                     (avail_h - mt - mb).max(1)
                 } else {

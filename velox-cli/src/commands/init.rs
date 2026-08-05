@@ -270,9 +270,9 @@ fn main() {
         let state = Arc::clone(&state);
         move |_w: u32, _h: u32| -> (VNode, Stylesheet) {
             let vnode = app::render_with_state(Arc::clone(&state), |name| match name {
-                "title" => state.get_title(),
-                "counter" => state.get_counter().to_string(),
-                "positive" => state.is_positive().to_string(),
+                "title" => state.title(),
+                "counter" => state.counter().to_string(),
+                "positive" => state.positive().to_string(),
                 _ => String::new(),
             });
             let sheet = Stylesheet::parse(app::STYLE);
@@ -283,7 +283,7 @@ fn main() {
     let on_event = app::make_on_event(Arc::clone(&state));
     let get_title = {
         let state = Arc::clone(&state);
-        move || state.get_title()
+        move || state.title()
     };
 
     let _ = velox_renderer::run_window_vnode_skia("Velox App", make_view, on_event, get_title);
@@ -328,9 +328,9 @@ impl State {
         }
     }
 
-    pub fn get_title(&self) -> String { String::from("Velox App") }
-    pub fn get_counter(&self) -> i32 { self.counter.get() }
-    pub fn is_positive(&self) -> bool { self.counter.get() > 0 }
+    pub fn title(&self) -> String { String::from("Velox App") }
+    pub fn counter(&self) -> i32 { self.counter.get() }
+    pub fn positive(&self) -> bool { self.counter.get() > 0 }
     pub fn increment(&self) { self.counter.set(self.counter.get() + 1); }
     pub fn decrement(&self) { self.counter.set(self.counter.get() - 1); }
     pub fn reset(&self) { self.counter.set(0); }

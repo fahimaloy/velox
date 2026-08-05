@@ -215,16 +215,57 @@ pub fn render_with_state<F>(_state: std::sync::Arc<script_rs::State>, mut resolv
         out.push_str(&generate_make_on_event(&handlers));
     }
 
-    // Generate render_with_props that accepts a HashMap of props from parent components
+    // Generate render_with_props that accepts a HashMap of props from parent components.
+    // When the component has interpolations AND a script_setup block with a State struct,
+    // create a State instance and use its methods as fallback resolvers. This ensures
+    // child components render correctly even when no props are explicitly passed.
+    // Props always take priority over state method calls.
+    //
+    // Convention: interpolation keys map directly to State methods.
+    //   {{ text }}     → state.text()
+    //   {{ completed }} → state.completed()
+    // If a method doesn't exist, the user must either add it or pass the value as a prop.
+    let interp_keys = collect_interpolation_keys(&nodes);
     out.push_str("\n\n");
-    out.push_str(
-        r#"pub fn render_with_props(props: std::collections::HashMap<&str, String>) -> velox_dom::VNode {
+    if interp_keys.is_empty() {
+        out.push_str(
+            r#"pub fn render_with_props(props: std::collections::HashMap<&str, String>) -> velox_dom::VNode {
     let resolve_props = |key: &str| -> String {
         props.get(key).cloned().unwrap_or_default()
     };
     render_with(resolve_props)
 }"#,
-    );
+        );
+    } else {
+        let mut match_arms = String::new();
+        for key in &interp_keys {
+            let method_name: String = key.chars().enumerate().map(|(i, c)| {
+                if i == 0 && c.is_ascii_digit() { '_'.to_string() }
+                else if c.is_ascii_alphanumeric() || c == '_' { c.to_string() }
+                else { "_".to_string() }
+            }).collect();
+            match_arms.push_str(&format!(
+                "            \"{}\" => state.{}().to_string(),\n",
+                key, method_name
+            ));
+        }
+        out.push_str(&format!(
+            r#"pub fn render_with_props(props: std::collections::HashMap<&str, String>) -> velox_dom::VNode {{
+    let state = script_rs::State::new();
+    let resolve_props = |key: &str| -> String {{
+        if let Some(v) = props.get(key) {{
+            v.clone()
+        }} else {{
+            match key {{
+{match_arms}                _ => String::new(),
+            }}
+        }}
+    }};
+    render_with(resolve_props)
+}}"#,
+            match_arms = match_arms
+        ));
+    }
 
     Ok(out)
 }
@@ -1298,6 +1339,32 @@ pub fn collect_vmodel_expressions(nodes: &[Node]) -> Vec<(String, String)> {
     }
     walk(nodes, &mut results);
     results
+}
+
+/// Collect all interpolation key names from the template AST.
+/// Returns unique keys like `["text", "completed", "counter"]` that are used
+/// in `{{ key }}` expressions. These correspond to method names on the
+/// component's State struct.
+pub fn collect_interpolation_keys(nodes: &[Node]) -> Vec<String> {
+    let mut keys = Vec::new();
+    fn walk(nodes: &[Node], out: &mut Vec<String>) {
+        for node in nodes {
+            match node {
+                Node::Interpolation(expr) => {
+                    let key = expr.trim().to_string();
+                    if !key.is_empty() && !out.contains(&key) {
+                        out.push(key);
+                    }
+                }
+                Node::Element { children, .. } => {
+                    walk(children, out);
+                }
+                _ => {}
+            }
+        }
+    }
+    walk(nodes, &mut keys);
+    keys
 }
 
 /// Generate setter methods on the State struct for v-model fields.

@@ -14,7 +14,7 @@ fn main() {
         let state = Arc::clone(&state);
         move |_w: u32, _h: u32| -> (VNode, Stylesheet) {
             let vnode = app::render_with_state(Arc::clone(&state), |name| match name {
-                "count" => state.get_count().to_string(),
+                "count" => state.count().to_string(),
                 _ => String::new(),
             });
             let sheet = Stylesheet::parse(app::STYLE);

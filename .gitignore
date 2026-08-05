@@ -48,3 +48,11 @@ plan.txt
 todo.txt
 .opencode/
 tmp/
+
+# Agent skill installs (tooling artifacts, not project source)
+.agents/
+.claude/
+skills-lock.json
+
+# Scratch project created while testing the CLI
+temp-velox-project/

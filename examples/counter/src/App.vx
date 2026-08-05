@@ -23,7 +23,8 @@ impl State {
     pub fn new() -> Self {
         Self { counter: Cell::new(0) }
     }
-    pub fn get_counter(&self) -> i32 { self.counter.get() }
+    pub fn title(&self) -> String { String::from("Velox Counter") }
+    pub fn count(&self) -> i32 { self.counter.get() }
     pub fn increment(&self) { self.counter.set(self.counter.get() + 1); }
     pub fn decrement(&self) { self.counter.set(self.counter.get() - 1); }
     pub fn reset(&self) { self.counter.set(0); }

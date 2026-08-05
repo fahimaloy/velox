@@ -26,7 +26,7 @@ impl State {
     pub fn new() -> Self {
         Self { count: Cell::new(0) }
     }
-    pub fn get_count(&self) -> i32 { self.count.get() }
+    pub fn count(&self) -> i32 { self.count.get() }
     pub fn increment(&self) { self.count.set(self.count.get() + 1); }
     pub fn decrement(&self) { self.count.set(self.count.get() - 1); }
     pub fn reset(&self) { self.count.set(0); }
