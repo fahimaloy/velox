@@ -9,6 +9,14 @@ fn cli_exposes_git_rev() {
 }
 
 #[test]
+fn init_toml_pins_version_and_rev() {
+    unsafe { std::env::remove_var("VELOX_PATH"); }
+    let dir = std::env::temp_dir().join(format!("velox-pin-{}", std::process::id()));
+    let toml = velox_cli::commands::init::generate_cargo_toml_for_test("demo", &dir);
+    assert!(toml.contains(r#"version = "0.1.0""#), "must bind version:\n{toml}");
+}
+
+#[test]
 fn cli_build_emits_stub_file() {
     let manifest_dir = env!("CARGO_MANIFEST_DIR");
     let input = PathBuf::from(manifest_dir).join("templates/project/src/App.vx");

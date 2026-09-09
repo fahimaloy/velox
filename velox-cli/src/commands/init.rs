@@ -63,6 +63,11 @@ fn compute_relative_path(from: &Path, to: &Path) -> PathBuf {
     }
 }
 
+pub(crate) fn velox_dep_path(prefix: &str, workspace: &std::path::Path, project_dir: &std::path::Path, leaf: &str) -> String {
+    let p = compute_relative_path(project_dir, &workspace.join(leaf));
+    format!(r#"{{ path = "{}", version = "0.1.0" }}"#, p.display())
+}
+
 /// Initialize a new Velox project
 pub fn init_project(name: &str) -> Result<PathBuf> {
     let requested_dir = PathBuf::from(name);
@@ -114,6 +119,11 @@ pub fn init_project(name: &str) -> Result<PathBuf> {
     println!("   velox run");
 
     Ok(project_dir)
+}
+
+/// Compatibility shim for the drifted `velox init --template` CLI (Task 3 will flesh out template handling).
+pub fn init_project_with_template(name: &str, _template: &str) -> Result<PathBuf> {
+    init_project(name)
 }
 
 /// Initialize a new example app inside examples/
@@ -194,7 +204,21 @@ fn main() {
     Ok(root)
 }
 
-fn generate_cargo_toml(name: &str, project_dir: &Path) -> String {
+pub(crate) fn generate_cargo_toml(name: &str, project_dir: &Path) -> String {
+    if let Ok(local) = std::env::var("VELOX_PATH") {
+        let ws = std::path::PathBuf::from(local);
+        if ws.join("velox-core").join("Cargo.toml").exists() {
+            let core_path = compute_relative_path(project_dir, &ws.join("velox-core"));
+            let dom_path = compute_relative_path(project_dir, &ws.join("velox-dom"));
+            let style_path = compute_relative_path(project_dir, &ws.join("velox-style"));
+            let renderer_path = compute_relative_path(project_dir, &ws.join("velox-renderer"));
+            let cli_path = compute_relative_path(project_dir, &ws.join("velox-cli"));
+            return format!(
+                "[package]\nname = \"{name}\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[workspace]\n\n[dependencies]\nvelox-core = {{ path = \"{}\", version = \"0.1.0\" }}\nvelox-dom = {{ path = \"{}\", version = \"0.1.0\" }}\nvelox-style = {{ path = \"{}\", version = \"0.1.0\" }}\nvelox-renderer = {{ path = \"{}\", version = \"0.1.0\", features = [\"skia-native\"] }}\nserde_json = \"1.0\"\n\n[build-dependencies]\nvelox-cli = {{ path = \"{}\", version = \"0.1.0\" }}\n",
+                core_path.display(), dom_path.display(), style_path.display(), renderer_path.display(), cli_path.display()
+            );
+        }
+    }
     // Try to find the velox workspace root by walking up from CWD
     let workspace_root = find_velox_workspace();
 
@@ -215,14 +239,14 @@ edition = "2021"
 [workspace]
 
 [dependencies]
-velox-core = {{ path = "{}" }}
-velox-dom = {{ path = "{}" }}
-velox-style = {{ path = "{}" }}
-velox-renderer = {{ path = "{}", features = ["skia-native"] }}
+velox-core = {{ path = "{}", version = "0.1.0" }}
+velox-dom = {{ path = "{}", version = "0.1.0" }}
+velox-style = {{ path = "{}", version = "0.1.0" }}
+velox-renderer = {{ path = "{}", version = "0.1.0", features = ["skia-native"] }}
 serde_json = "1.0"
 
 [build-dependencies]
-velox-cli = {{ path = "{}" }}
+velox-cli = {{ path = "{}", version = "0.1.0" }}
 "#,
             core_path.display(),
             dom_path.display(),
@@ -232,24 +256,9 @@ velox-cli = {{ path = "{}" }}
         )
     } else {
         // No workspace found — fall back to git dependencies
+        let rev = crate::velox_git_rev();
         format!(
-            r#"[package]
-name = "{name}"
-version = "0.1.0"
-edition = "2021"
-
-[workspace]
-
-[dependencies]
-velox-core = {{ git = "https://github.com/fahimaloy/velox" }}
-velox-dom = {{ git = "https://github.com/fahimaloy/velox" }}
-velox-style = {{ git = "https://github.com/fahimaloy/velox" }}
-velox-renderer = {{ git = "https://github.com/fahimaloy/velox", features = ["skia-native"] }}
-serde_json = "1.0"
-
-[build-dependencies]
-velox-cli = {{ git = "https://github.com/fahimaloy/velox" }}
-"#
+            "[package]\nname = \"{name}\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[workspace]\n\n[dependencies]\nvelox-core = {{ git = \"https://github.com/fahimaloy/velox\", rev = \"{rev}\", version = \"0.1.0\" }}\nvelox-dom = {{ git = \"https://github.com/fahimaloy/velox\", rev = \"{rev}\", version = \"0.1.0\" }}\nvelox-style = {{ git = \"https://github.com/fahimaloy/velox\", rev = \"{rev}\", version = \"0.1.0\" }}\nvelox-renderer = {{ git = \"https://github.com/fahimaloy/velox\", rev = \"{rev}\", version = \"0.1.0\", features = [\"skia-native\"] }}\nserde_json = \"1.0\"\n\n[build-dependencies]\nvelox-cli = {{ git = \"https://github.com/fahimaloy/velox\", rev = \"{rev}\", version = \"0.1.0\" }}\n"
         )
     }
 }
@@ -479,4 +488,9 @@ impl State {
 </style>
 "#
     .to_string()
+}
+
+#[doc(hidden)]
+pub fn generate_cargo_toml_for_test(name: &str, dir: &std::path::Path) -> String {
+    generate_cargo_toml(name, dir)
 }
