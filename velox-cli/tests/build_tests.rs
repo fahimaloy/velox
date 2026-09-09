@@ -28,7 +28,7 @@ fn cli_build_emits_stub_file() {
     velox_cli::build_cmd(&input, Some(out_dir.as_path()), velox_cli::EmitMode::Stub)
         .expect("build stub");
 
-    let out_file = out_dir.join("App.rs");
+    let out_file = out_dir.join("app.rs");
     let content = fs::read_to_string(&out_file).expect("read stub output");
     assert!(
         content.contains("pub const TEMPLATE"),
@@ -64,6 +64,20 @@ fn init_local_override_uses_given_path() {
     let toml = velox_cli::commands::init::init_toml_with_local("demo", &dir, Some(ws.as_path()));
     assert!(toml.contains(r#"version = "0.1.0""#), "local path must also pin version:\n{toml}");
     assert!(toml.contains("path = "), "local override must use path deps:\n{toml}");
+}
+
+#[test]
+fn cli_stub_emits_lowercase_and_alias() {
+    let manifest_dir = env!("CARGO_MANIFEST_DIR");
+    let input = std::path::PathBuf::from(manifest_dir).join("templates/project/src/App.vx");
+    let out_dir = std::path::PathBuf::from(manifest_dir)
+        .join("../target/velox-cli-tests")
+        .join(format!("{}-stub-alias", std::process::id()));
+    velox_cli::build_cmd(&input, Some(out_dir.as_path()), velox_cli::EmitMode::Stub).expect("stub");
+    assert!(out_dir.join("app.rs").exists(), "stub primary app.rs must exist");
+    assert!(out_dir.join("App.rs").exists(), "stub alias App.rs must exist");
+    let content = std::fs::read_to_string(out_dir.join("app.rs")).expect("read");
+    assert!(content.contains("pub mod app"), "module must be lowercase app");
 }
 
 #[test]

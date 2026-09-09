@@ -81,10 +81,15 @@ pub fn build_cmd(input: &Path, out_dir: Option<&Path>, emit: EmitMode) -> Result
                 .unwrap_or("component");
 
             let code = velox_sfc::to_stub_rs(&sfc, name);
-            let out_path = out_dir.join(format!("{}.rs", name));
-            fs::write(&out_path, code)
+            let mod_name = crate::commands::build::sanitize_mod_name(name);
+            let out_path = out_dir.join(format!("{}.rs", mod_name));
+            fs::write(&out_path, &code)
                 .with_context(|| format!("failed to write {}", out_path.display()))?;
             println!("Generated: {}", out_path.display());
+            let raw_path = out_dir.join(format!("{}.rs", name));
+            if raw_path != out_path {
+                let _ = fs::write(&raw_path, &code);
+            }
         }
         EmitMode::Render => {
             // Render mode: recursively compile the input and all imported components
