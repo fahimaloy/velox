@@ -10,6 +10,17 @@ pub mod watch;
 // Re-export ergonomics for convenient access
 pub use ergonomics::*;
 
+// Re-export lifecycle hooks for convenient access.
+// Each `on_*` function pairs with a same-named `#[macro_export]` macro at the
+// crate root (e.g. `velox_core::on_mounted!`), so SFC `<script setup>` blocks
+// can call either the function or macro form.
+pub use lifecycle::{
+    before_destroy, cleanup_component, clear_current_component, clear_updated_hooks,
+    current_component_id, generate_component_id, has_updated_hooks, on_mounted, on_updated,
+    on_unmounted, run_destroy_hooks, run_mounted_hooks, run_updated_hooks,
+    run_unmounted_hooks, set_current_component,
+};
+
 /// Create a Signal with an initial value.
 /// Usage: `let count = signal!(count = 0);`
 #[macro_export]

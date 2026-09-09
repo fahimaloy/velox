@@ -31,7 +31,7 @@ pub fn build_app(pkg: &str, release: bool) -> Result<()> {
 }
 
 /// Sanitize a component name for use as a Rust module identifier.
-fn sanitize_mod_name(name: &str) -> String {
+pub(crate) fn sanitize_mod_name(name: &str) -> String {
     name.replace(|c: char| !c.is_ascii_alphanumeric() && c != '_', "_")
         .to_lowercase()
 }
@@ -150,11 +150,27 @@ fn compile_component_tree(
         .as_ref()
         .map(|t| t.content.as_str())
         .unwrap_or("");
+    let script_src = sfc.script_setup.as_ref().map(|s| s.content.as_str());
 
-    let render_fn =
-        velox_sfc::compile_template_to_rs(tpl_src, name, Some(&resolver)).map_err(|e| {
-            anyhow::anyhow!("template compilation error in {}: {}", vx_file.display(), e)
-        })?;
+    // Compute the CSS scope attribute for this component. When the <style> block
+    // is scoped, every element rendered by this component needs the matching
+    // `data-v-<hash>` attribute so the scoped CSS selectors actually match.
+    let scope_id = sfc
+        .style
+        .as_ref()
+        .filter(|s| velox_sfc::is_scoped(s))
+        .map(|_| velox_sfc::generate_scope_id(name));
+
+    let render_fn = velox_sfc::compile_template_to_rs_full(
+        tpl_src,
+        name,
+        Some(&mut resolver),
+        script_src,
+        scope_id.as_deref(),
+    )
+    .map_err(|e| {
+        anyhow::anyhow!("template compilation error in {}: {}", vx_file.display(), e)
+    })?;
 
     // Generate component stub, passing the base path for correct import resolution.
     // Use unwrapped mode so the output is the module body (no `pub mod {name} { ... }`
@@ -274,6 +290,16 @@ fn compile_component_tree(
     fs::write(&out_path, &code)?;
 
     println!("[velox] Generated: {}", out_path.display());
+
+    // Backward-compat alias: if the raw file stem differs in case/format from
+    // the sanitized module name (e.g. `App.vx` -> `app.rs`), also write a copy
+    // under the raw-case filename so both `include!("app.rs")` and legacy
+    // `include!("App.rs")` resolve on case-sensitive filesystems.
+    let raw_path = out_dir.join(format!("{}.rs", name));
+    if raw_path != out_path {
+        // Best-effort alias; primary (sanitized) file is authoritative.
+        let _ = fs::write(&raw_path, &code);
+    }
 
     // Return all modules including self
     let mut result = descendant_modules;

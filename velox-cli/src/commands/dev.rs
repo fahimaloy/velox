@@ -35,12 +35,40 @@ fn clear_screen() {
     let _ = std::io::stdout().flush();
 }
 
-/// Read the `[package] name` from a project's Cargo.toml so we can target
-/// the right binary with `cargo run --bin <name>` (robust even inside a
-/// multi-binary workspace where a bare `cargo run` would be ambiguous).
+/// Read the binary name from a project's Cargo.toml so we can target the right
+/// binary with `cargo run --bin <name>` (robust even inside a multi-binary
+/// workspace where a bare `cargo run` would be ambiguous).
+///
+/// Prefers the explicit `[[bin]] name` over `[package] name` because the
+/// binary name (what cargo actually builds) may differ from the package name
+/// (e.g. `velox-example-counter` package with `counter` bin).
 fn project_bin_name(project_dir: &Path) -> Option<String> {
     let manifest = project_dir.join("Cargo.toml");
     let content = std::fs::read_to_string(&manifest).ok()?;
+
+    // First pass: look for an explicit [[bin]] name.
+    let mut in_bin = false;
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed == "[[bin]]" {
+            in_bin = true;
+            continue;
+        }
+        if in_bin && trimmed.starts_with('[') {
+            in_bin = false;
+        }
+        if in_bin
+            && trimmed.starts_with("name")
+            && let Some(eq) = trimmed.find('=')
+        {
+            let value = trimmed[eq + 1..].trim().trim_matches('"').to_string();
+            if !value.is_empty() {
+                return Some(value);
+            }
+        }
+    }
+
+    // Fallback: use [package] name.
     let mut in_package = false;
     for line in content.lines() {
         let trimmed = line.trim();
@@ -48,7 +76,6 @@ fn project_bin_name(project_dir: &Path) -> Option<String> {
             in_package = true;
             continue;
         }
-        // Leaving the [package] table.
         if in_package && trimmed.starts_with('[') && trimmed != "[package]" {
             break;
         }
@@ -74,6 +101,11 @@ enum DevCmd {
 
 /// Start the Velox dev server in `project_dir` (builds with `cargo run`,
 /// watching `<project_dir>/src` for changes).
+///
+/// Uses HMR: the dev server starts a TCP listener, spawns the app with
+/// `VELOX_HMR=1` and `VELOX_HMR_PORT=<port>`, and on file changes sends
+/// a `FullReload` message to the app. The app exits, and the dev server
+/// restarts it.
 pub fn dev_current(project_dir: &Path, release: bool) -> Result<()> {
     let watch_dir = project_dir.join("src");
     let watch_dir = if watch_dir.exists() {
@@ -87,7 +119,14 @@ pub fn dev_current(project_dir: &Path, release: bool) -> Result<()> {
     let (tx, rx) = mpsc::channel::<DevCmd>();
     spawn_stdin_reader(tx);
 
-    let mut child = spawn_app(project_dir, release)?;
+    // Start HMR TCP server in a background thread.
+    // The app connects to this listener as a client.
+    // The connected stream is stored in a shared slot so we can send
+    // reload messages to the app when files change.
+    let hmr_slot = start_hmr_listener(velox_renderer::DEFAULT_HMR_PORT);
+
+    let _ = hmr_slot; // listener thread is running in background
+    let mut child = spawn_app_hmr(project_dir, release, velox_renderer::DEFAULT_HMR_PORT)?;
     let mut last_check = SystemTime::now();
     let mut crashed = false;
 
@@ -118,7 +157,7 @@ pub fn dev_current(project_dir: &Path, release: bool) -> Result<()> {
                     let _ = c.kill();
                     let _ = c.wait();
                 }
-                child = spawn_app(project_dir, release)?;
+                child = spawn_app_hmr(project_dir, release, velox_renderer::DEFAULT_HMR_PORT)?;
                 crashed = false;
                 last_check = SystemTime::now();
             }
@@ -128,12 +167,34 @@ pub fn dev_current(project_dir: &Path, release: bool) -> Result<()> {
 
         // Detect file changes (debounced).
         if let Some(changed) = changed_file(&watch_dir, &mut last_check) {
-            println!("{} {} changed — rebuilding", yellow("↻"), changed.display());
+            println!(
+                "{} {} changed — rebuilding",
+                yellow("↻"),
+                changed.display()
+            );
+
+            // Try to send HMR reload to the still-running app.
+            // The app will receive FullReload and exit, then we'll restart it.
+            send_hmr_reload(&hmr_slot);
+
+            // Wait briefly for the app to exit (the HMR FullReload causes it to exit).
+            if let Some(ref mut c) = child {
+                // Give the app up to 2 seconds to exit gracefully after HMR.
+                for _ in 0..20 {
+                    if c.try_wait()?.is_some() {
+                        break;
+                    }
+                    thread::sleep(Duration::from_millis(100));
+                }
+            }
+
+            // Kill if still running and restart.
             if let Some(mut c) = child.take() {
                 let _ = c.kill();
                 let _ = c.wait();
             }
-            child = spawn_app(project_dir, release)?;
+
+            child = spawn_app_hmr(project_dir, release, velox_renderer::DEFAULT_HMR_PORT)?;
             crashed = false;
         }
 
@@ -155,6 +216,76 @@ pub fn dev_current(project_dir: &Path, release: bool) -> Result<()> {
     Ok(())
 }
 
+/// Shared slot that holds the most recently connected HMR client stream.
+/// The app connects to our TCP listener; we store the stream here so we
+/// can send messages to the app when files change.
+type HmrSlot = std::sync::Arc<std::sync::Mutex<Option<std::net::TcpStream>>>;
+
+/// Start the HMR TCP listener on `port`. Returns an `HmrSlot` that the
+/// dev server can use to send messages to the connected app.
+///
+/// The listener runs in a background thread. When the app connects, the
+/// stream is stored in the shared slot. When the app disconnects (or
+/// reconnects after a restart), the slot is updated.
+fn start_hmr_listener(port: u16) -> HmrSlot {
+    let slot: HmrSlot = std::sync::Arc::new(std::sync::Mutex::new(None));
+
+    let slot_clone = std::sync::Arc::clone(&slot);
+    thread::spawn(move || {
+        let listener = match std::net::TcpListener::bind(("127.0.0.1", port)) {
+            Ok(l) => l,
+            Err(e) => {
+                eprintln!(
+                    "[velox] HMR server could not bind port {}: {} (continuing without HMR)",
+                    port, e
+                );
+                return;
+            }
+        };
+        listener.set_nonblocking(true).ok();
+        eprintln!("[velox] HMR dev server listening on 127.0.0.1:{}", port);
+
+        loop {
+            match listener.accept() {
+                Ok((stream, addr)) => {
+                    eprintln!("[velox] HMR client connected: {}", addr);
+                    // Store the connected stream so the dev server can send to it.
+                    *slot_clone.lock().unwrap() = Some(stream);
+                }
+                Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    thread::sleep(std::time::Duration::from_millis(50));
+                }
+                Err(e) => {
+                    eprintln!("[velox] HMR accept error: {}", e);
+                    thread::sleep(std::time::Duration::from_millis(100));
+                }
+            }
+        }
+    });
+
+    slot
+}
+
+/// Send an HMR `FullReload` message to the connected app.
+fn send_hmr_reload(slot: &HmrSlot) {
+    let mut guard = slot.lock().unwrap();
+    if let Some(ref mut stream) = *guard {
+        let msg = velox_renderer::HmrMessage::FullReload;
+        let json = serde_json::to_string(&msg).unwrap_or_default();
+        match stream.write_all(json.as_bytes()) {
+            Ok(_) => {
+                eprintln!("[velox] Sent FullReload to app");
+            }
+            Err(e) => {
+                eprintln!("[velox] HMR send failed (app may have disconnected): {}", e);
+                *guard = None;
+            }
+        }
+    } else {
+        eprintln!("[velox] No HMR client connected — skipping reload");
+    }
+}
+
 fn print_banner(project_dir: &Path, release: bool, watch_dir: &Path) {
     let name = project_dir
         .canonicalize()
@@ -169,6 +300,11 @@ fn print_banner(project_dir: &Path, release: bool, watch_dir: &Path) {
     );
     println!("  {} {}", bold("➤ Project:"), name);
     println!("  {} {}", bold("➤ Watching:"), watch_dir.display());
+    println!(
+        "  {} {}",
+        bold("➤ HMR:"),
+        format!("port {} (auto-reload on save)", velox_renderer::DEFAULT_HMR_PORT)
+    );
     println!(
         "  {} {}",
         bold("➤ Build:"),
@@ -206,10 +342,11 @@ fn spawn_stdin_reader(tx: mpsc::Sender<DevCmd>) {
     });
 }
 
-fn spawn_app(project_dir: &Path, release: bool) -> Result<Option<Child>> {
-    // Resolve the binary name so `cargo run`/`cargo build` target the right
-    // crate even when invoked from inside a multi-binary workspace.
+/// Spawn the app with HMR enabled. The app connects to our HMR port
+/// and can receive reload messages.
+fn spawn_app_hmr(project_dir: &Path, release: bool, hmr_port: u16) -> Result<Option<Child>> {
     let bin = project_bin_name(project_dir);
+
     // Phase 1: build with piped output so we can surface compile errors
     // in a clean panel (Vite-style) without a crashing window.
     println!("{}", dim("⏳ Compiling..."));
@@ -244,8 +381,7 @@ fn spawn_app(project_dir: &Path, release: bool) -> Result<Option<Child>> {
 
     println!("{} Compiled in {:.1}s", green("✓"), elapsed);
 
-    // Phase 2: run the freshly built binary with inherited stdio so the
-    // GUI window appears and stays alive while we watch for changes.
+    // Phase 2: run the freshly built binary, passing HMR env vars.
     let mut run = Command::new("cargo");
     run.arg("run");
     if release {
@@ -254,13 +390,16 @@ fn spawn_app(project_dir: &Path, release: bool) -> Result<Option<Child>> {
     if let Some(ref name) = bin {
         run.arg("--bin").arg(name);
     }
-    run.current_dir(project_dir)
+    // Enable HMR mode in the app — it will connect to our TCP server.
+    run.env("VELOX_HMR", "1")
+        .env("VELOX_HMR_PORT", hmr_port.to_string())
+        .current_dir(project_dir)
         .stdin(Stdio::null())
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit());
     match run.spawn() {
         Ok(c) => {
-            println!("{}", green("App started"));
+            println!("{}", green("App started (HMR enabled)"));
             Ok(Some(c))
         }
         Err(e) => {

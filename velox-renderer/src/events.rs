@@ -50,6 +50,17 @@ pub struct HoverTarget {
     pub order: i32,
 }
 
+/// A focusable text-input element. `path` records the child source-index path
+/// from the VNode root so keyboard input can find the element in the freshly
+/// rebuilt tree.
+#[derive(Debug, Clone)]
+pub struct InputTarget {
+    pub rect: velox_dom::layout::Rect,
+    pub path: Vec<usize>,
+    pub z_index: i32,
+    pub order: i32,
+}
+
 pub fn is_hoverable(tag: &str, props: &velox_dom::Props) -> bool {
     if props.attrs.contains_key("on:click") || tag == "button" {
         return true;
@@ -232,6 +243,95 @@ pub fn hit_test_click(targets: &[ClickTarget], x: f32, y: f32) -> Option<(&str, 
         let y1 = (r.y + r.h) as f32;
         if x >= x0 && x <= x1 && y >= y0 && y <= y1 {
             return Some((target.handler.as_str(), target.payload.as_deref()));
+        }
+    }
+    None
+}
+
+/// Collect focusable text-input elements (`<input type="text">`) with their
+/// tree paths. Used to route keyboard input to the focused field.
+pub fn collect_input_targets(
+    vnode: &VNode,
+    layout: &velox_dom::layout::LayoutNode,
+    clip: Option<velox_dom::layout::Rect>,
+    path: &mut Vec<usize>,
+    order: &mut i32,
+    out: &mut Vec<InputTarget>,
+) {
+    let next_clip = match (clip, layout.clip) {
+        (Some(c), Some(lc)) => intersect(c, lc),
+        (None, Some(lc)) => Some(lc),
+        (Some(c), None) => Some(c),
+        (None, None) => None,
+    };
+    match vnode {
+        VNode::Text(_) => {}
+        VNode::Element {
+            tag,
+            props,
+            children,
+            ..
+        } => {
+            let is_text_input =
+                tag == "input" && props.attrs.get("type").map(|s| s == "text").unwrap_or(true);
+            if is_text_input
+                && next_clip
+                    .map(|c| rects_intersect(layout.rect, c))
+                    .unwrap_or(true)
+            {
+                let ord = *order;
+                *order += 1;
+                out.push(InputTarget {
+                    rect: layout.rect,
+                    path: path.clone(),
+                    z_index: layout.z_index,
+                    order: ord,
+                });
+            }
+            let mut ordered: Vec<(i32, usize)> = layout
+                .children
+                .iter()
+                .enumerate()
+                .filter_map(|(i, ln)| {
+                    if ln.display_none {
+                        None
+                    } else {
+                        Some((ln.z_index, i))
+                    }
+                })
+                .collect();
+            ordered.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
+            for (_, idx) in ordered {
+                if let Some(child_layout) = layout.children.get(idx)
+                    && let Some(src_idx) = child_layout.source_index
+                    && let Some(child) = children.get(src_idx)
+                {
+                    path.push(src_idx);
+                    collect_input_targets(child, child_layout, next_clip, path, order, out);
+                    path.pop();
+                }
+            }
+        }
+    }
+}
+
+/// Return the topmost text-input target under a point, if any.
+pub fn hit_test_input(targets: &[InputTarget], x: f32, y: f32) -> Option<&InputTarget> {
+    let mut ordered: Vec<(i32, usize)> = targets
+        .iter()
+        .enumerate()
+        .map(|(i, t)| (t.order, i))
+        .collect();
+    ordered.sort_by(|a, b| b.0.cmp(&a.0).then(b.1.cmp(&a.1)));
+    for (_, idx) in ordered {
+        let target = &targets[idx];
+        let r = target.rect;
+        let x0 = r.x as f32;
+        let y0 = r.y as f32;
+        let x1 = (r.x + r.w) as f32;
+        let y1 = (r.y + r.h) as f32;
+        if x >= x0 && x <= x1 && y >= y0 && y <= y1 {
+            return Some(target);
         }
     }
     None

@@ -1,35 +1,196 @@
 <template>
   <div class="app">
-    <h1 class="title">Todo List</h1>
-    <div class="card">
-      <div class="input-row">
-        <button class="btn inc" @click="increment">+1</button>
-        <button class="btn dec" @click="decrement">-1</button>
-        <button class="btn reset" @click="reset">Reset</button>
+    <header class="header">
+      <h1 class="title">{{ title }}</h1>
+    </header>
+    <main class="main">
+      <div class="add-bar">
+        <input
+          type="text"
+          class="input"
+          placeholder="What needs to be done?"
+          :value="draft"
+          @input="on_input"
+        />
+        <button class="btn btn-add" @click="on_submit">Add</button>
       </div>
-      <div class="counter">
-        <span class="count">{{ count }}</span>
+
+      <div class="todo-list">
+        <TodoItem
+          v-for="(todo, idx) in visible"
+          :todo="todo.text"
+          :completed="todo.completed"
+          :index="idx"
+          @toggle="on_toggle"
+          @remove="on_remove"
+        />
+        <p class="empty" v-if="is_empty">{{ empty_message }}</p>
       </div>
-      <p class="status">Click a button to change the counter</p>
-    </div>
+
+      <div class="filters">
+        <button class="btn filter" :class="{ active: is_all }" @click="click_all">All</button>
+        <button class="btn filter" :class="{ active: is_active }" @click="click_active">Active</button>
+        <button class="btn filter" :class="{ active: is_completed }" @click="click_completed">Completed</button>
+      </div>
+    </main>
   </div>
 </template>
 
 <script setup>
+import TodoItem from './components/TodoItem.vx'
 use std::cell::Cell;
 
+use velox_core::signal::Signal;
+
+#[derive(Clone, Copy, PartialEq)]
+pub enum Filter {
+    All,
+    Active,
+    Completed,
+}
+
+#[derive(Clone, PartialEq)]
+pub struct Todo {
+    pub id: usize,
+    pub text: String,
+    pub completed: bool,
+}
+
 pub struct State {
-    count: Cell<i32>,
+    // The todos list is a reactive signal created with the `signal!()` macro,
+    // which expands to `std::rc::Rc::new(Signal::new(value))`.
+    pub todos: std::rc::Rc<Signal<Vec<Todo>>>,
+    pub draft: std::rc::Rc<Signal<String>>,
+    pub filter: std::rc::Rc<Signal<Filter>>,
+    // A derived signal that auto-recomputes whenever `todos` or `filter`
+    // change, so the template can v-for over the currently visible subset.
+    pub visible: std::rc::Rc<Signal<Vec<Todo>>>,
+    pub next_id: Cell<usize>,
 }
 
 impl State {
     pub fn new() -> Self {
-        Self { count: Cell::new(0) }
+        let todos = velox_core::signal!(todos = vec![
+            Todo { id: 0, text: String::from("Learn Velox"), completed: true },
+            Todo { id: 1, text: String::from("Build a todo app"), completed: false },
+        ]);
+        let draft = velox_core::signal!(draft = String::new());
+        let filter = velox_core::signal!(filter = Filter::All);
+
+        let visible = {
+            let todos = std::rc::Rc::clone(&todos);
+            let filter = std::rc::Rc::clone(&filter);
+            velox_core::signal::computed(move || {
+                let list = todos.get();
+                let f = filter.get();
+                match f {
+                    Filter::All => list,
+                    Filter::Active => list.into_iter().filter(|t| !t.completed).collect(),
+                    Filter::Completed => list.into_iter().filter(|t| t.completed).collect(),
+                }
+            })
+        };
+
+        Self {
+            todos,
+            draft,
+            filter,
+            visible,
+            next_id: Cell::new(2),
+        }
     }
-    pub fn count(&self) -> i32 { self.count.get() }
-    pub fn increment(&self) { self.count.set(self.count.get() + 1); }
-    pub fn decrement(&self) { self.count.set(self.count.get() - 1); }
-    pub fn reset(&self) { self.count.set(0); }
+
+    pub fn title(&self) -> String {
+        String::from("Velox Todo")
+    }
+
+    pub fn draft(&self) -> String {
+        self.draft.get()
+    }
+
+    pub fn empty_message(&self) -> String {
+        match self.filter.get() {
+            Filter::Active => String::from("No active todos. Nice work!"),
+            Filter::Completed => String::from("No completed todos yet."),
+            Filter::All => String::from("Nothing to do. Add a todo above."),
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.todos.get().is_empty()
+    }
+
+    pub fn is_all(&self) -> bool {
+        self.filter.get() == Filter::All
+    }
+
+    pub fn is_active(&self) -> bool {
+        self.filter.get() == Filter::Active
+    }
+
+    pub fn is_completed(&self) -> bool {
+        self.filter.get() == Filter::Completed
+    }
+
+    pub fn on_input(&self, payload: &str) {
+        self.draft.set(payload.to_string());
+    }
+
+    pub fn on_submit(&self) {
+        let text = self.draft.get().trim().to_string();
+        if text.is_empty() {
+            return;
+        }
+        let id = self.next_id.get();
+        self.next_id.set(id + 1);
+        self.todos.update(|mut list| {
+            list.push(Todo { id, text, completed: false });
+            list
+        });
+        self.draft.set(String::new());
+    }
+
+    // TodoItem reports its position within the *visible* (filtered) list, so
+    // resolve that index back to the item's id before mutating the source list.
+    pub fn on_toggle(&self, payload: &str) {
+        if let Ok(vidx) = payload.trim().parse::<usize>() {
+            let visible = self.visible.get();
+            if let Some(target) = visible.get(vidx) {
+                let id = target.id;
+                self.todos.update(|mut list| {
+                    if let Some(t) = list.iter_mut().find(|t| t.id == id) {
+                        t.completed = !t.completed;
+                    }
+                    list
+                });
+            }
+        }
+    }
+
+    pub fn on_remove(&self, payload: &str) {
+        if let Ok(vidx) = payload.trim().parse::<usize>() {
+            let visible = self.visible.get();
+            if let Some(target) = visible.get(vidx) {
+                let id = target.id;
+                self.todos.update(|mut list| {
+                    list.retain(|t| t.id != id);
+                    list
+                });
+            }
+        }
+    }
+
+    pub fn click_all(&self) {
+        self.filter.set(Filter::All);
+    }
+
+    pub fn click_active(&self) {
+        self.filter.set(Filter::Active);
+    }
+
+    pub fn click_completed(&self) {
+        self.filter.set(Filter::Completed);
+    }
 }
 </script>
 
@@ -37,28 +198,52 @@ impl State {
 .app {
     width: 100%;
     height: 100%;
-    display: block;
-    background: #18181b;
-    color: #fafafa;
-    font-family: system-ui, sans-serif;
+    display: flex;
+    flex-direction: column;
+    background: #1a1a2e;
+    color: #e6edf3;
+    font-family: system-ui, -apple-system, sans-serif;
+}
+.header {
+    padding: 28px 24px 12px;
+    text-align: center;
 }
 .title {
-    text-align: center;
-    font-size: 28px;
-    font-weight: bold;
-    padding: 24px 0 12px;
     margin: 0;
+    font-size: 30px;
+    font-weight: 700;
 }
-.card {
-    background: #27272a;
-    border-radius: 12px;
-    padding: 20px;
-    margin: 0 24px;
+.main {
+    display: flex;
+    flex-direction: column;
+    flex: 1;
+    gap: 16px;
+    padding: 8px 24px 24px;
 }
-.input-row {
+.add-bar {
     display: flex;
     gap: 8px;
-    margin-bottom: 16px;
+}
+.input {
+    flex: 1;
+    padding: 10px 12px;
+    font-size: 15px;
+    border-radius: 8px;
+    border: 1px solid #3a3a5c;
+    background: #16213e;
+    color: #e6edf3;
+}
+.todo-list {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    flex: 1;
+}
+.empty {
+    text-align: center;
+    color: #8b949e;
+    font-size: 14px;
+    margin: 8px 0;
 }
 .btn {
     padding: 10px 20px;
@@ -69,25 +254,32 @@ impl State {
     cursor: pointer;
     color: #ffffff;
 }
-.inc { background: #22c55e; }
-.inc:hover { background: #16a34a; }
-.dec { background: #ef4444; }
-.dec:hover { background: #dc2626; }
-.reset { background: #64748b; }
-.reset:hover { background: #475569; }
-.counter {
+.btn-add {
+    background: #3478f6;
+}
+.btn-add:hover {
+    background: #4a8df8;
+}
+.filters {
     display: flex;
+    gap: 8px;
     justify-content: center;
-    padding: 20px;
 }
-.count {
-    font-size: 48px;
-    font-weight: bold;
+.filter {
+    background: #16213e;
+    color: #aab2ca;
+    padding: 8px 16px;
+    font-size: 14px;
+    font-weight: 600;
+    border: 1px solid #3a3a5c;
+    border-radius: 8px;
 }
-.status {
-    text-align: center;
-    color: #71717a;
-    font-size: 13px;
-    margin: 12px 0 0;
+.filter:hover {
+    background: #1e2a4a;
+}
+.filter.active {
+    background: #3478f6;
+    color: #ffffff;
+    border-color: #3478f6;
 }
 </style>

@@ -39,25 +39,28 @@ pub struct Sfc {
     pub style: Option<StyleBlock>,
 }
 
-/// Format a Pest parse error into a human-readable message with line number
-/// and context about which SFC block was being parsed.
+/// Format a Pest parse error into a human-readable message with line number,
+/// column, a source excerpt with a `^` caret, an explanatory message, and an
+/// actionable suggestion where one can be inferred.
 fn format_pest_error(err: pest::error::Error<Rule>, source: &str) -> String {
-    // Extract the line number from the error's location.
-    // Pest provides either a single position or a span (start, end).
-    let line = match err.line_col {
-        pest::error::LineColLocation::Pos((l, _)) => l,
-        pest::error::LineColLocation::Span((l, _), _) => l,
+    // Pest reports either a single position or a span; use the span start so the
+    // caret points at the first offending character.
+    let (line, column) = match err.line_col {
+        pest::error::LineColLocation::Pos((l, c)) => (l, c),
+        pest::error::LineColLocation::Span((l, c), _) => (l, c),
     };
 
     // Determine what kind of parsing failure occurred and produce a
     // human-readable summary.
+    let mut expected: Vec<String> = Vec::new();
+    let mut unexpected: Vec<String> = Vec::new();
     let description = match &err.variant {
         ErrorVariant::ParsingError {
             positives,
             negatives,
         } => {
-            let expected = positives.iter().map(rule_to_block_name).collect::<Vec<_>>();
-            let unexpected = negatives.iter().map(rule_to_block_name).collect::<Vec<_>>();
+            expected = positives.iter().map(rule_to_block_name).collect::<Vec<_>>();
+            unexpected = negatives.iter().map(rule_to_block_name).collect::<Vec<_>>();
 
             if expected.is_empty() {
                 "unexpected token found while parsing the SFC".to_string()
@@ -67,11 +70,7 @@ fn format_pest_error(err: pest::error::Error<Rule>, source: &str) -> String {
                 } else {
                     unexpected.join(", ")
                 };
-                format!(
-                    "expected {} but found {}",
-                    expected.join(", "),
-                    unexpected_str
-                )
+                format!("expected {} but found {}", expected.join(", "), unexpected_str)
             }
         }
         ErrorVariant::CustomError { message } => message.clone(),
@@ -80,11 +79,59 @@ fn format_pest_error(err: pest::error::Error<Rule>, source: &str) -> String {
     // Try to infer which block the error falls in by examining the source
     // up to the error position.
     let block_context = infer_block_context(source, line);
+    let message = format!(
+        "{description} while parsing the {block_context} block"
+    );
 
-    format!(
-        "SFC parse error at line {}: {}\nContext: parsing {} block",
-        line, description, block_context
+    // Build an actionable suggestion from the failure.
+    let suggestion = suggest_pest_error(&expected, &unexpected, &block_context);
+
+    crate::diagnostic::render_parse_error(
+        source,
+        line,
+        column,
+        1,
+        &message,
+        suggestion.as_deref(),
     )
+}
+
+/// Heuristically produce a helpful `help:` line for common SFC mistakes, based
+/// on what the grammar expected, what was found, and which block broke.
+fn suggest_pest_error(expected: &[String], unexpected: &[String], block: &str) -> Option<String> {
+    let end_of_input = expected
+        .iter()
+        .any(|e| e.contains("end of input") || e.contains("SFC file"));
+    let unexp_join = unexpected.join(" ");
+
+    if end_of_input {
+        return Some(format!(
+            "the {block} block may be missing its closing tag (e.g. </{block}>), or a block was never opened"
+        ));
+    }
+
+    if block != "top-level" {
+        // We are inside a block; the likely fixes are structural.
+        return Some(format!(
+            "check the {block} tags and attribute quotes near this line; \
+             every value after '=' should be wrapped in \"double\" or 'single' quotes"
+        ));
+    }
+
+    if unexp_join.contains("end of input") {
+        return Some(
+            "the file ended before a block was closed — add the missing </template>, </script>, or </style>".to_string(),
+        );
+    }
+
+    if expected.iter().any(|e| e.contains("<template")) {
+        return Some(
+            "after a <template> block you need a <script setup> block to define component state and logic"
+                .to_string(),
+        );
+    }
+
+    None
 }
 
 /// Map a Pest `Rule` to a human-readable name (block-level where possible).

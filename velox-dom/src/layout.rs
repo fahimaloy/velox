@@ -606,8 +606,14 @@ fn style_box_sides_full(
     viewport_h: f32,
 ) -> (i32, i32, i32, i32) {
     let resolve = |val: &str| -> Option<i32> {
-        parse_length_value(val, parent_size, parent_font_size, root_font_size, (viewport_w, viewport_h))
-            .map(|f| f.round() as i32)
+        parse_length_value(
+            val,
+            parent_size,
+            parent_font_size,
+            root_font_size,
+            (viewport_w, viewport_h),
+        )
+        .map(|f| f.round() as i32)
     };
 
     // Try expanding the shorthand value into individual sides.
@@ -616,9 +622,15 @@ fn style_box_sides_full(
         // Find the shorthand declaration (e.g. "padding: 10px 20px")
         let raw = s.split(';').find_map(|decl| {
             let d = decl.trim();
-            if d.is_empty() { return None; }
+            if d.is_empty() {
+                return None;
+            }
             let (k, v) = d.split_once(':')?;
-            if k.trim() == base { Some(v.trim()) } else { None }
+            if k.trim() == base {
+                Some(v.trim())
+            } else {
+                None
+            }
         })?;
         let parts: Vec<&str> = raw.split_whitespace().collect();
         match parts.len() {
@@ -650,14 +662,46 @@ fn style_box_sides_full(
     let (sh_l, sh_r, sh_t, sh_b) = shorthand_sides.unwrap_or((0, 0, 0, 0));
 
     // Individual longhand properties override the shorthand
-    let l = style_lookup_len_full(style, &format!("{}-left", base), parent_size, parent_font_size, root_font_size, viewport_w, viewport_h)
-        .unwrap_or(sh_l);
-    let r = style_lookup_len_full(style, &format!("{}-right", base), parent_size, parent_font_size, root_font_size, viewport_w, viewport_h)
-        .unwrap_or(sh_r);
-    let t = style_lookup_len_full(style, &format!("{}-top", base), parent_size, parent_font_size, root_font_size, viewport_w, viewport_h)
-        .unwrap_or(sh_t);
-    let b = style_lookup_len_full(style, &format!("{}-bottom", base), parent_size, parent_font_size, root_font_size, viewport_w, viewport_h)
-        .unwrap_or(sh_b);
+    let l = style_lookup_len_full(
+        style,
+        &format!("{}-left", base),
+        parent_size,
+        parent_font_size,
+        root_font_size,
+        viewport_w,
+        viewport_h,
+    )
+    .unwrap_or(sh_l);
+    let r = style_lookup_len_full(
+        style,
+        &format!("{}-right", base),
+        parent_size,
+        parent_font_size,
+        root_font_size,
+        viewport_w,
+        viewport_h,
+    )
+    .unwrap_or(sh_r);
+    let t = style_lookup_len_full(
+        style,
+        &format!("{}-top", base),
+        parent_size,
+        parent_font_size,
+        root_font_size,
+        viewport_w,
+        viewport_h,
+    )
+    .unwrap_or(sh_t);
+    let b = style_lookup_len_full(
+        style,
+        &format!("{}-bottom", base),
+        parent_size,
+        parent_font_size,
+        root_font_size,
+        viewport_w,
+        viewport_h,
+    )
+    .unwrap_or(sh_b);
     (l, r, t, b)
 }
 
@@ -1137,7 +1181,11 @@ pub fn compute_layout(node: &VNode, viewport_w: i32, viewport_h: i32) -> LayoutN
                         } else {
                             // CSS spec: flex-basis defaults to "auto" — use the
                             // pre-computed content size along the main axis.
-                            if is_column { ln.rect.h as f32 } else { ln.rect.w as f32 }
+                            if is_column {
+                                ln.rect.h as f32
+                            } else {
+                                ln.rect.w as f32
+                            }
                         };
 
                         let min_main = style_lookup_len_full(
@@ -1461,9 +1509,7 @@ pub fn compute_layout(node: &VNode, viewport_w: i32, viewport_h: i32) -> LayoutN
                                     "flex-end" | "end" => {
                                         (container_cross - item_cross_size).max(0.0)
                                     }
-                                    "center" => {
-                                        (container_cross - item_cross_size) / 2.0
-                                    }
+                                    "center" => (container_cross - item_cross_size) / 2.0,
                                     _ => 0.0, // stretch, flex-start, start
                                 };
 

@@ -157,7 +157,7 @@ impl State { pub fn new() -> Self { Self { count: 0 } } }
         .as_ref()
         .map(|t| t.content.as_str())
         .unwrap_or("");
-    let render_fn = velox_sfc::compile_template_to_rs(tpl_src, name, Some(&resolver))
+    let render_fn = velox_sfc::compile_template_to_rs(tpl_src, name, Some(&mut resolver))
         .expect("compile template");
 
     // Generate stub with correct base path for import resolution

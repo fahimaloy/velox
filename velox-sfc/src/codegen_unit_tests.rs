@@ -1,6 +1,46 @@
 use crate::template_ast::{AttrKind, Node, TemplateAttr};
 
 #[test]
+fn script_setup_lifecycle_hook_macros_pass_through() {
+    // A `<script setup>` that registers lifecycle hooks through the fully-qualified
+    // velox-core macros must be emitted verbatim into the generated module so the
+    // hooks are wired when the SFC is compiled by the CLI/example build.rs.
+    let sfc_src = r#"<template>
+  <div><span>{{ title }}</span></div>
+</template>
+<script setup>
+use velox_core::ref_value;
+
+pub struct State { pub title: String }
+impl State { pub fn new() -> Self { Self { title: String::from("Lifecycle") } } }
+</script>
+<style>
+.app { padding: 12px; }
+</style>"#;
+    // Simulate injecting the hook registrations at the top of script_setup,
+    // as a user would write them, and confirm codegen carries them through.
+    let with_hooks = sfc_src.replace(
+        "<script setup>\n",
+        "<script setup>\nvelox_core::on_mounted! { { /* setup */ } }\nvelox_core::on_updated! { { /* update */ } }\nvelox_core::on_unmounted! { { /* teardown */ } }\n",
+    );
+    let sfc = crate::parse_sfc(&with_hooks).expect("parse sfc");
+    let stub = crate::to_stub_rs(&sfc, "app");
+
+    for expected in [
+        "velox_core::on_mounted!",
+        "velox_core::on_updated!",
+        "velox_core::on_unmounted!",
+    ] {
+        assert!(
+            stub.contains(expected),
+            "generated module should contain `{expected}` verbatim"
+        );
+    }
+    // User code lands inside the `script_rs` module.
+    assert!(stub.contains("pub mod script_rs"));
+}
+
+#[test]
 fn emit_node_text_and_interpolation() {
     let t = Node::Text("hello".to_string());
     let out = crate::template_codegen::emit_node(&t);
@@ -160,5 +200,60 @@ fn v_if_else_resolves_to_single_branch() {
         pushes, 2,
         "expected one conditional push per render fn: {}",
         rust
+    );
+}
+
+#[test]
+fn scoped_style_prefixes_selectors_with_scope_id() {
+    use crate::codegen::to_stub_rs;
+    use crate::sfc::{Attr, Sfc, StyleBlock};
+
+    // Scoped style: selectors must be prefixed and a non-empty SCOPE_ID emitted.
+    let scoped = Sfc {
+        style: Some(StyleBlock {
+            attrs: vec![Attr {
+                name: "scoped".into(),
+                value: None,
+            }],
+            content: ".header h1 { color: red; }\nh1, .btn { margin: 0; }\n".into(),
+        }),
+        ..Default::default()
+    };
+    let out = to_stub_rs(&scoped, "Counter");
+    assert!(
+        out.contains("pub const SCOPE_ID: &str = \"data-v-"),
+        "expected a non-empty scope id: {}",
+        out
+    );
+    // Attribute appended to the descendant-most part of each selector.
+    assert!(
+        out.contains(".header h1[data-v-"),
+        "descendant selector not scoped: {}",
+        out
+    );
+    assert!(
+        out.contains("h1[data-v-") && out.contains(".btn[data-v-"),
+        "selector list members not scoped: {}",
+        out
+    );
+
+    // Unscoped style passes through unchanged with an empty scope id.
+    let unscoped = Sfc {
+        style: Some(StyleBlock {
+            attrs: vec![],
+            content: ".header { color: red; }".into(),
+        }),
+        ..Default::default()
+    };
+    let plain = to_stub_rs(&unscoped, "Counter");
+    assert!(
+        plain.contains("pub const SCOPE_ID: &str = \"\";"),
+        "unscoped component should emit empty scope id: {}",
+        plain
+    );
+    assert!(
+        plain.contains(".header { color: red; }") && !plain.contains("[data-v-"),
+        "unscoped style must pass through unchanged: {}",
+        plain
     );
 }

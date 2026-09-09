@@ -126,6 +126,49 @@ fn parse_template_comment_text() {
 }
 
 // =============================================================================
+// User-friendly parser diagnostics
+// =============================================================================
+
+#[test]
+fn template_unclosed_interpolation_errors_with_context() {
+    // An interpolation that is never closed must fail with a caret-style,
+    // line-numbered, contextual error — not a silent text node.
+    let result = parse_template_to_ast("<div>\n  {{ count </div>");
+    let err = result.expect_err("unclosed interpolation should be an error");
+    assert!(err.contains("SFC parse error at"), "got: {err}");
+    assert!(err.contains("'{{'"), "should name the offending token: {err}");
+    assert!(err.contains("help:"), "should carry a suggestion: {err}");
+    assert!(err.contains('^'), "should underline the position: {err}");
+}
+
+#[test]
+fn template_unclosed_interpolation_line_number_is_accurate() {
+    let result = parse_template_to_ast("<div>\n  <span>\n    {{ oops");
+    let err = result.expect_err("unclosed interpolation should be an error");
+    // The `{{` is on line 3.
+    assert!(err.contains("at 3:"), "should point at line 3: {err}");
+}
+
+#[test]
+fn template_unclosed_tags_return_ok_leniently() {
+    // These remain lenient (Ok), but now also emit line-numbered warnings.
+    let result = parse_template_to_ast(r#"<div><span>text</div>"#);
+    assert!(result.is_ok());
+    let unmatched = parse_template_to_ast(r#"</div>"#);
+    assert!(unmatched.is_ok());
+}
+
+#[test]
+fn sfc_parse_error_include_line_and_caret() {
+    // A template block that is never closed fails the pest grammar and the
+    // formatted error should carry line/column, an excerpt, and a caret.
+    let src = "<template>\n  <div>hello</div>\n";
+    let err = parse_sfc(src).expect_err("missing </template> should fail");
+    assert!(err.contains("SFC parse error at") || err.contains("at "), "got: {err}");
+    assert!(err.contains('^'), "should include a caret: {err}");
+}
+
+// =============================================================================
 // Template codegen error/edge cases
 // =============================================================================
 

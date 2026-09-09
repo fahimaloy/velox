@@ -1,5 +1,5 @@
 use crate::{Props, VNode};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Patch {
@@ -9,6 +9,15 @@ pub enum Patch {
     UpdateChild(usize, Vec<Patch>),
     InsertChild(usize, VNode),
     RemoveChild(usize),
+    /// Relocate the node currently at `from` (in the live DOM order) to `to`.
+    ///
+    /// All patch indices — for `UpdateChild`, `InsertChild`, `RemoveChild` and
+    /// `MoveChild` — are interpreted against the DOM as it exists *after* the
+    /// patches already emitted in the same sequence have been applied. This
+    /// lets a single keyed diff express add/remove/update *and* reorder as one
+    /// coherent, replayable list while preserving each keyed node's identity
+    /// (its DOM element / event listeners / internal state).
+    MoveChild(usize, usize),
 }
 
 impl VNode {
@@ -74,51 +83,85 @@ fn diff_props(a: &Props, b: &Props) -> Vec<Patch> {
 fn diff_children_keyed(
     old: &[VNode],
     new: &[VNode],
-    get_key: impl Fn(&VNode) -> Option<String> + 'static,
+    get_key: impl Fn(&VNode) -> Option<String>,
 ) -> Vec<Patch> {
-    let mut patches = Vec::new();
-
-    // Build key -> index map for old children
-    let mut old_key_map: HashMap<String, usize> = HashMap::new();
-    for (i, node) in old.iter().enumerate() {
-        if let Some(key) = get_key(node) {
-            old_key_map.insert(key, i);
-        }
+    // We simulate the live DOM child list as patches are emitted so that every
+    // index (Update / Insert / Remove / Move) refers to the DOM order as it is
+    // mutated by the patches already produced before it. This is what allows a
+    // single keyed diff to correctly express insert, remove, update AND reorder
+    // as one coherent, replayable sequence while preserving each keyed node's
+    // identity (its DOM element and any attached state / listeners).
+    //
+    //   Slot::Old(i)  -> a live node still backed by old child `i`; its DOM
+    //                    element can be reused, moved and updated in place.
+    //   Slot::New      -> a brand-new node that must be inserted. The node
+    //                     itself travels in the InsertChild patch; no payload
+    //                     is needed here, and caching a clone would be unused.
+    enum Slot {
+        Old(usize),
+        New,
     }
+    let mut sim: Vec<Slot> = (0..old.len()).map(Slot::Old).collect();
+    // Tracks old children already consumed by a keyed match so a duplicate key
+    // does not cause a single old node to be reused twice.
+    let mut used_old: HashSet<usize> = HashSet::new();
+    let mut patches: Vec<Patch> = Vec::new();
 
-    // Track which old nodes have been used
-    let mut used_old_indices: HashSet<usize> = HashSet::new();
-
-    // Process new children
     for (new_idx, new_node) in new.iter().enumerate() {
-        if let Some(key) = get_key(new_node)
-            && let Some(&old_idx) = old_key_map.get(&key)
-        {
-            // Key matches - diff at that position
-            used_old_indices.insert(old_idx);
-            let child_patches = diff(&old[old_idx], new_node);
-            if !child_patches.is_empty() {
-                patches.push(Patch::UpdateChild(new_idx, child_patches));
+        let key = get_key(new_node);
+
+        // Find a still-unused old child carrying the same key, in live order.
+        let mut reuse: Option<usize> = None; // index into `sim`
+        if let Some(key) = &key {
+            for (j, slot) in sim.iter().enumerate() {
+                if let Slot::Old(i) = slot
+                    && !used_old.contains(i)
+                    && get_key(&old[*i]).as_ref() == Some(key)
+                {
+                    reuse = Some(j);
+                    break;
+                }
             }
-            continue;
         }
 
-        // No key or key doesn't match - treat as insert or replace
-        if new_idx < old.len() && !used_old_indices.contains(&new_idx) {
-            patches.push(Patch::UpdateChild(
-                new_idx,
-                vec![Patch::Replace(new_node.clone())],
-            ));
-            used_old_indices.insert(new_idx);
-        } else {
-            patches.push(Patch::InsertChild(new_idx, new_node.clone()));
+        match reuse {
+            Some(cur) => {
+                // Reorder: relocate the reused node to its target index.
+                let old_idx = match &sim[cur] {
+                    Slot::Old(i) => *i,
+                    Slot::New => unreachable!("reuse index always points at an Old slot"),
+                };
+                if cur != new_idx {
+                    let slot = sim.remove(cur);
+                    sim.insert(new_idx, slot);
+                    patches.push(Patch::MoveChild(cur, new_idx));
+                }
+                used_old.insert(old_idx);
+                // Update content in place at its (possibly new) position.
+                let child_patches = diff(&old[old_idx], new_node);
+                if !child_patches.is_empty() {
+                    patches.push(Patch::UpdateChild(new_idx, child_patches));
+                }
+            }
+            None => {
+                // No reusable old node (new key, or unkeyed node): insert anew.
+                sim.insert(new_idx, Slot::New);
+                patches.push(Patch::InsertChild(new_idx, new_node.clone()));
+            }
         }
     }
 
-    // Remaining old nodes that weren't matched are removals
-    for i in 0..old.len() {
-        if !used_old_indices.contains(&i) {
-            patches.push(Patch::RemoveChild(i));
+    // Old children that were never matched are genuine removals. Removing each
+    // from the live `sim` keeps the indices emitted for later removals correct.
+    let mut j = 0;
+    while j < sim.len() {
+        if let Slot::Old(i) = sim[j]
+            && !used_old.contains(&i)
+        {
+            patches.push(Patch::RemoveChild(j));
+            sim.remove(j);
+        } else {
+            j += 1;
         }
     }
 

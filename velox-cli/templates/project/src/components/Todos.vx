@@ -1,0 +1,112 @@
+<template>
+  <div class="todos">
+    <TodoInput :value="new_todo" @input="on_input" @submit="on_submit" />
+    <div class="todo-list">
+      <TodoItem
+        v-for="(todo, idx) in todos"
+        :todo="todo.text"
+        :completed="todo.completed"
+        :index="idx"
+        @toggle="on_toggle"
+        @remove="on_remove"
+      />
+    </div>
+  </div>
+</template>
+
+<script setup>
+import TodoInput from './TodoInput.vx'
+import TodoItem from './TodoItem.vx'
+use velox_core::signal::Signal;
+
+#[derive(Clone)]
+pub struct Todo {
+    pub text: String,
+    pub completed: bool,
+}
+
+pub struct State {
+    // v-for reads `state.todos.get()`; Signal<Vec<T>> returns an owned clone
+    // that is iterated to render one TodoItem per entry.
+    pub todos: Signal<Vec<Todo>>,
+    pub new_todo: Signal<String>,
+}
+
+impl State {
+    pub fn new() -> Self {
+        Self {
+            todos: Signal::new(vec![
+                Todo {
+                    text: String::from("Learn Velox"),
+                    completed: false,
+                },
+                Todo {
+                    text: String::from("Build a todo app"),
+                    completed: true,
+                },
+            ]),
+            new_todo: Signal::new(String::new()),
+        }
+    }
+
+    pub fn new_todo(&self) -> String {
+        self.new_todo.get()
+    }
+
+    pub fn on_input(&self, payload: &str) {
+        self.new_todo.set(payload.to_string());
+    }
+
+    pub fn on_submit(&self, _payload: &str) {
+        let text = self.new_todo.get().trim().to_string();
+        if text.is_empty() {
+            return;
+        }
+        self.todos.update(|mut list| {
+            list.push(Todo {
+                text,
+                completed: false,
+            });
+            list
+        });
+        self.new_todo.set(String::new());
+    }
+
+    pub fn on_toggle(&self, payload: &str) {
+        if let Ok(idx) = payload.trim().parse::<usize>() {
+            self.todos.update(|mut list| {
+                if idx < list.len() {
+                    list[idx].completed = !list[idx].completed;
+                }
+                list
+            });
+        }
+    }
+
+    pub fn on_remove(&self, payload: &str) {
+        if let Ok(idx) = payload.trim().parse::<usize>() {
+            self.todos.update(|mut list| {
+                if idx < list.len() {
+                    list.remove(idx);
+                }
+                list
+            });
+        }
+    }
+}
+</script>
+
+<style scoped>
+.todos {
+    display: flex;
+    flex-direction: column;
+    flex: 1;
+    padding: 8px 24px 24px;
+    gap: 16px;
+}
+.todo-list {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+</style>

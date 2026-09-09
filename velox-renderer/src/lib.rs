@@ -7,9 +7,63 @@ use velox_dom::VNode;
 #[cfg(feature = "skia-native")]
 use velox_style::{Stylesheet, apply_styles_with_hover};
 
+/// Return the VNode at a child source-index path, if it exists.
+pub fn find_node_at_path<'a>(node: &'a VNode, path: &[usize]) -> Option<&'a VNode> {
+    let mut cur = node;
+    for &idx in path {
+        match cur {
+            VNode::Element { children, .. } => cur = children.get(idx)?,
+            _ => return None,
+        }
+    }
+    Some(cur)
+}
+
+/// Apply one character of keyboard input to the focused text input, if any.
+/// Reads the input's current `value` and `on:input` handler from the most
+/// recently built VNode, computes the new value (backspace / character /
+/// enter), and dispatches it so the app state updates.
+#[cfg(feature = "skia-native")]
+fn dispatch_input_to_focused(
+    ch: char,
+    last_vnode: &Option<VNode>,
+    focused_input: &Option<Vec<usize>>,
+    on_event: &mut impl FnMut(&str, Option<&str>),
+) {
+    let Some(path) = focused_input else { return };
+    let Some(vnode) = last_vnode else { return };
+    let Some(node) = find_node_at_path(vnode, path) else {
+        return;
+    };
+    let VNode::Element { props, .. } = node else {
+        return;
+    };
+    let Some(handler) = props.attrs.get("on:input").cloned() else {
+        return;
+    };
+    let current = props.attrs.get("value").cloned().unwrap_or_default();
+    let new_value = if ch == '\u{8}' {
+        // Backspace: drop the last Unicode scalar.
+        current
+            .chars()
+            .take(current.chars().count().saturating_sub(1))
+            .collect()
+    } else if ch == '\r' || ch == '\n' {
+        current
+    } else {
+        let mut s = current;
+        s.push(ch);
+        s
+    };
+    on_event(&handler, Some(&new_value));
+}
+
 pub mod event_binding;
 pub mod events;
+pub mod hmr;
 pub mod text;
+
+pub use hmr::{HmrMessage, run_hmr_client, hmr_config, DEFAULT_HMR_PORT};
 
 // Native Skia GL helper module (feature-gated)
 #[cfg(feature = "skia-native")]
@@ -46,14 +100,6 @@ pub struct A11yNode {
 #[derive(Debug, Clone, PartialEq)]
 pub struct A11yTree {
     pub root: A11yNode,
-}
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-#[non_exhaustive]
-pub enum HmrMessage {
-    FullReload,
-    HotReload { module_path: String },
-    KeepWindow,
 }
 
 pub trait HmrRenderer {
@@ -597,18 +643,69 @@ where
     use winit::event_loop::{ControlFlow, EventLoop};
     use winit::window::WindowBuilder;
 
-    let event_loop = EventLoop::new();
-    let mut _last_vnode: Option<velox_dom::VNode> = None;
-    let mut _hmr_pending = false;
-    let window = WindowBuilder::new()
-        .with_title(title)
-        .with_inner_size(PhysicalSize::new(800, 600))
-        .build(&event_loop)
-        .map_err(|e| format!("failed to create window: {e}"))?;
+    // Headless mode: when no compositor is available (CI, containers, SSH)
+    // we still create the window + run the event loop but skip softbuffer
+    // presentation, rendering offscreen only. Enable with VELOX_HEADLESS=1
+    // or it is auto-detected via presenter::is_compositor_available().
+    let headless_env = std::env::var("VELOX_HEADLESS").as_deref() == Ok("1")
+        || !crate::presenter::is_compositor_available();
 
-    let size = window.inner_size();
+    let mut last_vnode: Option<velox_dom::VNode> = None;
+    let mut _hmr_pending = false;
+
+    // Prepare the winit backend: force X11 if Wayland socket is stale to
+    // avoid winit's Wayland backend calling process::exit() on EPIPE.
+    let _headless_check = crate::presenter::prepare_backend();
+
+    // Try to create a winit event loop and window. In headless mode or when
+    // no compositor is available, both can fail (winit may panic instead of
+    // returning Err) — we catch this and proceed with headless rendering.
+    let (event_loop_opt, window, window_size, scale_factor): (
+        Option<winit::event_loop::EventLoop<()>>,
+        Option<winit::window::Window>,
+        PhysicalSize<u32>,
+        f32,
+    ) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let event_loop = EventLoop::new();
+        let window_result = WindowBuilder::new()
+            .with_title(title)
+            .with_inner_size(PhysicalSize::new(800, 600))
+            .build(&event_loop);
+        match window_result {
+            Ok(w) => {
+                let size = w.inner_size();
+                let sf = w.scale_factor() as f32;
+                (Some(event_loop), Some(w), size, sf)
+            }
+            Err(e) => {
+                let msg = e.to_string();
+                let lower = msg.to_ascii_lowercase();
+                let is_display_err = lower.contains("broken pipe")
+                    || lower.contains("os error 32")
+                    || lower.contains("no compositor")
+                    || lower.contains("no display server")
+                    || lower.contains("failed to connect");
+                if headless_env || is_display_err {
+                    log::warn!(
+                        "window creation failed — continuing in headless mode: {msg}"
+                    );
+                    (Some(event_loop), None, PhysicalSize::new(800, 600), 1.0)
+                } else {
+                    panic!("failed to create window: {e}");
+                }
+            }
+        }
+    }))
+    .unwrap_or_else(|_| {
+        log::warn!(
+            "window/event loop creation panicked — continuing in headless mode"
+        );
+        (None, None, PhysicalSize::new(800, 600), 1.0)
+    });
+
+    let window_opt: Option<winit::window::Window> = window;
     let mut renderer =
-        match crate::skia_surface::SkiaSurface::new_raster(size.width as i32, size.height as i32) {
+        match crate::skia_surface::SkiaSurface::new_raster(window_size.width as i32, window_size.height as i32) {
             Ok(surface) => skia_backend::SkiaRenderer {
                 surface: Some(surface),
                 vnode: None,
@@ -617,18 +714,39 @@ where
                 return Err(format!("failed to create SkiaSurface: {e}"));
             }
         };
-    let mut presenter =
-        match crate::presenter::SoftbufferPresenter::new(&window, size.width, size.height) {
-            Ok(p) => p,
-            Err(e) => {
-                return Err(format!("failed to create softbuffer presenter: {e}"));
+    let mut presenter: Option<crate::presenter::SoftbufferPresenter> = None;
+    if let Some(w) = window_opt.as_ref() {
+        // softbuffer::Context::new() can panic when the display server is
+        // unreachable even though DISPLAY/WAYLAND_DISPLAY are set (broken pipe).
+        // Catch such panics and degrade to headless rendering.
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            crate::presenter::SoftbufferPresenter::new(w, window_size.width, window_size.height)
+        })) {
+            Ok(Ok(p)) => presenter = Some(p),
+            Ok(Err(e)) => {
+                if headless_env {
+                    log::warn!(
+                        "softbuffer presenter unavailable — continuing in headless mode: {e}"
+                    );
+                } else {
+                    return Err(format!("failed to create softbuffer presenter: {e}"));
+                }
             }
-        };
-    let mut scale_factor = window.scale_factor() as f32;
+            Err(_) => {
+                log::warn!(
+                    "softbuffer presenter creation panicked — continuing in headless mode"
+                );
+            }
+        }
+    }
+    let mut scale_factor = scale_factor;
     let mut mouse_pos = (0.0f32, 0.0f32);
     let mut hovered_id: Option<u32> = None;
     let mut click_targets: Vec<crate::events::ClickTarget> = Vec::new();
     let mut hover_targets: Vec<crate::events::HoverTarget> = Vec::new();
+    let mut input_targets: Vec<crate::events::InputTarget> = Vec::new();
+    // Path (child source indices) to the focused text input, if any.
+    let mut focused_input: Option<Vec<usize>> = None;
 
     // Render first frame immediately before entering the event loop.
     // This ensures the window has content even on platforms where
@@ -646,6 +764,7 @@ where
         height: u32,
         click_targets: &mut Vec<crate::events::ClickTarget>,
         hover_targets: &mut Vec<crate::events::HoverTarget>,
+        input_targets: &mut Vec<crate::events::InputTarget>,
     ) {
         let layout = velox_dom::layout::compute_layout(vnode, width as i32, height as i32);
         click_targets.clear();
@@ -654,6 +773,17 @@ where
         hover_targets.clear();
         let mut order = 0;
         crate::events::collect_hover_targets(vnode, &layout, None, &mut order, hover_targets);
+        input_targets.clear();
+        let mut order = 0;
+        let mut path = Vec::new();
+        crate::events::collect_input_targets(
+            vnode,
+            &layout,
+            None,
+            &mut path,
+            &mut order,
+            input_targets,
+        );
     }
 
     fn with_hover_ids(vnode: &velox_dom::VNode, next_id: &mut u32) -> velox_dom::VNode {
@@ -697,21 +827,36 @@ where
                 .map(|id| Some(id) == hovered_id)
                 .unwrap_or(false)
         });
-        recompute_targets(&vnode, vw, vh, &mut click_targets, &mut hover_targets);
+        recompute_targets(
+            &vnode,
+            vw,
+            vh,
+            &mut click_targets,
+            &mut hover_targets,
+            &mut input_targets,
+        );
         // Render and present the initial frame so the window has immediate content.
         if let Err(e) = crate::skia_render::skia_impl::render_frame(s, &vnode, &sheet) {
             log::error!("skia initial render error: {}", e);
         }
-        if let Err(e) = presenter.present(s) {
-            log::error!("skia initial present error: {}", e);
+        if let Some(presenter) = presenter.as_mut() {
+            if let Err(e) = presenter.present(s) {
+                log::error!("skia initial present error: {}", e);
+            }
         }
     }
 
-    event_loop.run(move |event, _, control_flow| {
+    if let Some(event_loop) = event_loop_opt {
+        // The event loop can panic if the display server becomes unreachable
+        // (e.g. "Io error: Broken pipe") — catch that and degrade gracefully.
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        event_loop.run(move |event, _, control_flow| {
         *control_flow = ControlFlow::Wait;
         match event {
             Event::NewEvents(StartCause::Init) => {
-                window.request_redraw();
+                if let Some(w) = window_opt.as_ref() {
+                    w.request_redraw();
+                }
             }
             Event::WindowEvent {
                 event: WindowEvent::CloseRequested,
@@ -724,7 +869,9 @@ where
                 ..
             } => {
                 let _ = renderer.resize(new_size.width as i32, new_size.height as i32);
-                let _ = presenter.resize(new_size.width, new_size.height);
+                if let Some(presenter) = presenter.as_mut() {
+                    let _ = presenter.resize(new_size.width, new_size.height);
+                }
                 if let Some(s) = &mut renderer.surface {
                     s.set_scale_factor(scale_factor);
                     let (vw, vh) = logical_size(s.width, s.height, scale_factor);
@@ -739,9 +886,18 @@ where
                             .map(|id| Some(id) == hovered_id)
                             .unwrap_or(false)
                     });
-                    recompute_targets(&vnode, vw, vh, &mut click_targets, &mut hover_targets);
+                    recompute_targets(
+                        &vnode,
+                        vw,
+                        vh,
+                        &mut click_targets,
+                        &mut hover_targets,
+                        &mut input_targets,
+                    );
                 }
-                window.request_redraw();
+                if let Some(w) = window_opt.as_ref() {
+                    w.request_redraw();
+                }
             }
             Event::WindowEvent {
                 event:
@@ -754,7 +910,9 @@ where
             } => {
                 scale_factor = new_scale as f32;
                 let _ = renderer.resize(new_inner_size.width as i32, new_inner_size.height as i32);
-                let _ = presenter.resize(new_inner_size.width, new_inner_size.height);
+                if let Some(presenter) = presenter.as_mut() {
+                    let _ = presenter.resize(new_inner_size.width, new_inner_size.height);
+                }
                 if let Some(s) = &mut renderer.surface {
                     s.set_scale_factor(scale_factor);
                     let (vw, vh) = logical_size(s.width, s.height, scale_factor);
@@ -769,9 +927,18 @@ where
                             .map(|id| Some(id) == hovered_id)
                             .unwrap_or(false)
                     });
-                    recompute_targets(&vnode, vw, vh, &mut click_targets, &mut hover_targets);
+                    recompute_targets(
+                        &vnode,
+                        vw,
+                        vh,
+                        &mut click_targets,
+                        &mut hover_targets,
+                        &mut input_targets,
+                    );
                 }
-                window.request_redraw();
+                if let Some(w) = window_opt.as_ref() {
+                    w.request_redraw();
+                }
             }
             Event::WindowEvent {
                 event: WindowEvent::CursorMoved { position, .. },
@@ -785,7 +952,9 @@ where
                     crate::events::hit_test_hover(&hover_targets, mouse_pos.0, mouse_pos.1);
                 if now_hovered != hovered_id {
                     hovered_id = now_hovered;
-                    window.request_redraw();
+                    if let Some(w) = window_opt.as_ref() {
+                        w.request_redraw();
+                    }
                 }
             }
             Event::WindowEvent {
@@ -797,6 +966,15 @@ where
                     },
                 ..
             } => {
+                // Text-input focus: clicking a text field focuses it; clicking
+                // anywhere else drops focus.
+                if let Some(target) =
+                    crate::events::hit_test_input(&input_targets, mouse_pos.0, mouse_pos.1)
+                {
+                    focused_input = Some(target.path.clone());
+                } else {
+                    focused_input = None;
+                }
                 if let Some((handler, payload_opt)) =
                     crate::events::hit_test_click(&click_targets, mouse_pos.0, mouse_pos.1)
                 {
@@ -818,17 +996,26 @@ where
                                     .map(|id| Some(id) == hovered_id)
                                     .unwrap_or(false)
                             });
-                        recompute_targets(&vnode, vw, vh, &mut click_targets, &mut hover_targets);
+                        recompute_targets(
+                            &vnode,
+                            vw,
+                            vh,
+                            &mut click_targets,
+                            &mut hover_targets,
+                            &mut input_targets,
+                        );
                     }
-                    window.set_title(&get_title());
-                    window.request_redraw();
+                    if let Some(w) = window_opt.as_ref() {
+                        w.set_title(&get_title());
+                        w.request_redraw();
+                    }
                 }
             }
             Event::WindowEvent {
                 event: WindowEvent::KeyboardInput { input, .. },
                 ..
             } => {
-                // Handle keyboard shortcuts
+                // Handle keyboard shortcuts and text-input editing keys.
                 use winit::event::VirtualKeyCode;
                 if let Some(keycode) = input.virtual_keycode
                     && input.state == ElementState::Pressed
@@ -841,7 +1028,48 @@ where
                         VirtualKeyCode::Q => {
                             *control_flow = ControlFlow::Exit;
                         }
+                        VirtualKeyCode::Back => {
+                            if focused_input.is_some() {
+                                crate::dispatch_input_to_focused(
+                                    '\u{8}',
+                                    &last_vnode,
+                                    &focused_input,
+                                    &mut on_event,
+                                );
+                                if let Some(w) = window_opt.as_ref() {
+                                    w.request_redraw();
+                                }
+                            }
+                        }
+                        VirtualKeyCode::Return => {
+                            if focused_input.is_some() {
+                                crate::dispatch_input_to_focused(
+                                    '\r',
+                                    &last_vnode,
+                                    &focused_input,
+                                    &mut on_event,
+                                );
+                                if let Some(w) = window_opt.as_ref() {
+                                    w.request_redraw();
+                                }
+                            }
+                        }
                         _ => {}
+                    }
+                }
+            }
+            Event::WindowEvent {
+                event: WindowEvent::ReceivedCharacter(c),
+                ..
+            } => {
+                // Printable characters go to the focused text input.
+                if let Some(_) = &focused_input
+                    && !c.is_control()
+                    && c != '\u{7f}'
+                {
+                    crate::dispatch_input_to_focused(c, &last_vnode, &focused_input, &mut on_event);
+                    if let Some(w) = window_opt.as_ref() {
+                        w.request_redraw();
                     }
                 }
             }
@@ -861,18 +1089,34 @@ where
                             .map(|id| Some(id) == hovered_id)
                             .unwrap_or(false)
                     });
-                    recompute_targets(&vnode, vw, vh, &mut click_targets, &mut hover_targets);
+                    last_vnode = Some(vnode.clone());
+                    recompute_targets(
+                        &vnode,
+                        vw,
+                        vh,
+                        &mut click_targets,
+                        &mut hover_targets,
+                        &mut input_targets,
+                    );
                     if let Err(e) = crate::skia_render::skia_impl::render_frame(s, &vnode, &sheet) {
                         log::error!("skia render error: {}", e);
                     }
-                    if let Err(e) = presenter.present(s) {
-                        log::error!("skia present error: {}", e);
+                    if let Some(presenter) = presenter.as_mut() {
+                        if let Err(e) = presenter.present(s) {
+                            log::error!("skia present error: {}", e);
+                        }
                     }
                 }
             }
             _ => {}
         }
     });
+    }));
+    } else {
+        // Headless mode — no event loop, just run the initial render and return.
+        log::info!("running in headless mode (no event loop)");
+    }
+    Ok(())
 }
 
 #[cfg(feature = "skia-native")]
@@ -884,38 +1128,89 @@ pub fn run_window_vnode_skia_with_hmr<F, G, H>(
     hmr_rx: std::sync::Arc<std::sync::Mutex<std::sync::mpsc::Receiver<HmrMessage>>>,
 ) -> Result<(), String>
 where
-    F: FnMut(u32, u32) -> (velox_dom::VNode, Stylesheet) + Send + Sync + 'static,
-    G: FnMut(&str, Option<&str>) + Send + 'static,
-    H: FnMut() -> String + Send + Sync + 'static,
+    F: FnMut(u32, u32) -> (velox_dom::VNode, Stylesheet) + 'static,
+    G: FnMut(&str, Option<&str>) + 'static,
+    H: FnMut() -> String + 'static,
 {
     use winit::dpi::PhysicalSize;
     use winit::event::{ElementState, Event, MouseButton, StartCause, WindowEvent};
     use winit::event_loop::{ControlFlow, EventLoop};
     use winit::window::WindowBuilder;
 
-    let event_loop = EventLoop::new();
-    let proxy = event_loop.create_proxy();
-    let hmr_rx_for_thread = std::sync::Arc::clone(&hmr_rx);
-    let hmr_rx_for_loop = std::sync::Arc::clone(&hmr_rx);
-    std::thread::spawn(move || {
-        while let Ok(rx) = hmr_rx_for_thread.lock() {
-            if rx.recv().is_ok() {
-                let _ = proxy.send_event(());
-            } else {
-                break;
+    let headless_env_hmr = std::env::var("VELOX_HEADLESS").as_deref() == Ok("1")
+        || !crate::presenter::is_compositor_available();
+
+    // Prepare the winit backend: force X11 if Wayland socket is stale to
+    // avoid winit's Wayland backend calling process::exit() on EPIPE.
+    let _headless_check_hmr = crate::presenter::prepare_backend();
+
+    // Try to create a winit event loop and window. In headless mode or when
+    // no compositor is available, both can fail (winit may panic instead of
+    // returning Err) — we catch this and proceed with headless rendering.
+    let (event_loop_opt, proxy_opt, window, window_size, scale_factor): (
+        Option<winit::event_loop::EventLoop<()>>,
+        Option<winit::event_loop::EventLoopProxy<()>>,
+        Option<winit::window::Window>,
+        PhysicalSize<u32>,
+        f32,
+    ) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let event_loop = EventLoop::new();
+        let proxy = event_loop.create_proxy();
+        let window_result = WindowBuilder::new()
+            .with_title(title)
+            .with_inner_size(PhysicalSize::new(800, 600))
+            .build(&event_loop);
+        match window_result {
+            Ok(w) => {
+                let size = w.inner_size();
+                let sf = w.scale_factor() as f32;
+                (Some(event_loop), Some(proxy), Some(w), size, sf)
+            }
+            Err(e) => {
+                let msg = e.to_string();
+                let lower = msg.to_ascii_lowercase();
+                let is_display_err = lower.contains("broken pipe")
+                    || lower.contains("os error 32")
+                    || lower.contains("no compositor")
+                    || lower.contains("no display server")
+                    || lower.contains("failed to connect");
+                if headless_env_hmr || is_display_err {
+                    log::warn!(
+                        "window creation failed — continuing in headless mode: {msg}"
+                    );
+                    (Some(event_loop), Some(proxy), None, PhysicalSize::new(800, 600), 1.0)
+                } else {
+                    panic!("failed to create window: {e}");
+                }
             }
         }
+    }))
+    .unwrap_or_else(|_| {
+        log::warn!(
+            "window/event loop creation panicked — continuing in headless mode"
+        );
+        (None, None, None, PhysicalSize::new(800, 600), 1.0)
     });
 
-    let window = WindowBuilder::new()
-        .with_title(title)
-        .with_inner_size(PhysicalSize::new(800, 600))
-        .build(&event_loop)
-        .map_err(|e| format!("failed to create window: {e}"))?;
+    // Spawn the HMR receiver thread if we have an event loop proxy
+    if let Some(proxy) = proxy_opt {
+        let hmr_rx_for_thread = std::sync::Arc::clone(&hmr_rx);
+        std::thread::spawn(move || {
+            while let Ok(rx) = hmr_rx_for_thread.lock() {
+                if rx.recv().is_ok() {
+                    let _ = proxy.send_event(());
+                } else {
+                    break;
+                }
+            }
+        });
+    }
+    let hmr_rx_for_loop = std::sync::Arc::clone(&hmr_rx);
 
-    let size = window.inner_size();
+    let window_opt: Option<winit::window::Window> = window;
+    let mut scale_factor = scale_factor;
     let mut renderer =
-        match crate::skia_surface::SkiaSurface::new_raster(size.width as i32, size.height as i32) {
+        match crate::skia_surface::SkiaSurface::new_raster(window_size.width as i32, window_size.height as i32) {
             Ok(surface) => skia_backend::SkiaRenderer {
                 surface: Some(surface),
                 vnode: None,
@@ -924,14 +1219,31 @@ where
                 return Err(format!("failed to create SkiaSurface: {e}"));
             }
         };
-    let mut presenter =
-        match crate::presenter::SoftbufferPresenter::new(&window, size.width, size.height) {
-            Ok(p) => p,
-            Err(e) => {
-                return Err(format!("failed to create softbuffer presenter: {e}"));
+    let mut presenter: Option<crate::presenter::SoftbufferPresenter> = None;
+    if let Some(w) = window_opt.as_ref() {
+        // softbuffer::Context::new() can panic when the display server is
+        // unreachable even though DISPLAY/WAYLAND_DISPLAY are set (broken pipe).
+        // Catch such panics and degrade to headless rendering.
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            crate::presenter::SoftbufferPresenter::new(w, window_size.width, window_size.height)
+        })) {
+            Ok(Ok(p)) => presenter = Some(p),
+            Ok(Err(e)) => {
+                if headless_env_hmr || !crate::presenter::is_compositor_available() {
+                    log::warn!(
+                        "softbuffer presenter unavailable — continuing in headless mode: {e}"
+                    );
+                } else {
+                    return Err(format!("failed to create softbuffer presenter: {e}"));
+                }
             }
-        };
-    let mut scale_factor = window.scale_factor() as f32;
+            Err(_) => {
+                log::warn!(
+                    "softbuffer presenter creation panicked — continuing in headless mode"
+                );
+            }
+        }
+    }
     let mut mouse_pos = (0.0f32, 0.0f32);
     let mut hovered_id: Option<u32> = None;
     let mut click_targets: Vec<crate::events::ClickTarget> = Vec::new();
@@ -962,8 +1274,10 @@ where
         if let Err(e) = crate::skia_render::skia_impl::render_frame(s, &vnode, &sheet) {
             log::error!("skia initial render error: {}", e);
         }
-        if let Err(e) = presenter.present(s) {
-            log::error!("skia initial present error: {}", e);
+        if let Some(presenter) = presenter.as_mut() {
+            if let Err(e) = presenter.present(s) {
+                log::error!("skia initial present error: {}", e);
+            }
         }
     }
 
@@ -1016,7 +1330,11 @@ where
         }
     }
 
-    event_loop.run(move |event, _, control_flow| {
+    if let Some(event_loop) = event_loop_opt {
+        // The event loop can panic if the display server becomes unreachable
+        // (e.g. "Io error: Broken pipe") — catch that and degrade gracefully.
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        event_loop.run(move |event, _, control_flow| {
         *control_flow = ControlFlow::Wait;
         match event {
             Event::UserEvent(()) => {
@@ -1035,7 +1353,9 @@ where
                                 if let Err(e) = HmrRenderer::hot_update(&mut renderer, new_vnode) {
                                     log::error!("hot_update failed: {}", e);
                                 }
-                                window.request_redraw();
+                                if let Some(w) = window_opt.as_ref() {
+                                    w.request_redraw();
+                                }
                             }
                         }
                         HmrMessage::KeepWindow => {}
@@ -1043,7 +1363,9 @@ where
                 }
             }
             Event::NewEvents(StartCause::Init) => {
-                window.request_redraw();
+                if let Some(w) = window_opt.as_ref() {
+                    w.request_redraw();
+                }
             }
             Event::WindowEvent {
                 event: WindowEvent::CloseRequested,
@@ -1056,7 +1378,9 @@ where
                 ..
             } => {
                 let _ = renderer.resize(new_size.width as i32, new_size.height as i32);
-                let _ = presenter.resize(new_size.width, new_size.height);
+                if let Some(presenter) = presenter.as_mut() {
+                    let _ = presenter.resize(new_size.width, new_size.height);
+                }
                 if let Some(s) = &mut renderer.surface {
                     s.set_scale_factor(scale_factor);
                     let (vw, vh) = logical_size(s.width, s.height, scale_factor);
@@ -1074,7 +1398,9 @@ where
                     _last_vnode = Some(vnode.clone());
                     recompute_targets(&vnode, vw, vh, &mut click_targets, &mut hover_targets);
                 }
-                window.request_redraw();
+                if let Some(w) = window_opt.as_ref() {
+                    w.request_redraw();
+                }
             }
             Event::WindowEvent {
                 event:
@@ -1087,7 +1413,9 @@ where
             } => {
                 scale_factor = new_scale as f32;
                 let _ = renderer.resize(new_inner_size.width as i32, new_inner_size.height as i32);
-                let _ = presenter.resize(new_inner_size.width, new_inner_size.height);
+                if let Some(presenter) = presenter.as_mut() {
+                    let _ = presenter.resize(new_inner_size.width, new_inner_size.height);
+                }
                 if let Some(s) = &mut renderer.surface {
                     s.set_scale_factor(scale_factor);
                     let (vw, vh) = logical_size(s.width, s.height, scale_factor);
@@ -1105,7 +1433,9 @@ where
                     _last_vnode = Some(vnode.clone());
                     recompute_targets(&vnode, vw, vh, &mut click_targets, &mut hover_targets);
                 }
-                window.request_redraw();
+                if let Some(w) = window_opt.as_ref() {
+                    w.request_redraw();
+                }
             }
             Event::WindowEvent {
                 event: WindowEvent::CursorMoved { position, .. },
@@ -1119,7 +1449,9 @@ where
                     crate::events::hit_test_hover(&hover_targets, mouse_pos.0, mouse_pos.1);
                 if now_hovered != hovered_id {
                     hovered_id = now_hovered;
-                    window.request_redraw();
+                    if let Some(w) = window_opt.as_ref() {
+                        w.request_redraw();
+                    }
                 }
             }
             Event::WindowEvent {
@@ -1155,8 +1487,10 @@ where
                         _last_vnode = Some(vnode.clone());
                         recompute_targets(&vnode, vw, vh, &mut click_targets, &mut hover_targets);
                     }
-                    window.set_title(&get_title());
-                    window.request_redraw();
+                    if let Some(w) = window_opt.as_ref() {
+                        w.set_title(&get_title());
+                        w.request_redraw();
+                    }
                 }
             }
             Event::WindowEvent {
@@ -1201,14 +1535,22 @@ where
                     if let Err(e) = crate::skia_render::skia_impl::render_frame(s, &vnode, &sheet) {
                         log::error!("skia render error: {}", e);
                     }
-                    if let Err(e) = presenter.present(s) {
-                        log::error!("softbuffer present error: {}", e);
+                    if let Some(presenter) = presenter.as_mut() {
+                        if let Err(e) = presenter.present(s) {
+                            log::error!("softbuffer present error: {}", e);
+                        }
                     }
                 }
             }
             _ => {}
         }
     });
+    }));
+    } else {
+        // Headless mode — no event loop, just run the initial render and return.
+        log::info!("running in headless mode (no event loop)");
+    }
+    Ok(())
 }
 
 #[cfg(feature = "wgpu")]

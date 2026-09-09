@@ -8,6 +8,9 @@ pub fn parse_template_to_ast(input: &str) -> Result<Vec<Node>, String> {
     let mut i = 0usize;
     let bytes = input.as_bytes();
     let mut stack: Vec<Node> = Vec::new();
+    // Parallel stack tracking (tag, byte_offset) of *opening* elements, so we
+    // can report precise line/col positions for unclosed-tag warnings.
+    let mut open_info: Vec<(String, usize)> = Vec::new();
     let mut roots: Vec<Node> = Vec::new();
 
     #[allow(clippy::ptr_arg)]
@@ -23,6 +26,7 @@ pub fn parse_template_to_ast(input: &str) -> Result<Vec<Node>, String> {
         if bytes[i] == b'<' {
             // closing tag?
             if i + 1 < bytes.len() && bytes[i + 1] == b'/' {
+                let close_pos = i;
                 i += 2;
                 let tag = read_ident(bytes, &mut i);
                 skip_ws(bytes, &mut i);
@@ -43,12 +47,23 @@ pub fn parse_template_to_ast(input: &str) -> Result<Vec<Node>, String> {
                     }
                 }
                 if let Some(n) = popped {
+                    // Drop the innermost recorded opening tag of the same name
+                    // so it is no longer reported as unclosed.
+                    if let Some(idx) = open_info.iter().rposition(|(t, _)| *t == tag) {
+                        open_info.remove(idx);
+                    }
                     push_child(&mut stack, &mut roots, n);
+                } else {
+                    let (line, col) = crate::diagnostic::line_col_at(input, close_pos);
+                    eprintln!(
+                        "velox: warning: unmatched closing tag </{tag}> at {line},{col} — no matching opening tag; ignoring"
+                    );
                 }
                 continue;
             }
 
             // opening or self-closing tag
+            let open_pos = i;
             i += 1;
             let tag = read_ident(bytes, &mut i);
             let mut attrs: Vec<TemplateAttr> = Vec::new();
@@ -98,6 +113,7 @@ pub fn parse_template_to_ast(input: &str) -> Result<Vec<Node>, String> {
                     },
                 );
             } else {
+                open_info.push((tag.clone(), open_pos));
                 stack.push(Node::Element {
                     tag,
                     attrs,
@@ -107,20 +123,26 @@ pub fn parse_template_to_ast(input: &str) -> Result<Vec<Node>, String> {
             }
         } else if i + 1 < bytes.len() && bytes[i] == b'{' && bytes[i + 1] == b'{' {
             // interpolation
+            let open_pos = i;
             i += 2;
             let start = i;
             while i + 1 < bytes.len() && !(bytes[i] == b'}' && bytes[i + 1] == b'}') {
                 i += 1;
             }
             if i + 1 >= bytes.len() {
-                // Unclosed interpolation — emit as text instead of silent truncation
-                eprintln!(
-                    "velox: warning: unclosed '{{{{' at position {}, treating as text",
-                    start - 2
-                );
-                let text_content = input[start - 2..].to_string();
-                push_child(&mut stack, &mut roots, Node::Text(text_content));
-                break;
+                // Unclosed interpolation: report a rich, user-facing error instead
+                // of silently treating the remainder as text.
+                let (line, col) = crate::diagnostic::line_col_at(input, open_pos);
+                let message = "unclosed '{{' — expected a matching '}}'".to_string();
+                let suggestion = "close the interpolation with '}}', e.g. '{{ count }}'".to_string();
+                return Err(crate::diagnostic::render_parse_error(
+                    input,
+                    line,
+                    col,
+                    2,
+                    &message,
+                    Some(&suggestion),
+                ));
             }
             let expr = input[start..i].trim().to_string();
             i += 2; // skip "}}"
@@ -146,8 +168,20 @@ pub fn parse_template_to_ast(input: &str) -> Result<Vec<Node>, String> {
         }
     }
 
-    // Unclosed tags: drain stack to roots (best-effort)
+    // Unclosed tags: drain stack to roots (best-effort), warning about each so
+    // users know their markup is malformed even though we parse leniently.
     while let Some(n) = stack.pop() {
+        if let Node::Element { tag, .. } = &n {
+            if let Some((line, col)) = open_info
+                .iter()
+                .find(|(t, _)| t == tag)
+                .map(|(_, pos)| crate::diagnostic::line_col_at(input, *pos))
+            {
+                eprintln!(
+                    "velox: warning: unclosed tag <{tag}> at {line},{col} — add a matching </{tag}>"
+                );
+            }
+        }
         push_child(&mut stack, &mut roots, n);
     }
 

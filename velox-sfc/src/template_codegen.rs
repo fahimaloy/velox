@@ -1,7 +1,8 @@
 use crate::component_resolver::ComponentResolver;
+use crate::script_index::{StateMethod, extract_state_methods, method_names, resolve_method_name};
 use crate::template_ast::{AttrKind, Node, TemplateAttr};
 use crate::template_parse::is_all_ws;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 /// Determines how identifiers are resolved in generated code.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -143,11 +144,34 @@ fn validate_template(nodes: &[Node]) -> Vec<String> {
     errors
 }
 
-/// Public API: compile `<template>` string to a Rust module body with `render()`.
+/// Compile a `<template>` with no script indexing or cross-component handlers.
+/// Convenience wrapper used by tests and single-file compilation.
 pub fn compile_template_to_rs(
     template_src: &str,
+    component_name: &str,
+    resolver: Option<&mut ComponentResolver>,
+) -> Result<String, String> {
+    compile_template_to_rs_full(template_src, component_name, resolver, None, None)
+}
+
+/// Full public API: compile `<template>` string to a Rust module body with `render()`.
+///
+/// `script_setup` is the raw `<script setup>` block (if any); it is indexed so
+/// template keys can be resolved to the actual State method names and component
+/// tags can be matched to persistent child-state fields.
+///
+/// `scope_id` is the optional CSS scope attribute (e.g. `"data-v-abc123"`) that
+/// should be added to every rendered element so scoped CSS selectors match.
+///
+/// When a `resolver` is provided, handlers are collected across the component
+/// tree so the root dispatcher can route child-component events to the owning
+/// persistent State field.
+pub fn compile_template_to_rs_full(
+    template_src: &str,
     _component_name: &str,
-    resolver: Option<&ComponentResolver>,
+    mut resolver: Option<&mut ComponentResolver>,
+    script_setup: Option<&str>,
+    scope_id: Option<&str>,
 ) -> Result<String, String> {
     let nodes = crate::template_parse::parse_template_to_ast(template_src)?;
 
@@ -160,30 +184,35 @@ pub fn compile_template_to_rs(
     // For MVP, assume a single root node.
     let mut nodes = nodes;
 
-    // Transform components if resolver is provided
-    if let Some(resolver) = resolver {
+    // Index the script block so codegen can resolve template keys to the real
+    // State method names and match component tags to persistent state fields.
+    let methods = script_setup.map(extract_state_methods).unwrap_or_default();
+    let names = method_names(&methods);
+    let fields = script_setup
+        .map(crate::script_index::extract_state_fields)
+        .unwrap_or_default();
+
+    // Transform components if resolver is provided.
+    if let Some(resolver) = &mut resolver {
         super::component_resolver::transform_components(&mut nodes, resolver);
     }
 
-    if nodes.is_empty() {
-        return Ok(r#"pub fn render() -> velox_dom::VNode {
-    use velox_dom::*;
-    text("")
-}
-
-pub fn render_with_props(props: std::collections::HashMap<&str, String>) -> velox_dom::VNode {
-    let resolve_props = |key: &str| -> String {
-        props.get(key).cloned().unwrap_or_default()
+    // Collect handlers from the whole component tree so the dispatcher can route
+    // child-component events to the owning persistent State field.
+    let tree_handlers = if let Some(resolver) = &mut resolver {
+        collect_component_tree_handlers(&nodes, resolver, &fields)
+    } else {
+        Vec::new()
     };
-    render_with(resolve_props)
-}"#
-        .to_string());
+
+    if nodes.is_empty() {
+        return Ok(empty_component_module());
     }
 
     // For MVP, assume a single root node.
     let root = &nodes[0];
-    let body_with = emit_node_with(root);
-    let body_with_state = emit_node_with_state(root);
+    let body_with = emit_node_with(root, &fields, scope_id);
+    let body_with_state = emit_node_with_state(root, &fields, scope_id);
 
     let mut out = format!(
         r#"pub fn render() -> velox_dom::VNode {{
@@ -197,75 +226,36 @@ pub fn render_with<F>(mut resolve: F) -> velox_dom::VNode where F: FnMut(&str) -
         body_with = body_with
     );
 
-    // Also emit render_with_state that accepts a `state: Arc<script_rs::State>`
+    // render_with_state accepts a `state: Arc<script_rs::State>`; the param is
+    // named `state` so v-for/component codegen can read `state.{field}`.
     out.push_str("\n\n");
     out.push_str(&format!(
         r#"#[allow(clippy::arc_with_non_send_sync)]
-pub fn render_with_state<F>(_state: std::sync::Arc<script_rs::State>, mut resolve: F) -> velox_dom::VNode where F: FnMut(&str) -> String {{
+#[allow(unused_variables)]
+pub fn render_with_state<F>(state: std::sync::Arc<script_rs::State>, mut resolve: F) -> velox_dom::VNode where F: FnMut(&str) -> String {{
     use velox_dom::*;
     {body_with_state}
 }}"#,
         body_with_state = body_with_state
     ));
 
-    // Collect event handler names from the template and generate a helper
-    let handlers = collect_handlers(&nodes);
-    if !handlers.is_empty() {
-        out.push_str("\n\n");
-        out.push_str(&generate_make_on_event(&handlers));
-    }
-
-    // Generate render_with_props that accepts a HashMap of props from parent components.
-    // When the component has interpolations AND a script_setup block with a State struct,
-    // create a State instance and use its methods as fallback resolvers. This ensures
-    // child components render correctly even when no props are explicitly passed.
-    // Props always take priority over state method calls.
-    //
-    // Convention: interpolation keys map directly to State methods.
-    //   {{ text }}     → state.text()
-    //   {{ completed }} → state.completed()
-    // If a method doesn't exist, the user must either add it or pass the value as a prop.
+    // make_resolve: maps template interpolation keys to State getters so main.rs
+    // does not hand-write a resolve closure. Supports both bare (`title()`) and
+    // prefixed (`get_title()`) getter conventions.
     let interp_keys = collect_interpolation_keys(&nodes);
     out.push_str("\n\n");
-    if interp_keys.is_empty() {
-        out.push_str(
-            r#"pub fn render_with_props(props: std::collections::HashMap<&str, String>) -> velox_dom::VNode {
-    let resolve_props = |key: &str| -> String {
-        props.get(key).cloned().unwrap_or_default()
-    };
-    render_with(resolve_props)
-}"#,
-        );
-    } else {
-        let mut match_arms = String::new();
-        for key in &interp_keys {
-            let method_name: String = key.chars().enumerate().map(|(i, c)| {
-                if i == 0 && c.is_ascii_digit() { '_'.to_string() }
-                else if c.is_ascii_alphanumeric() || c == '_' { c.to_string() }
-                else { "_".to_string() }
-            }).collect();
-            match_arms.push_str(&format!(
-                "            \"{}\" => state.{}().to_string(),\n",
-                key, method_name
-            ));
-        }
-        out.push_str(&format!(
-            r#"pub fn render_with_props(props: std::collections::HashMap<&str, String>) -> velox_dom::VNode {{
-    let state = script_rs::State::new();
-    let resolve_props = |key: &str| -> String {{
-        if let Some(v) = props.get(key) {{
-            v.clone()
-        }} else {{
-            match key {{
-{match_arms}                _ => String::new(),
-            }}
-        }}
-    }};
-    render_with(resolve_props)
-}}"#,
-            match_arms = match_arms
-        ));
-    }
+    out.push_str(&generate_make_resolve(&interp_keys, &names));
+
+    // make_on_event: dispatch every template handler (plus, for the root, every
+    // handler anywhere in the component tree) to the owning State method.
+    let handlers = collect_handlers(&nodes);
+    out.push_str("\n\n");
+    out.push_str(&generate_make_on_event(&handlers, &tree_handlers, &methods));
+
+    // render_with_props: for presentational child components. Props take
+    // priority; interpolations fall back to State getters.
+    out.push_str("\n\n");
+    out.push_str(&generate_render_with_props(&interp_keys, &names));
 
     Ok(out)
 }
@@ -281,7 +271,14 @@ fn collect_handlers(nodes: &[Node]) -> Vec<String> {
                 if let AttrKind::On = a.kind
                     && let Some(v) = &a.value
                 {
-                    set.insert(v.clone());
+                    // Parse event modifiers: @click.stop, @click.prevent, etc.
+                    let (base_event, modifier) = parse_event_modifier(v);
+                    let handler_key = if let Some(m) = modifier {
+                        format!("{}.{}", base_event, m)
+                    } else {
+                        base_event.clone()
+                    };
+                    set.insert(handler_key);
                 }
                 // Collect v-model handlers: v-model="field" → __vmodel_set_field
                 if matches!(a.kind, AttrKind::Directive)
@@ -304,41 +301,406 @@ fn collect_handlers(nodes: &[Node]) -> Vec<String> {
     v
 }
 
-fn generate_make_on_event(handlers: &[String]) -> String {
-    // Generate a simple dispatch helper that calls methods on `app::script_rs::State`.
-    // v-model handlers (`__vmodel_set_*`) receive the event payload; other handlers are zero-arg.
+/// Parse an event handler string into (base_event, modifier).
+/// e.g., "click.stop" → ("click", Some("stop"))
+/// e.g., "click" → ("click", None)
+fn parse_event_modifier(handler: &str) -> (String, Option<String>) {
+    let parts: Vec<&str> = handler.split('.').collect();
+    if parts.len() >= 2 {
+        // Check if the last part is a known modifier
+        let modifier = parts[parts.len() - 1].to_string();
+        let known_modifiers = ["stop", "prevent", "once", "capture", "self"];
+        if known_modifiers.iter().any(|&m| m == modifier) {
+            let base: String = parts[..parts.len() - 1].join(".");
+            (base, Some(modifier))
+        } else {
+            // Not a known modifier, treat as regular handler
+            (handler.to_string(), None)
+        }
+    } else {
+        (handler.to_string(), None)
+    }
+}
+
+/// Collect every `@event` handler across the component tree, attributing each to
+/// the nearest persistent State field (the field on this component's State that
+/// matches the lowercased component tag). Used to build the root dispatcher so
+/// child-component events route to `state.{owner}.{method}`.
+fn collect_component_tree_handlers(
+    nodes: &[Node],
+    resolver: &mut ComponentResolver,
+    fields: &[String],
+) -> Vec<crate::script_index::TreeHandler> {
+    let mut out = Vec::new();
+    let mut seen: HashSet<String> = HashSet::new();
+    collect_tree_handlers_inner(nodes, resolver, fields, None, None, &mut out, &mut seen);
+    out
+}
+
+#[allow(clippy::too_many_arguments)]
+fn collect_tree_handlers_inner(
+    nodes: &[Node],
+    resolver: &mut ComponentResolver,
+    fields: &[String],
+    owner: Option<&str>,
+    owner_methods: Option<&[StateMethod]>,
+    out: &mut Vec<crate::script_index::TreeHandler>,
+    seen: &mut HashSet<String>,
+) {
+    for n in nodes {
+        let Node::Element {
+            attrs, children, ..
+        } = n
+        else {
+            continue;
+        };
+
+        // Local @event handlers on this element.
+        for a in attrs {
+            if let AttrKind::On = a.kind
+                && let Some(v) = &a.value
+            {
+                let takes_payload = owner_methods
+                    .map(|ms| ms.iter().any(|m| m.name == *v && m.takes_payload))
+                    .unwrap_or(false);
+                out.push(crate::script_index::TreeHandler {
+                    name: v.clone(),
+                    owner: owner.map(String::from),
+                    takes_payload,
+                });
+            }
+        }
+
+        // Component element: descend into its template.
+        if let Some(comp_attr) = attrs
+            .iter()
+            .find(|a| a.name == "data-velox-component" && a.kind == AttrKind::Static)
+            && let Some(comp_name) = &comp_attr.value
+        {
+            let field = comp_name.to_lowercase();
+            let becomes_owner = owner.is_none() && fields.contains(&field);
+            let child_owner: Option<String> = if becomes_owner {
+                Some(field)
+            } else {
+                owner.map(String::from)
+            };
+
+            if seen.insert(comp_name.clone())
+                && let Ok(sfc) = resolver.load_component(comp_name)
+            {
+                // Clone content so `sfc`'s borrow ends before recursing.
+                let child_script = sfc.script_setup.as_ref().map(|b| b.content.clone());
+                let child_tpl = sfc.template.as_ref().map(|t| t.content.clone());
+
+                // When this component becomes the owner, its State methods tell us
+                // which handlers take a payload. Otherwise inherit the owner's.
+                let subtree_methods = if becomes_owner {
+                    child_script.as_deref().map(extract_state_methods)
+                } else {
+                    None
+                };
+                let child_methods: Option<&[StateMethod]> = if becomes_owner {
+                    subtree_methods.as_deref()
+                } else {
+                    owner_methods
+                };
+
+                if let Some(tpl) = child_tpl
+                    && let Ok(child_nodes) = crate::template_parse::parse_template_to_ast(&tpl)
+                {
+                    collect_tree_handlers_inner(
+                        &child_nodes,
+                        resolver,
+                        fields,
+                        child_owner.as_deref(),
+                        child_methods,
+                        out,
+                        seen,
+                    );
+                }
+            }
+        }
+
+        // Recurse into plain element children.
+        collect_tree_handlers_inner(children, resolver, fields, owner, owner_methods, out, seen);
+    }
+}
+
+fn generate_make_on_event(
+    handlers: &[String],
+    extra_handlers: &[crate::script_index::TreeHandler],
+    methods: &[StateMethod],
+) -> String {
+    // Generate a dispatch helper that routes every template event to a State
+    // method. v-model handlers (`__vmodel_set_*`) and methods declared with a
+    // payload parameter receive the event payload; other handlers are zero-arg.
+    // Handlers owned by a persistent child component state (`extra_handlers`)
+    // route to `state.{owner}.{method}` instead of this component's State.
+    // Event modifiers (`.stop`, `.prevent`, `.once`, `.capture`, `.self`) are
+    // parsed from the handler name and the appropriate DOM method is called on
+    // the payload event.
+    let names = method_names(methods);
+    let mut extra_by_name: HashMap<&str, &crate::script_index::TreeHandler> = HashMap::new();
+    for eh in extra_handlers {
+        extra_by_name.entry(&eh.name).or_insert(eh);
+    }
+
     let mut arms = String::new();
-    let has_vmodel = handlers.iter().any(|h| h.starts_with("__vmodel_set_"));
+    let mut used: HashSet<String> = HashSet::new();
+    let mut uses_payload = false;
+
+    // Known event modifiers and the Rust code to call on the DOM event
+    let modifier_handlers: HashMap<&str, &str> = [
+        ("stop", "e.stop_propagation()"),
+        ("prevent", "e.prevent_default()"),
+        ("once", "// mark as handled once"),
+        ("capture", "// capture phase handling"),
+        ("self", "// only handle if event target is this element"),
+    ]
+    .iter()
+    .cloned()
+    .collect();
+
     for h in handlers {
         if h.starts_with("__vmodel_set_") {
             arms.push_str(&format!(
                 "        \"{name}\" => {{ if let Some(p) = payload {{ state.{name}(p); }} }},\n",
                 name = h
             ));
+            uses_payload = true;
+        } else if let Some(eh) = extra_by_name.get(h.as_str())
+            && let Some(owner) = eh.owner.as_deref()
+        {
+            // Handler owned by a persistent child component state field.
+            if eh.takes_payload {
+                arms.push_str(&format!(
+                    "        \"{name}\" => {{ if let Some(p) = payload {{ state.{owner}.{method}(p); }} }},\n",
+                    name = h, owner = owner, method = eh.name
+                ));
+                uses_payload = true;
+            } else {
+                arms.push_str(&format!(
+                    "        \"{name}\" => {{ state.{owner}.{method}(); }},\n",
+                    name = h,
+                    owner = owner,
+                    method = eh.name
+                ));
+            }
+        } else {
+            // Local handler on this component's State.
+            // Parse event modifiers from the handler name (e.g., "click.stop")
+            let (base_event, modifier) = parse_event_modifier(h);
+            let method = resolve_method_name(&names, &base_event);
+            let takes_payload = methods.iter().any(|m| m.name == method && m.takes_payload);
+
+            if takes_payload {
+                // Generate arm with modifier handling
+                let mod_code = match modifier.as_deref() {
+                    Some("stop") => "e.stop_propagation()",
+                    Some("prevent") => "e.prevent_default()",
+                    Some("once") => "// mark as handled once",
+                    Some("capture") => "// capture phase handling",
+                    Some("self") => "// only handle if event target is this element",
+                    _ => "",
+                };
+                arms.push_str(&format!(
+                    "        \"{original}\" => {{ if let Some(p) = payload {{ state.{method}(p); {mod_code} }} }},\n",
+                    original = h,
+                    method = method,
+                    mod_code = mod_code
+                ));
+                uses_payload = true;
+            } else {
+                // Zero-arg handler with modifier
+                let mod_code = match modifier.as_deref() {
+                    Some("stop") => "e.stop_propagation()",
+                    Some("prevent") => "e.prevent_default()",
+                    Some("once") => "// mark as handled once",
+                    Some("capture") => "// capture phase handling",
+                    Some("self") => "// only handle if event target is this element",
+                    _ => "",
+                };
+                arms.push_str(&format!(
+                    "        \"{original}\" => {{ state.{method}(); {mod_code} }},\n",
+                    original = h,
+                    method = method,
+                    mod_code = mod_code
+                ));
+            }
+        }
+        used.insert(h.clone());
+    }
+
+    // Extra handlers not already covered by a local template event still need
+    // an arm — they may be defined only inside a child component's template.
+    // Handlers without an owner are local to this component (already covered);
+    // only owner-attributed ones route through a persistent State field.
+    for eh in extra_handlers {
+        if used.contains(&eh.name) {
+            continue;
+        }
+        let Some(owner) = eh.owner.as_deref() else {
+            continue;
+        };
+        if eh.takes_payload {
+            arms.push_str(&format!(
+                "        \"{name}\" => {{ if let Some(p) = payload {{ state.{owner}.{method}(p); }} }},\n",
+                name = eh.name, owner = owner, method = eh.name
+            ));
+            uses_payload = true;
         } else {
             arms.push_str(&format!(
-                "        \"{name}\" => {{ state.{name}(); }},\n",
-                name = h
+                "        \"{name}\" => {{ state.{owner}.{method}(); }},\n",
+                name = eh.name,
+                owner = owner,
+                method = eh.name
             ));
         }
     }
 
-    let param = if has_vmodel { "payload" } else { "_payload" };
     format!(
         r#"#[allow(clippy::arc_with_non_send_sync)]
 pub fn make_on_event(state: std::sync::Arc<script_rs::State>) -> impl FnMut(&str, Option<&str>) + 'static {{
-    move |name: &str, {param}: Option<&str>| {{
+    move |name: &str, payload: Option<&str>| {{
         match name {{
 {arms}            _ => {{}}
         }}
     }}
 }}"#,
-        arms = arms,
-        param = param
+        arms = arms
     )
 }
 
-#[allow(dead_code)]
+/// Generate a `make_resolve(state)` helper that maps template interpolation keys
+/// to State getters. `main.rs` uses it instead of hand-writing a resolve closure.
+fn generate_make_resolve(interp_keys: &[String], names: &[String]) -> String {
+    let mut arms = String::new();
+    for key in interp_keys {
+        let method = resolve_method_name(names, key);
+        arms.push_str(&format!(
+            "        \"{}\" => state.{}().to_string(),\n",
+            key, method
+        ));
+    }
+    format!(
+        r#"#[allow(clippy::arc_with_non_send_sync)]
+pub fn make_resolve(state: std::sync::Arc<script_rs::State>) -> impl FnMut(&str) -> String {{
+    move |name: &str| match name {{
+{arms}        _ => String::new(),
+    }}
+}}"#,
+        arms = arms
+    )
+}
+
+/// Generate `render_with_props` — props take priority, interpolations fall back
+/// to State getters so a presentational child renders correctly even when the
+/// parent omits a prop.
+fn generate_render_with_props(interp_keys: &[String], names: &[String]) -> String {
+    if interp_keys.is_empty() {
+        return r#"pub fn render_with_props(props: std::collections::HashMap<&str, String>) -> velox_dom::VNode {
+    let resolve_props = |key: &str| -> String {
+        props.get(key).cloned().unwrap_or_default()
+    };
+    render_with(resolve_props)
+}"#
+        .to_string();
+    }
+    let mut match_arms = String::new();
+    for key in interp_keys {
+        let method = resolve_method_name(names, key);
+        match_arms.push_str(&format!(
+            "            \"{}\" => state.{}().to_string(),\n",
+            key, method
+        ));
+    }
+    format!(
+        r#"pub fn render_with_props(props: std::collections::HashMap<&str, String>) -> velox_dom::VNode {{
+    let state = script_rs::State::new();
+    let resolve_props = |key: &str| -> String {{
+        if let Some(v) = props.get(key) {{
+            v.clone()
+        }} else {{
+            match key {{
+{match_arms}                _ => String::new(),
+            }}
+        }}
+    }};
+    render_with(resolve_props)
+}}"#,
+        match_arms = match_arms
+    )
+}
+
+/// Minimal module emitted when a component has no template.
+fn empty_component_module() -> String {
+    r#"pub fn render() -> velox_dom::VNode {
+    use velox_dom::*;
+    text("")
+}
+
+pub fn render_with<F>(mut resolve: F) -> velox_dom::VNode where F: FnMut(&str) -> String {
+    use velox_dom::*;
+    text("")
+}
+
+#[allow(clippy::arc_with_non_send_sync)]
+pub fn render_with_state<F>(state: std::sync::Arc<script_rs::State>, mut resolve: F) -> velox_dom::VNode where F: FnMut(&str) -> String {
+    use velox_dom::*;
+    text("")
+}
+
+#[allow(clippy::arc_with_non_send_sync)]
+pub fn make_resolve(state: std::sync::Arc<script_rs::State>) -> impl FnMut(&str) -> String {
+    move |_name: &str| String::new()
+}
+
+pub fn make_on_event(state: std::sync::Arc<script_rs::State>) -> impl FnMut(&str, Option<&str>) + 'static {
+    move |_name: &str, _payload: Option<&str>| {}
+}
+
+pub fn render_with_props(props: std::collections::HashMap<&str, String>) -> velox_dom::VNode {
+    let resolve_props = |key: &str| -> String {
+        props.get(key).cloned().unwrap_or_default()
+    };
+    render_with(resolve_props)
+}"#
+    .to_string()
+}
+
+/// Emit code for a `<slot>` element.
+///
+/// `<slot>` elements appear inside component templates and act as outlets for
+/// slot content passed from the parent component. The slot's name is determined
+/// by the `name` attribute (defaulting to "default").
+///
+/// Slot content is passed from the parent as a `HashMap<&str, VNode>` under
+/// the key "slot:{name}". At render time, `render_slot` looks up the slot name
+/// and returns the slot VNode, falling back to the slot's own children
+/// (fallback content) if no slot was provided.
+fn emit_slot_node(
+    attrs: &[TemplateAttr],
+    children: &[Node],
+    mode: TransformMode,
+    fields: &[String],
+    scope_id: Option<&str>,
+) -> String {
+    let slot_name = attrs
+        .iter()
+        .find(|a| a.name == "name" && matches!(a.kind, AttrKind::Static))
+        .and_then(|a| a.value.clone())
+        .unwrap_or_else(|| "default".to_string());
+
+    // Emit fallback content (the slot's children).
+    let fallback = emit_children_with_mode(children, mode, fields, scope_id);
+
+    format!(
+        r#"render_slot({slot_name_lit}, || {{ {fallback} }})"#,
+        slot_name_lit = string_lit(&slot_name),
+        fallback = fallback,
+    )
+}
+
 pub(crate) fn emit_node(n: &Node) -> String {
     match n {
         Node::Text(t) => format!(r#"text({})"#, string_lit(t)),
@@ -552,7 +914,7 @@ fn extract_vmodel(attrs: &[TemplateAttr], _tag: &str) -> (Vec<TemplateAttr>, Opt
     }
 }
 
-fn emit_node_with_mode(n: &Node, mode: TransformMode) -> String {
+fn emit_node_with_mode(n: &Node, mode: TransformMode, fields: &[String], scope_id: Option<&str>) -> String {
     match n {
         Node::Text(t) => format!(r#"text({})"#, string_lit(t)),
         Node::Interpolation(expr) => {
@@ -565,6 +927,13 @@ fn emit_node_with_mode(n: &Node, mode: TransformMode) -> String {
             children,
             ..
         } => {
+            // Handle <slot> elements: render slot content passed as props from parent.
+            // Slot content is stored as a serialized VNode tree in props under
+            // "slot:{name}" (or "slot:default" for unnamed slots).
+            if tag == "slot" {
+                return emit_slot_node(attrs, children, mode, fields, scope_id);
+            }
+
             // Handle v-model directive: convert to :value + @input
             let (attrs2, _v_model_handler) = extract_vmodel(attrs, tag);
             let attrs = &attrs2;
@@ -583,28 +952,144 @@ fn emit_node_with_mode(n: &Node, mode: TransformMode) -> String {
                     children: children.clone(),
                     self_closing: false,
                 };
-                let inner = emit_node_with_mode(&tmp, mode);
+                let inner = emit_node_with_mode(&tmp, mode, fields, scope_id);
                 return format!(r#"if {} {{ {} }} else {{ text("") }}"#, expr.trim(), inner);
             }
 
-            // Check if this is a component (has data-velox-component marker)
-            if let Some(component_attr) = attrs
+            // handle directive `v-show`
+            // v-show always renders the element but toggles CSS `display: none`
+            // based on the expression, preserving it in the DOM (unlike v-if).
+            if let Some(pos) = attrs
                 .iter()
-                .find(|a| a.name == "data-velox-component" && a.kind == AttrKind::Static)
+                .position(|a| matches!(a.kind, AttrKind::Directive) && a.name == "show")
+            {
+                let mut attrs2 = attrs.clone();
+                let dir = attrs2.remove(pos);
+                let expr = rewrite_if_expr(&dir.value.unwrap_or_default());
+
+                // Build the element without the v-show directive, then conditionally
+                // set display style based on the expression value.
+                let inner = emit_node_with_mode(
+                    &Node::Element {
+                        tag: tag.clone(),
+                        attrs: attrs2,
+                        children: children.clone(),
+                        self_closing: false,
+                    },
+                    mode,
+                    fields,
+                    scope_id,
+                );
+
+                // If the element already has a `style` attribute, we merge the
+                // display value. Otherwise, we add a style attribute.
+                let has_style = attrs
+                    .iter()
+                    .any(|a| a.name == "style" && matches!(a.kind, AttrKind::Static | AttrKind::Bind));
+
+                if has_style {
+                    // The style attr is already emitted by emit_node_with_mode.
+                    // We wrap the result: if expression is false, override display.
+                    return format!(
+                        r#"{{ let __node = {inner}; if !({expr}) {{ if let velox_dom::VNode::Element {{ ref mut props, .. }} = __node {{ props.attrs.entry("style".to_string()).and_modify(|s| {{ if s.contains("display:") {{ /* preserve existing display */ }} else {{ s.push_str("; display: none"); }} }}).or_insert_with(|| "display: none".to_string()); }} }} __node }}"#,
+                        inner = inner,
+                        expr = expr.trim()
+                    );
+                } else {
+                    return format!(
+                        r#"{{ let __node = {inner}; if !({expr}) {{ if let velox_dom::VNode::Element {{ ref mut props, .. }} = __node {{ props.attrs.insert("style".to_string(), "display: none".to_string()); }} }} __node }}"#,
+                        inner = inner,
+                        expr = expr.trim()
+                    );
+                }
+            }
+
+            // Check if this is a component (has data-velox-component marker).
+            // A component with v-for falls through to the v-for branch below so
+            // it iterates instead of rendering once.
+            let has_v_for = attrs
+                .iter()
+                .any(|a| matches!(a.kind, AttrKind::Directive) && a.name == "for");
+            if !has_v_for
+                && let Some(component_attr) = attrs
+                    .iter()
+                    .find(|a| a.name == "data-velox-component" && a.kind == AttrKind::Static)
                 && let Some(comp_name) = &component_attr.value
             {
                 let mut clean_attrs = attrs.clone();
                 clean_attrs.retain(|a| a.name != "data-velox-component");
 
+                // Separate slot children from props/events.
+                // Children that are plain Element/Text/Interpolation nodes are
+                // slot content (default slot). Children with v-slot:foo directive
+                // or with a parent that has #foo / #default shorthand go into
+                // named slots — for MVP we treat all non-prop children as the
+                // default slot.
+                let has_slot_children = !children.is_empty();
+
+                // Persistent child state: when the parent State declares a field
+                // matching the lowercased component tag and the instance is
+                // prop-less, render with the child's persistent State so it can
+                // own mutable state across renders (state survives because it is
+                // created once in the parent's State::new()).
+                let field = comp_name.to_lowercase();
+                let has_props_events = clean_attrs
+                    .iter()
+                    .any(|a| matches!(a.kind, AttrKind::Bind | AttrKind::On));
+                if mode == TransformMode::State && !has_props_events && !has_slot_children && fields.contains(&field) {
+                    return format!(
+                        r#"{comp_name}::render_with_state(std::sync::Arc::clone(&state.{field}), {comp_name}::make_resolve(std::sync::Arc::clone(&state.{field})))"#,
+                    );
+                }
+
                 let (_has_props, props_expr) = generate_component_props_expr(&clean_attrs);
                 let callbacks = collect_component_callbacks(&clean_attrs);
 
-                if callbacks.is_empty() {
+                if callbacks.is_empty() && !has_slot_children {
                     return format!(
                         r#"{{ let __props = {props_expr}; {comp_name}::render_with_props(__props) }}"#,
                     );
                 }
 
+                // Build slots map from default slot children.
+                // Named slots (#foo="slotProps" or v-slot:foo) are a future
+                // extension; for now all children become the "default" slot.
+                let slots_expr = if has_slot_children {
+                    let slot_vnodes: Vec<String> = children
+                        .iter()
+                        .map(|c| emit_node_with_mode(c, mode, fields, scope_id))
+                        .collect();
+                    format!(
+                        r#"std::collections::HashMap::from([("default", {})])"#,
+                        if slot_vnodes.len() == 1 {
+                            slot_vnodes[0].clone()
+                        } else {
+                            format!("velox_dom::h(\"slot\", velox_dom::Props::new(), vec![{}])", slot_vnodes.join(", "))
+                        }
+                    )
+                } else {
+                    "std::collections::HashMap::new()".to_string()
+                };
+
+                // No slot children but has callbacks: use render_with_callbacks
+                if !has_slot_children {
+                    let callback_map = format_callback_map(&callbacks);
+                    let callback_names: Vec<String> = callbacks
+                        .iter()
+                        .map(|(_, handler)| handler.clone())
+                        .collect();
+
+                    return format!(
+                        r#"{{ let __props = {props_expr}; let __callbacks = {callback_map}; {comp_name}::render_with_callbacks(__props, &__callbacks, &[{callback_names}]) }}"#,
+                        callback_names = callback_names
+                            .iter()
+                            .map(|n| format!("\"{}\"", n))
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    );
+                }
+
+                // Has both callbacks and slot children: use render_with_slots
                 let callback_map = format_callback_map(&callbacks);
                 let callback_names: Vec<String> = callbacks
                     .iter()
@@ -612,7 +1097,7 @@ fn emit_node_with_mode(n: &Node, mode: TransformMode) -> String {
                     .collect();
 
                 return format!(
-                    r#"{{ let __props = {props_expr}; let __callbacks = {callback_map}; {comp_name}::render_with_callbacks(__props, &__callbacks, &[{callback_names}]) }}"#,
+                    r#"{{ let __props = {props_expr}; let __callbacks = {callback_map}; let __slots = {slots_expr}; {comp_name}::render_with_slots(__props, &__callbacks, &[{callback_names}], &__slots) }}"#,
                     callback_names = callback_names
                         .iter()
                         .map(|n| format!("\"{}\"", n))
@@ -678,7 +1163,7 @@ fn emit_node_with_mode(n: &Node, mode: TransformMode) -> String {
                                 idx_var = for_info.index_name
                             ));
 
-                            let inner = emit_node_with_ctx_for_loop(&tmp_elem, &for_info);
+                            let inner = emit_node_with_ctx_for_loop(&tmp_elem, &for_info, scope_id);
 
                             let inner_with_key = if let Some(Some(key_val)) = &key_expr {
                                 format!(
@@ -692,19 +1177,24 @@ fn emit_node_with_mode(n: &Node, mode: TransformMode) -> String {
 
                             if let Some(if_pos) = v_if_pos {
                                 let dir_if = &attrs[if_pos];
-                                let expr_if = rewrite_if_expr(&dir_if.value.clone().unwrap_or_default());
+                                let expr_if =
+                                    rewrite_if_expr(&dir_if.value.clone().unwrap_or_default());
                                 loop_code.push_str(&format!(
                                     "    if {} {{\n        __children.push({});\n    }}\n",
                                     expr_if.trim(),
                                     inner_with_key
                                 ));
                             } else {
-                                loop_code.push_str(&format!("    __children.push({});\n", inner_with_key));
+                                loop_code.push_str(&format!(
+                                    "    __children.push({});\n",
+                                    inner_with_key
+                                ));
                             }
                         }
                         TransformMode::State => {
                             // Collection-based iteration via state.{expr}.get()
-                            loop_code.push_str(&format!("let __col = state.{}.get();\n", for_info.expr));
+                            loop_code
+                                .push_str(&format!("let __col = state.{}.get();\n", for_info.expr));
                             loop_code.push_str("if !__col.is_empty() {\n");
                             loop_code.push_str(&format!(
                                 "    for ({idx_var}, {item_var}) in __col.iter().enumerate() {{\n",
@@ -716,6 +1206,7 @@ fn emit_node_with_mode(n: &Node, mode: TransformMode) -> String {
                                 &tmp_elem,
                                 Some(&for_info.item_name),
                                 Some(&for_info.index_name),
+                                scope_id,
                             );
 
                             let inner_with_key = if let Some(Some(key_val)) = &key_expr {
@@ -735,14 +1226,18 @@ fn emit_node_with_mode(n: &Node, mode: TransformMode) -> String {
 
                             if let Some(if_pos) = v_if_pos {
                                 let dir_if = &attrs[if_pos];
-                                let expr_if = rewrite_if_expr(&dir_if.value.clone().unwrap_or_default());
+                                let expr_if =
+                                    rewrite_if_expr(&dir_if.value.clone().unwrap_or_default());
                                 loop_code.push_str(&format!(
                                     "    if {} {{\n        __children.push({});\n    }}\n",
                                     expr_if.trim(),
                                     inner_with_key
                                 ));
                             } else {
-                                loop_code.push_str(&format!("    __children.push({});\n", inner_with_key));
+                                loop_code.push_str(&format!(
+                                    "    __children.push({});\n",
+                                    inner_with_key
+                                ));
                             }
 
                             loop_code.push_str("    }\n");
@@ -756,14 +1251,14 @@ fn emit_node_with_mode(n: &Node, mode: TransformMode) -> String {
             }
 
             let props = emit_props_with(attrs);
-            let kids = emit_children_with_mode(children, mode);
-            format!(r#"h("{}", {props}, {kids})"#, tag)
+            let kids = emit_children_with_mode(children, mode, fields, scope_id);
+            format!(r#"h("{}", {}, {kids})"#, tag, append_scope_attr(&props, scope_id))
         }
     }
 }
 
-fn emit_node_with(n: &Node) -> String {
-    emit_node_with_mode(n, TransformMode::Resolve)
+fn emit_node_with(n: &Node, fields: &[String], scope_id: Option<&str>) -> String {
+    emit_node_with_mode(n, TransformMode::Resolve, fields, scope_id)
 }
 
 /// Generate code that builds a `HashMap<&str, String>` of component props
@@ -775,10 +1270,16 @@ fn generate_component_props_expr(clean_attrs: &[TemplateAttr]) -> (bool, String)
     for a in clean_attrs {
         match a.kind {
             AttrKind::Bind => {
-                let key = string_lit(&a.name);
+                // `:click-payload="..."` maps to the renderer's on:click-payload.
+                let key = if a.name == "click-payload" || a.name == "payload" {
+                    "on:click-payload"
+                } else {
+                    &a.name
+                };
+                let key = string_lit(key);
                 let expr = a.value.clone().unwrap_or_else(|| a.name.clone());
                 let val_key = string_lit(expr.trim());
-                bind_entries.push(format!("({}, resolve({}).clone())", key, val_key));
+                bind_entries.push(format!("({key}, resolve({val_key}).clone())"));
             }
             AttrKind::On => {
                 let key = string_lit(&format!("on:{}", a.name));
@@ -796,6 +1297,129 @@ fn generate_component_props_expr(clean_attrs: &[TemplateAttr]) -> (bool, String)
         true,
         format!("std::collections::HashMap::from([{entries}])"),
     )
+}
+
+/// If `expr` references a v-for loop variable, return the direct Rust expression
+/// to read it (e.g. `todo` → `todo`, `todo.text` → `todo.text`, `idx` → `idx`).
+/// Returns `None` when the expression is not a loop-variable reference (codegen
+/// falls back to `resolve(...)`).
+fn rewrite_ctx_expr(expr: &str, item_name: Option<&str>, idx_name: Option<&str>) -> Option<String> {
+    let expr = expr.trim();
+    if let Some(item) = item_name {
+        if expr == item {
+            return Some(item.to_string());
+        }
+        if expr.starts_with(item) && expr.len() > item.len() && expr.as_bytes()[item.len()] == b'.'
+        {
+            return Some(expr.to_string());
+        }
+    }
+    if let Some(idx) = idx_name
+        && expr == idx
+    {
+        return Some(idx.to_string());
+    }
+    None
+}
+
+/// Like [`generate_component_props_expr`] but resolves bind values that reference
+/// v-for loop variables directly instead of through `resolve()`.
+fn generate_component_props_expr_with_ctx(
+    clean_attrs: &[TemplateAttr],
+    item_name: Option<&str>,
+    idx_name: Option<&str>,
+) -> (bool, String) {
+    let mut bind_entries: Vec<String> = Vec::new();
+    for a in clean_attrs {
+        match a.kind {
+            AttrKind::Bind => {
+                let key = if a.name == "click-payload" || a.name == "payload" {
+                    "on:click-payload"
+                } else {
+                    &a.name
+                };
+                let key = string_lit(key);
+                let expr = a.value.clone().unwrap_or_else(|| a.name.clone());
+                if let Some(direct) = rewrite_ctx_expr(&expr, item_name, idx_name) {
+                    bind_entries.push(format!("({key}, format!(\"{{}}\", {direct}))"));
+                } else {
+                    let val_key = string_lit(expr.trim());
+                    bind_entries.push(format!("({key}, resolve({val_key}).clone())"));
+                }
+            }
+            AttrKind::On => {
+                let key = string_lit(&format!("on:{}", a.name));
+                let handler = a.value.clone().unwrap_or_default();
+                bind_entries.push(format!("({}, {}.to_string())", key, string_lit(&handler)));
+            }
+            _ => {}
+        }
+    }
+    if bind_entries.is_empty() {
+        return (false, "std::collections::HashMap::new()".to_string());
+    }
+    let entries = bind_entries.join(", ");
+    (
+        true,
+        format!("std::collections::HashMap::from([{entries}])"),
+    )
+}
+
+/// Like [`emit_props_with`] but resolves loop-variable bindings directly.
+fn emit_props_with_ctx(
+    attrs: &[TemplateAttr],
+    item_name: Option<&str>,
+    idx_name: Option<&str>,
+) -> String {
+    if attrs.is_empty() {
+        return "Props::new()".to_string();
+    }
+    let mut parts = vec!["Props::new()".to_string()];
+    for a in attrs {
+        match a.kind {
+            AttrKind::Static => {
+                let v = a.value.clone().unwrap_or_default();
+                parts.push(format!(r#".set("{}", {})"#, a.name, string_lit(&v)));
+            }
+            AttrKind::Bind => {
+                let expr = a.value.clone().unwrap_or_else(|| a.name.clone());
+                let key = if a.name == "click-payload" || a.name == "payload" {
+                    "on:click-payload"
+                } else {
+                    &a.name
+                };
+                if let Some(direct) = rewrite_ctx_expr(&expr, item_name, idx_name) {
+                    parts.push(format!(r#".set("{}", &format!("{{}}", {}))"#, key, direct));
+                } else {
+                    let val_key = string_lit(expr.trim());
+                    parts.push(format!(r#".set("{}", &resolve({}))"#, key, val_key));
+                }
+            }
+            AttrKind::Directive => {
+                // directives are not emitted as props
+            }
+            AttrKind::On => {
+                let handler = a.value.clone().unwrap_or_default();
+                parts.push(format!(
+                    r#".set("on:{}", {})"#,
+                    a.name,
+                    string_lit(&handler)
+                ));
+            }
+        }
+    }
+    parts.join("")
+}
+
+/// Append the CSS scope attribute (e.g. `data-v-abc123`) to a props chain string.
+/// When `scope_id` is `Some("data-v-xxx")`, appends `.set("data-v-xxx", "")` to the
+/// Props builder so scoped CSS selectors match this element.
+fn append_scope_attr(props: &str, scope_id: Option<&str>) -> String {
+    if let Some(id) = scope_id {
+        format!(r#"{}.set("{}", "")"#, props, id)
+    } else {
+        props.to_string()
+    }
 }
 
 fn emit_props_with(attrs: &[TemplateAttr]) -> String {
@@ -842,8 +1466,13 @@ fn emit_props_with(attrs: &[TemplateAttr]) -> String {
                         parts.push(format!(r#".set("class", {})"#, code));
                     }
                 } else {
-                    let key = string_lit(expr.trim());
-                    parts.push(format!(r#".set("{}", &resolve({}))"#, a.name, key));
+                    let key_attr = if a.name == "click-payload" || a.name == "payload" {
+                        "on:click-payload"
+                    } else {
+                        &a.name
+                    };
+                    let val_key = string_lit(expr.trim());
+                    parts.push(format!(r#".set("{}", &resolve({}))"#, key_attr, val_key));
                 }
             }
             AttrKind::Directive => {
@@ -862,7 +1491,7 @@ fn emit_props_with(attrs: &[TemplateAttr]) -> String {
     parts.join("")
 }
 
-fn emit_children_with_mode(children: &[Node], mode: TransformMode) -> String {
+fn emit_children_with_mode(children: &[Node], mode: TransformMode, fields: &[String], scope_id: Option<&str>) -> String {
     if children.is_empty() {
         return "vec![]".to_string();
     }
@@ -891,7 +1520,7 @@ fn emit_children_with_mode(children: &[Node], mode: TransformMode) -> String {
                         children: ch.clone(),
                         self_closing: *self_closing,
                     };
-                    let inner_if = emit_node_with_mode(&tmp_if, mode);
+                    let inner_if = emit_node_with_mode(&tmp_if, mode, fields, scope_id);
 
                     let mut chain_parts: Vec<String> = Vec::new();
                     let mut j = i + 1;
@@ -917,7 +1546,7 @@ fn emit_children_with_mode(children: &[Node], mode: TransformMode) -> String {
                                     children: ch2.clone(),
                                     self_closing: *sc2,
                                 };
-                                let inner_ei = emit_node_with_mode(&tmp_ei, mode);
+                                let inner_ei = emit_node_with_mode(&tmp_ei, mode, fields, scope_id);
                                 chain_parts.push(format!(
                                     r#"else if {} {{ {} }}"#,
                                     expr_ei.trim(),
@@ -937,7 +1566,7 @@ fn emit_children_with_mode(children: &[Node], mode: TransformMode) -> String {
                                     children: ch2.clone(),
                                     self_closing: *sc2,
                                 };
-                                let inner_e = emit_node_with_mode(&tmp_e, mode);
+                                let inner_e = emit_node_with_mode(&tmp_e, mode, fields, scope_id);
                                 else_part = Some(format!(r#"else {{ {} }}"#, inner_e));
                                 j += 1;
                                 break;
@@ -1022,7 +1651,7 @@ fn emit_children_with_mode(children: &[Node], mode: TransformMode) -> String {
                                     idx_var = for_info.index_name
                                 ));
 
-                                let inner = emit_node_with_ctx_for_loop(&tmp_elem, &for_info);
+                                let inner = emit_node_with_ctx_for_loop(&tmp_elem, &for_info, scope_id);
 
                                 let inner_with_key = if let Some(Some(key_val)) = &key_expr {
                                     format!(
@@ -1044,11 +1673,17 @@ fn emit_children_with_mode(children: &[Node], mode: TransformMode) -> String {
                                         inner_with_key
                                     ));
                                 } else {
-                                    out.push_str(&format!("    __children.push({});\n", inner_with_key));
+                                    out.push_str(&format!(
+                                        "    __children.push({});\n",
+                                        inner_with_key
+                                    ));
                                 }
                             }
                             TransformMode::State => {
-                                out.push_str(&format!("let __col = state.{}.get();\n", for_info.expr));
+                                out.push_str(&format!(
+                                    "let __col = state.{}.get();\n",
+                                    for_info.expr
+                                ));
                                 out.push_str("if !__col.is_empty() {\n");
                                 out.push_str(&format!(
                                     "    for ({idx_var}, {item_var}) in __col.iter().enumerate() {{\n",
@@ -1060,6 +1695,7 @@ fn emit_children_with_mode(children: &[Node], mode: TransformMode) -> String {
                                     &tmp_elem,
                                     Some(&for_info.item_name),
                                     Some(&for_info.index_name),
+                                    scope_id,
                                 );
 
                                 let inner_with_key = if let Some(Some(key_val)) = &key_expr {
@@ -1087,7 +1723,10 @@ fn emit_children_with_mode(children: &[Node], mode: TransformMode) -> String {
                                         inner_with_key
                                     ));
                                 } else {
-                                    out.push_str(&format!("    __children.push({});\n", inner_with_key));
+                                    out.push_str(&format!(
+                                        "    __children.push({});\n",
+                                        inner_with_key
+                                    ));
                                 }
 
                                 out.push_str("    }\n");
@@ -1095,19 +1734,23 @@ fn emit_children_with_mode(children: &[Node], mode: TransformMode) -> String {
                             }
                         }
 
-                        out.push_str("}\n");
+                        // Resolve mode opens `for {idx} in 0..count {` but does not
+                        // close it inline; State mode already closes its for and if.
+                        if mode == TransformMode::Resolve {
+                            out.push_str("}\n");
+                        }
                         i += 1;
                         continue;
                     }
                 }
 
                 // default element
-                let expr = emit_node_with_mode(&children[i], mode);
+                let expr = emit_node_with_mode(&children[i], mode, fields, scope_id);
                 out.push_str(&format!("__children.push({});\n", expr));
                 i += 1;
             }
             _ => {
-                let expr = emit_node_with_mode(&children[i], mode);
+                let expr = emit_node_with_mode(&children[i], mode, fields, scope_id);
                 out.push_str(&format!("__children.push({});\n", expr));
                 i += 1;
             }
@@ -1117,18 +1760,18 @@ fn emit_children_with_mode(children: &[Node], mode: TransformMode) -> String {
     out
 }
 
-fn emit_node_with_state(n: &Node) -> String {
-    emit_node_with_mode(n, TransformMode::State)
+fn emit_node_with_state(n: &Node, fields: &[String], scope_id: Option<&str>) -> String {
+    emit_node_with_mode(n, TransformMode::State, fields, scope_id)
 }
 
-fn emit_node_with_ctx_state(n: &Node, item_name: Option<&str>, idx_name: Option<&str>) -> String {
+fn emit_node_with_ctx_state(n: &Node, item_name: Option<&str>, idx_name: Option<&str>, scope_id: Option<&str>) -> String {
     match n {
         Node::Text(t) => format!(r#"text({})"#, string_lit(t)),
         Node::Interpolation(expr) => {
             let key = expr.trim();
             if let Some(item) = item_name {
                 if key == item {
-                    return "text(format!(\"{}\", __item))".to_string();
+                    return format!(r#"text(format!("{{}}", {item}))"#);
                 }
                 // Handle dot notation: item.property or item.nested.property
                 if key.starts_with(item)
@@ -1137,7 +1780,7 @@ fn emit_node_with_ctx_state(n: &Node, item_name: Option<&str>, idx_name: Option<
                 {
                     let prop_path = &key[item.len()..];
                     return format!(
-                        r#"text({{ let __obj = &__item; __obj{}.to_string() }})"#,
+                        r#"text({{ let __obj = &{item}; __obj{}.to_string() }})"#,
                         prop_path
                     );
                 }
@@ -1145,7 +1788,7 @@ fn emit_node_with_ctx_state(n: &Node, item_name: Option<&str>, idx_name: Option<
             if let Some(idx) = idx_name
                 && key == idx
             {
-                return "text(__idx.to_string())".to_string();
+                return format!(r#"text({idx}.to_string())"#);
             }
             let key_lit = string_lit(key);
             format!(r#"text(resolve({}))"#, key_lit)
@@ -1156,19 +1799,191 @@ fn emit_node_with_ctx_state(n: &Node, item_name: Option<&str>, idx_name: Option<
             children,
             ..
         } => {
-            let props = emit_props_with(attrs);
+            // Handle <slot> inside v-for context
+            if tag == "slot" {
+                let slot_name = attrs
+                    .iter()
+                    .find(|a| a.name == "name" && matches!(a.kind, AttrKind::Static))
+                    .and_then(|a| a.value.clone())
+                    .unwrap_or_else(|| "default".to_string());
+
+                // Fallback children rendered with ctx state
+                let fallback_children: Vec<String> = children
+                    .iter()
+                    .map(|c| emit_node_with_ctx_state(c, item_name, idx_name, scope_id))
+                    .collect();
+                let fallback = format!("vec![{}]", fallback_children.join(", "));
+
+                return format!(
+                    r#"render_slot({slot_name_lit}, || {{ velox_dom::h(\"slot\", velox_dom::Props::new(), {fallback}) }})"#,
+                    slot_name_lit = string_lit(&slot_name),
+                    fallback = fallback,
+                );
+            }
+
+            // handle directive `v-show` inside the loop body
+            // v-show always renders the element but toggles CSS `display: none`
+            // based on the expression, preserving it in the DOM (unlike v-if).
+            if let Some(pos) = attrs
+                .iter()
+                .position(|a| matches!(a.kind, AttrKind::Directive) && a.name == "show")
+            {
+                let mut attrs2 = attrs.clone();
+                let dir = attrs2.remove(pos);
+                let expr = rewrite_if_expr(&dir.value.unwrap_or_default());
+
+                // Build the element without the v-show directive, then conditionally
+                // set display style based on the expression value.
+                let inner = emit_node_with_ctx_state(
+                    &Node::Element {
+                        tag: tag.clone(),
+                        attrs: attrs2.clone(),
+                        children: children.clone(),
+                        self_closing: false,
+                    },
+                    item_name,
+                    idx_name,
+                    scope_id,
+                );
+
+                // If the element already has a `style` attribute, we merge the
+                // display value. Otherwise, we add a style attribute.
+                let has_style = attrs
+                    .iter()
+                    .any(|a| a.name == "style" && matches!(a.kind, AttrKind::Static | AttrKind::Bind));
+
+                if has_style {
+                    // The style attr is already emitted by emit_node_with_ctx_state.
+                    // We wrap the result: if expression is false, override display.
+                    return format!(
+                        r#"{{ let __node = {inner}; if !({expr}) {{ if let velox_dom::VNode::Element {{ ref mut props, .. }} = __node {{ props.attrs.entry("style".to_string()).and_modify(|s| {{ if s.contains("display:") {{ /* preserve existing display */ }} else {{ s.push_str("; display: none"); }} }}).or_insert_with(|| "display: none".to_string()); }} }} __node }}"#,
+                        inner = inner,
+                        expr = expr.trim()
+                    );
+                }
+                return format!(
+                    r#"{{ let __node = {inner}; if !({expr}) {{ if let velox_dom::VNode::Element {{ ref mut props, .. }} = __node {{ props.attrs.insert("style".to_string(), "display: none".to_string()); }} }} __node }}"#,
+                    inner = inner,
+                    expr = expr.trim()
+                );
+            }
+
+            // v-if inside the loop body
+            if let Some(pos) = attrs
+                .iter()
+                .position(|a| matches!(a.kind, AttrKind::Directive) && a.name == "if")
+            {
+                let mut attrs2 = attrs.clone();
+                let dir = attrs2.remove(pos);
+                let expr_if = rewrite_if_expr(&dir.value.unwrap_or_default());
+                let tmp = Node::Element {
+                    tag: tag.clone(),
+                    attrs: attrs2,
+                    children: children.clone(),
+                    self_closing: false,
+                };
+                let inner = emit_node_with_ctx_state(&tmp, item_name, idx_name, scope_id);
+                return format!(
+                    r#"if {} {{ {} }} else {{ text("") }}"#,
+                    expr_if.trim(),
+                    inner
+                );
+            }
+
+            // Component inside the loop body: props must be built from the loop
+            // variables directly (resolve() returns "" for loop vars).
+            if let Some(component_attr) = attrs
+                .iter()
+                .find(|a| a.name == "data-velox-component" && a.kind == AttrKind::Static)
+                && let Some(comp_name) = &component_attr.value
+            {
+                let mut clean_attrs = attrs.clone();
+                clean_attrs.retain(|a| a.name != "data-velox-component");
+
+                let has_slot_children = !children.is_empty();
+
+                let (_has_props, props_expr) =
+                    generate_component_props_expr_with_ctx(&clean_attrs, item_name, idx_name);
+                let callbacks = collect_component_callbacks(&clean_attrs);
+
+                // Build slots map from default slot children.
+                let slots_expr = if has_slot_children {
+                    let slot_vnodes: Vec<String> = children
+                        .iter()
+                        .map(|c| emit_node_with_ctx_state(c, item_name, idx_name, scope_id))
+                        .collect();
+                    format!(
+                        r#"std::collections::HashMap::from([(\"default\", {})])"#,
+                        if slot_vnodes.len() == 1 {
+                            slot_vnodes[0].clone()
+                        } else {
+                            format!("velox_dom::h(\"slot\", velox_dom::Props::new(), vec![{}])", slot_vnodes.join(", "))
+                        }
+                    )
+                } else {
+                    "std::collections::HashMap::new()".to_string()
+                };
+
+                if callbacks.is_empty() {
+                    if !has_slot_children {
+                        return format!(
+                            r#"{{ let __props = {props_expr}; {comp_name}::render_with_props(__props) }}"#,
+                        );
+                    }
+                    return format!(
+                        r#"{{ let __props = {props_expr}; let __slots = {slots_expr}; {comp_name}::render_with_slots(__props, &__slots) }}"#,
+                    );
+                }
+
+                // No slot children but has callbacks: use render_with_callbacks
+                if !has_slot_children {
+                    let callback_map = format_callback_map(&callbacks);
+                    let callback_names: Vec<String> = callbacks
+                        .iter()
+                        .map(|(_, handler)| handler.clone())
+                        .collect();
+
+                    return format!(
+                        r#"{{ let __props = {props_expr}; let __callbacks = {callback_map}; {comp_name}::render_with_callbacks(__props, &__callbacks, &[{callback_names}]) }}"#,
+                        callback_names = callback_names
+                            .iter()
+                            .map(|n| format!("\"{}\"", n))
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    );
+                }
+
+                // Has both callbacks and slot children: use render_with_slots
+                let callback_map = format_callback_map(&callbacks);
+                let callback_names: Vec<String> = callbacks
+                    .iter()
+                    .map(|(_, handler)| handler.clone())
+                    .collect();
+
+                return format!(
+                    r#"{{ let __props = {props_expr}; let __callbacks = {callback_map}; let __slots = {slots_expr}; {comp_name}::render_with_slots(__props, &__callbacks, &[{callback_names}], &__slots) }}"#,
+                    callback_names = callback_names
+                        .iter()
+                        .map(|n| format!("\"{}\"", n))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                );
+            }
+
+            // Plain element inside the loop body.
+            let props = emit_props_with_ctx(attrs, item_name, idx_name);
             let mut k_items: Vec<String> = Vec::new();
             for c in children {
-                k_items.push(emit_node_with_ctx_state(c, item_name, idx_name));
+                k_items.push(emit_node_with_ctx_state(c, item_name, idx_name, scope_id));
             }
             let kids = format!("vec![{}]", k_items.join(", "));
-            format!(r#"h("{}", {props}, {kids})"#, tag)
+            format!(r#"h("{}", {}, {kids})"#, tag, append_scope_attr(&props, scope_id))
         }
     }
 }
 
 #[allow(dead_code)]
-fn emit_node_with_ctx(n: &Node, loop_var: Option<&str>) -> String {
+fn emit_node_with_ctx(n: &Node, loop_var: Option<&str>, scope_id: Option<&str>) -> String {
     match n {
         Node::Text(t) => format!(r#"text({})"#, string_lit(t)),
         Node::Interpolation(expr) => {
@@ -1202,11 +2017,11 @@ fn emit_node_with_ctx(n: &Node, loop_var: Option<&str>) -> String {
             let kids = {
                 let mut k_items: Vec<String> = Vec::new();
                 for c in children {
-                    k_items.push(emit_node_with_ctx(c, loop_var));
+                    k_items.push(emit_node_with_ctx(c, loop_var, scope_id));
                 }
                 format!("vec![{}]", k_items.join(", "))
             };
-            format!(r#"h("{}", {props}, {kids})"#, tag)
+            format!(r#"h("{}", {}, {kids})"#, tag, append_scope_attr(&props, scope_id))
         }
     }
 }
@@ -1215,7 +2030,7 @@ fn emit_node_with_ctx(n: &Node, loop_var: Option<&str>) -> String {
 /// This version uses resolve() with indexed access for collection items.
 /// For `item in items`, it generates code like `resolve("items[__i].property")`
 /// or `resolve("items[__i]")` for the item itself.
-fn emit_node_with_ctx_for_loop(n: &Node, for_info: &VForInfo) -> String {
+fn emit_node_with_ctx_for_loop(n: &Node, for_info: &VForInfo, scope_id: Option<&str>) -> String {
     match n {
         Node::Text(t) => format!(r#"text({})"#, string_lit(t)),
         Node::Interpolation(expr) => {
@@ -1255,11 +2070,11 @@ fn emit_node_with_ctx_for_loop(n: &Node, for_info: &VForInfo) -> String {
             let kids = {
                 let mut k_items: Vec<String> = Vec::new();
                 for c in children {
-                    k_items.push(emit_node_with_ctx_for_loop(c, for_info));
+                    k_items.push(emit_node_with_ctx_for_loop(c, for_info, scope_id));
                 }
                 format!("vec![{}]", k_items.join(", "))
             };
-            format!(r#"h("{}", {props}, {kids})"#, tag)
+            format!(r#"h("{}", {}, {kids})"#, tag, append_scope_attr(&props, scope_id))
         }
     }
 }

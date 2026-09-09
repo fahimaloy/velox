@@ -32,10 +32,45 @@ fn diff_keyed_children_reorder() {
     );
 
     let patches = diff(&old, &new);
-    // The keyed diff may or may not produce patches depending on implementation.
-    // What matters is that the diff completes without error.
-    // The reconcile_keyed_children in renderer handles the actual reordering.
-    let _ = patches;
+    // Reordering [a,b,c] -> [c,a,b] with identical content is expressed as a
+    // single move (node keyed "c" relocates from old index 2 to new index 0),
+    // preserving each keyed node's identity. No Insert/Remove is emitted.
+    assert_eq!(patches, vec![Patch::MoveChild(2, 0)]);
+}
+
+#[test]
+fn diff_keyed_children_reorder_with_updates() {
+    // old: a, b, c   new: c, a, b  (reorder) with changed text on every node
+    let old = h(
+        "ul",
+        (),
+        vec![
+            h("li", vec![("key", "a")], vec![text("A")]),
+            h("li", vec![("key", "b")], vec![text("B")]),
+            h("li", vec![("key", "c")], vec![text("C")]),
+        ],
+    );
+    let new = h(
+        "ul",
+        (),
+        vec![
+            h("li", vec![("key", "c")], vec![text("C2")]),
+            h("li", vec![("key", "a")], vec![text("A2")]),
+            h("li", vec![("key", "b")], vec![text("B2")]),
+        ],
+    );
+
+    let patches = diff(&old, &new);
+
+    // "c" moves to the front...
+    assert!(patches.contains(&Patch::MoveChild(2, 0)));
+    // ...and every keyed node is updated in place at its new index. The whole
+    // diff is a pure reorder + in-place updates — no Insert/Remove — so keyed
+    // identity is preserved across the reorder.
+    assert!(patches.iter().all(|p| matches!(
+        p,
+        Patch::MoveChild(_, _) | Patch::UpdateChild(_, _)
+    )));
 }
 
 #[test]
@@ -59,9 +94,11 @@ fn diff_keyed_children_insert_in_middle() {
     );
 
     let patches = diff(&old, &new);
-    // Should produce some patches for the insert
-    // The exact patch type depends on the keyed diff implementation
-    let _ = patches;
+    // Insert in the middle: only the brand-new "b" node is inserted at index 1;
+    // the keyed "a" and "c" nodes are matched by key (no-op content), so no
+    // insert/remove is emitted for them.
+    let b_node = h("li", vec![("key", "b")], vec![text("B")]);
+    assert_eq!(patches, vec![Patch::InsertChild(1, b_node)]);
 }
 
 #[test]
@@ -85,8 +122,9 @@ fn diff_keyed_children_remove_from_middle() {
     );
 
     let patches = diff(&old, &new);
-    // Should have a removal for "b"
-    assert!(patches.iter().any(|p| matches!(p, Patch::RemoveChild(_))));
+    // Removing "b" from the middle: "c" moves up (2 -> 1) and the leftover "b"
+    // at live index 2 is removed.
+    assert_eq!(patches, vec![Patch::MoveChild(2, 1), Patch::RemoveChild(2)]);
 }
 
 #[test]
@@ -109,9 +147,20 @@ fn diff_keyed_children_full_replace() {
     );
 
     let patches = diff(&old, &new);
-    // All old keys should be removed, all new inserted
-    // Verify the diff produces some output
-    let _ = patches;
+    // All keys differ: every old node is removed and every new node inserted.
+    // The two RemoveChild(2) refer to the two old nodes, which collapse onto
+    // live index 2 as each is removed in sequence.
+    let x = h("li", vec![("key", "x")], vec![text("X")]);
+    let y = h("li", vec![("key", "y")], vec![text("Y")]);
+    assert_eq!(
+        patches,
+        vec![
+            Patch::InsertChild(0, x),
+            Patch::InsertChild(1, y),
+            Patch::RemoveChild(2),
+            Patch::RemoveChild(2),
+        ]
+    );
 }
 
 #[test]

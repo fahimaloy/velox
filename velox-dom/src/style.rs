@@ -686,6 +686,87 @@ impl Default for Transform {
     }
 }
 
+impl Transform {
+    /// Parse a `transform` value such as `translate(10px, 20px) rotate(45deg) scale(1.5)`.
+    ///
+    /// Supports the three operations surfaced by Velox: `translate`/`translateX`/`translateY`,
+    /// `rotate`, and `scale`/`scaleX`/`scaleY`. `none` and empty values produce an empty transform.
+    pub fn parse(s: &str) -> Option<Self> {
+        let s = s.trim();
+        if s.is_empty() || s.eq_ignore_ascii_case("none") {
+            return Some(Self::new());
+        }
+        let mut operations = Vec::new();
+        // Each `<name>(<args>)` is a single operation. Args may contain spaces after commas
+        // (`translate(10px, 20px)`), so accumulate whitespace-separated runs into one token
+        // until parentheses balance.
+        let mut current = String::new();
+        let mut depth = 0usize;
+        for token in s.split_whitespace() {
+            if !current.is_empty() {
+                current.push(' ');
+            }
+            current.push_str(token);
+            depth = depth
+                .saturating_add(token.matches('(').count())
+                .saturating_sub(token.matches(')').count());
+            if depth == 0 {
+                operations.push(TransformOp::parse(&current)?);
+                current.clear();
+            }
+        }
+        if !current.is_empty() {
+            operations.push(TransformOp::parse(&current)?);
+        }
+        Some(Transform { operations })
+    }
+}
+
+impl TransformOp {
+    fn parse(s: &str) -> Option<Self> {
+        let s = s.trim();
+        let open = s.find('(')?;
+        let close = s.rfind(')')?;
+        if close < open {
+            return None;
+        }
+        let name = s[..open].trim().to_ascii_lowercase();
+        let args: Vec<&str> = s[open + 1..close].split(',').map(|a| a.trim()).collect();
+
+        match name.as_str() {
+            "translate" => {
+                let x = Length::parse(args.first()?)?;
+                let y = if args.len() > 1 {
+                    Length::parse(args[1])?
+                } else {
+                    Length::Zero
+                };
+                Some(TransformOp::Translate(x, y))
+            }
+            "translatex" => Some(TransformOp::TranslateX(Length::parse(args.first()?)?)),
+            "translatey" => Some(TransformOp::TranslateY(Length::parse(args.first()?)?)),
+            "rotate" => {
+                let raw = args.first()?.trim();
+                let deg_raw = raw.strip_suffix("deg").unwrap_or(raw).trim();
+                let deg = deg_raw.parse::<f32>().ok()?;
+                Some(TransformOp::Rotate(deg))
+            }
+            "scale" => {
+                let x = args.first()?.trim().parse::<f32>().ok()?;
+                let y = if args.len() > 1 {
+                    args[1].trim().parse::<f32>().ok()?
+                } else {
+                    x
+                };
+                Some(TransformOp::Scale(x, y))
+            }
+            "scalex" => Some(TransformOp::ScaleX(args.first()?.trim().parse::<f32>().ok()?)),
+            "scaley" => Some(TransformOp::ScaleY(args.first()?.trim().parse::<f32>().ok()?)),
+            _ => None,
+        }
+    }
+}
+
 /// Box shadow struct
 #[derive(Debug, Clone, PartialEq)]
 pub struct BoxShadow {
@@ -695,6 +776,157 @@ pub struct BoxShadow {
     pub spread_radius: Length,
     pub color: Color,
     pub inset: bool,
+}
+
+impl BoxShadow {
+    /// Parse a `box-shadow` value such as `2px 2px 4px rgba(0,0,0,0.5)` or
+    /// `inset 0 2px 4px #000`. Returns `None` for `none` / empty values.
+    pub fn parse(s: &str) -> Option<Self> {
+        let s = s.trim();
+        if s.is_empty() || s.eq_ignore_ascii_case("none") {
+            return None;
+        }
+        let mut inset = false;
+        let mut parts: Vec<&str> = Vec::new();
+        for tok in s.split_whitespace() {
+            if tok.eq_ignore_ascii_case("inset") {
+                inset = true;
+            } else {
+                parts.push(tok);
+            }
+        }
+        // offset-x and offset-y are required.
+        let offset_x = Length::parse(parts.first()?)?;
+        let offset_y = Length::parse(parts.get(1)?)?;
+        let mut blur: Option<Length> = None;
+        let mut spread: Option<Length> = None;
+        let mut color = Color::BLACK;
+        for tok in &parts[2..] {
+            if let Some(l) = Length::parse(tok) {
+                if blur.is_none() {
+                    blur = Some(l);
+                } else if spread.is_none() {
+                    spread = Some(l);
+                }
+            } else if let Some(c) = Color::parse(tok) {
+                color = c;
+            }
+        }
+        Some(BoxShadow {
+            offset_x,
+            offset_y,
+            blur_radius: blur.unwrap_or(Length::Zero),
+            spread_radius: spread.unwrap_or(Length::Zero),
+            color,
+            inset,
+        })
+    }
+}
+
+/// CSS transition timing function
+#[derive(Debug, Clone, PartialEq, Default)]
+pub enum TimingFunction {
+    #[default]
+    Linear,
+    Ease,
+    EaseIn,
+    EaseOut,
+    EaseInOut,
+    CubicBezier(f32, f32, f32, f32),
+}
+
+impl TimingFunction {
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "linear" => Some(TimingFunction::Linear),
+            "ease" => Some(TimingFunction::Ease),
+            "ease-in" => Some(TimingFunction::EaseIn),
+            "ease-out" => Some(TimingFunction::EaseOut),
+            "ease-in-out" => Some(TimingFunction::EaseInOut),
+            _ => {
+                let s = s.trim();
+                if let Some(inner) = s.strip_prefix("cubic-bezier(") {
+                    let inner = inner.trim_end_matches(')');
+                    let parts: Vec<f32> = inner
+                        .split(',')
+                        .map(|p| p.trim().parse::<f32>())
+                        .collect::<Result<Vec<_>, _>>()
+                        .ok()?;
+                    if parts.len() == 4 {
+                        return Some(TimingFunction::CubicBezier(
+                            parts[0], parts[1], parts[2], parts[3],
+                        ));
+                    }
+                }
+                None
+            }
+        }
+    }
+}
+
+/// A single CSS transition (e.g. `opacity 0.2s ease-in 0.1s`)
+#[derive(Debug, Clone, PartialEq)]
+pub struct Transition {
+    /// The CSS property being transitioned, or `all`.
+    pub property: String,
+    /// Transition duration in seconds.
+    pub duration: f32,
+    /// Timing function applied over the duration.
+    pub timing_function: TimingFunction,
+    /// Transition delay in seconds.
+    pub delay: f32,
+}
+
+impl Default for Transition {
+    fn default() -> Self {
+        Self {
+            property: "all".to_string(),
+            duration: 0.0,
+            timing_function: TimingFunction::Linear,
+            delay: 0.0,
+        }
+    }
+}
+
+impl Transition {
+    /// Parse a single transition declaration value, e.g. `opacity 0.2s ease-in 0.1s`.
+    /// Returns `None` for `none` / empty values.
+    pub fn parse(value: &str) -> Option<Self> {
+        let value = value.trim();
+        if value.is_empty() || value.eq_ignore_ascii_case("none") {
+            return None;
+        }
+        let mut t = Transition::default();
+        let mut seen_time = false;
+        for tok in value.split_whitespace() {
+            if let Some(num) = parse_time_seconds(tok) {
+                if !seen_time {
+                    t.duration = num;
+                } else {
+                    t.delay = num;
+                }
+                seen_time = true;
+            } else if let Some(tf) = TimingFunction::parse(tok) {
+                t.timing_function = tf;
+            } else {
+                t.property = tok.trim_matches(',').to_string();
+            }
+        }
+        if t.property.is_empty() {
+            t.property = "all".to_string();
+        }
+        Some(t)
+    }
+}
+
+fn parse_time_seconds(s: &str) -> Option<f32> {
+    if let Some(v) = s.strip_suffix("ms") {
+        return v.trim().parse::<f32>().ok().map(|ms| ms / 1000.0);
+    }
+    if let Some(v) = s.strip_suffix('s') {
+        return v.trim().parse::<f32>().ok();
+    }
+    None
 }
 
 /// Display enum
@@ -928,6 +1160,8 @@ pub struct ComputedStyle {
     pub visibility: Visibility,
     pub transform: Transform,
     pub box_shadow: Option<BoxShadow>,
+    /// Declared CSS transitions, applied in order.
+    pub transitions: Vec<Transition>,
 }
 
 impl ComputedStyle {
@@ -1218,6 +1452,32 @@ impl ComputedStyle {
                 }
             }
 
+            // Transform
+            "transform" => {
+                if let Some(t) = Transform::parse(value) {
+                    self.transform = t;
+                }
+            }
+
+            // Box shadow
+            "box-shadow" => {
+                self.box_shadow = BoxShadow::parse(value);
+            }
+
+            // Transitions (comma-separated list of transition declarations)
+            "transition" => {
+                self.transitions.clear();
+                for part in value.split(',') {
+                    let part = part.trim();
+                    if part.is_empty() || part.eq_ignore_ascii_case("none") {
+                        continue;
+                    }
+                    if let Some(t) = Transition::parse(part) {
+                        self.transitions.push(t);
+                    }
+                }
+            }
+
             // Border shorthand
             "border" => {
                 if let Some(sides) = parse_border_shorthand(value) {
@@ -1335,6 +1595,7 @@ impl Default for ComputedStyle {
             visibility: Visibility::default(),
             transform: Transform::default(),
             box_shadow: None,
+            transitions: Vec::new(),
         }
     }
 }
@@ -1545,5 +1806,89 @@ mod tests {
     fn test_display_hidden_alias() {
         assert_eq!(Display::parse("none"), Some(Display::None));
         assert_eq!(Display::parse("hidden"), Some(Display::None));
+    }
+
+    #[test]
+    fn test_position_parsing() {
+        assert_eq!(Position::parse("relative"), Some(Position::Relative));
+        assert_eq!(Position::parse("absolute"), Some(Position::Absolute));
+        assert_eq!(Position::parse("fixed"), Some(Position::Fixed));
+        assert_eq!(Position::parse("static"), Some(Position::Static));
+    }
+
+    #[test]
+    fn test_overflow_parsing() {
+        assert_eq!(Overflow::parse("hidden"), Some(Overflow::Hidden));
+        assert_eq!(Overflow::parse("scroll"), Some(Overflow::Scroll));
+        assert_eq!(Overflow::parse("auto"), Some(Overflow::Auto));
+        assert_eq!(Overflow::parse("visible"), Some(Overflow::Visible));
+    }
+
+    #[test]
+    fn test_set_property_position_overflow_zindex() {
+        let mut cs = ComputedStyle::new();
+        cs.set_property("position", "absolute");
+        cs.set_property("overflow", "hidden");
+        cs.set_property("z-index", "10");
+        assert_eq!(cs.position, Position::Absolute);
+        assert_eq!(cs.overflow, Overflow::Hidden);
+        assert_eq!(cs.z_index, Some(10));
+    }
+
+    #[test]
+    fn test_set_property_transform() {
+        let mut cs = ComputedStyle::new();
+        cs.set_property("transform", "translate(10px, 20px) rotate(45deg) scale(1.5)");
+        assert_eq!(
+            cs.transform.operations,
+            vec![
+                TransformOp::Translate(Length::Px(10.0), Length::Px(20.0)),
+                TransformOp::Rotate(45.0),
+                TransformOp::Scale(1.5, 1.5),
+            ]
+        );
+        // translateX / scaleY / none
+        cs.set_property("transform", "translateX(5px) scaleY(2)");
+        assert_eq!(
+            cs.transform.operations,
+            vec![TransformOp::TranslateX(Length::Px(5.0)), TransformOp::ScaleY(2.0)]
+        );
+        cs.set_property("transform", "none");
+        assert!(cs.transform.is_empty());
+    }
+
+    #[test]
+    fn test_set_property_box_shadow() {
+        let mut cs = ComputedStyle::new();
+        cs.set_property("box-shadow", "2px 3px 4px rgba(0,0,0,0.5)");
+        let bs = cs.box_shadow.as_ref().expect("box shadow should be set");
+        assert_eq!(bs.offset_x, Length::Px(2.0));
+        assert_eq!(bs.offset_y, Length::Px(3.0));
+        assert_eq!(bs.blur_radius, Length::Px(4.0));
+        assert!(!bs.inset);
+        // inset + color
+        cs.set_property("box-shadow", "inset 0 2px #000");
+        let bs = cs.box_shadow.as_ref().expect("inset shadow set");
+        assert!(bs.inset);
+        assert_eq!(bs.color, Color::BLACK);
+        // none clears
+        cs.set_property("box-shadow", "none");
+        assert!(cs.box_shadow.is_none());
+    }
+
+    #[test]
+    fn test_set_property_transition() {
+        let mut cs = ComputedStyle::new();
+        cs.set_property("transition", "opacity 0.2s ease-in 0.1s, transform 300ms");
+        assert_eq!(cs.transitions.len(), 2);
+        assert_eq!(cs.transitions[0].property, "opacity");
+        assert_eq!(cs.transitions[0].duration, 0.2);
+        assert_eq!(cs.transitions[0].timing_function, TimingFunction::EaseIn);
+        assert_eq!(cs.transitions[0].delay, 0.1);
+        assert_eq!(cs.transitions[1].property, "transform");
+        assert_eq!(cs.transitions[1].duration, 0.3);
+        // transition: none clears
+        cs.set_property("transition", "none");
+        assert!(cs.transitions.is_empty());
     }
 }

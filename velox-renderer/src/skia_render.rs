@@ -42,6 +42,8 @@ pub mod skia_impl {
         font_size: f32,
         bold: bool,
         line_height: f32,
+        nowrap: bool,
+        ellipsis: bool,
     }
 
     #[derive(Clone, Copy)]
@@ -345,6 +347,11 @@ pub mod skia_impl {
                 } else if key == "font-weight" {
                     text_style.bold = val.trim().eq_ignore_ascii_case("bold")
                         || val.trim().parse::<u16>().map(|w| w >= 700).unwrap_or(false);
+                } else if key == "white-space" {
+                    let v = val.trim().to_ascii_lowercase();
+                    text_style.nowrap = v == "nowrap" || v == "pre";
+                } else if key == "text-overflow" {
+                    text_style.ellipsis = val.trim().eq_ignore_ascii_case("ellipsis");
                 } else if key == "line-height" {
                     if let Ok(lh) = val.trim().parse::<f32>() {
                         text_style.line_height = lh;
@@ -460,6 +467,37 @@ pub mod skia_impl {
             }
         }
         lines
+    }
+
+    /// Truncate `text` to fit `max_width` px, appending a horizontal ellipsis
+    /// (`…`) when it overflows. Used for `text-overflow: ellipsis` on
+    /// single-line (`white-space: nowrap` / `pre`) text boxes.
+    fn truncate_with_ellipsis(
+        text: &str,
+        max_width: f32,
+        fonts: &mut FontCache,
+        family: &str,
+        size: f32,
+    ) -> String {
+        const ELLIPSIS: &str = "\u{2026}";
+        if max_width <= 0.0 || text.is_empty() {
+            return String::new();
+        }
+        if fonts.measure_text(family, size, text) <= max_width {
+            return text.to_string();
+        }
+        // Reserve room for the ellipsis itself before fitting prefix chars.
+        let avail = (max_width - fonts.measure_text(family, size, ELLIPSIS)).max(0.0);
+        let mut cur = String::new();
+        for ch in text.chars() {
+            let candidate = format!("{cur}{ch}");
+            if fonts.measure_text(family, size, &candidate) <= avail {
+                cur = candidate;
+            } else {
+                break;
+            }
+        }
+        format!("{cur}{ELLIPSIS}")
     }
 
     fn collect_debug_hit_rects(
@@ -579,6 +617,8 @@ pub mod skia_impl {
             font_size: 14.0,
             bold: false,
             line_height: 1.2,
+            nowrap: false,
+            ellipsis: false,
         };
         let mut paints = RenderPaints::new();
 
@@ -702,16 +742,24 @@ pub mod skia_impl {
                     if text_style.bold {
                         font.set_embolden(true);
                     }
-                    let lines = layout_text_lines(
-                        t.as_str(),
-                        container_rect.width(),
-                        fonts,
-                        font_family,
-                        font_size,
-                    );
                     let line_height = font_size * text_style.line_height;
                     let layout_rect =
                         sk::Rect::from_xywh(rect.left, rect.top, rect.width(), rect.height());
+                    let lines = if text_style.ellipsis {
+                        // Single-line truncated with an ellipsis to the text box width.
+                        let single =
+                            truncate_with_ellipsis(t.as_str(), layout_rect.width(), fonts, font_family, font_size);
+                        let single_w = fonts.measure_text(font_family, font_size, &single);
+                        vec![(single, single_w)]
+                    } else {
+                        layout_text_lines(
+                            t.as_str(),
+                            container_rect.width(),
+                            fonts,
+                            font_family,
+                            font_size,
+                        )
+                    };
                     let align_rect = if layout_rect.width() >= container_rect.width() - 0.5 {
                         container_rect
                     } else {
@@ -978,6 +1026,8 @@ pub mod skia_impl {
             font_size: 14.0,
             bold: false,
             line_height: 1.2,
+            nowrap: false,
+            ellipsis: false,
         };
         let default_family = fonts.default_family();
         let mut paints = RenderPaints::new();
@@ -1210,13 +1260,6 @@ pub mod skia_impl {
                     if text_style.bold {
                         font.set_embolden(true);
                     }
-                    let lines = layout_text_lines(
-                        t.as_str(),
-                        container_rect.width(),
-                        fonts,
-                        font_family,
-                        font_size,
-                    );
                     let line_height = font_size * text_style.line_height;
                     let layout_rect = sk::Rect::from_xywh(
                         layout.rect.x as f32,
@@ -1224,6 +1267,26 @@ pub mod skia_impl {
                         layout.rect.w as f32,
                         layout.rect.h as f32,
                     );
+                    let lines = if text_style.ellipsis {
+                        // Single-line truncated with an ellipsis to the text box width.
+                        let single = truncate_with_ellipsis(
+                            t.as_str(),
+                            layout_rect.width(),
+                            fonts,
+                            font_family,
+                            font_size,
+                        );
+                        let single_w = fonts.measure_text(font_family, font_size, &single);
+                        vec![(single, single_w)]
+                    } else {
+                        layout_text_lines(
+                            t.as_str(),
+                            container_rect.width(),
+                            fonts,
+                            font_family,
+                            font_size,
+                        )
+                    };
                     let align_rect = if layout_rect.width() >= container_rect.width() - 0.5 {
                         container_rect
                     } else {
@@ -1411,6 +1474,55 @@ pub mod skia_impl {
             let mut rects = Vec::new();
             collect_debug_hit_rects(&vnode, &layout, &mut rects);
             assert_eq!(rects.len(), 1);
+        }
+
+        #[test]
+        fn truncate_ellipsis_fits_short_text_unchanged() {
+            let mut fc = FontCache::new();
+            let family = fc.default_family();
+            let size = 14.0;
+            let text = "Hi";
+            let out = truncate_with_ellipsis(text, 500.0, &mut fc, &family, size);
+            assert_eq!(out, "Hi");
+        }
+
+        #[test]
+        fn truncate_ellipsis_appends_ellipsis_on_overflow() {
+            let mut fc = FontCache::new();
+            let family = fc.default_family();
+            let size = 14.0;
+            let text = "This is a very long line of text that will definitely not fit";
+            let out = truncate_with_ellipsis(text, 60.0, &mut fc, &family, size);
+            assert!(out.ends_with('\u{2026}'), "expected ellipsis, got: {out:?}");
+            let w = fc.measure_text(&family, size, &out);
+            assert!(w <= 60.0, "truncated width {w} exceeds 60px: {out:?}");
+            assert!(out.len() < text.len(), "expected truncation, got: {out:?}");
+        }
+
+        #[test]
+        fn truncate_ellipsis_handles_zero_width() {
+            let mut fc = FontCache::new();
+            let family = fc.default_family();
+            let out = truncate_with_ellipsis("anything", 0.0, &mut fc, &family, 14.0);
+            assert!(out.is_empty());
+        }
+
+        #[test]
+        fn parse_text_style_detects_ellipsis_and_nowrap() {
+            let base = TextStyle {
+                color: sk::Color::from_argb(255, 0, 0, 0),
+                align: TextAlign::Left,
+                underline: false,
+                font_size: 14.0,
+                bold: false,
+                line_height: 1.2,
+                nowrap: false,
+                ellipsis: false,
+            };
+            let (s, _f) =
+                parse_text_style("white-space:nowrap;text-overflow:ellipsis", base, "default");
+            assert!(s.nowrap, "expected nowrap");
+            assert!(s.ellipsis, "expected ellipsis");
         }
 
         fn fnv1a(bytes: &[u8]) -> u32 {
