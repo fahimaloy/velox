@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 
 /// Walk up from the current directory looking for a directory that contains
 /// the velox workspace marker (velox-core/Cargo.toml). Returns the workspace root.
-fn find_velox_workspace() -> Option<PathBuf> {
+pub(crate) fn find_velox_workspace() -> Option<PathBuf> {
     let cwd = std::env::current_dir().ok()?;
     let mut current = cwd.as_path();
     loop {
@@ -19,6 +19,11 @@ fn find_velox_workspace() -> Option<PathBuf> {
     }
 }
 
+#[doc(hidden)]
+pub fn find_velox_workspace_for_test() -> Option<std::path::PathBuf> {
+    find_velox_workspace()
+}
+
 /// Compute the relative path from `from` to `to`.
 /// For example, if `from` is `/a/b/c/project` and `to` is `/a/b/velox-core`,
 /// the result is `../../velox-core`.
@@ -26,6 +31,10 @@ fn compute_relative_path(from: &Path, to: &Path) -> PathBuf {
     // Canonicalize both paths so they share a common absolute prefix
     let from_canonical = from.canonicalize().unwrap_or_else(|_| from.to_path_buf());
     let to_canonical = to.canonicalize().unwrap_or_else(|_| to.to_path_buf());
+
+    if !from.exists() || !to.exists() {
+        return to.to_path_buf();
+    }
 
     // Collect path components, filtering out the RootDir
     let from_comps: Vec<_> = from_canonical

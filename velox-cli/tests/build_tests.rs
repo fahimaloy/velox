@@ -65,3 +65,11 @@ fn init_local_override_uses_given_path() {
     assert!(toml.contains(r#"version = "0.1.0""#), "local path must also pin version:\n{toml}");
     assert!(toml.contains("path = "), "local override must use path deps:\n{toml}");
 }
+
+#[test]
+fn workspace_detect_requires_marker_file() {
+    let found = velox_cli::commands::init::find_velox_workspace_for_test();
+    if let Some(ws) = found {
+        assert!(ws.join("velox-core").join("Cargo.toml").exists(), "workspace must contain marker");
+    }
+}
