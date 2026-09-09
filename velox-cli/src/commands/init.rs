@@ -126,6 +126,27 @@ pub fn init_project_with_template(name: &str, _template: &str) -> Result<PathBuf
     init_project(name)
 }
 
+pub fn init_project_with_template_local(name: &str, template: &str, local: Option<&Path>) -> Result<PathBuf> {
+    if let Some(p) = local {
+        unsafe { std::env::set_var("VELOX_PATH", p); }
+    }
+    let out = init_project_with_template(name, template);
+    if local.is_some() {
+        unsafe { std::env::remove_var("VELOX_PATH"); }
+    }
+    out
+}
+
+#[doc(hidden)]
+pub fn init_toml_with_local(name: &str, dir: &Path, local: Option<&Path>) -> String {
+    if let Some(p) = local {
+        unsafe { std::env::set_var("VELOX_PATH", p); }
+    }
+    let s = generate_cargo_toml(name, dir);
+    unsafe { std::env::remove_var("VELOX_PATH"); }
+    s
+}
+
 /// Initialize a new example app inside examples/
 pub fn init_app(name: &str) -> Result<PathBuf> {
     let root = PathBuf::from("examples").join(name);

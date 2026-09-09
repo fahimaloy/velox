@@ -56,3 +56,12 @@ fn cli_build_emits_render_fn() {
         "render mode should include render() fn"
     );
 }
+
+#[test]
+fn init_local_override_uses_given_path() {
+    let ws = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..");
+    let dir = std::env::temp_dir().join(format!("velox-local-{}", std::process::id()));
+    let toml = velox_cli::commands::init::init_toml_with_local("demo", &dir, Some(ws.as_path()));
+    assert!(toml.contains(r#"version = "0.1.0""#), "local path must also pin version:\n{toml}");
+    assert!(toml.contains("path = "), "local override must use path deps:\n{toml}");
+}

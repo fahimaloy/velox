@@ -17,8 +17,11 @@ enum Commands {
     /// Initialize a new Velox project
     #[command(about = "Create a new Velox project with scaffolding")]
     Init {
-        /// Project name
         name: String,
+        #[arg(long, short = 't', default_value = "default")]
+        template: String,
+        #[arg(long)]
+        local: Option<std::path::PathBuf>,
     },
 
     /// Build the current project, or compile a .vx component to Rust
@@ -58,11 +61,31 @@ enum Commands {
     Lint {
         /// File or directory to lint
         target: Option<PathBuf>,
+        /// Auto-fix fixable issues (trailing whitespace, missing final newline)
+        #[arg(long)]
+        fix: bool,
+    },
+
+    /// Add a component or other scaffold
+    #[command(about = "Add a component or other scaffold to the project")]
+    Add {
+        #[command(subcommand)]
+        what: AddCommand,
     },
 
     /// Show version and system info
     #[command(about = "Display version information")]
     Version,
+}
+
+#[derive(Subcommand)]
+enum AddCommand {
+    /// Add a new component (.vx file)
+    #[command(about = "Generate a new component .vx file")]
+    Component {
+        /// Component name (e.g. "Counter" or "side-bar")
+        name: String,
+    },
 }
 
 fn main() -> Result<()> {
@@ -71,8 +94,8 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Init { name } => {
-            let path = velox_cli::commands::init_project(&name)?;
+        Commands::Init { name, template, local } => {
+            let path = velox_cli::commands::init_project_with_template_local(&name, &template, local.as_deref())?;
             println!("✅ Created Velox project at: {}", path.display());
             println!("\n📖 Next steps:");
             println!("   cd {}", path.display());
@@ -106,11 +129,34 @@ fn main() -> Result<()> {
             velox_cli::commands::dev_current(&dir, release)?;
         }
 
-        Commands::Lint { target } => {
-            let dir = target.unwrap_or_else(|| PathBuf::from("src"));
-            println!("🔍 Linting .vx files in {}...", dir.display());
-            lint_directory(&dir)?;
+        Commands::Lint { target, fix } => {
+            let target = target.unwrap_or_else(|| PathBuf::from("src"));
+            if target.is_file() {
+                // A single .vx file was given.
+                if fix {
+                    println!("🔧 Lint+fix {}...", target.display());
+                    velox_cli::commands::fix_file_single(&target)?;
+                } else {
+                    println!("🔍 Linting {}...", target.display());
+                    velox_cli::commands::lint_file(&target)?;
+                }
+            } else {
+                // A directory (or the default "src") — walk recursively.
+                if fix {
+                    println!("🔧 Lint+fix .vx files in {}...", target.display());
+                    velox_cli::commands::lint_directory_fix(&target, true)?;
+                } else {
+                    println!("🔍 Linting .vx files in {}...", target.display());
+                    velox_cli::commands::lint_directory_fix(&target, false)?;
+                }
+            }
         }
+
+        Commands::Add { what } => match what {
+            AddCommand::Component { name } => {
+                velox_cli::commands::add_component(&name)?;
+            }
+        },
 
         Commands::Version => {
             println!("velox {}", env!("CARGO_PKG_VERSION"));
@@ -122,58 +168,6 @@ fn main() -> Result<()> {
             #[cfg(target_os = "windows")]
             println!("Platform: Windows");
         }
-    }
-
-    Ok(())
-}
-
-/// Simple directory linting
-fn lint_directory(dir: &std::path::Path) -> Result<()> {
-    fn walk(dir: &std::path::Path, file_count: &mut usize, error_count: &mut usize) -> Result<()> {
-        for entry in std::fs::read_dir(dir)? {
-            let entry = entry?;
-            let path = entry.path();
-
-            if path.is_dir() {
-                walk(&path, file_count, error_count)?;
-                continue;
-            }
-
-            if path.extension().and_then(|s| s.to_str()) == Some("vx") {
-                *file_count += 1;
-                match std::fs::read_to_string(&path) {
-                    Ok(content) => match velox_sfc::parse_sfc(&content) {
-                        Ok(_) => println!("✅ {}", path.display()),
-                        Err(e) => {
-                            *error_count += 1;
-                            println!("❌ {} - {}", path.display(), e);
-                        }
-                    },
-                    Err(e) => {
-                        *error_count += 1;
-                        println!("❌ {} - Read error: {}", path.display(), e);
-                    }
-                }
-            }
-        }
-        Ok(())
-    }
-
-    let mut file_count = 0usize;
-    let mut error_count = 0usize;
-    walk(dir, &mut file_count, &mut error_count)?;
-
-    if file_count == 0 {
-        println!("⚠️  No .vx files found in {}", dir.display());
-    } else {
-        println!(
-            "\n📊 Lint results: {} files, {} errors",
-            file_count, error_count
-        );
-    }
-
-    if error_count > 0 {
-        anyhow::bail!("Lint failed with {} errors", error_count);
     }
 
     Ok(())
