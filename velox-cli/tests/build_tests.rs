@@ -2,6 +2,13 @@ use std::fs;
 use std::path::PathBuf;
 
 #[test]
+fn cli_exposes_git_rev() {
+    let rev = velox_cli::velox_git_rev();
+    assert!(!rev.is_empty(), "rev must not be empty");
+    assert_ne!(rev, "MISSING", "build.rs must set VELOX_GIT_REV or fallback");
+}
+
+#[test]
 fn cli_build_emits_stub_file() {
     let manifest_dir = env!("CARGO_MANIFEST_DIR");
     let input = PathBuf::from(manifest_dir).join("templates/project/src/App.vx");
