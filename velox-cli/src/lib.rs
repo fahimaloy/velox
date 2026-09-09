@@ -81,21 +81,10 @@ pub fn build_cmd(input: &Path, out_dir: Option<&Path>, emit: EmitMode) -> Result
                 .unwrap_or("component");
 
             let code = velox_sfc::to_stub_rs(&sfc, name);
-            // Sanitize the output filename so Stub and Render modes agree on
-            // lowercase module files (e.g. `App.vx` -> `app.rs`), matching
-            // what `include!(concat!(env!("OUT_DIR"), "/app.rs"))` expects
-            // on case-sensitive filesystems.
-            let mod_name = commands::build::sanitize_mod_name(name);
-            let out_path = out_dir.join(format!("{}.rs", mod_name));
-            fs::write(&out_path, &code)
+            let out_path = out_dir.join(format!("{}.rs", name));
+            fs::write(&out_path, code)
                 .with_context(|| format!("failed to write {}", out_path.display()))?;
             println!("Generated: {}", out_path.display());
-            // Backward-compat alias for legacy `include!("App.rs")` paths.
-            let raw_path = out_dir.join(format!("{}.rs", name));
-            if raw_path != out_path {
-                // Best-effort alias; ignore errors since primary file exists.
-                let _ = fs::write(&raw_path, &code);
-            }
         }
         EmitMode::Render => {
             // Render mode: recursively compile the input and all imported components
