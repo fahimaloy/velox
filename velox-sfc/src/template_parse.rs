@@ -171,16 +171,15 @@ pub fn parse_template_to_ast(input: &str) -> Result<Vec<Node>, String> {
     // Unclosed tags: drain stack to roots (best-effort), warning about each so
     // users know their markup is malformed even though we parse leniently.
     while let Some(n) = stack.pop() {
-        if let Node::Element { tag, .. } = &n {
-            if let Some((line, col)) = open_info
+        if let Node::Element { tag, .. } = &n
+            && let Some((line, col)) = open_info
                 .iter()
                 .find(|(t, _)| t == tag)
                 .map(|(_, pos)| crate::diagnostic::line_col_at(input, *pos))
-            {
-                eprintln!(
-                    "velox: warning: unclosed tag <{tag}> at {line},{col} — add a matching </{tag}>"
-                );
-            }
+        {
+            eprintln!(
+                "velox: warning: unclosed tag <{tag}> at {line},{col} — add a matching </{tag}>"
+            );
         }
         push_child(&mut stack, &mut roots, n);
     }

@@ -270,30 +270,59 @@ pub fn generate_scope_id(component_name: &str) -> String {
 /// VNodes tagged with the matching `data-v-*` attribute.
 fn scope_css(css: &str, scope_id: &str) -> String {
     let attr = format!("[{scope_id}]");
-    let mut out = String::with_capacity(css.len());
-    let mut depth: usize = 0;
+    let mut out = String::with_capacity(css.len() + 32);
     let mut prelude = String::new();
+    // Stack of block types: true = at-rule container (@media, @keyframes), false = style rule.
+    let mut stack: Vec<bool> = Vec::new();
+    // Depth of @keyframes container, if any. Selectors inside it (0%, from, to) must not be scoped.
+    let mut keyframes_depth: Option<usize> = None;
     for c in css.chars() {
         match c {
             '{' => {
-                if depth == 0 {
-                    out.push_str(&scope_selector_list(&prelude, &attr));
-                } else {
+                let trimmed = prelude.trim().to_string();
+                let is_at_rule = trimmed.starts_with('@');
+                let is_keyframes = trimmed.starts_with("@keyframes")
+                    || trimmed.starts_with("@-webkit-keyframes")
+                    || trimmed.starts_with("@-moz-keyframes");
+                if is_keyframes {
+                    keyframes_depth = Some(stack.len());
+                }
+                if is_at_rule {
                     out.push_str(&prelude);
+                } else if keyframes_depth.is_some() {
+                    // Inside @keyframes: keyframe selectors (0%, from, to) are not scoped.
+                    out.push_str(&prelude);
+                } else if trimmed.is_empty() {
+                    out.push_str(&prelude);
+                } else {
+                    let inside_style = stack.last() == Some(&false);
+                    if inside_style {
+                        // Unexpected nested selector inside declarations — pass through.
+                        out.push_str(&prelude);
+                    } else {
+                        out.push_str(&scope_selector_list(&prelude, &attr));
+                    }
                 }
                 prelude.clear();
-                depth += 1;
+                stack.push(is_at_rule);
                 out.push(c);
             }
             '}' => {
                 out.push(c);
-                depth = depth.saturating_sub(1);
+                stack.pop();
+                if let Some(kd) = keyframes_depth
+                    && stack.len() <= kd
+                {
+                    keyframes_depth = None;
+                }
             }
             _ => {
-                if depth == 0 {
-                    prelude.push(c);
-                } else {
+                let inside_style = stack.last() == Some(&false);
+                if inside_style {
+                    // Inside a style rule's declaration block — copy verbatim.
                     out.push(c);
+                } else {
+                    prelude.push(c);
                 }
             }
         }

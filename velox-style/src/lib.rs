@@ -23,28 +23,41 @@ use velox_dom::{Props, VNode};
 
 // --- CSS Parser types (module-level for rust-analyzer compatibility) ---
 
-/// A single part of a CSS selector (e.g., `h1`, `.class`, `h1.class`).
+/// A single part of a CSS selector (e.g., `h1`, `.class`, `h1.class`, `[attr]`).
 #[derive(Debug, Clone, PartialEq)]
 pub struct SelectorPart {
     pub tag: String,
     pub class: String,
     pub hover: bool,
+    pub attr_name: String,
+    pub attr_value: Option<String>,
 }
 
 impl SelectorPart {
-    fn matches_element(&self, tag: &str, class_attr: Option<&str>, hovered: bool) -> bool {
+    fn matches_element(&self, tag: &str, props: &Props, hovered: bool) -> bool {
         if self.hover && !hovered {
             return false;
         }
-        let tag_ok = self.tag.is_empty() || self.tag == tag;
+        let tag_ok = self.tag.is_empty() || self.tag == "*" || self.tag == tag;
         let class_ok = if self.class.is_empty() {
             true
-        } else if let Some(classes) = class_attr {
+        } else if let Some(classes) = props.attrs.get("class") {
             classes.split_whitespace().any(|x| x == self.class)
         } else {
             false
         };
-        tag_ok && class_ok
+        let attr_ok = if self.attr_name.is_empty() {
+            true
+        } else if let Some(val) = props.attrs.get(&self.attr_name) {
+            if let Some(expected) = &self.attr_value {
+                val == expected
+            } else {
+                true
+            }
+        } else {
+            false
+        };
+        tag_ok && class_ok && attr_ok
     }
 
     #[allow(dead_code)]
@@ -105,11 +118,13 @@ impl<'i> cssparser::QualifiedRuleParser<'i> for &mut SheetParser {
         &mut self,
         input: &mut cssparser::Parser<'i, 't>,
     ) -> Result<String, cssparser::ParseError<'i, ()>> {
-        let mut selector = String::new();
+        // Use slice_from to preserve attribute selectors and complex selectors exactly.
+        // `to_css` for SquareBracketBlock loses inner content (emits ".btn[ ").
+        let start = input.position();
         while let Ok(token) = input.next_including_whitespace() {
-            let _ = token.to_css(&mut selector);
+            let _ = token;
         }
-        Ok(selector.trim().to_string())
+        Ok(input.slice_from(start).trim().to_string())
     }
 
     fn parse_block<'t>(
@@ -140,9 +155,61 @@ impl<'i> cssparser::QualifiedRuleParser<'i> for &mut SheetParser {
 }
 
 impl<'i> cssparser::AtRuleParser<'i> for &mut SheetParser {
-    type Prelude = ();
+    type Prelude = String;
     type AtRule = ();
     type Error = ();
+
+    fn parse_prelude<'t>(
+        &mut self,
+        name: cssparser::CowRcStr<'i>,
+        input: &mut cssparser::Parser<'i, 't>,
+    ) -> Result<String, cssparser::ParseError<'i, ()>> {
+        let mut prelude = String::new();
+        while let Ok(token) = input.next_including_whitespace() {
+            let _ = token.to_css(&mut prelude);
+        }
+        Ok(format!("@{} {}", name, prelude.trim()))
+    }
+
+    fn parse_block<'t>(
+        &mut self,
+        prelude: String,
+        _start: &cssparser::ParserState,
+        input: &mut cssparser::Parser<'i, 't>,
+    ) -> Result<(), cssparser::ParseError<'i, ()>> {
+        // Handle @media / @supports by parsing nested rules recursively.
+        // @keyframes and other at-rules are ignored (inner selectors are not style rules).
+        let prelude_trim = prelude.trim().to_lowercase();
+        if prelude_trim.starts_with("@keyframes")
+            || prelude_trim.starts_with("@-webkit-keyframes")
+            || prelude_trim.starts_with("@-moz-keyframes")
+            || prelude_trim.starts_with("@font-face")
+        {
+            return Ok(());
+        }
+        // For @media / @supports / other, parse inner qualified rules as flattened rules.
+        {
+            use cssparser::RuleListParser;
+            let mut tmp = SheetParser { rules: Vec::new() };
+            {
+                let mut rule_list = RuleListParser::new_for_nested_rule(input, &mut tmp);
+                for rule in &mut rule_list {
+                    let _ = rule;
+                }
+            }
+            self.rules.extend(tmp.rules);
+        }
+        Ok(())
+    }
+
+    fn rule_without_block(
+        &mut self,
+        prelude: String,
+        _start: &cssparser::ParserState,
+    ) -> Result<(), ()> {
+        let _ = prelude;
+        Err(())
+    }
 }
 
 struct DeclarationParser;
@@ -170,15 +237,98 @@ impl<'i> cssparser::AtRuleParser<'i> for DeclarationParser {
     type Error = ();
 }
 
-/// Parse a single selector part (tag, .class, or tag.class) with optional :hover.
+/// Parse a single selector part (tag, .class, tag.class, [attr], [attr="val"], etc.) with optional :hover.
+/// Attribute selectors: `[attr]`, `[attr="value"]`, `[attr='value']` appended to tag/class (e.g. `.btn[data-v-abc]`).
 fn parse_selector_part(raw: &str) -> Option<SelectorPart> {
-    let (name_raw, hover) = if let Some((base, pseudo)) = raw.split_once(':') {
-        (base.trim(), pseudo.trim() == "hover")
+    // Robustly extract attribute selector: find '[' and matching ']' (first ']' after '[')
+    // Allows trailing pseudo like `.btn[data-v-x]:hover`.
+    let (base_raw, attr_raw): (String, Option<String>) = if let Some(lb) = raw.find('[') {
+        if let Some(rb_rel) = raw[lb..].find(']') {
+            let rb = lb + rb_rel;
+            let attr_inner = raw[lb + 1..rb].to_string();
+            let before = &raw[..lb];
+            let after = &raw[rb + 1..];
+            // base without attr is before + after (after may contain :hover)
+            let base = format!("{}{}", before, after);
+            (base, Some(attr_inner))
+        } else {
+            return None;
+        }
     } else {
-        (raw, false)
+        (raw.to_string(), None)
     };
+
+    let (attr_name, attr_value) = if let Some(inner) = attr_raw {
+        let inner = inner.trim().to_string();
+        if inner.is_empty() {
+            return None;
+        }
+        if let Some(eq) = inner.find('=') {
+            let name = inner[..eq].trim().to_string();
+            if name.is_empty() {
+                return None;
+            }
+            let mut val = inner[eq + 1..].trim().to_string();
+            // Strip surrounding quotes
+            if (val.starts_with('"') && val.ends_with('"') && val.len() >= 2)
+                || (val.starts_with('\'') && val.ends_with('\'') && val.len() >= 2)
+            {
+                val = val[1..val.len() - 1].to_string();
+            }
+            (name, Some(val))
+        } else {
+            (inner, None)
+        }
+    } else {
+        (String::new(), None)
+    };
+
+    // Handle base being empty (pure attribute selector like [data-v-x])
+    let base_trimmed = base_raw.trim();
+    if base_trimmed.is_empty() {
+        if attr_name.is_empty() {
+            return None;
+        }
+        // Pure attribute selector may have hover pseudo in after part already removed? but if base empty, check hover not applicable
+        // However `[data-v-x]:hover` would have base ":hover" not empty - handled below
+        if base_trimmed.is_empty() {
+            return Some(SelectorPart {
+                tag: String::new(),
+                class: String::new(),
+                hover: false,
+                attr_name,
+                attr_value,
+            });
+        }
+    }
+
+    let (name_raw, hover) = if let Some((base, pseudo)) = base_trimmed.split_once(':') {
+        (base.trim().to_string(), pseudo.trim() == "hover")
+    } else {
+        (base_trimmed.to_string(), false)
+    };
+    // Allow `*` universal selector: treat like empty tag (matches any tag)
+    if name_raw == "*" {
+        return Some(SelectorPart {
+            tag: "*".to_string(),
+            class: String::new(),
+            hover,
+            attr_name,
+            attr_value,
+        });
+    }
     if name_raw.is_empty() {
-        return None;
+        if attr_name.is_empty() {
+            return None;
+        }
+        // e.g. `[data-v-x]:hover` => name_raw is "" but attr present, hover true
+        return Some(SelectorPart {
+            tag: String::new(),
+            class: String::new(),
+            hover,
+            attr_name,
+            attr_value,
+        });
     }
     if let Some(rest) = name_raw.strip_prefix('.') {
         let class = rest.trim();
@@ -189,6 +339,8 @@ fn parse_selector_part(raw: &str) -> Option<SelectorPart> {
             tag: String::new(),
             class: class.to_string(),
             hover,
+            attr_name,
+            attr_value,
         })
     } else if let Some((tag, class)) = name_raw.split_once('.') {
         let tag = tag.trim();
@@ -200,12 +352,16 @@ fn parse_selector_part(raw: &str) -> Option<SelectorPart> {
             tag: tag.to_string(),
             class: class.to_string(),
             hover,
+            attr_name,
+            attr_value,
         })
     } else {
         Some(SelectorPart {
-            tag: name_raw.to_string(),
+            tag: name_raw,
             class: String::new(),
             hover,
+            attr_name,
+            attr_value,
         })
     }
 }
@@ -274,7 +430,7 @@ impl Stylesheet {
 fn matches_selector(
     sel: &CompoundSelector,
     tag: &str,
-    class_attr: Option<&str>,
+    props: &Props,
     hovered: bool,
     ancestors: &[&VNode],
 ) -> bool {
@@ -282,7 +438,7 @@ fn matches_selector(
         return false;
     }
     let last = &sel.parts[sel.parts.len() - 1];
-    if !last.matches_element(tag, class_attr, hovered) {
+    if !last.matches_element(tag, props, hovered) {
         return false;
     }
     // Single-part selector: no ancestor check needed.
@@ -302,12 +458,10 @@ fn matches_selector(
                 props: a_props,
                 ..
             } = ancestors[ancestor_idx]
+                && part.matches_element(a_tag, a_props, false)
             {
-                let a_class = a_props.attrs.get("class").map(|s| s.as_str());
-                if part.matches_element(a_tag, a_class, false) {
-                    found = true;
-                    break;
-                }
+                found = true;
+                break;
             }
         }
         if !found {
@@ -417,13 +571,12 @@ where
                 props,
                 children,
             } => {
-                let class_attr = props.attrs.get("class").map(|s| s.as_str());
                 let hovered = is_hovered(tag, props);
                 let mut acc: HashMap<String, String> = inherited.clone();
                 // Match all selectors against this element, passing the ancestor chain
                 // so compound selectors (e.g., `.header h1`) can walk up the tree.
                 for rule in &sheet.rules {
-                    if matches_selector(&rule.selector, tag, class_attr, hovered, ancestors) {
+                    if matches_selector(&rule.selector, tag, props, hovered, ancestors) {
                         for (k, v) in &rule.decls {
                             acc.insert(k.clone(), v.clone());
                         }
@@ -486,11 +639,9 @@ pub fn compute_styles_for_node(
     if let Some(sheet) = sheet
         && let VNode::Element { tag, props, .. } = node
     {
-        let class_attr = props.attrs.get("class").map(|s| s.as_str());
-
         // Apply matching rules from stylesheet
         for rule in &sheet.rules {
-            if matches_selector(&rule.selector, tag, class_attr, is_hovered, ancestors) {
+            if matches_selector(&rule.selector, tag, props, is_hovered, ancestors) {
                 for (prop, value) in &rule.decls {
                     computed.set_property(prop, value);
                 }

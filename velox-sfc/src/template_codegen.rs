@@ -447,10 +447,11 @@ fn generate_make_on_event(
 
     let mut arms = String::new();
     let mut used: HashSet<String> = HashSet::new();
-    let mut uses_payload = false;
+    #[allow(unused_variables, unused_assignments)]
+    let mut _uses_payload = false;
 
-    // Known event modifiers and the Rust code to call on the DOM event
-    let modifier_handlers: HashMap<&str, &str> = [
+    // Known event modifiers — reserved for future modifier codegen (currently inlined)
+    let _modifier_handlers: HashMap<&str, &str> = [
         ("stop", "e.stop_propagation()"),
         ("prevent", "e.prevent_default()"),
         ("once", "// mark as handled once"),
@@ -467,7 +468,7 @@ fn generate_make_on_event(
                 "        \"{name}\" => {{ if let Some(p) = payload {{ state.{name}(p); }} }},\n",
                 name = h
             ));
-            uses_payload = true;
+            _uses_payload = true;
         } else if let Some(eh) = extra_by_name.get(h.as_str())
             && let Some(owner) = eh.owner.as_deref()
         {
@@ -477,7 +478,7 @@ fn generate_make_on_event(
                     "        \"{name}\" => {{ if let Some(p) = payload {{ state.{owner}.{method}(p); }} }},\n",
                     name = h, owner = owner, method = eh.name
                 ));
-                uses_payload = true;
+                _uses_payload = true;
             } else {
                 arms.push_str(&format!(
                     "        \"{name}\" => {{ state.{owner}.{method}(); }},\n",
@@ -509,7 +510,7 @@ fn generate_make_on_event(
                     method = method,
                     mod_code = mod_code
                 ));
-                uses_payload = true;
+                _uses_payload = true;
             } else {
                 // Zero-arg handler with modifier
                 let mod_code = match modifier.as_deref() {
@@ -547,7 +548,7 @@ fn generate_make_on_event(
                 "        \"{name}\" => {{ if let Some(p) = payload {{ state.{owner}.{method}(p); }} }},\n",
                 name = eh.name, owner = owner, method = eh.name
             ));
-            uses_payload = true;
+            _uses_payload = true;
         } else {
             arms.push_str(&format!(
                 "        \"{name}\" => {{ state.{owner}.{method}(); }},\n",
