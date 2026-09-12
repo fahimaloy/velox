@@ -10,11 +10,14 @@ mod native {
     use skia_safe as sk;
     use std::path::Path;
 
+    use crate::viewport::Viewport;
+
     pub struct SkiaSurface {
         surface: sk::Surface,
+        pub viewport: Viewport,
+        /// Legacy aliases kept for backwards compat — kept in sync with viewport.
         pub width: i32,
         pub height: i32,
-        scale_factor: f32,
         // Optional GPU context if available (kept for future extension)
         pub _gpu_ctx: Option<sk::gpu::DirectContext>,
         // Keep the native GL/EGL context alive while the Skia surface exists.
@@ -25,13 +28,16 @@ mod native {
     impl SkiaSurface {
         /// Create a CPU raster SkiaSurface.
         pub fn new_raster(width: i32, height: i32) -> Result<Self, String> {
-            let surface = sk::surfaces::raster_n32_premul((width, height))
+            let viewport = Viewport::from_i32(width, height, 1.0);
+            let w = viewport.physical_width_i32();
+            let h = viewport.physical_height_i32();
+            let surface = sk::surfaces::raster_n32_premul((w, h))
                 .ok_or_else(|| "skia: failed to create raster surface".to_string())?;
             Ok(SkiaSurface {
                 surface,
-                width,
-                height,
-                scale_factor: 1.0,
+                viewport,
+                width: w,
+                height: h,
                 _gpu_ctx: None,
                 #[cfg(all(feature = "skia-native", unix))]
                 _gl_ctx: None,
@@ -104,21 +110,20 @@ mod native {
 
         /// Update the scale factor used for logical-to-physical mapping.
         pub fn set_scale_factor(&mut self, scale_factor: f32) {
-            if scale_factor > 0.0 {
-                self.scale_factor = scale_factor;
-            }
+            self.viewport.set_scale(scale_factor);
         }
 
         /// Current scale factor for logical-to-physical mapping.
         pub fn scale_factor(&self) -> f32 {
-            self.scale_factor
+            self.viewport.scale
         }
 
         /// Resize the surface. Recreate a GPU-backed surface when a `DirectContext`
         /// is available; otherwise recreate a CPU raster surface.
+        /// Clamps to max(1) before raster/glow, warns on error and keeps previous surface.
         pub fn resize(&mut self, width: i32, height: i32) -> Result<(), String> {
-            self.width = width;
-            self.height = height;
+            let w = width.max(1);
+            let h = height.max(1);
 
             // If we have a DirectContext, try to create a GPU-backed surface.
             if let Some(dctx) = &mut self._gpu_ctx {
@@ -126,19 +131,33 @@ mod native {
                 if let Some(gl_ctx) = &self._gl_ctx {
                     let _ = gl_ctx.make_current();
                 }
-                if let Some(new_surf) = create_gpu_surface_from_direct_context(dctx, width, height)
-                {
+                if let Some(new_surf) = create_gpu_surface_from_direct_context(dctx, w, h) {
                     self.surface = new_surf;
+                    self.viewport.set_physical_i32(w, h);
+                    self.width = w;
+                    self.height = h;
                     return Ok(());
                 }
                 // If GPU surface recreation failed, fall through to raster fallback.
             }
 
-            // Raster fallback
-            let surface = sk::surfaces::raster_n32_premul((width, height))
-                .ok_or_else(|| "skia: failed to create raster surface on resize".to_string())?;
-            self.surface = surface;
-            Ok(())
+            // Raster fallback — attempt creation before mutating state.
+            match sk::surfaces::raster_n32_premul((w, h)) {
+                Some(surface) => {
+                    self.surface = surface;
+                    self.viewport.set_physical_i32(w, h);
+                    self.width = w;
+                    self.height = h;
+                    Ok(())
+                }
+                None => {
+                    log::warn!(
+                        "SkiaSurface::resize failed to create raster surface {}x{} — keeping previous {}x{}",
+                        w, h, self.width, self.height
+                    );
+                    Err("skia: failed to create raster surface on resize".to_string())
+                }
+            }
         }
     }
 
@@ -153,6 +172,8 @@ mod native {
         width: i32,
         height: i32,
     ) -> Result<SkiaSurface, String> {
+        let cw = width.max(1);
+        let ch = height.max(1);
         // Try to create a native GL/EGL context using the helper in `skia_gl`.
         match crate::skia_gl::create_context_from_winit(window) {
             Ok(gl_ctx) => {
@@ -164,28 +185,30 @@ mod native {
                     // and the native GL context so they are kept alive for the lifetime
                     // of the surface.
                     if let Some(gpu_surf) =
-                        create_gpu_surface_from_direct_context(&mut dctx, width, height)
+                        create_gpu_surface_from_direct_context(&mut dctx, cw, ch)
                     {
+                        let viewport = Viewport::from_i32(cw, ch, 1.0);
                         return Ok(SkiaSurface {
                             surface: gpu_surf,
-                            width,
-                            height,
-                            scale_factor: 1.0,
+                            viewport,
+                            width: cw,
+                            height: ch,
                             _gpu_ctx: Some(dctx),
                             #[cfg(all(feature = "skia-native", unix))]
                             _gl_ctx: Some(gl_ctx),
                         });
                     }
                     // Fallback to raster until the platform-specific path is implemented.
+                    let viewport = Viewport::from_i32(cw, ch, 1.0);
                     let surface =
-                        sk::surfaces::raster_n32_premul((width, height)).ok_or_else(|| {
+                        sk::surfaces::raster_n32_premul((cw, ch)).ok_or_else(|| {
                             "skia: failed to create raster fallback surface".to_string()
                         })?;
                     return Ok(SkiaSurface {
                         surface,
-                        width,
-                        height,
-                        scale_factor: 1.0,
+                        viewport,
+                        width: cw,
+                        height: ch,
                         _gpu_ctx: Some(dctx),
                         #[cfg(all(feature = "skia-native", unix))]
                         _gl_ctx: Some(gl_ctx),
@@ -199,8 +222,8 @@ mod native {
             }
         }
 
-        // Fallback to CPU raster surface
-        SkiaSurface::new_raster(width, height)
+        // Fallback to CPU raster surface (already clamps)
+        SkiaSurface::new_raster(cw, ch)
     }
 
     pub use SkiaSurface as Surface;

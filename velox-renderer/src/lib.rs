@@ -38,11 +38,11 @@ pub fn find_node_at_path<'a>(node: &'a VNode, path: &[usize]) -> Option<&'a VNod
 }
 
 /// Unified logical size helper — single rounding point for all frame paths.
+/// Delegates to Viewport::new for consistent clamping; kept as free function for compat.
 #[cfg(feature = "skia-native")]
 pub fn logical_size(width: i32, height: i32, scale_factor: f32) -> (u32, u32) {
-    let w = ((width as f32) / scale_factor).round().max(1.0) as u32;
-    let h = ((height as f32) / scale_factor).round().max(1.0) as u32;
-    (w, h)
+    let vp = Viewport::from_i32(width, height, scale_factor);
+    vp.logical_size()
 }
 
 /// Build hit-test targets from a precomputed layout. No layout recompute here.
@@ -126,8 +126,10 @@ pub mod event_binding;
 pub mod events;
 pub mod hmr;
 pub mod text;
+pub mod viewport;
 
 pub use hmr::{HmrMessage, run_hmr_client, hmr_config, DEFAULT_HMR_PORT};
+pub use viewport::{LogicalSize, PhysicalSize, Viewport};
 
 // Native Skia GL helper module (feature-gated)
 #[cfg(feature = "skia-native")]
@@ -877,9 +879,13 @@ where
                 event: WindowEvent::Resized(new_size),
                 ..
             } => {
-                let _ = renderer.resize(new_size.width as i32, new_size.height as i32);
+                if let Err(e) = renderer.resize(new_size.width as i32, new_size.height as i32) {
+                    log::warn!("renderer resize failed ({}x{}): {}", new_size.width, new_size.height, e);
+                }
                 if let Some(presenter) = presenter.as_mut() {
-                    let _ = presenter.resize(new_size.width, new_size.height);
+                    if let Err(e) = presenter.resize(new_size.width, new_size.height) {
+                        log::warn!("presenter resize failed: {}", e);
+                    }
                 }
                 if let Some(w) = window_opt.as_ref() {
                     w.request_redraw();
@@ -895,9 +901,13 @@ where
                 ..
             } => {
                 scale_factor = new_scale as f32;
-                let _ = renderer.resize(new_inner_size.width as i32, new_inner_size.height as i32);
+                if let Err(e) = renderer.resize(new_inner_size.width as i32, new_inner_size.height as i32) {
+                    log::warn!("renderer resize failed on scale change: {}", e);
+                }
                 if let Some(presenter) = presenter.as_mut() {
-                    let _ = presenter.resize(new_inner_size.width, new_inner_size.height);
+                    if let Err(e) = presenter.resize(new_inner_size.width, new_inner_size.height) {
+                        log::warn!("presenter resize failed on scale change: {}", e);
+                    }
                 }
                 if let Some(s) = &mut renderer.surface {
                     s.set_scale_factor(scale_factor);
@@ -1394,9 +1404,13 @@ where
                 event: WindowEvent::Resized(new_size),
                 ..
             } => {
-                let _ = renderer.resize(new_size.width as i32, new_size.height as i32);
+                if let Err(e) = renderer.resize(new_size.width as i32, new_size.height as i32) {
+                    log::warn!("renderer resize failed ({}x{}): {}", new_size.width, new_size.height, e);
+                }
                 if let Some(presenter) = presenter.as_mut() {
-                    let _ = presenter.resize(new_size.width, new_size.height);
+                    if let Err(e) = presenter.resize(new_size.width, new_size.height) {
+                        log::warn!("presenter resize failed: {}", e);
+                    }
                 }
                 if let Some(w) = window_opt.as_ref() {
                     w.request_redraw();
@@ -1412,9 +1426,13 @@ where
                 ..
             } => {
                 scale_factor = new_scale as f32;
-                let _ = renderer.resize(new_inner_size.width as i32, new_inner_size.height as i32);
+                if let Err(e) = renderer.resize(new_inner_size.width as i32, new_inner_size.height as i32) {
+                    log::warn!("renderer resize failed on scale change: {}", e);
+                }
                 if let Some(presenter) = presenter.as_mut() {
-                    let _ = presenter.resize(new_inner_size.width, new_inner_size.height);
+                    if let Err(e) = presenter.resize(new_inner_size.width, new_inner_size.height) {
+                        log::warn!("presenter resize failed on scale change: {}", e);
+                    }
                 }
                 if let Some(s) = &mut renderer.surface {
                     s.set_scale_factor(scale_factor);

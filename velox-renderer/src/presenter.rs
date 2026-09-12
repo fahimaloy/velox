@@ -6,6 +6,8 @@ use softbuffer::{Context, Surface};
 use velox_dom::VeloxError;
 use winit::window::Window;
 
+use crate::viewport::Viewport;
+
 /// Returns true if a display compositor appears to be available.
 ///
 /// Checks `WAYLAND_DISPLAY` / `DISPLAY` / `VELOX_HEADLESS` env vars. This is
@@ -144,6 +146,8 @@ fn compositor_help(err_detail: &str) -> String {
 pub struct SoftbufferPresenter {
     _context: Context,
     surface: Surface,
+    viewport: Viewport,
+    /// Legacy aliases — kept in sync with viewport.
     width: u32,
     height: u32,
     rgba: Vec<u8>,
@@ -201,9 +205,11 @@ impl SoftbufferPresenter {
                 return Err(VeloxError::Render(format!("softbuffer resize failed: {}", msg)));
             }
         }
+        let viewport = Viewport::new(w, h, 1.0);
         Ok(Self {
             _context: context,
             surface,
+            viewport,
             width: w,
             height: h,
             rgba: vec![0u8; (w as usize) * (h as usize) * 4],
@@ -242,6 +248,7 @@ impl SoftbufferPresenter {
                 return Err(VeloxError::Render(format!("softbuffer resize failed: {}", msg)));
             }
         }
+        self.viewport.set_physical(w, h);
         self.width = w;
         self.height = h;
         self.rgba.resize((w as usize) * (h as usize) * 4, 0);
