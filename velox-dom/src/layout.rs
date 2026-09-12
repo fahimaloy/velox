@@ -189,6 +189,7 @@ fn parse_length_value(
     if let Some(p) = val.strip_suffix('%')
         && let Ok(pct) = p.trim().parse::<f32>()
     {
+        let pct = if pct.is_finite() { pct } else { 0.0 };
         return Some((pct / 100.0) * parent_size);
     }
 
@@ -196,13 +197,14 @@ fn parse_length_value(
     if let Some(px) = val.strip_suffix("px")
         && let Ok(v) = px.trim().parse::<f32>()
     {
-        return Some(v);
+        return Some(if v.is_finite() { v } else { 0.0 });
     }
 
     // rem (root em)
     if let Some(rem) = val.strip_suffix("rem")
         && let Ok(v) = rem.trim().parse::<f32>()
     {
+        let v = if v.is_finite() { v } else { 0.0 };
         return Some(v * root_font_size);
     }
 
@@ -210,6 +212,7 @@ fn parse_length_value(
     if let Some(em) = val.strip_suffix("em")
         && let Ok(v) = em.trim().parse::<f32>()
     {
+        let v = if v.is_finite() { v } else { 0.0 };
         return Some(v * parent_font_size);
     }
 
@@ -217,6 +220,7 @@ fn parse_length_value(
     if let Some(vw) = val.strip_suffix("vw")
         && let Ok(v) = vw.trim().parse::<f32>()
     {
+        let v = if v.is_finite() { v } else { 0.0 };
         return Some((v / 100.0) * viewport.0);
     }
 
@@ -224,12 +228,13 @@ fn parse_length_value(
     if let Some(vh) = val.strip_suffix("vh")
         && let Ok(v) = vh.trim().parse::<f32>()
     {
+        let v = if v.is_finite() { v } else { 0.0 };
         return Some((v / 100.0) * viewport.1);
     }
 
     // Plain number -> pixels
     if let Ok(v) = val.parse::<f32>() {
-        return Some(v);
+        return Some(if v.is_finite() { v } else { 0.0 });
     }
 
     None
@@ -896,7 +901,7 @@ pub fn compute_layout(node: &VNode, viewport_w: i32, viewport_h: i32) -> LayoutN
                     0
                 };
                 let opacity = style_lookup_str(style, "opacity")
-                    .and_then(|v| v.parse::<f32>().ok())
+                    .and_then(|v| v.parse::<f32>().ok().map(|f| if f.is_finite() { f } else { 1.0 }))
                     .unwrap_or(1.0);
                 let transform =
                     style_lookup_str(style, "transform").unwrap_or_else(|| "none".to_string());
@@ -1069,7 +1074,7 @@ pub fn compute_layout(node: &VNode, viewport_w: i32, viewport_h: i32) -> LayoutN
                     let is_column = flex_dir == "column" || flex_dir == "column-reverse";
                     let is_reverse = flex_dir == "row-reverse" || flex_dir == "column-reverse";
                     let is_wrap = flex_wrap == "wrap" || flex_wrap == "wrap-reverse";
-                    let _wrap_reverse = flex_wrap == "wrap-reverse";
+                    let wrap_reverse = flex_wrap == "wrap-reverse";
 
                     let main_size = if is_column {
                         (avail_h - pt - pb).max(0)
@@ -1163,10 +1168,10 @@ pub fn compute_layout(node: &VNode, viewport_w: i32, viewport_h: i32) -> LayoutN
                             vh_f,
                         );
                         let flex_grow: f32 = style_lookup_str(fc.style, "flex-grow")
-                            .and_then(|v| v.parse::<f32>().ok())
+                            .and_then(|v| v.parse::<f32>().ok().map(|f| if f.is_finite() { f } else { 0.0 }))
                             .unwrap_or(0.0);
                         let flex_shrink: f32 = style_lookup_str(fc.style, "flex-shrink")
-                            .and_then(|v| v.parse::<f32>().ok())
+                            .and_then(|v| v.parse::<f32>().ok().map(|f| if f.is_finite() { f } else { 1.0 }))
                             .unwrap_or(1.0);
 
                         // Re-compute flex_basis now that we know flex_grow:
@@ -1208,7 +1213,7 @@ pub fn compute_layout(node: &VNode, viewport_w: i32, viewport_h: i32) -> LayoutN
                             vh_f,
                         );
                         let max_main = match max_main_val {
-                            Some(v) if v > 0 => v as f32,
+                            Some(v) if v >= 0 => v as f32,
                             _ => f32::MAX,
                         };
 
@@ -1287,7 +1292,14 @@ pub fn compute_layout(node: &VNode, viewport_w: i32, viewport_h: i32) -> LayoutN
                     }
 
                     // Step 3: For each line, distribute flex
-                    let mut main_offset = if is_column { pt as f32 } else { pl as f32 };
+                    // L-C1: wrap-reverse support; L-C2: track cross_offset not main_offset
+                    let cross_gap = (if is_column { column_gap } else { row_gap }) as f32;
+                    let main_start = if is_column { pt as f32 } else { pl as f32 };
+                    let mut cross_offset: f32 = 0.0;
+                    // Pre-compute reversal by reversing lines order; later we restore DOM order via sort
+                    if wrap_reverse {
+                        lines.reverse();
+                    }
                     for line in &mut lines {
                         // Calculate total flex basis and grow/shrink factors
                         let total_basis: f32 = line
@@ -1351,63 +1363,72 @@ pub fn compute_layout(node: &VNode, viewport_w: i32, viewport_h: i32) -> LayoutN
                                 + total_gap;
 
                         // Step 4: Justify content (main axis alignment)
+                        // L-H8: guard empty line (n==0) before extra/n
+                        if line.items.is_empty() {
+                            continue;
+                        }
                         let mut main_positions: Vec<(usize, f32)> = Vec::new(); // (item_idx, position)
                         let effective_main = line.main_size;
                         let extra_space = (main_size as f32 - effective_main).max(0.0);
                         let gap_val = if is_column { row_gap } else { column_gap };
+                        let n = line.items.len();
 
                         let start_offset = match justify_content.as_str() {
                             "flex-start" | "start" => 0.0,
                             "flex-end" | "end" => extra_space,
                             "center" => extra_space / 2.0,
                             "space-between" => {
-                                if line.items.len() <= 1 {
+                                if n <= 1 {
                                     0.0
                                 } else {
-                                    extra_space / (line.items.len() as f32 - 1.0)
+                                    extra_space / (n as f32 - 1.0)
                                 }
                             }
-                            "space-around" => extra_space / line.items.len() as f32,
-                            "space-evenly" => extra_space / (line.items.len() as f32 + 1.0),
+                            "space-around" => {
+                                if n == 0 { 0.0 } else { extra_space / n as f32 }
+                            }
+                            "space-evenly" => {
+                                if n == 0 { 0.0 } else { extra_space / (n as f32 + 1.0) }
+                            }
                             _ => 0.0,
                         };
 
-                        let mut cursor = main_offset + start_offset;
+                        let mut cursor = main_start + start_offset;
                         // For space-around, add half gap at start
-                        if justify_content == "space-around" && line.items.len() > 1 {
+                        if justify_content == "space-around" && n > 1 {
                             cursor += start_offset / 2.0;
                         }
                         // For space-evenly, start after one slot
-                        if justify_content == "space-evenly" && !line.items.is_empty() {
-                            cursor = main_offset + start_offset;
+                        if justify_content == "space-evenly" && n > 0 {
+                            cursor = main_start + start_offset;
                         }
 
                         for (line_idx, &item_idx) in line.items.iter().enumerate() {
                             let item_main_size = items[item_idx].flex_basis;
-                            let pos = if justify_content == "space-between" && line.items.len() > 1
+                            let pos = if justify_content == "space-between" && n > 1
                             {
-                                main_offset
+                                main_start
                                     + line_idx as f32
-                                        * (extra_space / (line.items.len() as f32 - 1.0)
+                                        * (extra_space / (n as f32 - 1.0)
                                             + items[item_idx].flex_basis
                                             + gap_val as f32)
                                     - gap_val as f32
                             } else if justify_content == "space-evenly" {
-                                main_offset
+                                main_start
                                     + start_offset
                                     + line_idx as f32 * (items[item_idx].flex_basis + start_offset)
                             } else if justify_content == "space-around" {
                                 let half_gap = start_offset / 2.0;
                                 if line_idx == 0 {
-                                    main_offset + half_gap
+                                    main_start + half_gap
                                 } else {
-                                    let prev_size = items[line.items[line_idx - 1]].flex_basis;
+                                    // let prev_size = items[line.items[line_idx - 1]].flex_basis;
                                     let prev_pos = if line_idx == 1 {
-                                        main_offset
+                                        main_start
                                     } else {
                                         main_positions[line_idx - 1].1
                                     };
-                                    prev_pos + prev_size + start_offset
+                                    prev_pos + items[line.items[line_idx - 1]].flex_basis + start_offset
                                 }
                             } else {
                                 cursor
@@ -1513,16 +1534,22 @@ pub fn compute_layout(node: &VNode, viewport_w: i32, viewport_h: i32) -> LayoutN
                                     _ => 0.0, // stretch, flex-start, start
                                 };
 
-                                // Set final position
+                                // L-C2: use cross_offset for multi-line row; fix row X to include content_x_scrolled
+                                let line_cross = cross_offset + cross_pos;
                                 if is_column {
                                     ln.rect.x =
-                                        (content_x_scrolled as f32 + cross_pos).round() as i32;
-                                    ln.rect.y =
-                                        (content_y_scrolled as f32 + main_pos).round() as i32;
+                                        (content_x_scrolled as f32 + line_cross).round() as i32;
+                                    ln.rect.y = (content_y_scrolled as f32
+                                        + (main_pos - main_start))
+                                        .round()
+                                        as i32;
                                 } else {
-                                    ln.rect.x = main_pos as i32;
+                                    ln.rect.x = (content_x_scrolled as f32
+                                        + (main_pos - main_start))
+                                        .round()
+                                        as i32;
                                     ln.rect.y =
-                                        (content_y_scrolled as f32 + cross_pos).round() as i32;
+                                        (content_y_scrolled as f32 + line_cross).round() as i32;
                                 }
 
                                 // Handle reverse directions
@@ -1573,9 +1600,12 @@ pub fn compute_layout(node: &VNode, viewport_w: i32, viewport_h: i32) -> LayoutN
                             }
                         }
 
-                        // Advance main offset for next line
-                        main_offset +=
-                            line.main_size + (if is_column { row_gap } else { column_gap }) as f32;
+                        // L-C2: advance cross_offset (not main_offset) for next line
+                        line.cross_size = max_cross_size;
+                        cross_offset += max_cross_size + cross_gap;
+                    }
+                    if wrap_reverse {
+                        laid_children.sort_by_key(|n| n.source_index.unwrap_or(usize::MAX));
                     }
 
                     // Handle reverse main axis ordering for multi-line
@@ -1835,7 +1865,7 @@ pub fn compute_layout(node: &VNode, viewport_w: i32, viewport_h: i32) -> LayoutN
                     vh_f,
                 );
                 let max_h = match max_h_val {
-                    Some(v) if v > 0 => v,
+                    Some(v) if v >= 0 => v,
                     _ => i32::MAX,
                 };
                 rect_h = rect_h.max(min_h).min(max_h);
