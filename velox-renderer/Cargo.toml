@@ -31,6 +31,7 @@ glow = { version = "0.12", optional = true }
 softbuffer = { version = "0.3", optional = true }
 
 [dependencies]
+velox-core = { path = "../velox-core" }
 # Optional backends (do NOT compile unless feature enabled)
 winit = { version = "0.28", optional = true }
 wgpu = { version = "0.16", optional = true }

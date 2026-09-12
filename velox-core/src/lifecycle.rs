@@ -1,5 +1,5 @@
 // velox-core/src/lifecycle.rs
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 
 /// A unique identifier for a component instance
@@ -177,6 +177,40 @@ pub fn has_updated_hooks(id: ComponentId) -> bool {
     })
 }
 
+/// Run *all* queued `on_mounted` hooks that have not yet fired.
+///
+/// Mounted hooks are removed after they run, so this call is idempotent — the
+/// renderer may safely call it at the top of every `RedrawRequested` frame.
+pub fn run_all_mounted_hooks() {
+    let ids: Vec<ComponentId> = MOUNTED_HOOKS.with(|h| h.borrow().keys().copied().collect());
+    for id in ids {
+        run_mounted_hooks(id);
+    }
+}
+
+/// Run all `on_updated` hooks for every mounted component.
+pub fn run_all_updated_hooks() {
+    let ids: Vec<ComponentId> = UPDATED_HOOKS.with(|h| h.borrow().keys().copied().collect());
+    for id in ids {
+        run_updated_hooks(id);
+    }
+}
+
+/// Run (and remove) all `before_destroy` / `on_unmounted` hooks for every
+/// component and clear their `on_updated` hooks. The renderer calls this from
+/// `CloseRequested` (window close) and from the drop guard around the event
+/// loop.
+pub fn run_all_destroy_hooks() {
+    let ids: Vec<ComponentId> = DESTROY_HOOKS.with(|h| h.borrow().keys().copied().collect());
+    for id in ids {
+        run_destroy_hooks(id);
+    }
+    UPDATED_HOOKS.with(|h| h.borrow_mut().clear());
+    MOUNTED_HOOKS.with(|h| h.borrow_mut().clear());
+    // `DESTROY_HOOKS` entries were already removed by `run_destroy_hooks`; the
+    // clear above covers cases where cleanup_component was not yet called.
+}
+
 /// Clean up all hooks for a component (call when component is fully destroyed)
 pub fn cleanup_component(id: ComponentId) {
     MOUNTED_HOOKS.with(|h| {
@@ -188,6 +222,69 @@ pub fn cleanup_component(id: ComponentId) {
     UPDATED_HOOKS.with(|h| {
         h.borrow_mut().remove(&id);
     });
+}
+
+/// RAII handle that owns a component id and runs destroy+cleanup on drop.
+///
+/// The renderer creates one per mounted app and keeps it alive for the
+/// duration of the event loop so `on_unmounted`/`before_destroy` fire even when
+/// the loop exits via `Drop` rather than an explicit `CloseRequested`.
+pub struct LifecycleHandle {
+    id: ComponentId,
+    mounted: Cell<bool>,
+}
+
+impl LifecycleHandle {
+    /// Allocate a fresh component id and enter its registration context.
+    #[must_use]
+    pub fn new() -> Self {
+        let id = generate_component_id();
+        set_current_component(id);
+        Self {
+            id,
+            mounted: Cell::new(false),
+        }
+    }
+
+    /// Wrap an existing `id` (the id is *not* re-entered into the current
+    /// context; call `set_current_component` if hook registration is needed).
+    #[must_use]
+    pub fn with_id(id: ComponentId) -> Self {
+        Self {
+            id,
+            mounted: Cell::new(false),
+        }
+    }
+
+    pub fn id(&self) -> ComponentId {
+        self.id
+    }
+
+    /// Run mounted hooks once. Safe to call redundantly.
+    pub fn mount(&self) {
+        if !self.mounted.get() {
+            self.mounted.set(true);
+            run_mounted_hooks(self.id);
+        }
+    }
+
+    /// True once [`mount`](Self::mount) has been called.
+    pub fn is_mounted(&self) -> bool {
+        self.mounted.get()
+    }
+}
+
+impl Default for LifecycleHandle {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Drop for LifecycleHandle {
+    fn drop(&mut self) {
+        run_destroy_hooks(self.id);
+        cleanup_component(self.id);
+    }
 }
 
 // ===== Lifecycle macros =====
