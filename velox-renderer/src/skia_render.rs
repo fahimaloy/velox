@@ -835,7 +835,8 @@ pub mod skia_impl {
         let styled = apply_styles(vnode, sheet);
         let vnode = &styled;
         let mut surface = crate::skia_surface::SkiaSurface::new_raster(width, height)?;
-        render_frame(&mut surface, vnode, sheet)?;
+        let layout = velox_dom::layout::compute_layout(vnode, width, height);
+        render_frame(&mut surface, vnode, &layout, sheet)?;
 
         let info = sk::ImageInfo::new(
             (width, height),
@@ -862,7 +863,8 @@ pub mod skia_impl {
         let physical_h = ((height as f32) * scale_factor).round() as i32;
         let mut surface = crate::skia_surface::SkiaSurface::new_raster(physical_w, physical_h)?;
         surface.set_scale_factor(scale_factor);
-        render_frame(&mut surface, vnode, sheet)?;
+        let layout = velox_dom::layout::compute_layout(vnode, width, height);
+        render_frame(&mut surface, vnode, &layout, sheet)?;
         surface.encode_png()
     }
 
@@ -1000,17 +1002,16 @@ pub mod skia_impl {
         fallback_mgr.legacy_make_typeface(None, sk::FontStyle::default())
     }
 
-    /// Render a VNode tree into an existing `SkiaSurface`.
+    /// Render a VNode tree into an existing `SkiaSurface` using a precomputed layout.
+    /// `layout` must be the result of `compute_layout(vnode, logical_w, logical_h)` where
+    /// `logical_w,logical_h` were obtained via `logical_size(physical, scale)` — single rounding point.
     pub fn render_frame(
         surface: &mut crate::skia_surface::SkiaSurface,
         vnode: &VNode,
+        layout_root: &velox_dom::layout::LayoutNode,
         _sheet: &Stylesheet,
     ) -> Result<(), String> {
-        // Compute layout using the existing velox-dom layout system.
         let scale = surface.scale_factor().max(1.0);
-        let width_i = ((surface.width as f32) / scale).round().max(1.0) as i32;
-        let height_i = ((surface.height as f32) / scale).round().max(1.0) as i32;
-        let layout_root = velox_dom::layout::compute_layout(vnode, width_i, height_i);
 
         let canvas = surface.canvas();
         canvas.clear(sk::Color::TRANSPARENT);
@@ -1408,7 +1409,8 @@ pub mod skia_impl {
 
             let mut surface =
                 crate::skia_surface::SkiaSurface::new_raster(64, 64).expect("surface");
-            render_frame(&mut surface, &vnode, &Stylesheet::default()).expect("render");
+            let layout = velox_dom::layout::compute_layout(&vnode, 64, 64);
+            render_frame(&mut surface, &vnode, &layout, &Stylesheet::default()).expect("render");
             let path = "target/skia_overflow_clip.png";
             surface.save_png(path).expect("save png");
             let png = std::fs::read(path).expect("read png");
@@ -1448,7 +1450,8 @@ pub mod skia_impl {
 
             let mut surface =
                 crate::skia_surface::SkiaSurface::new_raster(64, 64).expect("surface");
-            render_frame(&mut surface, &vnode, &Stylesheet::default()).expect("render");
+            let layout = velox_dom::layout::compute_layout(&vnode, 64, 64);
+            render_frame(&mut surface, &vnode, &layout, &Stylesheet::default()).expect("render");
             let path = "target/skia_z_index.png";
             surface.save_png(path).expect("save png");
             let png = std::fs::read(path).expect("read png");
