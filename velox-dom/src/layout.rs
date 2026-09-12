@@ -710,6 +710,132 @@ fn style_box_sides_full(
     (l, r, t, b)
 }
 
+fn style_border_widths(
+    style: Option<&str>,
+    parent_size: f32,
+    parent_font_size: f32,
+    root_font_size: f32,
+    viewport_w: f32,
+    viewport_h: f32,
+) -> (i32, i32, i32, i32) {
+    let resolve = |val: &str| -> Option<i32> {
+        parse_length_value(
+            val,
+            parent_size,
+            parent_font_size,
+            root_font_size,
+            (viewport_w, viewport_h),
+        )
+        .map(|f| f.round() as i32)
+    };
+
+    // default from `border` shorthand first token if it parses as length
+    let mut default_border: Option<i32> = None;
+    if let Some(s) = style
+        && let Some(raw) = s.split(';').find_map(|decl| {
+            let d = decl.trim();
+            if d.is_empty() {
+                return None;
+            }
+            let (k, v) = d.split_once(':')?;
+            if k.trim() == "border" {
+                Some(v.trim())
+            } else {
+                None
+            }
+        })
+    {
+        let first = raw.split_whitespace().next().unwrap_or("");
+        if let Some(v) = resolve(first) {
+            default_border = Some(v);
+        } else if first == "0" {
+            default_border = Some(0);
+        }
+    }
+    let (mut bl, mut br, mut bt, mut bb) = default_border
+        .map(|v| (v, v, v, v))
+        .unwrap_or((0, 0, 0, 0));
+
+    // `border-width` shorthand (1-4 values) overrides `border` default if present
+    let has_border_width = style.is_some_and(|s| {
+        s.split(';').any(|decl| {
+            let d = decl.trim();
+            if d.is_empty() {
+                return false;
+            }
+            if let Some((k, _)) = d.split_once(':') {
+                k.trim() == "border-width"
+            } else {
+                false
+            }
+        })
+    });
+    if has_border_width {
+        let (l, r, t, b) = style_box_sides_full(
+            style,
+            "border-width",
+            parent_size,
+            parent_font_size,
+            root_font_size,
+            viewport_w,
+            viewport_h,
+        );
+        bl = l;
+        br = r;
+        bt = t;
+        bb = b;
+    }
+
+    // individual `border-*-width` overrides
+    for (key, target) in [
+        ("border-left-width", &mut bl),
+        ("border-right-width", &mut br),
+        ("border-top-width", &mut bt),
+        ("border-bottom-width", &mut bb),
+    ] {
+        if let Some(v) = style_lookup_len_full(
+            style,
+            key,
+            parent_size,
+            parent_font_size,
+            root_font_size,
+            viewport_w,
+            viewport_h,
+        ) {
+            *target = v;
+        }
+    }
+    // also support legacy `border-left` etc shorthand width extraction
+    for (key, target) in [
+        ("border-left", &mut bl),
+        ("border-right", &mut br),
+        ("border-top", &mut bt),
+        ("border-bottom", &mut bb),
+    ] {
+        if let Some(s) = style
+            && let Some(raw) = s.split(';').find_map(|decl| {
+                let d = decl.trim();
+                if d.is_empty() {
+                    return None;
+                }
+                let (k, v) = d.split_once(':')?;
+                if k.trim() == key {
+                    Some(v.trim())
+                } else {
+                    None
+                }
+            })
+        {
+            let first = raw.split_whitespace().next().unwrap_or("");
+            if let Some(v) = resolve(first) {
+                *target = v;
+            }
+        }
+    }
+
+    (bl, br, bt, bb)
+}
+
 pub fn compute_layout(node: &VNode, viewport_w: i32, viewport_h: i32) -> LayoutNode {
     #[allow(clippy::too_many_arguments)]
     fn at(
@@ -781,6 +907,18 @@ pub fn compute_layout(node: &VNode, viewport_w: i32, viewport_h: i32) -> LayoutN
                     vw_f,
                     vh_f,
                 );
+                let (bl, br, bt, bb) = style_border_widths(
+                    style,
+                    avail_w as f32,
+                    parent_font_size,
+                    root_font_size,
+                    vw_f,
+                    vh_f,
+                );
+                let box_sizing = style_lookup_str(style, "box-sizing")
+                    .map(|s| s.trim().to_ascii_lowercase())
+                    .unwrap_or_else(|| "content-box".to_string());
+                let is_border_box = box_sizing == "border-box";
                 let is_root = matches!(tag.as_str(), "body" | "html");
 
                 // Check if element has height: 100vh or min-height: 100vh (viewport-relative)
@@ -843,27 +981,41 @@ pub fn compute_layout(node: &VNode, viewport_w: i32, viewport_h: i32) -> LayoutN
                     .unwrap_or(false);
                 let is_viewport_filling = has_100p_width && has_100p_height;
 
-                let rect_w = if is_root || is_viewport_filling {
-                    (avail_w - ml - mr).max(1)
-                } else {
-                    declared_w.unwrap_or(avail_w)
-                };
-
-                // Update is_viewport_height to include viewport-filling elements
+                // Update is_viewport_height to include viewport-filling elements (must be before rect calcs)
                 let is_viewport_height =
                     is_root || is_viewport_filling || has_viewport_height || min_height_vh;
 
-                // For viewport-height elements, use viewport height as the base
-                let _rect_h = if is_viewport_height {
+                let rect_w = if is_root || is_viewport_filling {
+                    (avail_w - ml - mr).max(1)
+                } else if let Some(dw) = declared_w {
+                    if is_border_box {
+                        dw
+                    } else {
+                        dw + pl + pr + bl + br
+                    }
+                } else {
+                    avail_w
+                };
+
+                // For viewport-height elements, use viewport height as the base, otherwise box-sizing adjusted
+                let mut _rect_h = if is_viewport_height {
                     (avail_h - mt - mb).max(1)
+                } else if let Some(dh) = declared_h {
+                    if is_border_box {
+                        dh
+                    } else {
+                        dh + pt + pb + bt + bb
+                    }
                 } else {
                     declared_h.unwrap_or(avail_h)
                 };
 
-                // Content box
-                let content_x = elem_x + pl;
-                let content_y_start = elem_y + pt;
-                let content_w = (rect_w - pl - pr).max(0);
+                // Content box (border inside padding offset)
+                let content_x = elem_x + bl + pl;
+                let content_y_start = elem_y + bt + pt;
+                let content_w =
+                    (rect_w - pl - pr - bl - br).max(0);
+                let content_h_available = (_rect_h - pt - pb - bt - bb).max(0);
 
                 let overflow =
                     style_lookup_str(style, "overflow").unwrap_or_else(|| "visible".to_string());
@@ -880,7 +1032,7 @@ pub fn compute_layout(node: &VNode, viewport_w: i32, viewport_h: i32) -> LayoutN
                 let scroll_y = style_lookup_len_full(
                     style,
                     "scroll-top",
-                    (avail_h - pt - pb).max(0) as f32,
+                    content_h_available as f32,
                     my_font_size,
                     root_font_size,
                     vw_f,
@@ -1030,7 +1182,7 @@ pub fn compute_layout(node: &VNode, viewport_w: i32, viewport_h: i32) -> LayoutN
                             let cb_h = if position == "fixed" {
                                 viewport_h
                             } else {
-                                (avail_h - pt - pb).max(0)
+                                content_h_available
                             };
                             let mut child_ln = at(
                                 c,
@@ -1077,12 +1229,12 @@ pub fn compute_layout(node: &VNode, viewport_w: i32, viewport_h: i32) -> LayoutN
                     let wrap_reverse = flex_wrap == "wrap-reverse";
 
                     let main_size = if is_column {
-                        (avail_h - pt - pb).max(0)
+                        content_h_available
                     } else {
                         content_w
                     };
                     // Cross size: use explicit container dimension if set, otherwise use available
-                    let explicit_h = style_lookup_len_full(
+                    let explicit_h_raw = style_lookup_len_full(
                         style,
                         "height",
                         avail_h as f32,
@@ -1091,6 +1243,13 @@ pub fn compute_layout(node: &VNode, viewport_w: i32, viewport_h: i32) -> LayoutN
                         vw_f,
                         vh_f,
                     );
+                    let explicit_h_content = explicit_h_raw.map(|v| {
+                        if is_border_box {
+                            (v - pt - pb - bt - bb).max(0)
+                        } else {
+                            v
+                        }
+                    });
                     let _explicit_w = style_lookup_len_full(
                         style,
                         "width",
@@ -1103,7 +1262,7 @@ pub fn compute_layout(node: &VNode, viewport_w: i32, viewport_h: i32) -> LayoutN
                     let cross_size = if is_column {
                         content_w
                     } else {
-                        explicit_h.unwrap_or(avail_h - pt - pb).max(0)
+                        explicit_h_content.unwrap_or(content_h_available).max(0)
                     };
 
                     // Step 1: Compute flex-basis for each child
@@ -1122,14 +1281,14 @@ pub fn compute_layout(node: &VNode, viewport_w: i32, viewport_h: i32) -> LayoutN
                     for fc in &flex_children {
                         // Pre-layout child to get its natural size
                         let child_avail_main = if is_column {
-                            (avail_h - pt - pb).max(0)
+                            content_h_available
                         } else {
                             main_size
                         };
                         let child_avail_cross = if is_column {
                             cross_size
                         } else {
-                            (avail_h - pt - pb).max(0)
+                            content_h_available
                         };
                         let ln = at(
                             fc.node,
@@ -1142,7 +1301,7 @@ pub fn compute_layout(node: &VNode, viewport_w: i32, viewport_h: i32) -> LayoutN
                             content_x,
                             content_y_start,
                             content_w,
-                            (avail_h - pt - pb).max(0),
+                            content_h_available,
                             Some(fc.index),
                             root_font_size,
                             my_font_size,
@@ -1556,7 +1715,7 @@ pub fn compute_layout(node: &VNode, viewport_w: i32, viewport_h: i32) -> LayoutN
                                 if is_reverse {
                                     if is_column {
                                         let container_bottom =
-                                            content_y_start + (avail_h - pt - pb).max(0);
+                                            content_y_start + content_h_available;
                                         ln.rect.y = container_bottom - ln.rect.y - ln.rect.h;
                                     } else {
                                         let container_right = content_x_scrolled + content_w;
@@ -1574,7 +1733,7 @@ pub fn compute_layout(node: &VNode, viewport_w: i32, viewport_h: i32) -> LayoutN
                                     child_style,
                                     &mut ln,
                                     content_w,
-                                    (avail_h - pt - pb).max(0),
+                                    content_h_available,
                                     my_font_size,
                                     root_font_size,
                                     vw_f,
@@ -1586,7 +1745,7 @@ pub fn compute_layout(node: &VNode, viewport_w: i32, viewport_h: i32) -> LayoutN
                                     content_x,
                                     content_y_start,
                                     content_w,
-                                    (avail_h - pt - pb).max(0),
+                                    content_h_available,
                                     scroll_x,
                                     scroll_y,
                                     my_font_size,
@@ -1652,7 +1811,7 @@ pub fn compute_layout(node: &VNode, viewport_w: i32, viewport_h: i32) -> LayoutN
                             let cb_h = if position == "fixed" {
                                 viewport_h
                             } else {
-                                (avail_h - pt - pb).max(0)
+                                content_h_available
                             };
                             let mut child_ln = at(
                                 c,
@@ -1768,13 +1927,13 @@ pub fn compute_layout(node: &VNode, viewport_w: i32, viewport_h: i32) -> LayoutN
                             cur_x,
                             cur_y,
                             (content_w - (cur_x - content_x_scrolled)).max(0),
-                            (avail_h - pt - pb).max(0),
+                            content_h_available,
                             viewport_w,
                             viewport_h,
                             content_x,
                             content_y_start,
                             content_w,
-                            (avail_h - pt - pb).max(0),
+                            content_h_available,
                             Some(idx),
                             root_font_size,
                             my_font_size,
@@ -1784,7 +1943,7 @@ pub fn compute_layout(node: &VNode, viewport_w: i32, viewport_h: i32) -> LayoutN
                             child_style,
                             &mut child_ln,
                             content_w,
-                            (avail_h - pt - pb).max(0),
+                            content_h_available,
                             my_font_size,
                             root_font_size,
                             vw_f,
@@ -1796,7 +1955,7 @@ pub fn compute_layout(node: &VNode, viewport_w: i32, viewport_h: i32) -> LayoutN
                             content_x,
                             content_y_start,
                             content_w,
-                            (avail_h - pt - pb).max(0),
+                            content_h_available,
                             scroll_x,
                             scroll_y,
                             my_font_size,
@@ -1827,8 +1986,8 @@ pub fn compute_layout(node: &VNode, viewport_w: i32, viewport_h: i32) -> LayoutN
                     }
                 }
 
-                // Height: declared or content height + paddings, clamped by min/max-height
-                let declared_h = style_lookup_len_full(
+                // Height: declared or content height + paddings/borders, clamped by min/max-height
+                let declared_h2 = style_lookup_len_full(
                     style,
                     "height",
                     avail_h as f32,
@@ -1841,9 +2000,16 @@ pub fn compute_layout(node: &VNode, viewport_w: i32, viewport_h: i32) -> LayoutN
                 // including those positioned above content_y_start via negative margins/offsets.
                 let content_h = (max_y_end - content_y_start).max(0);
                 let mut rect_h = if is_root || is_viewport_filling || is_viewport_height {
-                    (avail_h - mt - mb).max(1)
+                    // viewport/root heights are viewport-relative - already computed as _rect_h outer
+                    _rect_h
+                } else if let Some(dh) = declared_h2 {
+                    if is_border_box {
+                        dh
+                    } else {
+                        dh + pt + pb + bt + bb
+                    }
                 } else {
-                    declared_h.unwrap_or(content_h + pt + pb)
+                    content_h + pt + pb + bt + bb
                 };
                 let min_h = style_lookup_len_full(
                     style,
@@ -1874,10 +2040,10 @@ pub fn compute_layout(node: &VNode, viewport_w: i32, viewport_h: i32) -> LayoutN
                     && children.len() == 1
                     && let Some(child) = laid_children.get_mut(0)
                 {
-                    let content_h = (rect_h - pt - pb).max(0);
+                    let content_h = (rect_h - pt - pb - bt - bb).max(0);
                     let child_h = child.rect.h;
                     let offset_y = ((content_h - child_h).max(0)) / 2;
-                    child.rect.y = elem_y + pt + offset_y;
+                    child.rect.y = elem_y + bt + pt + offset_y;
 
                     let align =
                         style_lookup_str(style, "text-align").unwrap_or_else(|| "left".to_string());
