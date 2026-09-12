@@ -2,9 +2,9 @@ name: CI
 
 on:
   push:
-    branches: [ main, master ]
+    branches: [ main, master, alpha ]
   pull_request:
-    branches: [ main, master ]
+    branches: [ main, master, alpha ]
 
 jobs:
   build-test:
@@ -18,9 +18,9 @@ jobs:
       - name: Format check
         run: cargo fmt --all -- --check
       - name: Clippy
-        run: cargo clippy --workspace -- -D warnings
+        run: cargo clippy --workspace --all-targets -- -D warnings
       - name: Test (workspace)
-        run: cargo test --workspace --all-features --no-fail-fast
+        run: cargo test --workspace --no-fail-fast
 
   renderer-features:
     runs-on: ubuntu-latest

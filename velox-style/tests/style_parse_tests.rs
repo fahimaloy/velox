@@ -1,4 +1,4 @@
-use velox_style::{Stylesheet};
+use velox_style::Stylesheet;
 
 #[test]
 fn parses_color_and_fontsize_from_style_string() {
@@ -6,4 +6,3 @@ fn parses_color_and_fontsize_from_style_string() {
     let ss = Stylesheet::parse(css);
     assert_eq!(ss.rules.len(), 1);
 }
-

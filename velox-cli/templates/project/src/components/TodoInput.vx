@@ -1,0 +1,78 @@
+<template>
+  <div class="todo-input">
+    <input
+      type="text"
+      class="input"
+      :value="value"
+      :placeholder="placeholder"
+      @input="on_input"
+    />
+    <button class="btn btn-add" @click="on_submit">Add</button>
+  </div>
+</template>
+
+<script setup>
+pub struct Props {
+    pub value: String,
+    pub placeholder: String,
+}
+
+pub struct State {
+    pub props: Props,
+}
+
+impl State {
+    pub fn new() -> Self {
+        Self {
+            props: Props {
+                value: String::new(),
+                placeholder: String::from("What needs to be done?"),
+            }
+        }
+    }
+
+    pub fn value(&self) -> String {
+        self.props.value.clone()
+    }
+
+    pub fn placeholder(&self) -> String {
+        self.props.placeholder.clone()
+    }
+
+    // Events bubble to the owning (Todos) State via the root dispatcher; these
+    // no-ops keep the generated per-component dispatcher compiling.
+    pub fn on_input(&self) {}
+    pub fn on_submit(&self) {}
+}
+</script>
+
+<style scoped>
+.todo-input {
+    display: flex;
+    gap: 8px;
+}
+.input {
+    flex: 1;
+    padding: 10px 12px;
+    font-size: 15px;
+    border-radius: 8px;
+    border: 1px solid #3a3a5c;
+    background: #16213e;
+    color: #e6edf3;
+}
+.btn {
+    padding: 10px 20px;
+    font-size: 15px;
+    font-weight: 600;
+    border: none;
+    border-radius: 8px;
+    cursor: pointer;
+    color: #ffffff;
+}
+.btn-add {
+    background: #3478f6;
+}
+.btn-add:hover {
+    background: #4a8df8;
+}
+</style>

@@ -9,4 +9,3 @@ fn wgpu_backend_reports_name() {
 fn skia_backend_reports_name() {
     assert_eq!(velox_renderer::backend_name(), "skia");
 }
-

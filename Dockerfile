@@ -18,8 +18,6 @@ COPY velox-sfc/Cargo.toml velox-sfc/Cargo.toml
 COPY velox-style/Cargo.toml velox-style/Cargo.toml
 COPY velox-renderer/Cargo.toml velox-renderer/Cargo.toml
 COPY velox-cli/Cargo.toml velox-cli/Cargo.toml
-COPY examples/gallery/Cargo.toml examples/gallery/Cargo.toml
-COPY examples/todo/Cargo.toml examples/todo/Cargo.toml
 
 RUN cargo fetch
 
@@ -29,5 +27,7 @@ RUN cargo build --workspace
 
 FROM base AS test
 COPY . .
-RUN cargo test --workspace --all-features --no-fail-fast
+# Don't enable all features in CI tests — `skia-native` pulls large C++ deps
+# that often fail in CI. Run workspace tests without optional native features.
+RUN cargo test --workspace --no-fail-fast
 

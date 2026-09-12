@@ -1,11 +1,17 @@
 [package]
 name = "velox-sfc"
-version = "0.1.1"
+version = "0.1.0"
 edition = "2024"
+license = "MIT"
+description = "Single-file component compiler for the Velox UI framework"
+authors = ["fahimaloy"]
+repository = "https://github.com/fahimaloy/velox"
 publish = false
 
 [dependencies]
 pest         = "2.8"
 pest_derive  = "2.8"
-quote        = "1.0"
-syn          = { version = "2.0", features = ["full"] }
+
+[dev-dependencies]
+velox-dom = { path = "../velox-dom" }
+velox-renderer = { path = "../velox-renderer" }

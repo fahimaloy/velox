@@ -1,7 +1,7 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use velox_dom::{h, text, Props};
+use velox_dom::{Props, h, text};
 use velox_renderer::Renderer;
 
 #[test]
@@ -16,7 +16,7 @@ fn runtime_click_and_dblclick_and_hover() {
         vec![text("ok")],
     );
     let r = velox_renderer::new_selected_renderer();
-    let tree = r.mount(&vnode);
+    let tree = r.mount(&vnode).expect("mount should succeed");
     let mut rt = velox_renderer::EventRuntime::new(tree);
 
     let clicks = Rc::new(RefCell::new(0));
@@ -25,15 +25,15 @@ fn runtime_click_and_dblclick_and_hover() {
 
     {
         let c = clicks.clone();
-        rt.registry.on("inc", move || *c.borrow_mut() += 1);
+        rt.registry.on("inc", move |_| *c.borrow_mut() += 1);
     }
     {
         let d = dbls.clone();
-        rt.registry.on("boom", move || *d.borrow_mut() += 1);
+        rt.registry.on("boom", move |_| *d.borrow_mut() += 1);
     }
     {
         let h = hovs.clone();
-        rt.registry.on("hov", move || *h.borrow_mut() += 1);
+        rt.registry.on("hov", move |_| *h.borrow_mut() += 1);
     }
 
     // First click
@@ -46,13 +46,16 @@ fn runtime_click_and_dblclick_and_hover() {
     assert!(n >= 1);
     assert_eq!(*dbls.borrow(), 1);
 
-    // Hover fires once until reset
+    // Hover fires on every cursor movement
     let n = rt.cursor_moved();
     assert_eq!(n, 1);
     assert_eq!(*hovs.borrow(), 1);
     let n2 = rt.cursor_moved();
-    assert_eq!(n2, 0);
+    assert_eq!(n2, 1);
+    assert_eq!(*hovs.borrow(), 2);
+    // Reset clears hover_sent flag
     rt.reset_hover();
     let n3 = rt.cursor_moved();
     assert_eq!(n3, 1);
+    assert_eq!(*hovs.borrow(), 3);
 }

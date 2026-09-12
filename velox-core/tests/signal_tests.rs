@@ -9,13 +9,14 @@ fn test_signal_and_effect() {
     // Observed must also be Rc<RefCell> to mutate inside the closure
     let observed = Rc::new(StdRefCell::new(0));
 
-    {
+    // Keep the effect handle alive so the effect continues to run
+    let _handle = {
         let count_clone = count.clone();
         let observed_clone = observed.clone();
         effect(move || {
             *observed_clone.borrow_mut() = count_clone.get();
-        });
-    }
+        })
+    };
 
     // Initial effect run should have written 0
     assert_eq!(*observed.borrow(), 0);

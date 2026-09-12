@@ -1,5 +1,5 @@
 [workspace]
-resolver = "3"
+resolver = "2"
 members = [
     "velox-core",
     "velox-sfc",
@@ -7,8 +7,6 @@ members = [
     "velox-renderer",
     "velox-style",
     "velox-cli",
+    "examples/counter",
     "examples/todo",
-    "examples/gallery",
-
-    "examples/myapp",
 ]

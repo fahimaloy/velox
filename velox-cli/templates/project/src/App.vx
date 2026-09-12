@@ -1,0 +1,51 @@
+<template>
+  <div class="app">
+    <header class="header">
+      <h1 class="title">{{ title }}</h1>
+    </header>
+    <Todos />
+  </div>
+</template>
+
+<script setup>
+import Todos from './components/Todos.vx'
+
+pub struct State {
+    // Persistent child-state: the Todos component owns its todo list across
+    // renders because it is created once here and passed by reference.
+    pub todos: std::sync::Arc<super::todos::script_rs::State>,
+}
+
+impl State {
+    pub fn new() -> Self {
+        Self {
+            todos: std::sync::Arc::new(super::todos::script_rs::State::new()),
+        }
+    }
+
+    pub fn title(&self) -> String {
+        String::from("Velox Todo")
+    }
+}
+</script>
+
+<style scoped>
+.app {
+    width: 100%;
+    height: 100%;
+    display: flex;
+    flex-direction: column;
+    background: #1a1a2e;
+    color: #e6edf3;
+    font-family: system-ui, sans-serif;
+}
+.header {
+    padding: 28px 24px 12px;
+    text-align: center;
+}
+.title {
+    margin: 0;
+    font-size: 30px;
+    font-weight: 700;
+}
+</style>

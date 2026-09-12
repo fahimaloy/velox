@@ -1,0 +1,7 @@
+tools:
+    shell:
+        allow:
+            - find *
+            - head *
+            - ls *
+            - mkdir *

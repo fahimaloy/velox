@@ -1,8 +1,11 @@
-
 [package]
 name = "velox-renderer"
-version = "0.1.1"
-edition = "2021"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+description = "Rendering backends (Skia, WGPU) for the Velox UI framework"
+authors = ["fahimaloy"]
+repository = "https://github.com/fahimaloy/velox"
 publish = false
 
 [features]
@@ -13,20 +16,44 @@ default = []
 wgpu = ["dep:winit", "dep:wgpu"]
 # `skia` enables the API surface; `skia-native` pulls the heavy dependency.
 skia = []
-skia-native = ["dep:skia-safe", "skia"]
+# Enable platform crates when building the native Skia backend.
+# This ensures `raw-window-handle`, `egl`, and `glow` are available to the
+# `skia_gl` module when the feature is enabled.
+skia-native = ["dep:skia-safe", "skia", "dep:raw-window-handle", "dep:egl", "dep:glow", "dep:winit", "dep:softbuffer"]
+
+[target.'cfg(unix)'.dependencies]
+# raw-window-handle helps obtain native window handles from winit
+raw-window-handle = { version = "0.5", optional = true }
+# egl bindings for creating contexts on Linux
+egl = { version = "0.2", optional = true }
+# glow for loading GL function pointers where needed
+glow = { version = "0.12", optional = true }
+softbuffer = { version = "0.3", optional = true }
 
 [dependencies]
 # Optional backends (do NOT compile unless feature enabled)
 winit = { version = "0.28", optional = true }
 wgpu = { version = "0.16", optional = true }
-skia-safe = { version = "0.52", features = ["gl", "egl"], optional = true }
+skia-safe = { version = "0.91.1", features = ["gl", "egl"], optional = true }
+# Note: raw-window-handle, egl, glow, softbuffer are in [target.'cfg(unix)'.dependencies] above
 velox-dom = { path = "../velox-dom" }
 velox-style = { path = "../velox-style" }
+log = "0.4"
 pollster = "0.3"
 bytemuck = { version = "1", features = ["derive"] }
 wgpu_glyph = "0.20"
 ab_glyph = "0.2"
 
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
 [dev-dependencies]
 velox-core = { path = "../velox-core" }
 velox-style = { path = "../velox-style" }
+velox-sfc = { path = "../velox-sfc" }
+skia-safe = { version = "0.91.1", features = ["gl", "egl"] }
+criterion = "0.5"
+
+[[bench]]
+name = "skia_render_bench"
+harness = false
