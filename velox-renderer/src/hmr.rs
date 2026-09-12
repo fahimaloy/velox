@@ -71,49 +71,49 @@ pub fn hmr_config() -> Option<u16> {
 /// process exiting) and then restarts with a fresh build.
 pub fn run_hmr_client(port: u16, tx: std::sync::mpsc::Sender<HmrMessage>) {
     std::thread::spawn(move || {
-        loop {
-            match std::net::TcpStream::connect(("127.0.0.1", port)) {
-                Ok(stream) => {
-                    eprintln!(
-                        "[velox] HMR client connected to dev server on port {}",
-                        port
-                    );
-                    let reader = std::io::BufReader::new(stream);
-                    for line in std::io::BufRead::lines(reader) {
-                        match line {
-                            Ok(json) => match serde_json::from_str::<HmrMessage>(&json) {
-                                Ok(msg) => {
-                                    if tx.send(msg.clone()).is_err() {
-                                        // Receiver dropped — stop the thread.
-                                        return;
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            loop {
+                match std::net::TcpStream::connect(("127.0.0.1", port)) {
+                    Ok(stream) => {
+                        eprintln!(
+                            "[velox] HMR client connected to dev server on port {}",
+                            port
+                        );
+                        let reader = std::io::BufReader::new(stream);
+                        for line in std::io::BufRead::lines(reader) {
+                            match line {
+                                Ok(json) => match serde_json::from_str::<HmrMessage>(&json) {
+                                    Ok(msg) => {
+                                        if tx.send(msg.clone()).is_err() {
+                                            return;
+                                        }
+                                        if msg == HmrMessage::FullReload {
+                                            std::process::exit(0);
+                                        }
                                     }
-                                    if msg == HmrMessage::FullReload {
-                                        std::process::exit(0);
+                                    Err(e) => {
+                                        eprintln!(
+                                            "[velox] HMR: failed to parse message: {}",
+                                            e
+                                        );
                                     }
-                                }
+                                },
                                 Err(e) => {
-                                    eprintln!(
-                                        "[velox] HMR: failed to parse message: {}",
-                                        e
-                                    );
+                                    eprintln!("[velox] HMR connection error: {}", e);
+                                    break;
                                 }
-                            },
-                            Err(e) => {
-                                eprintln!("[velox] HMR connection error: {}", e);
-                                break;
                             }
                         }
                     }
+                    Err(e) => {
+                        eprintln!(
+                            "[velox] HMR client: connection to port {} failed: {} — retrying...",
+                            port, e
+                        );
+                    }
                 }
-                Err(e) => {
-                    eprintln!(
-                        "[velox] HMR client: connection to port {} failed: {} — retrying...",
-                        port, e
-                    );
-                }
+                std::thread::sleep(std::time::Duration::from_millis(500));
             }
-            // Retry interval between connection attempts.
-            std::thread::sleep(std::time::Duration::from_millis(500));
-        }
+        }));
     });
 }
