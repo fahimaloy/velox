@@ -1134,7 +1134,7 @@ where
 {
     use winit::dpi::PhysicalSize;
     use winit::event::{ElementState, Event, MouseButton, StartCause, WindowEvent};
-    use winit::event_loop::{ControlFlow, EventLoop};
+    use winit::event_loop::{ControlFlow, EventLoopBuilder};
     use winit::window::WindowBuilder;
 
     let headless_env_hmr = std::env::var("VELOX_HEADLESS").as_deref() == Ok("1")
@@ -1147,14 +1147,17 @@ where
     // Try to create a winit event loop and window. In headless mode or when
     // no compositor is available, both can fail (winit may panic instead of
     // returning Err) — we catch this and proceed with headless rendering.
+    // Use EventLoop<HmrMessage> so the HMR thread can forward messages
+    // directly via EventLoopProxy::send_event(HmrMessage) without any
+    // shared Mutex<Receiver>.
     let (event_loop_opt, proxy_opt, window, window_size, scale_factor): (
-        Option<winit::event_loop::EventLoop<()>>,
-        Option<winit::event_loop::EventLoopProxy<()>>,
+        Option<winit::event_loop::EventLoop<HmrMessage>>,
+        Option<winit::event_loop::EventLoopProxy<HmrMessage>>,
         Option<winit::window::Window>,
         PhysicalSize<u32>,
         f32,
     ) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let event_loop = EventLoop::new();
+        let event_loop = EventLoopBuilder::<HmrMessage>::with_user_event().build();
         let proxy = event_loop.create_proxy();
         let window_result = WindowBuilder::new()
             .with_title(title)
@@ -1192,20 +1195,54 @@ where
         (None, None, None, PhysicalSize::new(800, 600), 1.0)
     });
 
-    // Spawn the HMR receiver thread if we have an event loop proxy
+    // Spawn the HMR forwarding thread. It takes sole ownership of the
+    // Receiver (moved out of the Arc<Mutex>) and forwards each HmrMessage
+    // directly via EventLoopProxy::send_event(HmrMessage). No Mutex is
+    // held across blocking recv(). Wrap in catch_unwind so HMR panics
+    // never bring down the app (acceptance: catch_unwind around HMR loop).
     if let Some(proxy) = proxy_opt {
-        let hmr_rx_for_thread = std::sync::Arc::clone(&hmr_rx);
-        std::thread::spawn(move || {
-            while let Ok(rx) = hmr_rx_for_thread.lock() {
-                if rx.recv().is_ok() {
-                    let _ = proxy.send_event(());
-                } else {
-                    break;
-                }
+        match std::sync::Arc::try_unwrap(hmr_rx) {
+            Ok(mutex) => {
+                let rx = mutex.into_inner().expect("hmr mutex poisoned");
+                std::thread::spawn(move || {
+                    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        while let Ok(msg) = rx.recv() {
+                            if proxy.send_event(msg).is_err() {
+                                break;
+                            }
+                        }
+                    }));
+                });
             }
-        });
+            Err(shared) => {
+                // Fallback: another Arc clone exists (unusual). Poll without
+                // holding the lock across blocking recv.
+                std::thread::spawn(move || {
+                    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        loop {
+                            let res = {
+                                let guard = shared.lock().expect("hmr mutex poisoned");
+                                guard.try_recv()
+                            };
+                            match res {
+                                Ok(msg) => {
+                                    if proxy.send_event(msg).is_err() {
+                                        break;
+                                    }
+                                }
+                                Err(std::sync::mpsc::TryRecvError::Empty) => {
+                                    std::thread::sleep(std::time::Duration::from_millis(16));
+                                }
+                                Err(std::sync::mpsc::TryRecvError::Disconnected) => break,
+                            }
+                        }
+                    }));
+                });
+            }
+        }
     }
-    let hmr_rx_for_loop = std::sync::Arc::clone(&hmr_rx);
+    // NOTE: hmr_rx has been moved into the forwarding thread. The event loop
+    // now receives HmrMessage via Event::UserEvent(msg) without any Mutex.
 
     let window_opt: Option<winit::window::Window> = window;
     let mut scale_factor = scale_factor;
@@ -1248,6 +1285,7 @@ where
     let mut hovered_id: Option<u32> = None;
     let mut click_targets: Vec<crate::events::ClickTarget> = Vec::new();
     let mut hover_targets: Vec<crate::events::HoverTarget> = Vec::new();
+    let mut input_targets: Vec<crate::events::InputTarget> = Vec::new();
     let mut _last_vnode: Option<velox_dom::VNode> = None;
 
     // Render first frame immediately before entering the event loop.
@@ -1269,7 +1307,14 @@ where
                 .unwrap_or(false)
         });
         _last_vnode = Some(vnode.clone());
-        recompute_targets(&vnode, vw, vh, &mut click_targets, &mut hover_targets);
+        recompute_targets(
+            &vnode,
+            vw,
+            vh,
+            &mut click_targets,
+            &mut hover_targets,
+            &mut input_targets,
+        );
         // Render and present the initial frame so the window has immediate content.
         if let Err(e) = crate::skia_render::skia_impl::render_frame(s, &vnode, &sheet) {
             log::error!("skia initial render error: {}", e);
@@ -1293,6 +1338,7 @@ where
         height: u32,
         click_targets: &mut Vec<crate::events::ClickTarget>,
         hover_targets: &mut Vec<crate::events::HoverTarget>,
+        input_targets: &mut Vec<crate::events::InputTarget>,
     ) {
         let layout = velox_dom::layout::compute_layout(vnode, width as i32, height as i32);
         click_targets.clear();
@@ -1301,6 +1347,12 @@ where
         hover_targets.clear();
         let mut order = 0;
         crate::events::collect_hover_targets(vnode, &layout, None, &mut order, hover_targets);
+        input_targets.clear();
+        let mut order = 0;
+        let mut path = Vec::new();
+        crate::events::collect_input_targets(
+            vnode, &layout, None, &mut path, &mut order, input_targets,
+        );
     }
 
     fn with_hover_ids(vnode: &velox_dom::VNode, next_id: &mut u32) -> velox_dom::VNode {
@@ -1337,31 +1389,52 @@ where
         event_loop.run(move |event, _, control_flow| {
         *control_flow = ControlFlow::Wait;
         match event {
-            Event::UserEvent(()) => {
-                if let Ok(guard) = hmr_rx_for_loop.lock()
-                    && let Ok(msg) = guard.try_recv()
-                {
-                    match msg {
-                        HmrMessage::FullReload => {
-                            *control_flow = ControlFlow::Exit;
+            Event::UserEvent(msg) => match msg {
+                HmrMessage::FullReload => {
+                    *control_flow = ControlFlow::Exit;
+                }
+                HmrMessage::HotReload { module_path: _ } => {
+                    // Rebuild view and refresh all hit-test targets including
+                    // input_targets, then request a redraw so the new VNode
+                    // is painted on the next frame.
+                    if let Some(s) = renderer.surface.as_ref() {
+                        let (vw, vh) = logical_size(s.width, s.height, scale_factor);
+                        let (vnode_raw, _) = make_view(vw, vh);
+                        if let Err(e) = HmrRenderer::hot_update(&mut renderer, vnode_raw) {
+                            log::error!("hot_update failed: {}", e);
                         }
-                        HmrMessage::HotReload { module_path: _ } => {
-                            if let Some(s) = &renderer.surface {
-                                let (vw, vh) = logical_size(s.width, s.height, scale_factor);
-                                let (vnode_raw, _) = make_view(vw, vh);
-                                let new_vnode = vnode_raw;
-                                if let Err(e) = HmrRenderer::hot_update(&mut renderer, new_vnode) {
-                                    log::error!("hot_update failed: {}", e);
-                                }
-                                if let Some(w) = window_opt.as_ref() {
-                                    w.request_redraw();
-                                }
-                            }
+                        // Recompute all targets from the updated view so
+                        // input focus / hit-test stays in sync after HMR.
+                        if let Some(s2) = renderer.surface.as_ref() {
+                            let (vw2, vh2) = logical_size(s2.width, s2.height, scale_factor);
+                            let (vnode2_raw, sheet2) = make_view(vw2, vh2);
+                            let mut nid = 1u32;
+                            let tagged = with_hover_ids(&vnode2_raw, &mut nid);
+                            let vnode2 = apply_styles_with_hover(&tagged, &sheet2, &|_tag, props| {
+                                props
+                                    .attrs
+                                    .get("data-hover-id")
+                                    .and_then(|v| v.parse::<u32>().ok())
+                                    .map(|id| Some(id) == hovered_id)
+                                    .unwrap_or(false)
+                            });
+                            _last_vnode = Some(vnode2.clone());
+                            recompute_targets(
+                                &vnode2,
+                                vw2,
+                                vh2,
+                                &mut click_targets,
+                                &mut hover_targets,
+                                &mut input_targets,
+                            );
                         }
-                        HmrMessage::KeepWindow => {}
+                    }
+                    if let Some(w) = window_opt.as_ref() {
+                        w.request_redraw();
                     }
                 }
-            }
+                HmrMessage::KeepWindow => {}
+            },
             Event::NewEvents(StartCause::Init) => {
                 if let Some(w) = window_opt.as_ref() {
                     w.request_redraw();
@@ -1396,7 +1469,9 @@ where
                             .unwrap_or(false)
                     });
                     _last_vnode = Some(vnode.clone());
-                    recompute_targets(&vnode, vw, vh, &mut click_targets, &mut hover_targets);
+                    recompute_targets(
+                        &vnode, vw, vh, &mut click_targets, &mut hover_targets, &mut input_targets,
+                    );
                 }
                 if let Some(w) = window_opt.as_ref() {
                     w.request_redraw();
@@ -1431,7 +1506,9 @@ where
                             .unwrap_or(false)
                     });
                     _last_vnode = Some(vnode.clone());
-                    recompute_targets(&vnode, vw, vh, &mut click_targets, &mut hover_targets);
+                    recompute_targets(
+                        &vnode, vw, vh, &mut click_targets, &mut hover_targets, &mut input_targets,
+                    );
                 }
                 if let Some(w) = window_opt.as_ref() {
                     w.request_redraw();
@@ -1485,7 +1562,9 @@ where
                                     .unwrap_or(false)
                             });
                         _last_vnode = Some(vnode.clone());
-                        recompute_targets(&vnode, vw, vh, &mut click_targets, &mut hover_targets);
+                        recompute_targets(
+                            &vnode, vw, vh, &mut click_targets, &mut hover_targets, &mut input_targets,
+                        );
                     }
                     if let Some(w) = window_opt.as_ref() {
                         w.set_title(&get_title());
@@ -1531,7 +1610,9 @@ where
                             .unwrap_or(false)
                     });
                     _last_vnode = Some(vnode.clone());
-                    recompute_targets(&vnode, vw, vh, &mut click_targets, &mut hover_targets);
+                    recompute_targets(
+                        &vnode, vw, vh, &mut click_targets, &mut hover_targets, &mut input_targets,
+                    );
                     if let Err(e) = crate::skia_render::skia_impl::render_frame(s, &vnode, &sheet) {
                         log::error!("skia render error: {}", e);
                     }
