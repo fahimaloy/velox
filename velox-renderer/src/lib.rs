@@ -7,6 +7,24 @@ use velox_dom::VNode;
 #[cfg(feature = "skia-native")]
 use velox_style::{Stylesheet, apply_styles_with_hover};
 
+/// Lifecycle wiring helper — ensures `on_unmounted` / `before_destroy` hooks
+/// fire even if the event loop exits via `Drop` rather than `CloseRequested`.
+#[allow(dead_code)]
+pub struct LifecycleCleanupGuard;
+impl Drop for LifecycleCleanupGuard {
+    fn drop(&mut self) {
+        let _ = std::panic::catch_unwind(velox_core::lifecycle::run_all_destroy_hooks);
+    }
+}
+
+#[allow(dead_code)]
+pub fn ensure_mounted(flag: &mut bool) {
+    if !*flag {
+        *flag = true;
+        velox_core::lifecycle::run_all_mounted_hooks();
+    }
+}
+
 /// Return the VNode at a child source-index path, if it exists.
 pub fn find_node_at_path<'a>(node: &'a VNode, path: &[usize]) -> Option<&'a VNode> {
     let mut cur = node;
@@ -747,6 +765,10 @@ where
     let mut input_targets: Vec<crate::events::InputTarget> = Vec::new();
     // Path (child source indices) to the focused text input, if any.
     let mut focused_input: Option<Vec<usize>> = None;
+    // Lifecycle: ensure on_mounted fires once on first RedrawRequested and
+    // on_unmounted/before_destroy fire on CloseRequested or drop.
+    let _lifecycle_guard = LifecycleCleanupGuard;
+    let mut did_mount = false;
 
     // Render first frame immediately before entering the event loop.
     // This ensures the window has content even on platforms where
@@ -862,6 +884,7 @@ where
                 event: WindowEvent::CloseRequested,
                 ..
             } => {
+                velox_core::lifecycle::run_all_destroy_hooks();
                 *control_flow = ControlFlow::Exit;
             }
             Event::WindowEvent {
@@ -982,6 +1005,7 @@ where
                         format!("{{\"x\":{},\"y\":{}}}", mouse_pos.0, mouse_pos.1)
                     });
                     on_event(handler, Some(&payload_owned));
+                    velox_core::lifecycle::run_all_updated_hooks();
                     if let Some(s) = &mut renderer.surface {
                         let (vw, vh) = logical_size(s.width, s.height, scale_factor);
                         let (vnode_raw, sheet) = make_view(vw, vh);
@@ -1023,9 +1047,11 @@ where
                     match keycode {
                         VirtualKeyCode::R => {
                             // Trigger reload (app will exit, dev server will restart it)
+                            velox_core::lifecycle::run_all_destroy_hooks();
                             *control_flow = ControlFlow::Exit;
                         }
                         VirtualKeyCode::Q => {
+                            velox_core::lifecycle::run_all_destroy_hooks();
                             *control_flow = ControlFlow::Exit;
                         }
                         VirtualKeyCode::Back => {
@@ -1036,6 +1062,7 @@ where
                                     &focused_input,
                                     &mut on_event,
                                 );
+                                velox_core::lifecycle::run_all_updated_hooks();
                                 if let Some(w) = window_opt.as_ref() {
                                     w.request_redraw();
                                 }
@@ -1049,6 +1076,7 @@ where
                                     &focused_input,
                                     &mut on_event,
                                 );
+                                velox_core::lifecycle::run_all_updated_hooks();
                                 if let Some(w) = window_opt.as_ref() {
                                     w.request_redraw();
                                 }
@@ -1068,12 +1096,15 @@ where
                     && c != '\u{7f}'
                 {
                     crate::dispatch_input_to_focused(c, &last_vnode, &focused_input, &mut on_event);
+                    velox_core::lifecycle::run_all_updated_hooks();
                     if let Some(w) = window_opt.as_ref() {
                         w.request_redraw();
                     }
                 }
             }
             Event::RedrawRequested(_) => {
+                // First mount: fire on_mounted once.
+                ensure_mounted(&mut did_mount);
                 // Render VNode -> Skia frame and present.
                 if let Some(s) = &mut renderer.surface {
                     s.set_scale_factor(scale_factor);
@@ -1110,11 +1141,12 @@ where
             }
             _ => {}
         }
-    });
+     });
     }));
     } else {
         // Headless mode — no event loop, just run the initial render and return.
         log::info!("running in headless mode (no event loop)");
+        velox_core::lifecycle::run_all_destroy_hooks();
     }
     Ok(())
 }
@@ -1287,6 +1319,8 @@ where
     let mut hover_targets: Vec<crate::events::HoverTarget> = Vec::new();
     let mut input_targets: Vec<crate::events::InputTarget> = Vec::new();
     let mut _last_vnode: Option<velox_dom::VNode> = None;
+    let _lifecycle_guard_hmr = LifecycleCleanupGuard;
+    let mut did_mount_hmr = false;
 
     // Render first frame immediately before entering the event loop.
     // This ensures the window has content even on platforms where
@@ -1391,6 +1425,7 @@ where
         match event {
             Event::UserEvent(msg) => match msg {
                 HmrMessage::FullReload => {
+                    velox_core::lifecycle::run_all_destroy_hooks();
                     *control_flow = ControlFlow::Exit;
                 }
                 HmrMessage::HotReload { module_path: _ } => {
@@ -1444,6 +1479,7 @@ where
                 event: WindowEvent::CloseRequested,
                 ..
             } => {
+                velox_core::lifecycle::run_all_destroy_hooks();
                 *control_flow = ControlFlow::Exit;
             }
             Event::WindowEvent {
@@ -1547,6 +1583,7 @@ where
                         format!("{{\"x\":{},\"y\":{}}}", mouse_pos.0, mouse_pos.1)
                     });
                     on_event(handler, Some(&payload_owned));
+                    velox_core::lifecycle::run_all_updated_hooks();
                     if let Some(s) = &mut renderer.surface {
                         let (vw, vh) = logical_size(s.width, s.height, scale_factor);
                         let (vnode_raw, sheet) = make_view(vw, vh);
@@ -1584,9 +1621,11 @@ where
                     match keycode {
                         VirtualKeyCode::R => {
                             // Trigger reload (app will exit, dev server will restart it)
+                            velox_core::lifecycle::run_all_destroy_hooks();
                             *control_flow = ControlFlow::Exit;
                         }
                         VirtualKeyCode::Q => {
+                            velox_core::lifecycle::run_all_destroy_hooks();
                             *control_flow = ControlFlow::Exit;
                         }
                         _ => {}
@@ -1594,6 +1633,7 @@ where
                 }
             }
             Event::RedrawRequested(_) => {
+                ensure_mounted(&mut did_mount_hmr);
                 // Render VNode -> Skia frame and present.
                 if let Some(s) = &mut renderer.surface {
                     s.set_scale_factor(scale_factor);
@@ -1625,11 +1665,12 @@ where
             }
             _ => {}
         }
-    });
+     });
     }));
     } else {
         // Headless mode — no event loop, just run the initial render and return.
         log::info!("running in headless mode (no event loop)");
+        velox_core::lifecycle::run_all_destroy_hooks();
     }
     Ok(())
 }
