@@ -81,11 +81,12 @@ fn hmr_hot_reload_recomputes_input_targets_and_redraw() {
         panic!("cannot find run_window_vnode_skia_with_hmr");
     };
     let slice = &src[start..];
-    // The recompute_targets fn inside with_hmr should have input_targets param after fix.
-    // Check that with_hmr's recompute_targets signature includes input_targets.
-    // There are two recompute_targets fns: one for normal, one for with_hmr. We check with_hmr's.
+    // recompute_targets is now unified at module scope (single definition) after 1B fix,
+    // so check either local slice or global src for the unified helper with input_targets.
     let with_hmr_has_input = slice.contains("input_targets: &mut Vec<crate::events::InputTarget>")
-        || slice.contains("input_targets: &mut Vec<events::InputTarget>");
+        || slice.contains("input_targets: &mut Vec<events::InputTarget>")
+        || src.contains("fn recompute_targets")
+            && src.contains("input_targets: &mut Vec<crate::events::InputTarget>");
     assert!(
         with_hmr_has_input,
         "BUG R-M3: with_hmr recompute_targets missing input_targets — should recompute click+hover+input"

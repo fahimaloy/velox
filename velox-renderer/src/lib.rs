@@ -37,6 +37,52 @@ pub fn find_node_at_path<'a>(node: &'a VNode, path: &[usize]) -> Option<&'a VNod
     Some(cur)
 }
 
+/// Unified logical size helper — single rounding point for all frame paths.
+#[cfg(feature = "skia-native")]
+pub fn logical_size(width: i32, height: i32, scale_factor: f32) -> (u32, u32) {
+    let w = ((width as f32) / scale_factor).round().max(1.0) as u32;
+    let h = ((height as f32) / scale_factor).round().max(1.0) as u32;
+    (w, h)
+}
+
+/// Build hit-test targets from a precomputed layout. No layout recompute here.
+#[cfg(feature = "skia-native")]
+fn recompute_targets(
+    vnode: &velox_dom::VNode,
+    layout: &velox_dom::layout::LayoutNode,
+    click_targets: &mut Vec<crate::events::ClickTarget>,
+    hover_targets: &mut Vec<crate::events::HoverTarget>,
+    input_targets: &mut Vec<crate::events::InputTarget>,
+) {
+    click_targets.clear();
+    let mut order = 0;
+    crate::events::collect_click_targets(vnode, layout, None, &mut order, click_targets);
+    hover_targets.clear();
+    let mut order = 0;
+    crate::events::collect_hover_targets(vnode, layout, None, &mut order, hover_targets);
+    input_targets.clear();
+    let mut order = 0;
+    let mut path = Vec::new();
+    crate::events::collect_input_targets(vnode, layout, None, &mut path, &mut order, input_targets);
+}
+
+#[cfg(feature = "skia-native")]
+fn with_hover_ids(vnode: &velox_dom::VNode, next_id: &mut u32) -> velox_dom::VNode {
+    match vnode {
+        velox_dom::VNode::Text(_) => vnode.clone(),
+        velox_dom::VNode::Element { tag, props, children } => {
+            let mut new_props = props.clone();
+            if crate::events::is_hoverable(tag, props) {
+                let id = *next_id;
+                *next_id += 1;
+                new_props = new_props.set("data-hover-id", id.to_string());
+            }
+            let new_children = children.iter().map(|c| with_hover_ids(c, next_id)).collect();
+            velox_dom::VNode::Element { tag: tag.clone(), props: new_props, children: new_children }
+        }
+    }
+}
+
 /// Apply one character of keyboard input to the focused text input, if any.
 /// Reads the input's current `value` and `on:input` handler from the most
 /// recently built VNode, computes the new value (backspace / character /
@@ -774,66 +820,6 @@ where
     // This ensures the window has content even on platforms where
     // request_redraw() from NewEvents(StartCause::Init) may not trigger
     // a RedrawRequested event (e.g. certain Wayland/X11 compositors).
-    fn logical_size(width: i32, height: i32, scale_factor: f32) -> (u32, u32) {
-        let w = ((width as f32) / scale_factor).round().max(1.0) as u32;
-        let h = ((height as f32) / scale_factor).round().max(1.0) as u32;
-        (w, h)
-    }
-
-    fn recompute_targets(
-        vnode: &velox_dom::VNode,
-        width: u32,
-        height: u32,
-        click_targets: &mut Vec<crate::events::ClickTarget>,
-        hover_targets: &mut Vec<crate::events::HoverTarget>,
-        input_targets: &mut Vec<crate::events::InputTarget>,
-    ) {
-        let layout = velox_dom::layout::compute_layout(vnode, width as i32, height as i32);
-        click_targets.clear();
-        let mut order = 0;
-        crate::events::collect_click_targets(vnode, &layout, None, &mut order, click_targets);
-        hover_targets.clear();
-        let mut order = 0;
-        crate::events::collect_hover_targets(vnode, &layout, None, &mut order, hover_targets);
-        input_targets.clear();
-        let mut order = 0;
-        let mut path = Vec::new();
-        crate::events::collect_input_targets(
-            vnode,
-            &layout,
-            None,
-            &mut path,
-            &mut order,
-            input_targets,
-        );
-    }
-
-    fn with_hover_ids(vnode: &velox_dom::VNode, next_id: &mut u32) -> velox_dom::VNode {
-        match vnode {
-            velox_dom::VNode::Text(_) => vnode.clone(),
-            velox_dom::VNode::Element {
-                tag,
-                props,
-                children,
-            } => {
-                let mut new_props = props.clone();
-                if crate::events::is_hoverable(tag, props) {
-                    let id = *next_id;
-                    *next_id += 1;
-                    new_props = new_props.set("data-hover-id", id.to_string());
-                }
-                let new_children = children
-                    .iter()
-                    .map(|c| with_hover_ids(c, next_id))
-                    .collect();
-                velox_dom::VNode::Element {
-                    tag: tag.clone(),
-                    props: new_props,
-                    children: new_children,
-                }
-            }
-        }
-    }
 
     if let Some(s) = &mut renderer.surface {
         s.set_scale_factor(scale_factor);
@@ -849,16 +835,16 @@ where
                 .map(|id| Some(id) == hovered_id)
                 .unwrap_or(false)
         });
+        let layout = velox_dom::layout::compute_layout(&vnode, vw as i32, vh as i32);
         recompute_targets(
             &vnode,
-            vw,
-            vh,
+            &layout,
             &mut click_targets,
             &mut hover_targets,
             &mut input_targets,
         );
         // Render and present the initial frame so the window has immediate content.
-        if let Err(e) = crate::skia_render::skia_impl::render_frame(s, &vnode, &sheet) {
+        if let Err(e) = crate::skia_render::skia_impl::render_frame(s, &vnode, &layout, &sheet) {
             log::error!("skia initial render error: {}", e);
         }
         if let Some(presenter) = presenter.as_mut() {
@@ -895,29 +881,6 @@ where
                 if let Some(presenter) = presenter.as_mut() {
                     let _ = presenter.resize(new_size.width, new_size.height);
                 }
-                if let Some(s) = &mut renderer.surface {
-                    s.set_scale_factor(scale_factor);
-                    let (vw, vh) = logical_size(s.width, s.height, scale_factor);
-                    let (vnode_raw, sheet) = make_view(vw, vh);
-                    let mut next_id = 1u32;
-                    let vnode_tagged = with_hover_ids(&vnode_raw, &mut next_id);
-                    let vnode = apply_styles_with_hover(&vnode_tagged, &sheet, &|_tag, props| {
-                        props
-                            .attrs
-                            .get("data-hover-id")
-                            .and_then(|v| v.parse::<u32>().ok())
-                            .map(|id| Some(id) == hovered_id)
-                            .unwrap_or(false)
-                    });
-                    recompute_targets(
-                        &vnode,
-                        vw,
-                        vh,
-                        &mut click_targets,
-                        &mut hover_targets,
-                        &mut input_targets,
-                    );
-                }
                 if let Some(w) = window_opt.as_ref() {
                     w.request_redraw();
                 }
@@ -950,10 +913,10 @@ where
                             .map(|id| Some(id) == hovered_id)
                             .unwrap_or(false)
                     });
+                    let layout = velox_dom::layout::compute_layout(&vnode, vw as i32, vh as i32);
                     recompute_targets(
                         &vnode,
-                        vw,
-                        vh,
+                        &layout,
                         &mut click_targets,
                         &mut hover_targets,
                         &mut input_targets,
@@ -1020,11 +983,11 @@ where
                                     .map(|id| Some(id) == hovered_id)
                                     .unwrap_or(false)
                             });
-                        recompute_targets(
-                            &vnode,
-                            vw,
-                            vh,
-                            &mut click_targets,
+                        let layout = velox_dom::layout::compute_layout(&vnode, vw as i32, vh as i32);
+                    recompute_targets(
+                        &vnode,
+                        &layout,
+                        &mut click_targets,
                             &mut hover_targets,
                             &mut input_targets,
                         );
@@ -1121,15 +1084,15 @@ where
                             .unwrap_or(false)
                     });
                     last_vnode = Some(vnode.clone());
+                    let layout = velox_dom::layout::compute_layout(&vnode, vw as i32, vh as i32);
                     recompute_targets(
                         &vnode,
-                        vw,
-                        vh,
+                        &layout,
                         &mut click_targets,
                         &mut hover_targets,
                         &mut input_targets,
                     );
-                    if let Err(e) = crate::skia_render::skia_impl::render_frame(s, &vnode, &sheet) {
+                    if let Err(e) = crate::skia_render::skia_impl::render_frame(s, &vnode, &layout, &sheet) {
                         log::error!("skia render error: {}", e);
                     }
                     if let Some(presenter) = presenter.as_mut() {
@@ -1341,16 +1304,16 @@ where
                 .unwrap_or(false)
         });
         _last_vnode = Some(vnode.clone());
+        let layout = velox_dom::layout::compute_layout(&vnode, vw as i32, vh as i32);
         recompute_targets(
             &vnode,
-            vw,
-            vh,
+            &layout,
             &mut click_targets,
             &mut hover_targets,
             &mut input_targets,
         );
         // Render and present the initial frame so the window has immediate content.
-        if let Err(e) = crate::skia_render::skia_impl::render_frame(s, &vnode, &sheet) {
+        if let Err(e) = crate::skia_render::skia_impl::render_frame(s, &vnode, &layout, &sheet) {
             log::error!("skia initial render error: {}", e);
         }
         if let Some(presenter) = presenter.as_mut() {
@@ -1360,61 +1323,6 @@ where
         }
     }
 
-    fn logical_size(width: i32, height: i32, scale_factor: f32) -> (u32, u32) {
-        let w = ((width as f32) / scale_factor).round().max(1.0) as u32;
-        let h = ((height as f32) / scale_factor).round().max(1.0) as u32;
-        (w, h)
-    }
-
-    fn recompute_targets(
-        vnode: &velox_dom::VNode,
-        width: u32,
-        height: u32,
-        click_targets: &mut Vec<crate::events::ClickTarget>,
-        hover_targets: &mut Vec<crate::events::HoverTarget>,
-        input_targets: &mut Vec<crate::events::InputTarget>,
-    ) {
-        let layout = velox_dom::layout::compute_layout(vnode, width as i32, height as i32);
-        click_targets.clear();
-        let mut order = 0;
-        crate::events::collect_click_targets(vnode, &layout, None, &mut order, click_targets);
-        hover_targets.clear();
-        let mut order = 0;
-        crate::events::collect_hover_targets(vnode, &layout, None, &mut order, hover_targets);
-        input_targets.clear();
-        let mut order = 0;
-        let mut path = Vec::new();
-        crate::events::collect_input_targets(
-            vnode, &layout, None, &mut path, &mut order, input_targets,
-        );
-    }
-
-    fn with_hover_ids(vnode: &velox_dom::VNode, next_id: &mut u32) -> velox_dom::VNode {
-        match vnode {
-            velox_dom::VNode::Text(_) => vnode.clone(),
-            velox_dom::VNode::Element {
-                tag,
-                props,
-                children,
-            } => {
-                let mut new_props = props.clone();
-                if crate::events::is_hoverable(tag, props) {
-                    let id = *next_id;
-                    *next_id += 1;
-                    new_props = new_props.set("data-hover-id", id.to_string());
-                }
-                let new_children = children
-                    .iter()
-                    .map(|c| with_hover_ids(c, next_id))
-                    .collect();
-                velox_dom::VNode::Element {
-                    tag: tag.clone(),
-                    props: new_props,
-                    children: new_children,
-                }
-            }
-        }
-    }
 
     if let Some(event_loop) = event_loop_opt {
         // The event loop can panic if the display server becomes unreachable
@@ -1454,11 +1362,11 @@ where
                                     .unwrap_or(false)
                             });
                             _last_vnode = Some(vnode2.clone());
-                            recompute_targets(
-                                &vnode2,
-                                vw2,
-                                vh2,
-                                &mut click_targets,
+                            let layout = velox_dom::layout::compute_layout(&vnode2, vw2 as i32, vh2 as i32);
+                    recompute_targets(
+                        &vnode2,
+                        &layout,
+                        &mut click_targets,
                                 &mut hover_targets,
                                 &mut input_targets,
                             );
@@ -1489,25 +1397,6 @@ where
                 let _ = renderer.resize(new_size.width as i32, new_size.height as i32);
                 if let Some(presenter) = presenter.as_mut() {
                     let _ = presenter.resize(new_size.width, new_size.height);
-                }
-                if let Some(s) = &mut renderer.surface {
-                    s.set_scale_factor(scale_factor);
-                    let (vw, vh) = logical_size(s.width, s.height, scale_factor);
-                    let (vnode_raw, sheet) = make_view(vw, vh);
-                    let mut next_id = 1u32;
-                    let vnode_tagged = with_hover_ids(&vnode_raw, &mut next_id);
-                    let vnode = apply_styles_with_hover(&vnode_tagged, &sheet, &|_tag, props| {
-                        props
-                            .attrs
-                            .get("data-hover-id")
-                            .and_then(|v| v.parse::<u32>().ok())
-                            .map(|id| Some(id) == hovered_id)
-                            .unwrap_or(false)
-                    });
-                    _last_vnode = Some(vnode.clone());
-                    recompute_targets(
-                        &vnode, vw, vh, &mut click_targets, &mut hover_targets, &mut input_targets,
-                    );
                 }
                 if let Some(w) = window_opt.as_ref() {
                     w.request_redraw();
@@ -1542,8 +1431,11 @@ where
                             .unwrap_or(false)
                     });
                     _last_vnode = Some(vnode.clone());
+                    let layout = velox_dom::layout::compute_layout(&vnode, vw as i32, vh as i32);
                     recompute_targets(
-                        &vnode, vw, vh, &mut click_targets, &mut hover_targets, &mut input_targets,
+                        &vnode,
+                        &layout,
+                        &mut click_targets, &mut hover_targets, &mut input_targets,
                     );
                 }
                 if let Some(w) = window_opt.as_ref() {
@@ -1599,8 +1491,11 @@ where
                                     .unwrap_or(false)
                             });
                         _last_vnode = Some(vnode.clone());
-                        recompute_targets(
-                            &vnode, vw, vh, &mut click_targets, &mut hover_targets, &mut input_targets,
+                        let layout = velox_dom::layout::compute_layout(&vnode, vw as i32, vh as i32);
+                    recompute_targets(
+                        &vnode,
+                        &layout,
+                        &mut click_targets, &mut hover_targets, &mut input_targets,
                         );
                     }
                     if let Some(w) = window_opt.as_ref() {
@@ -1650,10 +1545,13 @@ where
                             .unwrap_or(false)
                     });
                     _last_vnode = Some(vnode.clone());
+                    let layout = velox_dom::layout::compute_layout(&vnode, vw as i32, vh as i32);
                     recompute_targets(
-                        &vnode, vw, vh, &mut click_targets, &mut hover_targets, &mut input_targets,
+                        &vnode,
+                        &layout,
+                        &mut click_targets, &mut hover_targets, &mut input_targets,
                     );
-                    if let Err(e) = crate::skia_render::skia_impl::render_frame(s, &vnode, &sheet) {
+                    if let Err(e) = crate::skia_render::skia_impl::render_frame(s, &vnode, &layout, &sheet) {
                         log::error!("skia render error: {}", e);
                     }
                     if let Some(presenter) = presenter.as_mut() {
