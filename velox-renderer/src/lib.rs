@@ -692,6 +692,21 @@ pub fn create_direct_context() -> Result<skia_safe::gpu::DirectContext, String> 
     crate::skia_gl::create_direct_context()
 }
 
+/// Run a Skia window whose contents are produced by `make_view`.
+///
+/// # Viewport contract (1A / X-H1)
+///
+/// `make_view` is `FnMut(w: u32, h: u32) -> (VNode, Stylesheet)` where
+/// `(w, h)` are **logical viewport dimensions** — `Viewport::from_i32(physical, scale).logical_size()`.
+/// The renderer calls it:
+/// * once on startup,
+/// * on every `RedrawRequested` / resize / DPI change with the *current* logical `w,h`.
+/// Templates must not ignore `(w,h)` (no `|_w, _h|`). The canonical
+/// responsive pattern is a viewport-filling root:
+/// `width: 100%; min-height: 100vh` on `.app` (see `velox-cli/templates/project/src/App.vx`).
+/// With `width:100%` and `min-height:100vh`, `compute_layout(vnode, w as i32, h as i32)`
+/// reflows visibly on every window resize — no element hidden when it should be visible
+/// (Flutter invariant). Callers may also thread `(w,h)` into style/layout decisions if needed.
 #[cfg(feature = "skia-native")]
 pub fn run_window_vnode_skia<F, G, H>(
     title: &str,
@@ -1131,6 +1146,9 @@ where
     Ok(())
 }
 
+/// HMR variant — same viewport contract as [`run_window_vnode_skia`] (see its docs).
+/// `make_view` is called with logical `(w, h)` on every frame/resize; templates use
+/// `width:100%` / `min-height:100vh` so the viewport change is visibly reflected.
 #[cfg(feature = "skia-native")]
 pub fn run_window_vnode_skia_with_hmr<F, G, H>(
     title: &str,

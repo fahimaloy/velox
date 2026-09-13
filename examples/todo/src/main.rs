@@ -12,7 +12,11 @@ fn main() {
 
     let make_view = {
         let state = Arc::clone(&state);
-        move |_w: u32, _h: u32| -> (VNode, Stylesheet) {
+        // Viewport contract (X-H1): renderer passes logical viewport size (w,h).
+        // Root .app fills viewport via `width:100%` / `min-height:100vh`
+        // (see App.vx) so compute_layout(w,h) reflows on every resize.
+        move |w: u32, h: u32| -> (VNode, Stylesheet) {
+            let _viewport = (w, h); // viewport acknowledged — no hidden-when-visible on resize
             let vnode =
                 app::render_with_state(Arc::clone(&state), app::make_resolve(Arc::clone(&state)));
             let sheet = Stylesheet::parse(app::STYLE);

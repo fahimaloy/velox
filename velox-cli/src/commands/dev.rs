@@ -301,9 +301,9 @@ fn print_banner(project_dir: &Path, release: bool, watch_dir: &Path) {
     println!("  {} {}", bold("➤ Project:"), name);
     println!("  {} {}", bold("➤ Watching:"), watch_dir.display());
     println!(
-        "  {} {}",
+        "  {} port {} (auto-reload on save)",
         bold("➤ HMR:"),
-        format!("port {} (auto-reload on save)", velox_renderer::DEFAULT_HMR_PORT)
+        velox_renderer::DEFAULT_HMR_PORT
     );
     println!(
         "  {} {}",

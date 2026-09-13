@@ -9,9 +9,16 @@ fn main() -> Result<(), String> {
 
     let state = Arc::new(app::script_rs::State::new());
 
+    // Viewport contract (X-H1 / 1A): the renderer calls make_view with the
+    // current *logical* viewport size (w,h) — `logical_size(physical, scale)`.
+    // Templates must acknowledge (w,h): even if the VNode itself is not
+    // parameterized by them, the root style uses `width:100%` /
+    // `min-height:100vh` (see src/App.vx `.app`) so compute_layout(w,h)
+    // visibly reflows on every window resize / DPI change without hidden-when-visible.
     let make_view = {
         let state = Arc::clone(&state);
-        move |_w: u32, _h: u32| -> (VNode, Stylesheet) {
+        move |w: u32, h: u32| -> (VNode, Stylesheet) {
+            let _viewport = (w, h);
             let vnode = app::render_with_state(
                 Arc::clone(&state),
                 app::make_resolve(Arc::clone(&state)),

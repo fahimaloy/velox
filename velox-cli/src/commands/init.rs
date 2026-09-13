@@ -72,7 +72,8 @@ fn compute_relative_path(from: &Path, to: &Path) -> PathBuf {
     }
 }
 
-pub(crate) fn velox_dep_path(prefix: &str, workspace: &std::path::Path, project_dir: &std::path::Path, leaf: &str) -> String {
+#[allow(dead_code)]
+pub(crate) fn velox_dep_path(_prefix: &str, workspace: &std::path::Path, project_dir: &std::path::Path, leaf: &str) -> String {
     let p = compute_relative_path(project_dir, &workspace.join(leaf));
     format!(r#"{{ path = "{}", version = "0.1.0" }}"#, p.display())
 }
@@ -199,7 +200,7 @@ impl State {
 </script>
 
 <style>
-  .app { display: flex; flex-direction: column; padding: 20px; background: #1a1a2e; color: #e6edf3; font-family: system-ui, sans-serif; }
+  .app { display: flex; flex-direction: column; width: 100%; min-height: 100vh; padding: 20px; background: #1a1a2e; color: #e6edf3; font-family: system-ui, sans-serif; }
   .btn { background: #3478f6; color: white; padding: 10px 20px; margin: 5px; }
   .count { margin-top: 12px; font-size: 24px; }
 </style>
@@ -305,9 +306,13 @@ fn main() {
 
     let state = Arc::new(app::script_rs::State::new());
 
+    // Viewport contract (1A / X-H1): renderer passes logical viewport (w,h).
+    // Root .app fills viewport via `width:100%` / `min-height:100vh`
+    // (see src/App.vx) so layout reflows visibly on every resize.
     let make_view = {
         let state = Arc::clone(&state);
-        move |_w: u32, _h: u32| -> (VNode, Stylesheet) {
+        move |w: u32, h: u32| -> (VNode, Stylesheet) {
+            let _viewport = (w, h);
             let vnode = app::render_with_state(Arc::clone(&state), |name| match name {
                 "title" => state.title(),
                 "counter" => state.counter().to_string(),
@@ -377,7 +382,7 @@ impl State {
 </script>
 
 <style>
-.app { display: flex; flex-direction: column; width: 100%; height: 100%; background: #1a1a2e; color: #e6edf3; font-family: system-ui, sans-serif; padding: 20px; }
+.app { display: flex; flex-direction: column; width: 100%; min-height: 100vh; background: #1a1a2e; color: #e6edf3; font-family: system-ui, sans-serif; padding: 20px; }
 .header { padding: 20px; text-align: center; }
 .card { background: #16213e; padding: 24px; border-radius: 12px; text-align: center; margin-bottom: 16px; }
 .count { font-size: 48px; font-weight: bold; margin: 0; }
