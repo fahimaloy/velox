@@ -900,7 +900,13 @@ where
                     },
                 ..
             } => {
+                let old_scale = scale_factor;
                 scale_factor = new_scale as f32;
+                // R-M1: atomically rescale mouse_pos to keep physical cursor stable
+                if old_scale.is_finite() && old_scale > 0.0 && scale_factor.is_finite() && scale_factor > 0.0 {
+                    mouse_pos.0 = mouse_pos.0 * old_scale / scale_factor;
+                    mouse_pos.1 = mouse_pos.1 * old_scale / scale_factor;
+                }
                 if let Err(e) = renderer.resize(new_inner_size.width as i32, new_inner_size.height as i32) {
                     log::warn!("renderer resize failed on scale change: {}", e);
                 }
@@ -911,6 +917,7 @@ where
                 }
                 if let Some(s) = &mut renderer.surface {
                     s.set_scale_factor(scale_factor);
+                    // R-H3: single rounding via Viewport::logical_size, shared between hit-test and render
                     let (vw, vh) = logical_size(s.width, s.height, scale_factor);
                     let (vnode_raw, sheet) = make_view(vw, vh);
                     let mut next_id = 1u32;
@@ -1425,7 +1432,12 @@ where
                     },
                 ..
             } => {
+                let old_scale = scale_factor;
                 scale_factor = new_scale as f32;
+                if old_scale.is_finite() && old_scale > 0.0 && scale_factor.is_finite() && scale_factor > 0.0 {
+                    mouse_pos.0 = mouse_pos.0 * old_scale / scale_factor;
+                    mouse_pos.1 = mouse_pos.1 * old_scale / scale_factor;
+                }
                 if let Err(e) = renderer.resize(new_inner_size.width as i32, new_inner_size.height as i32) {
                     log::warn!("renderer resize failed on scale change: {}", e);
                 }
