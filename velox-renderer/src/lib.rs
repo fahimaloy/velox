@@ -832,6 +832,9 @@ where
     // on_unmounted/before_destroy fire on CloseRequested or drop.
     let _lifecycle_guard = LifecycleCleanupGuard;
     let mut did_mount = false;
+    // R-L3: coalesce rapid resize drags — only last size per frame materializes.
+    // Surface recreation (raster_n32_premul) is deferred to RedrawRequested.
+    let mut pending_resize: Option<(u32, u32)> = None;
 
     // Render first frame immediately before entering the event loop.
     // This ensures the window has content even on platforms where
@@ -894,14 +897,8 @@ where
                 event: WindowEvent::Resized(new_size),
                 ..
             } => {
-                if let Err(e) = renderer.resize(new_size.width as i32, new_size.height as i32) {
-                    log::warn!("renderer resize failed ({}x{}): {}", new_size.width, new_size.height, e);
-                }
-                if let Some(presenter) = presenter.as_mut() {
-                    if let Err(e) = presenter.resize(new_size.width, new_size.height) {
-                        log::warn!("presenter resize failed: {}", e);
-                    }
-                }
+                // R-L3: coalesce — do not touch raster surface here; defer to RedrawRequested.
+                pending_resize = Some((new_size.width, new_size.height));
                 if let Some(w) = window_opt.as_ref() {
                     w.request_redraw();
                 }
@@ -922,38 +919,12 @@ where
                     mouse_pos.0 = mouse_pos.0 * old_scale / scale_factor;
                     mouse_pos.1 = mouse_pos.1 * old_scale / scale_factor;
                 }
-                if let Err(e) = renderer.resize(new_inner_size.width as i32, new_inner_size.height as i32) {
-                    log::warn!("renderer resize failed on scale change: {}", e);
-                }
-                if let Some(presenter) = presenter.as_mut() {
-                    if let Err(e) = presenter.resize(new_inner_size.width, new_inner_size.height) {
-                        log::warn!("presenter resize failed on scale change: {}", e);
-                    }
-                }
+                // R-L3: coalesce renderer/presenter resize to RedrawRequested as well.
+                pending_resize = Some((new_inner_size.width, new_inner_size.height));
                 if let Some(s) = &mut renderer.surface {
                     s.set_scale_factor(scale_factor);
-                    // R-H3: single rounding via Viewport::logical_size, shared between hit-test and render
-                    let (vw, vh) = logical_size(s.width, s.height, scale_factor);
-                    let (vnode_raw, sheet) = make_view(vw, vh);
-                    let mut next_id = 1u32;
-                    let vnode_tagged = with_hover_ids(&vnode_raw, &mut next_id);
-                    let vnode = apply_styles_with_hover(&vnode_tagged, &sheet, &|_tag, props| {
-                        props
-                            .attrs
-                            .get("data-hover-id")
-                            .and_then(|v| v.parse::<u32>().ok())
-                            .map(|id| Some(id) == hovered_id)
-                            .unwrap_or(false)
-                    });
-                    let layout = velox_dom::layout::compute_layout(&vnode, vw as i32, vh as i32);
-                    recompute_targets(
-                        &vnode,
-                        &layout,
-                        &mut click_targets,
-                        &mut hover_targets,
-                        &mut input_targets,
-                    );
                 }
+                // Hit-test/layout refresh deferred to RedrawRequested (single layout/frame, R-H5).
                 if let Some(w) = window_opt.as_ref() {
                     w.request_redraw();
                 }
@@ -1098,6 +1069,17 @@ where
                 }
             }
             Event::RedrawRequested(_) => {
+                // R-L3: materialize any coalesced resize exactly once per frame.
+                if let Some((pw, ph)) = pending_resize.take() {
+                    if let Err(e) = renderer.resize(pw as i32, ph as i32) {
+                        log::warn!("renderer resize failed ({}x{}): {}", pw, ph, e);
+                    }
+                    if let Some(presenter) = presenter.as_mut() {
+                        if let Err(e) = presenter.resize(pw, ph) {
+                            log::warn!("presenter resize failed: {}", e);
+                        }
+                    }
+                }
                 // First mount: fire on_mounted once.
                 ensure_mounted(&mut did_mount);
                 // Render VNode -> Skia frame and present.
@@ -1319,6 +1301,8 @@ where
     let mut _last_vnode: Option<velox_dom::VNode> = None;
     let _lifecycle_guard_hmr = LifecycleCleanupGuard;
     let mut did_mount_hmr = false;
+    // R-L3: coalesce rapid resize drags in HMR loop too (only last size per frame).
+    let mut pending_resize: Option<(u32, u32)> = None;
 
     // Render first frame immediately before entering the event loop.
     // This ensures the window has content even on platforms where
@@ -1429,14 +1413,8 @@ where
                 event: WindowEvent::Resized(new_size),
                 ..
             } => {
-                if let Err(e) = renderer.resize(new_size.width as i32, new_size.height as i32) {
-                    log::warn!("renderer resize failed ({}x{}): {}", new_size.width, new_size.height, e);
-                }
-                if let Some(presenter) = presenter.as_mut() {
-                    if let Err(e) = presenter.resize(new_size.width, new_size.height) {
-                        log::warn!("presenter resize failed: {}", e);
-                    }
-                }
+                // R-L3: coalesce — defer surface recreation to RedrawRequested.
+                pending_resize = Some((new_size.width, new_size.height));
                 if let Some(w) = window_opt.as_ref() {
                     w.request_redraw();
                 }
@@ -1456,36 +1434,12 @@ where
                     mouse_pos.0 = mouse_pos.0 * old_scale / scale_factor;
                     mouse_pos.1 = mouse_pos.1 * old_scale / scale_factor;
                 }
-                if let Err(e) = renderer.resize(new_inner_size.width as i32, new_inner_size.height as i32) {
-                    log::warn!("renderer resize failed on scale change: {}", e);
-                }
-                if let Some(presenter) = presenter.as_mut() {
-                    if let Err(e) = presenter.resize(new_inner_size.width, new_inner_size.height) {
-                        log::warn!("presenter resize failed on scale change: {}", e);
-                    }
-                }
+                // R-L3: coalesce renderer/presenter resize to RedrawRequested.
+                pending_resize = Some((new_inner_size.width, new_inner_size.height));
                 if let Some(s) = &mut renderer.surface {
                     s.set_scale_factor(scale_factor);
-                    let (vw, vh) = logical_size(s.width, s.height, scale_factor);
-                    let (vnode_raw, sheet) = make_view(vw, vh);
-                    let mut next_id = 1u32;
-                    let vnode_tagged = with_hover_ids(&vnode_raw, &mut next_id);
-                    let vnode = apply_styles_with_hover(&vnode_tagged, &sheet, &|_tag, props| {
-                        props
-                            .attrs
-                            .get("data-hover-id")
-                            .and_then(|v| v.parse::<u32>().ok())
-                            .map(|id| Some(id) == hovered_id)
-                            .unwrap_or(false)
-                    });
-                    _last_vnode = Some(vnode.clone());
-                    let layout = velox_dom::layout::compute_layout(&vnode, vw as i32, vh as i32);
-                    recompute_targets(
-                        &vnode,
-                        &layout,
-                        &mut click_targets, &mut hover_targets, &mut input_targets,
-                    );
                 }
+                // Hit-test/layout refresh deferred to RedrawRequested (single layout/frame, R-H5).
                 if let Some(w) = window_opt.as_ref() {
                     w.request_redraw();
                 }
@@ -1576,6 +1530,17 @@ where
                 }
             }
             Event::RedrawRequested(_) => {
+                // R-L3: materialize any coalesced resize exactly once per frame.
+                if let Some((pw, ph)) = pending_resize.take() {
+                    if let Err(e) = renderer.resize(pw as i32, ph as i32) {
+                        log::warn!("renderer resize failed ({}x{}): {}", pw, ph, e);
+                    }
+                    if let Some(presenter) = presenter.as_mut() {
+                        if let Err(e) = presenter.resize(pw, ph) {
+                            log::warn!("presenter resize failed: {}", e);
+                        }
+                    }
+                }
                 ensure_mounted(&mut did_mount_hmr);
                 // Render VNode -> Skia frame and present.
                 if let Some(s) = &mut renderer.surface {
