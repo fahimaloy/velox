@@ -607,7 +607,7 @@ pub mod skia_impl {
         let canvas = surface.canvas();
         canvas.clear(sk::Color::TRANSPARENT);
 
-        let mut fonts = FontCache::new();
+        let mut fonts = FontCache::new_with_scale(1.0);
         let mut images = ImageCache::new();
         let default_family = fonts.default_family();
         let default_text_style = TextStyle {
@@ -869,15 +869,23 @@ pub mod skia_impl {
     }
 
     /// Minimal FontCache for mapping sizes to `skia_safe::Font`.
+    /// DPI-aware: re-rasters fonts at device pixels (hinting) via scale-factor snapping.
     pub struct FontCache {
         typefaces: HashMap<String, sk::Typeface>,
         fonts: HashMap<FontKey, sk::Font>,
         default_family: String,
+        scale: f32,
     }
 
     impl FontCache {
-        /// Attempt to load a system font or bundled fallback fonts.
+        /// Attempt to load a system font or bundled fallback fonts. Defaults to scale 1.0.
         pub fn new() -> Self {
+            Self::new_with_scale(1.0)
+        }
+
+        /// Create a FontCache that re-rasters at `scale` device pixels.
+        pub fn new_with_scale(scale: f32) -> Self {
+            let s = if scale.is_finite() && scale > 0.0 { scale } else { 1.0 };
             let default_family = "default".to_string();
             let mut typefaces = HashMap::new();
             if let Some(tf) = load_default_typeface() {
@@ -887,7 +895,22 @@ pub mod skia_impl {
                 typefaces,
                 fonts: HashMap::new(),
                 default_family,
+                scale: s,
             }
+        }
+
+        /// Update scale (e.g. on ScaleFactorChanged) — clears cache so glyphs
+        /// are re-rastered at new device pixels (prevents blur).
+        pub fn set_scale_factor(&mut self, scale: f32) {
+            let s = if scale.is_finite() && scale > 0.0 { scale } else { 1.0 };
+            if (self.scale - s).abs() > f32::EPSILON {
+                self.scale = s;
+                self.fonts.clear();
+            }
+        }
+
+        pub fn scale_factor(&self) -> f32 {
+            self.scale
         }
 
         pub fn default_family(&self) -> String {
@@ -906,9 +929,25 @@ pub mod skia_impl {
             None
         }
 
+        /// Snap a logical font size to the nearest physical pixel row so that
+        /// `(logical * scale).round()` is integer device pixels. This ensures
+        /// glyph hinting lands on device pixels at fractional scales (1.25/1.5)
+        /// instead of 0.25px subpixel blur after `canvas.scale(scale)`.
+        #[inline]
+        fn snapped_size(&self, logical_size: f32) -> f32 {
+            if self.scale == 1.0 {
+                return logical_size;
+            }
+            let device = (logical_size * self.scale).round().max(1.0);
+            device / self.scale
+        }
+
         /// Return a `skia_safe::Font` at the requested `size` and `family`.
+        /// Size is DPI-snapped to device pixels for `self.scale`.
         pub fn font(&mut self, family: &str, size: f32) -> sk::Font {
-            let size_key = (size * 100.0).round() as u32;
+            let snapped = self.snapped_size(size);
+            let size_key = (snapped * 100.0).round() as u32;
+            // Include scale in key implicitly via snapped value; also clear on scale change.
             let key = FontKey {
                 family: family.to_string(),
                 size_key,
@@ -917,10 +956,10 @@ pub mod skia_impl {
                 return font.clone();
             }
             let font = if let Some(tf) = self.get_or_load_family(family) {
-                sk::Font::new(tf, size)
+                sk::Font::new(tf, snapped)
             } else {
                 let mut f = sk::Font::default();
-                f.set_size(size);
+                f.set_size(snapped);
                 f
             };
             self.fonts.insert(key, font.clone());
@@ -928,6 +967,7 @@ pub mod skia_impl {
         }
 
         /// Measure the width (in px) of `text` rendered at `size` using the cached typeface.
+        /// Measurement is at DPI-snapped size so layout and render agree (no wrap mismatch).
         pub fn measure_text(&mut self, family: &str, size: f32, text: &str) -> f32 {
             let font = self.font(family, size);
             let mut p = sk::Paint::default();
@@ -1005,6 +1045,8 @@ pub mod skia_impl {
     /// Render a VNode tree into an existing `SkiaSurface` using a precomputed layout.
     /// `layout` must be the result of `compute_layout(vnode, logical_w, logical_h)` where
     /// `logical_w,logical_h` were obtained via `logical_size(physical, scale)` — single rounding point.
+    /// Hit-test and render must share the same `Viewport` (physical/logical/scale) so that
+    /// fractional scales (1.25/1.5) have identical snapped edges and clicks hit the rendered pixel.
     pub fn render_frame(
         surface: &mut crate::skia_surface::SkiaSurface,
         vnode: &VNode,
@@ -1016,9 +1058,12 @@ pub mod skia_impl {
         let canvas = surface.canvas();
         canvas.clear(sk::Color::TRANSPARENT);
         canvas.save();
+        // R-H3: single rounding physical=(logical*scale).round() keeping both; don't round-trip.
+        // We do canvas.scale(scale) here so logical rects map to device pixels; font re-raster
+        // below snaps sizes to physical pixels to avoid 0.25px blur at 1.25/1.5.
         canvas.scale((scale, scale));
 
-        let mut fonts = FontCache::new();
+        let mut fonts = FontCache::new_with_scale(scale);
         let mut images = ImageCache::new();
         let default_text_style = TextStyle {
             color: sk::Color::from_argb(255, 0, 0, 0),
