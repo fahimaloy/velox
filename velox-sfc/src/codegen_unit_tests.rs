@@ -225,10 +225,10 @@ fn scoped_style_prefixes_selectors_with_scope_id() {
         "expected a non-empty scope id: {}",
         out
     );
-    // Attribute appended to the descendant-most part of each selector.
+    // Attribute appended to every compound of each selector.
     assert!(
-        out.contains(".header h1[data-v-"),
-        "descendant selector not scoped: {}",
+        out.contains(".header[data-v-") && out.contains("] h1[data-v-"),
+        "descendant selector compounds not scoped: {}",
         out
     );
     assert!(

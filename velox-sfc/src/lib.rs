@@ -21,6 +21,7 @@ pub use template_codegen::compile_template_to_rs;
 pub use template_codegen::compile_template_to_rs_full;
 pub use template_codegen::generate_vmodel_setters;
 pub use template_parse::parse_template_to_ast;
+pub use template_parse::{TemplateDiag, parse_template};
 
 pub use codegen::generate_scope_id;
 pub use codegen::is_scoped;

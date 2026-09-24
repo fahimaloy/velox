@@ -256,19 +256,24 @@ pub fn generate_scope_id(component_name: &str) -> String {
     format!("data-v-{:08x}", hash)
 }
 
-/// Rewrite a CSS stylesheet so every top-level selector carries the scope
-/// attribute appended to its descendant-most (rightmost) part:
+/// Rewrite a CSS stylesheet so every selector compound carries the scope
+/// attribute, preserving combinators between compounds:
 ///
 /// ```css
-/// .header h1 { ... }  ->  .header h1[data-v-abc123] { ... }
-/// h1, .a { ... }      ->  h1[data-v-abc123], .a[data-v-abc123] { ... }
+/// .header h1 { ... }   ->  .header[data-v-x] h1[data-v-x] { ... }
+/// div > .card { ... }  ->  div[data-v-x] > .card[data-v-x] { ... }
+/// h1, .a { ... }       ->  h1[data-v-x], .a[data-v-x] { ... }
 /// ```
 ///
-/// Declaration blocks are copied verbatim. Appending the attribute to the last
-/// selector part matches how the velox-style parser matches rules (it checks
-/// the rightmost part against the target element), so a rule applies only to
-/// VNodes tagged with the matching `data-v-*` attribute.
-fn scope_css(css: &str, scope_id: &str) -> String {
+/// Declaration blocks are copied verbatim. `@keyframes` blocks keep their
+/// inner keyframe selectors (`from`/`to`/percent offsets) unscoped, while
+/// `@media` preludes pass through and only their inner style-rule selectors
+/// are scoped. Appending the attribute to every compound confines the rule to
+/// elements that all belong to this component — every element rendered from
+/// this component's template is tagged with the same `data-v-*` attribute, so
+/// a rule like `.header h1[data-v-*]` could otherwise leak across component
+/// boundaries via an un-tagged ancestor.
+pub fn scope_css(css: &str, scope_id: &str) -> String {
     let attr = format!("[{scope_id}]");
     let mut out = String::with_capacity(css.len() + 32);
     let mut prelude = String::new();
@@ -344,29 +349,69 @@ fn scope_selector_list(prelude: &str, attr: &str) -> String {
     out
 }
 
-/// Append `[data-v-<scope>]` to the descendant-most (rightmost) part of a single
-/// selector. Child combinators (`>`) are dropped, matching how the velox-style
-/// parser lowers selectors to descendant chains.
+/// Append `[data-v-<scope>]` to every compound in a single complex selector,
+/// preserving the combinators (`>`, `+`, `~`) between compounds.
+///
+/// `div > .card` -> `div[data-v-x] > .card[data-v-x]`
+/// `.header h1`  -> `.header[data-v-x] h1[data-v-x]`
 fn scope_single_selector(sel: &str, attr: &str) -> String {
-    let mut parts: Vec<&str> = Vec::new();
-    for tok in sel.split_whitespace() {
-        if tok == ">" {
+    let spaced = pad_child_combinators(sel);
+    let mut out = String::with_capacity(spaced.len() + 16);
+    let mut pending_combinator: Option<&str> = None;
+    let mut wrote_compound = false;
+    for token in spaced.split_whitespace() {
+        if matches!(token, ">" | "+" | "~") {
+            pending_combinator = Some(token);
             continue;
         }
-        parts.push(tok);
+        if wrote_compound {
+            out.push(' ');
+            if let Some(comb) = pending_combinator {
+                out.push_str(comb);
+                out.push(' ');
+            }
+        }
+        pending_combinator = None;
+        out.push_str(token);
+        out.push_str(attr);
+        wrote_compound = true;
     }
-    if parts.is_empty() {
+    if !wrote_compound {
         return sel.to_string();
     }
-    let last = parts.len() - 1;
-    let mut out = String::with_capacity(sel.len() + attr.len());
-    for (i, p) in parts.iter().enumerate() {
-        if i > 0 {
-            out.push(' ');
+    out
+}
+
+/// Re-space `>` so the whitespace tokenizer sees it as a standalone token,
+/// which makes `div>.card` behave like `div > .card`. A `>` inside an
+/// attribute selector (e.g. `[data-x="a>b"]`) is left untouched.
+fn pad_child_combinators(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len() + 4);
+    let mut bracket_depth = 0usize;
+    let mut quote: Option<char> = None;
+    for ch in raw.chars() {
+        if let Some(q) = quote {
+            out.push(ch);
+            if ch == q {
+                quote = None;
+            }
+            continue;
         }
-        out.push_str(p);
-        if i == last {
-            out.push_str(attr);
+        match ch {
+            '[' => {
+                bracket_depth += 1;
+                out.push(ch);
+            }
+            ']' => {
+                bracket_depth = bracket_depth.saturating_sub(1);
+                out.push(ch);
+            }
+            '"' | '\'' if bracket_depth > 0 => {
+                quote = Some(ch);
+                out.push(ch);
+            }
+            '>' if bracket_depth == 0 => out.push_str(" > "),
+            _ => out.push(ch),
         }
     }
     out

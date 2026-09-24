@@ -4,7 +4,117 @@ use crate::template_ast::{AttrKind, Node, TemplateAttr};
 /// - nested elements and self-closing tags (`<input/>`)
 /// - attributes: static (`class="x"`), bind (`:value="expr"`), event (`@click="foo"`)
 /// - text and `{{ interpolation }}` splits
+///
+/// Warnings (unclosed/unmatched tags) are printed to stderr, preserving the
+/// historical behavior of this entry point.
 pub fn parse_template_to_ast(input: &str) -> Result<Vec<Node>, String> {
+    let mut warnings = Vec::new();
+    let nodes = parse_template_inner(input, &mut warnings)?;
+    emit_warnings(&warnings);
+    Ok(nodes)
+}
+
+fn emit_warnings(warnings: &[String]) {
+    for warning in warnings {
+        eprintln!("velox: warning: {warning}");
+    }
+}
+
+/// Warnings collected while parsing a template, alongside the parsed AST.
+#[derive(Debug, Clone)]
+pub struct TemplateDiag {
+    /// The parsed template AST.
+    pub nodes: Vec<Node>,
+    /// Non-fatal warnings: structural leniency notes (unclosed/unmatched
+    /// tags) plus `unknown component` diagnostics for PascalCase tags that
+    /// are not registered component imports.
+    pub warnings: Vec<String>,
+}
+
+/// Parse a template into an AST plus a list of non-fatal warnings.
+///
+/// `known_components` lists the component tag names registered for this SFC
+/// (its resolved `<script setup>` imports). A tag starting with an uppercase
+/// ASCII letter that is not in that list produces an `unknown component`
+/// warning: PascalCase tags are treated as component references, and an
+/// unregistered one renders as an inert unknown element instead of the
+/// intended component.
+///
+/// Unlike [`parse_template_to_ast`], warnings are returned to the caller
+/// instead of being printed to stderr.
+pub fn parse_template(input: &str, known_components: &[&str]) -> Result<TemplateDiag, String> {
+    let mut warnings = Vec::new();
+    let nodes = parse_template_inner(input, &mut warnings)?;
+    warnings.extend(unknown_component_warnings(&nodes, known_components, input));
+    Ok(TemplateDiag { nodes, warnings })
+}
+
+/// Warnings for PascalCase tags that are not registered components.
+///
+/// `known_components` is the set of imported component names for the SFC
+/// being compiled; `source` is the raw template text (used for best-effort
+/// line/column positions in the messages).
+pub fn unknown_component_warnings(
+    nodes: &[Node],
+    known_components: &[&str],
+    source: &str,
+) -> Vec<String> {
+    let mut warnings = Vec::new();
+    collect_unknown_components(nodes, known_components, source, &mut warnings);
+    warnings
+}
+
+fn collect_unknown_components(
+    nodes: &[Node],
+    known_components: &[&str],
+    source: &str,
+    warnings: &mut Vec<String>,
+) {
+    for node in nodes {
+        if let Node::Element { tag, .. } = node
+            && tag.starts_with(|c: char| c.is_ascii_uppercase())
+            && !known_components.contains(&tag.as_str())
+        {
+            let suggestion = format!(
+                "PascalCase tags are component references; \
+                 import it in <script setup> (import {tag} from './{tag}.vx') or fix the tag name"
+            );
+            match tag_position(source, tag) {
+                Some((line, col)) => warnings.push(format!(
+                    "unknown component <{tag}> at {line},{col} — {suggestion}"
+                )),
+                None => warnings.push(format!("unknown component <{tag}> — {suggestion}")),
+            }
+        }
+        if let Node::Element { children, .. } = node {
+            collect_unknown_components(children, known_components, source, warnings);
+        }
+    }
+}
+
+/// Best-effort (line, col) of the first occurrence of `<tag` in `source`.
+/// The template AST does not record source offsets, so the position is
+/// located by scanning for the opening tag with a word boundary after it.
+fn tag_position(source: &str, tag: &str) -> Option<(usize, usize)> {
+    let needle = format!("<{tag}");
+    let bytes = source.as_bytes();
+    let mut search_from = 0usize;
+    while let Some(rel) = source[search_from..].find(&needle) {
+        let at = search_from + rel;
+        let after = at + needle.len();
+        let boundary = match bytes.get(after) {
+            Some(&b) => !(b as char).is_ascii_alphanumeric() && b != b'_' && b != b'-',
+            None => true,
+        };
+        if boundary {
+            return Some(crate::diagnostic::line_col_at(source, at));
+        }
+        search_from = after;
+    }
+    None
+}
+
+fn parse_template_inner(input: &str, warnings: &mut Vec<String>) -> Result<Vec<Node>, String> {
     let mut i = 0usize;
     let bytes = input.as_bytes();
     let mut stack: Vec<Node> = Vec::new();
@@ -55,9 +165,9 @@ pub fn parse_template_to_ast(input: &str) -> Result<Vec<Node>, String> {
                     push_child(&mut stack, &mut roots, n);
                 } else {
                     let (line, col) = crate::diagnostic::line_col_at(input, close_pos);
-                    eprintln!(
-                        "velox: warning: unmatched closing tag </{tag}> at {line},{col} — no matching opening tag; ignoring"
-                    );
+                    warnings.push(format!(
+                        "unmatched closing tag </{tag}> at {line},{col} — no matching opening tag; ignoring"
+                    ));
                 }
                 continue;
             }
@@ -178,9 +288,9 @@ pub fn parse_template_to_ast(input: &str) -> Result<Vec<Node>, String> {
                 .find(|(t, _)| t == tag)
                 .map(|(_, pos)| crate::diagnostic::line_col_at(input, *pos))
         {
-            eprintln!(
-                "velox: warning: unclosed tag <{tag}> at {line},{col} — add a matching </{tag}>"
-            );
+            warnings.push(format!(
+                "unclosed tag <{tag}> at {line},{col} — add a matching </{tag}>"
+            ));
         }
         push_child(&mut stack, &mut roots, n);
     }

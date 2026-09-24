@@ -181,6 +181,33 @@ pub fn compile_template_to_rs_full(
         return Err(validation_errors.join("\n"));
     }
 
+    // Surface `unknown component` warnings here: pure template parsing is
+    // component-agnostic, but this is the point where the SFC's registered
+    // component names are known — via the resolver (imports parsed from
+    // `<script setup>` by the caller) and/or the raw `<script setup>` block.
+    // Must run before `transform_components` renames known component tags.
+    {
+        let mut known: Vec<String> = Vec::new();
+        if let Some(resolver) = &resolver {
+            known.extend(resolver.component_names());
+        }
+        if let Some(script_setup) = script_setup {
+            let mut scratch = ComponentResolver::new(std::path::PathBuf::from("."));
+            scratch.parse_imports(script_setup);
+            for name in scratch.component_names() {
+                if !known.contains(&name) {
+                    known.push(name);
+                }
+            }
+        }
+        let known_refs: Vec<&str> = known.iter().map(String::as_str).collect();
+        for warning in
+            crate::template_parse::unknown_component_warnings(&nodes, &known_refs, template_src)
+        {
+            eprintln!("velox: warning: {warning}");
+        }
+    }
+
     // For MVP, assume a single root node.
     let mut nodes = nodes;
 

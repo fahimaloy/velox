@@ -24,6 +24,21 @@ use velox_dom::{Props, VNode};
 
 // --- CSS Parser types (module-level for rust-analyzer compatibility) ---
 
+/// How a selector part is connected to the part on its left in the source
+/// selector (e.g. the `>` between `div` and `.card` in `div > .card`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Combinator {
+    /// No combinator precedes this part — it is the leftmost part of the chain.
+    #[default]
+    None,
+    /// Descendant combinator (whitespace): this part may match any ancestor of
+    /// the part on its right.
+    Descendant,
+    /// Child combinator (`>`): this part must match the element exactly one
+    /// level above the part on its right.
+    Child,
+}
+
 /// A single part of a CSS selector (e.g., `h1`, `.class`, `h1.class`, `[attr]`).
 #[derive(Debug, Clone, PartialEq)]
 pub struct SelectorPart {
@@ -32,6 +47,9 @@ pub struct SelectorPart {
     pub hover: bool,
     pub attr_name: String,
     pub attr_value: Option<String>,
+    /// Combinator that connected this part to the part on its left in the
+    /// source selector. `Combinator::None` for the leftmost part.
+    pub combinator: Combinator,
 }
 
 impl SelectorPart {
@@ -73,10 +91,12 @@ impl SelectorPart {
 }
 
 /// A compound CSS selector — a chain of `SelectorPart`s connected by
-/// descendant combinators (spaces). The rightmost part matches the
-/// target element; preceding parts must match ancestors.
+/// combinators (whitespace for descendant, `>` for child). The rightmost part
+/// matches the target element; preceding parts must match ancestors according
+/// to the combinator stored on each part.
 ///
-/// Example: `.header h1` → `[SelectorPart(class="header"), SelectorPart(tag="h1")]`
+/// Examples: `.header h1` → `[SelectorPart(class="header", None), SelectorPart(tag="h1", Descendant)]`,
+/// `div > .card` → `[SelectorPart(tag="div", None), SelectorPart(class="card", Child)]`
 #[derive(Debug, Clone, PartialEq)]
 pub struct CompoundSelector {
     pub parts: Vec<SelectorPart>,
@@ -299,6 +319,7 @@ fn parse_selector_part(raw: &str) -> Option<SelectorPart> {
                 hover: false,
                 attr_name,
                 attr_value,
+                combinator: Combinator::None,
             });
         }
     }
@@ -316,6 +337,7 @@ fn parse_selector_part(raw: &str) -> Option<SelectorPart> {
             hover,
             attr_name,
             attr_value,
+            combinator: Combinator::None,
         });
     }
     if name_raw.is_empty() {
@@ -329,6 +351,7 @@ fn parse_selector_part(raw: &str) -> Option<SelectorPart> {
             hover,
             attr_name,
             attr_value,
+            combinator: Combinator::None,
         });
     }
     if let Some(rest) = name_raw.strip_prefix('.') {
@@ -342,6 +365,7 @@ fn parse_selector_part(raw: &str) -> Option<SelectorPart> {
             hover,
             attr_name,
             attr_value,
+            combinator: Combinator::None,
         })
     } else if let Some((tag, class)) = name_raw.split_once('.') {
         let tag = tag.trim();
@@ -355,6 +379,7 @@ fn parse_selector_part(raw: &str) -> Option<SelectorPart> {
             hover,
             attr_name,
             attr_value,
+            combinator: Combinator::None,
         })
     } else {
         Some(SelectorPart {
@@ -363,8 +388,44 @@ fn parse_selector_part(raw: &str) -> Option<SelectorPart> {
             hover,
             attr_name,
             attr_value,
+            combinator: Combinator::None,
         })
     }
+}
+
+/// Re-space `>` so the whitespace tokenizer sees it as a standalone token,
+/// which makes `div>.card` behave like `div > .card`. A `>` inside an
+/// attribute selector (e.g. `[data-x="a>b"]`) is left untouched.
+fn pad_child_combinators(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len() + 4);
+    let mut bracket_depth = 0usize;
+    let mut quote: Option<char> = None;
+    for ch in raw.chars() {
+        if let Some(q) = quote {
+            out.push(ch);
+            if ch == q {
+                quote = None;
+            }
+            continue;
+        }
+        match ch {
+            '[' => {
+                bracket_depth += 1;
+                out.push(ch);
+            }
+            ']' => {
+                bracket_depth = bracket_depth.saturating_sub(1);
+                out.push(ch);
+            }
+            '"' | '\'' if bracket_depth > 0 => {
+                quote = Some(ch);
+                out.push(ch);
+            }
+            '>' if bracket_depth == 0 => out.push_str(" > "),
+            _ => out.push(ch),
+        }
+    }
+    out
 }
 
 fn parse_selector_list(selector: &str) -> Vec<CompoundSelector> {
@@ -374,23 +435,41 @@ fn parse_selector_list(selector: &str) -> Vec<CompoundSelector> {
         if raw.is_empty() {
             continue;
         }
-        // Split by whitespace to get compound selector parts (descendant combinators).
-        // Each whitespace-separated token is one part of the chain.
-        let mut parts = Vec::new();
+        // Tokenize on whitespace. A `>` token (padded so `div>.card` also
+        // works) sets the combinator of the compound that follows it instead
+        // of being silently dropped; plain whitespace between compounds is a
+        // descendant combinator.
+        let mut parts: Vec<SelectorPart> = Vec::new();
+        let mut pending: Option<Combinator> = None;
         let mut valid = true;
-        for token in raw.split_whitespace() {
+        for token in pad_child_combinators(raw).split_whitespace() {
             if token == ">" {
-                // Child combinator — for now treat as descendant (full > support later).
+                if parts.is_empty() {
+                    // Leading `>` (e.g. `> .card`): there is no left compound
+                    // to be the child of — invalid selector, drop the rule.
+                    valid = false;
+                    break;
+                }
+                pending = Some(Combinator::Child);
                 continue;
             }
             match parse_selector_part(token) {
-                Some(sp) => parts.push(sp),
+                Some(mut sp) => {
+                    sp.combinator = pending.take().unwrap_or(if parts.is_empty() {
+                        Combinator::None
+                    } else {
+                        Combinator::Descendant
+                    });
+                    parts.push(sp);
+                }
                 None => {
                     valid = false;
                     break;
                 }
             }
         }
+        // A trailing combinator (`div >`) is ignored: the compounds parsed so
+        // far still form a usable selector (previous behavior).
         if valid && !parts.is_empty() {
             out.push(CompoundSelector::new(parts));
         }
@@ -425,9 +504,13 @@ impl Stylesheet {
 
 /// Match a compound selector against a VNode element, walking ancestors as needed.
 ///
-/// For a single-part selector (e.g., `.app`, `button`), only the target element is checked.
-/// For a multi-part selector (e.g., `.header h1`), the rightmost part matches the target
-/// and preceding parts must match ancestor VNodes (walking up the provided `ancestors` slice).
+/// For a single-part selector (e.g., `.app`, `button`), only the target element
+/// is checked. For a multi-part selector (e.g., `.header h1`, `div > .card`),
+/// the rightmost part matches the target and preceding parts must match
+/// ancestor VNodes: a `Descendant` combinator may match any ancestor, while a
+/// `Child` (`>`) combinator must match exactly one level above the part on
+/// its right. `ancestors[0]` is the target's parent, `ancestors[1]` the
+/// grandparent, and so on.
 fn matches_selector(
     sel: &CompoundSelector,
     tag: &str,
@@ -435,41 +518,58 @@ fn matches_selector(
     hovered: bool,
     ancestors: &[&VNode],
 ) -> bool {
-    if sel.parts.is_empty() {
+    let Some((last, prefix)) = sel.parts.split_last() else {
         return false;
-    }
-    let last = &sel.parts[sel.parts.len() - 1];
+    };
     if !last.matches_element(tag, props, hovered) {
         return false;
     }
-    // Single-part selector: no ancestor check needed.
-    if sel.parts.len() == 1 {
+    // The last part matched the target element itself — "position -1" in the
+    // ancestor chain. Match the remaining chain, constrained by the
+    // combinator that connected the last part to the part on its left.
+    match_prefix(prefix, ancestors, -1, last.combinator)
+}
+
+/// Whether every part in `prefix` (the chain left of an already-matched part)
+/// can match the ancestor chain.
+///
+/// `below` is the ancestor position of the element matched by the part just
+/// right of `prefix`'s last part (the target element itself sits at position
+/// -1). `comb` is the combinator that connected that rightward part to
+/// `prefix`'s last part: `Child` pins it exactly one level above, while
+/// `Descendant` (and a leftmost `None`) allow any strictly-higher ancestor.
+fn match_prefix(
+    prefix: &[SelectorPart],
+    ancestors: &[&VNode],
+    below: isize,
+    comb: Combinator,
+) -> bool {
+    let Some((last, rest)) = prefix.split_last() else {
         return true;
-    }
-    // Multi-part (compound/descendant) selector:
-    // Walk ancestors right-to-left matching earlier parts of the chain.
-    let mut ancestor_idx = ancestors.len(); // start from nearest ancestor
-    for part_idx in (0..sel.parts.len() - 1).rev() {
-        let part = &sel.parts[part_idx];
-        let mut found = false;
-        while ancestor_idx > 0 {
-            ancestor_idx -= 1;
-            if let VNode::Element {
-                tag: a_tag,
-                props: a_props,
-                ..
-            } = ancestors[ancestor_idx]
-                && part.matches_element(a_tag, a_props, false)
-            {
-                found = true;
-                break;
+    };
+    let candidates: Box<dyn Iterator<Item = usize> + '_> = match comb {
+        Combinator::Child => {
+            let pos = below + 1;
+            if pos < 0 {
+                return false;
             }
+            Box::new(pos as usize..pos as usize + 1)
         }
-        if !found {
-            return false;
+        _ => Box::new((below + 1).max(0) as usize..ancestors.len()),
+    };
+    for pos in candidates {
+        if let VNode::Element {
+            tag: a_tag,
+            props: a_props,
+            ..
+        } = ancestors[pos]
+            && last.matches_element(a_tag, a_props, false)
+            && match_prefix(rest, ancestors, pos as isize, last.combinator)
+        {
+            return true;
         }
     }
-    true
+    false
 }
 
 fn merge_styles(existing: Option<&str>, new_map: &HashMap<String, String>) -> String {
@@ -536,22 +636,6 @@ pub fn apply_styles_with_hover<F>(node: &VNode, sheet: &Stylesheet, is_hovered: 
 where
     F: Fn(&str, &Props) -> bool,
 {
-    #[allow(dead_code)]
-    fn has_style_key(style: &str, key: &str) -> bool {
-        for decl in style.split(';') {
-            let d = decl.trim();
-            if d.is_empty() {
-                continue;
-            }
-            if let Some((k, _)) = d.split_once(':')
-                && k.trim() == key
-            {
-                return true;
-            }
-        }
-        false
-    }
-
     fn filter_inheritable(style: Option<&str>) -> HashMap<String, String> {
         let mut map = HashMap::new();
         if let Some(s) = style {
