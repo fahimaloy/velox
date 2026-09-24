@@ -72,7 +72,10 @@ fn margin_auto_left_only_absorbs_free_space() {
 }
 
 #[test]
-fn margin_auto_negative_free_space_resolves_zero() {
+fn margin_auto_over_wide_box_centers_negative() {
+    // CSS 2.1 §10.3.3: auto margins resolve with no clamping, so an over-wide
+    // box centers with negative margins exactly like a browser:
+    // ml = mr = (800 - 900) / 2 = -50 -> left edge at x = -50.
     let lo = compute_layout(
         &h(
             "div",
@@ -82,7 +85,7 @@ fn margin_auto_negative_free_space_resolves_zero() {
         800,
         600,
     );
-    assert_eq!(lo.rect.x, 0);
+    assert_eq!(lo.rect.x, -50); // (800 - 900) / 2
 }
 
 #[test]

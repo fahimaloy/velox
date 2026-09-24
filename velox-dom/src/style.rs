@@ -1913,9 +1913,12 @@ fn parse_border_shorthand(value: &str) -> Option<Border> {
 /// per-side auto flags, spreads the free space `avail_w - outer_w - fixed
 /// margins` across the auto margins:
 ///
-/// - both sides auto: free space splits equally between them;
+/// - both sides auto: free space splits equally between them (their used
+///   values are equal, per spec);
 /// - one side auto: it absorbs the remainder after the fixed opposite margin;
-/// - negative free space resolves auto margins to `0`.
+/// - free space may be negative and auto margins resolve negative — an
+///   over-wide box centers with negative margins, as in browsers. No
+///   clamping.
 pub fn resolve_auto_margins_core(
     avail_w: f32,
     outer_w: f32,
@@ -1924,18 +1927,15 @@ pub fn resolve_auto_margins_core(
     ml_auto: bool,
     mr_auto: bool,
 ) -> (f32, f32) {
-    if !ml_auto && !mr_auto {
-        return (ml, mr);
-    }
     let fixed = (if ml_auto { 0.0 } else { ml }) + (if mr_auto { 0.0 } else { mr });
     let free = avail_w - outer_w - fixed;
     match (ml_auto, mr_auto) {
         (true, true) => {
-            let each = (free / 2.0).max(0.0);
+            let each = free / 2.0;
             (each, each)
         }
-        (true, false) => (free.max(0.0), mr),
-        (false, true) => (ml, free.max(0.0)),
+        (true, false) => (free, mr),
+        (false, true) => (ml, free),
         (false, false) => (ml, mr),
     }
 }
@@ -2225,17 +2225,19 @@ mod tests {
     }
 
     #[test]
-    fn test_resolve_auto_margins_negative_free_space_resolves_zero() {
+    fn test_resolve_auto_margins_negative_free_space_resolves_negative() {
+        // CSS 2.1 §10.3.3: auto margins resolve from the constraint equation
+        // with no clamping — an over-wide box centers with negative margins.
         let mut cs = ComputedStyle::new();
         cs.set_property("margin", "0 auto");
         let (ml, mr) = resolve_auto_margins(800.0, &cs, Some(900.0));
-        assert_eq!((ml, mr), (0.0, 0.0));
+        assert_eq!((ml, mr), (-50.0, -50.0)); // (800 - 900) / 2
 
-        // one auto side with negative free space also resolves to 0
+        // one auto side absorbs the negative leftover: 800 - 900 - 0
         let mut cs = ComputedStyle::new();
         cs.set_property("margin-left", "auto");
         let (ml, mr) = resolve_auto_margins(800.0, &cs, Some(900.0));
-        assert_eq!((ml, mr), (0.0, 0.0));
+        assert_eq!((ml, mr), (-100.0, 0.0));
     }
 
     #[test]
