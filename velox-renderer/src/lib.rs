@@ -48,24 +48,93 @@ pub fn find_node_at_path<'a>(node: &'a VNode, path: &[usize]) -> Option<&'a VNod
 }
 
 /// Unified logical size helper — single rounding point for all frame paths.
-/// Delegates to Viewport::new for consistent clamping; kept as free function for compat.
+/// Delegates to Viewport::from_i32 for consistent clamping; kept as free function for compat.
+#[cfg(any(feature = "skia-native", test))]
+fn viewport_logical_dimensions(width: i32, height: i32, scale_factor: f32) -> (u32, u32) {
+    Viewport::from_i32(width, height, scale_factor).logical_size()
+}
+
 #[cfg(feature = "skia-native")]
 pub fn logical_size(width: i32, height: i32, scale_factor: f32) -> (u32, u32) {
-    let vp = Viewport::from_i32(width, height, scale_factor);
-    vp.logical_size()
+    viewport_logical_dimensions(width, height, scale_factor)
 }
 
 /// Notify resize hooks only after a coalesced physical resize has committed and
 /// its logical viewport differs from the last committed size.
-#[cfg(feature = "skia-native")]
+#[cfg(any(feature = "skia-native", test))]
 fn dispatch_resize_if_changed(
     committed: bool,
     logical: (u32, u32),
-    last_logical: &mut Option<(u32, u32)>,
+    last_resize_size: &mut Option<(u32, u32)>,
 ) {
-    if committed && *last_logical != Some(logical) {
+    if committed && *last_resize_size != Some(logical) {
         velox_core::lifecycle::run_resize_hooks(logical.0, logical.1);
-        *last_logical = Some(logical);
+        *last_resize_size = Some(logical);
+    }
+}
+
+#[cfg(any(feature = "skia-native", test))]
+fn frame_logical_size(
+    width: i32,
+    height: i32,
+    scale_factor: f32,
+    committed: bool,
+    last_resize_size: &mut Option<(u32, u32)>,
+) -> (u32, u32) {
+    let logical = viewport_logical_dimensions(width, height, scale_factor);
+    dispatch_resize_if_changed(committed, logical, last_resize_size);
+    logical
+}
+
+/// Per-renderer resize state. Physical events are coalesced here and the
+/// committed logical baseline is kept locally to this window/event loop.
+#[cfg(any(feature = "skia-native", test))]
+struct ResizeState {
+    pending_resize: Option<(u32, u32)>,
+    last_resize_size: Option<(u32, u32)>,
+}
+
+#[cfg(any(feature = "skia-native", test))]
+impl ResizeState {
+    fn new() -> Self {
+        Self {
+            pending_resize: None,
+            last_resize_size: None,
+        }
+    }
+
+    #[cfg(test)]
+    fn queue(&mut self, physical: (u32, u32)) {
+        self.pending_resize = Some(physical);
+    }
+
+    #[cfg(test)]
+    fn take_pending(&mut self) -> Option<(u32, u32)> {
+        self.pending_resize.take()
+    }
+
+    #[cfg(test)]
+    fn record_initial(&mut self, width: i32, height: i32, scale_factor: f32) -> (u32, u32) {
+        let logical = viewport_logical_dimensions(width, height, scale_factor);
+        self.last_resize_size = Some(logical);
+        logical
+    }
+
+    #[cfg(test)]
+    fn frame_logical_size(
+        &mut self,
+        width: i32,
+        height: i32,
+        scale_factor: f32,
+        committed: bool,
+    ) -> (u32, u32) {
+        frame_logical_size(
+            width,
+            height,
+            scale_factor,
+            committed,
+            &mut self.last_resize_size,
+        )
     }
 }
 
@@ -926,10 +995,10 @@ where
     let mut did_mount = false;
     // R-L3: coalesce rapid resize drags — only last size per frame materializes.
     // Surface recreation (raster_n32_premul) is deferred to RedrawRequested.
-    let mut pending_resize: Option<(u32, u32)> = None;
-    // The initial viewport is delivered through `make_view`; only a later
-    // committed resize should notify lifecycle hooks.
-    let mut last_resize_size: Option<(u32, u32)> = None;
+    let ResizeState {
+        mut pending_resize,
+        mut last_resize_size,
+    } = ResizeState::new();
 
     // Render first frame immediately before entering the event loop.
     // This ensures the window has content even on platforms where
@@ -1241,10 +1310,11 @@ where
                         // Render VNode -> Skia frame and present.
                         if let Some(s) = &mut renderer.surface {
                             s.set_scale_factor(scale_factor);
-                            let (vw, vh) = logical_size(s.width, s.height, scale_factor);
-                            dispatch_resize_if_changed(
+                            let (vw, vh) = frame_logical_size(
+                                s.width,
+                                s.height,
+                                scale_factor,
                                 committed_resize,
-                                (vw, vh),
                                 &mut last_resize_size,
                             );
                             let (vnode_raw, sheet) = make_view(vw, vh);
@@ -1496,10 +1566,10 @@ where
     let _lifecycle_guard_hmr = LifecycleCleanupGuard;
     let mut did_mount_hmr = false;
     // R-L3: coalesce rapid resize drags in HMR loop too (only last size per frame).
-    let mut pending_resize: Option<(u32, u32)> = None;
-    // The initial viewport is delivered through `make_view`; only a later
-    // committed resize should notify lifecycle hooks.
-    let mut last_resize_size: Option<(u32, u32)> = None;
+    let ResizeState {
+        mut pending_resize,
+        mut last_resize_size,
+    } = ResizeState::new();
 
     // Render first frame immediately before entering the event loop.
     // This ensures the window has content even on platforms where
@@ -1813,10 +1883,11 @@ where
                         // Render VNode -> Skia frame and present.
                         if let Some(s) = &mut renderer.surface {
                             s.set_scale_factor(scale_factor);
-                            let (vw, vh) = logical_size(s.width, s.height, scale_factor);
-                            dispatch_resize_if_changed(
+                            let (vw, vh) = frame_logical_size(
+                                s.width,
+                                s.height,
+                                scale_factor,
                                 committed_resize,
-                                (vw, vh),
                                 &mut last_resize_size,
                             );
                             let (vnode_raw, sheet) = make_view(vw, vh);
@@ -3910,4 +3981,155 @@ pub fn run_counter_window() -> Result<(), String> {
         Event::MainEventsCleared => {}
         _ => {}
     });
+}
+
+#[cfg(test)]
+mod resize_state_tests {
+    use super::ResizeState;
+    use std::cell::RefCell;
+    use std::rc::Rc;
+    use std::sync::{Mutex, MutexGuard, OnceLock};
+    use velox_core::lifecycle::{
+        cleanup_component, clear_current_component, generate_component_id, on_resize,
+        set_current_component,
+    };
+    use velox_core::signal::Signal;
+
+    fn resize_test_guard() -> MutexGuard<'static, ()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    fn register_recorder(calls: Rc<RefCell<Vec<(u32, u32)>>>) -> usize {
+        let id = generate_component_id();
+        set_current_component(id);
+        on_resize(move |width, height| calls.borrow_mut().push((width, height)));
+        clear_current_component();
+        id
+    }
+
+    #[test]
+    fn renderer_resize_state_coalesces_raw_events_and_dispatches_once() {
+        let _guard = resize_test_guard();
+        let calls = Rc::new(RefCell::new(Vec::new()));
+        let id = register_recorder(calls.clone());
+        let mut state = ResizeState::new();
+
+        assert_eq!(state.record_initial(640, 480, 1.0), (640, 480));
+        state.queue((800, 600));
+        state.queue((900, 700));
+        // Raw events only update the pending size; they do not dispatch hooks.
+        assert!(calls.borrow().is_empty());
+        assert_eq!(state.take_pending(), Some((900, 700)));
+        assert_eq!(state.frame_logical_size(900, 700, 1.0, true), (900, 700));
+        assert_eq!(state.take_pending(), None);
+        assert_eq!(state.frame_logical_size(900, 700, 1.0, true), (900, 700));
+
+        assert_eq!(&*calls.borrow(), &[(900, 700)]);
+        cleanup_component(id);
+    }
+
+    #[test]
+    fn renderer_resize_state_initial_logical_size_suppresses_notification() {
+        let _guard = resize_test_guard();
+        let calls = Rc::new(RefCell::new(Vec::new()));
+        let id = register_recorder(calls.clone());
+        let mut state = ResizeState::new();
+
+        assert_eq!(state.record_initial(800, 600, 1.0), (800, 600));
+        assert_eq!(state.frame_logical_size(800, 600, 1.0, true), (800, 600));
+        assert!(calls.borrow().is_empty());
+        cleanup_component(id);
+    }
+
+    #[test]
+    fn renderer_resize_state_uses_viewport_logical_pixels_for_dpi() {
+        let _guard = resize_test_guard();
+        let calls = Rc::new(RefCell::new(Vec::new()));
+        let id = register_recorder(calls.clone());
+        let mut state = ResizeState::new();
+
+        assert_eq!(state.record_initial(1600, 1200, 2.0), (800, 600));
+        state.queue((2000, 1000));
+        assert_eq!(state.take_pending(), Some((2000, 1000)));
+        assert_eq!(state.frame_logical_size(2000, 1000, 2.0, true), (1000, 500));
+        assert_eq!(&*calls.borrow(), &[(1000, 500)]);
+        cleanup_component(id);
+    }
+
+    #[test]
+    fn two_windows_with_equal_committed_sizes_both_dispatch() {
+        let _guard = resize_test_guard();
+        let calls = Rc::new(RefCell::new(Vec::new()));
+        let id = register_recorder(calls.clone());
+        let mut first_window = ResizeState::new();
+        let mut second_window = ResizeState::new();
+
+        // Each window owns its baseline; both legitimately commit 900x600.
+        first_window.record_initial(800, 600, 1.0);
+        second_window.record_initial(700, 600, 1.0);
+        first_window.queue((900, 600));
+        second_window.queue((900, 600));
+
+        first_window.frame_logical_size(900, 600, 1.0, true);
+        second_window.frame_logical_size(900, 600, 1.0, true);
+
+        assert_eq!(&*calls.borrow(), &[(900, 600), (900, 600)]);
+        cleanup_component(id);
+    }
+
+    #[test]
+    fn renderer_resize_state_runs_all_hooks_and_allows_signal_mutation() {
+        let _guard = resize_test_guard();
+        let first_calls = Rc::new(RefCell::new(Vec::new()));
+        let second_calls = Rc::new(RefCell::new(Vec::new()));
+        let signal = Rc::new(Signal::new(0u32));
+        let id = generate_component_id();
+
+        set_current_component(id);
+        {
+            let calls = first_calls.clone();
+            on_resize(move |width, height| calls.borrow_mut().push((width, height)));
+        }
+        {
+            let calls = second_calls.clone();
+            let signal = signal.clone();
+            on_resize(move |width, height| {
+                calls.borrow_mut().push((width, height));
+                signal.set(width + height);
+            });
+        }
+        clear_current_component();
+
+        let mut state = ResizeState::new();
+        state.record_initial(100, 100, 1.0);
+        state.queue((200, 150));
+        assert_eq!(state.take_pending(), Some((200, 150)));
+        assert_eq!(state.frame_logical_size(200, 150, 1.0, true), (200, 150));
+
+        assert_eq!(&*first_calls.borrow(), &[(200, 150)]);
+        assert_eq!(&*second_calls.borrow(), &[(200, 150)]);
+        assert_eq!(signal.get(), 350);
+        cleanup_component(id);
+    }
+
+    #[test]
+    fn cleanup_component_removes_only_its_resize_hook() {
+        let _guard = resize_test_guard();
+        let removed_calls = Rc::new(RefCell::new(Vec::new()));
+        let retained_calls = Rc::new(RefCell::new(Vec::new()));
+        let removed_id = register_recorder(removed_calls.clone());
+        let retained_id = register_recorder(retained_calls.clone());
+
+        cleanup_component(removed_id);
+        let mut state = ResizeState::new();
+        state.record_initial(100, 100, 1.0);
+        state.frame_logical_size(200, 150, 1.0, true);
+
+        assert!(removed_calls.borrow().is_empty());
+        assert_eq!(&*retained_calls.borrow(), &[(200, 150)]);
+        cleanup_component(retained_id);
+    }
 }

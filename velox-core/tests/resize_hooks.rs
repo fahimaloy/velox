@@ -2,12 +2,12 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use velox_core::lifecycle::{
-    cleanup_component, clear_current_component, generate_component_id, on_resize, run_resize_hooks,
-    set_current_component,
+    before_destroy, cleanup_component, clear_current_component, generate_component_id, on_resize,
+    run_all_destroy_hooks, run_resize_hooks, set_current_component,
 };
 
 #[test]
-fn resize_hooks_receive_logical_sizes_once_per_change() {
+fn resize_dispatcher_invokes_each_call_for_renderer_change_filtering() {
     let id = generate_component_id();
     let calls = Rc::new(RefCell::new(Vec::new()));
 
@@ -22,7 +22,7 @@ fn resize_hooks_receive_logical_sizes_once_per_change() {
     run_resize_hooks(640, 480);
     run_resize_hooks(800, 600);
 
-    assert_eq!(&*calls.borrow(), &[(640, 480), (800, 600)]);
+    assert_eq!(&*calls.borrow(), &[(640, 480), (640, 480), (800, 600)]);
     cleanup_component(id);
 }
 
@@ -55,7 +55,32 @@ fn resize_hooks_can_register_another_hook_while_dispatching() {
     run_resize_hooks(1024, 768);
     run_resize_hooks(1280, 800);
 
-    assert_eq!(&*calls.borrow(), &[(1024, 768), (1280, 800)]);
-    assert_eq!(&*nested_calls.borrow(), &[(1280, 800)]);
+    assert_eq!(&*calls.borrow(), &[(1024, 768), (1024, 768), (1280, 800)]);
+    assert_eq!(&*nested_calls.borrow(), &[(1024, 768), (1280, 800)]);
     cleanup_component(outer_id);
+}
+
+#[test]
+fn global_destroy_cleanup_preserves_other_components_resize_hooks() {
+    let first_id = generate_component_id();
+    let second_id = generate_component_id();
+    let second_calls = Rc::new(RefCell::new(Vec::new()));
+
+    set_current_component(first_id);
+    on_resize(|_, _| {});
+    before_destroy(|| {});
+    clear_current_component();
+    set_current_component(second_id);
+    {
+        let second_calls = second_calls.clone();
+        on_resize(move |width, height| second_calls.borrow_mut().push((width, height)));
+    }
+    clear_current_component();
+
+    run_all_destroy_hooks();
+    run_resize_hooks(1024, 768);
+
+    assert_eq!(&*second_calls.borrow(), &[(1024, 768)]);
+    cleanup_component(first_id);
+    cleanup_component(second_id);
 }

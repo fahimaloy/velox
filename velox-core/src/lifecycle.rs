@@ -190,8 +190,6 @@ type ResizeHookRef = Rc<RefCell<ResizeHook>>;
 thread_local! {
     #[allow(clippy::type_complexity, clippy::missing_const_for_thread_local)]
     static RESIZE_HOOKS: RefCell<HashMap<ComponentId, Vec<ResizeHookRef>>> = RefCell::new(HashMap::new());
-    #[allow(clippy::missing_const_for_thread_local)]
-    static LAST_RESIZE_SIZE: Cell<Option<(u32, u32)>> = Cell::new(None);
 }
 
 /// Register a hook to run when the current component's viewport changes.
@@ -216,22 +214,13 @@ pub fn on_resize(f: impl FnMut(u32, u32) + 'static) {
 
 /// Run all registered resize hooks for a committed logical viewport size.
 ///
-/// The first call establishes the last-seen size and dispatches. Repeated
-/// calls with the same size are ignored. The renderer deliberately does not
-/// call this on its initial frame, so `make_view` remains the sole initial
-/// viewport notification.
+/// This public entry point dispatches each call. The renderer owns the
+/// change-only baseline per window and calls it only after a committed logical
+/// size change, so direct core callers must provide their own dispatch scope.
 pub fn run_resize_hooks(width: u32, height: u32) {
-    let changed = LAST_RESIZE_SIZE.with(|last| {
-        let previous = last.replace(Some((width, height)));
-        previous != Some((width, height))
-    });
-    if !changed {
-        return;
-    }
-
     // Clone handles while the registry is borrowed, then drop that borrow
     // before invoking any user code. A newly registered hook is intentionally
-    // deferred until the next committed change.
+    // deferred until the next dispatch.
     let hooks: Vec<ResizeHookRef> = RESIZE_HOOKS.with(|h| {
         h.borrow()
             .values()
@@ -258,14 +247,7 @@ pub fn run_all_resize_hooks(width: u32, height: u32) {
 /// Clear all resize hooks for a component (call when component is destroyed).
 pub fn clear_resize_hooks(id: ComponentId) {
     RESIZE_HOOKS.with(|h| {
-        let mut hooks = h.borrow_mut();
-        hooks.remove(&id);
-        if hooks.is_empty() {
-            // A later component starts with its own initial viewport supplied
-            // by `make_view`; do not let a prior component's last size suppress
-            // its first real committed change.
-            LAST_RESIZE_SIZE.with(|last| last.set(None));
-        }
+        h.borrow_mut().remove(&id);
     });
 }
 
@@ -294,17 +276,15 @@ pub fn run_all_updated_hooks() {
 }
 
 /// Run (and remove) all `before_destroy` / `on_unmounted` hooks for every
-/// component and clear their `on_updated` and resize hooks. The renderer calls
-/// this from `CloseRequested` (window close) and from the drop guard around the
-/// event loop.
+/// component and clear their `on_updated` hooks. Resize hooks remain owned by
+/// their component until [`cleanup_component`] is called, because this legacy
+/// global teardown may run while another window on the same thread is alive.
 pub fn run_all_destroy_hooks() {
     let ids: Vec<ComponentId> = DESTROY_HOOKS.with(|h| h.borrow().keys().copied().collect());
     for id in ids {
         run_destroy_hooks(id);
     }
     UPDATED_HOOKS.with(|h| h.borrow_mut().clear());
-    RESIZE_HOOKS.with(|h| h.borrow_mut().clear());
-    LAST_RESIZE_SIZE.with(|last| last.set(None));
     MOUNTED_HOOKS.with(|h| h.borrow_mut().clear());
     // `DESTROY_HOOKS` entries were already removed by `run_destroy_hooks`; the
     // clear above covers cases where cleanup_component was not yet called.
