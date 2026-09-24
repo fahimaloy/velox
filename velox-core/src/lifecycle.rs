@@ -276,15 +276,16 @@ pub fn run_all_updated_hooks() {
 }
 
 /// Run (and remove) all `before_destroy` / `on_unmounted` hooks for every
-/// component and clear their `on_updated` hooks. Resize hooks remain owned by
-/// their component until [`cleanup_component`] is called, because this legacy
-/// global teardown may run while another window on the same thread is alive.
+/// component and clear their `on_updated` and resize hooks. The renderer calls
+/// this from `CloseRequested` (window close) and from the drop guard around the
+/// event loop.
 pub fn run_all_destroy_hooks() {
     let ids: Vec<ComponentId> = DESTROY_HOOKS.with(|h| h.borrow().keys().copied().collect());
     for id in ids {
         run_destroy_hooks(id);
     }
     UPDATED_HOOKS.with(|h| h.borrow_mut().clear());
+    RESIZE_HOOKS.with(|h| h.borrow_mut().clear());
     MOUNTED_HOOKS.with(|h| h.borrow_mut().clear());
     // `DESTROY_HOOKS` entries were already removed by `run_destroy_hooks`; the
     // clear above covers cases where cleanup_component was not yet called.

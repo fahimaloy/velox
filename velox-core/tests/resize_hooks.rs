@@ -61,13 +61,17 @@ fn resize_hooks_can_register_another_hook_while_dispatching() {
 }
 
 #[test]
-fn global_destroy_cleanup_preserves_other_components_resize_hooks() {
+fn global_destroy_cleanup_removes_all_resize_hooks() {
     let first_id = generate_component_id();
     let second_id = generate_component_id();
+    let first_calls = Rc::new(RefCell::new(Vec::new()));
     let second_calls = Rc::new(RefCell::new(Vec::new()));
 
     set_current_component(first_id);
-    on_resize(|_, _| {});
+    {
+        let first_calls = first_calls.clone();
+        on_resize(move |width, height| first_calls.borrow_mut().push((width, height)));
+    }
     before_destroy(|| {});
     clear_current_component();
     set_current_component(second_id);
@@ -80,7 +84,8 @@ fn global_destroy_cleanup_preserves_other_components_resize_hooks() {
     run_all_destroy_hooks();
     run_resize_hooks(1024, 768);
 
-    assert_eq!(&*second_calls.borrow(), &[(1024, 768)]);
+    assert!(first_calls.borrow().is_empty());
+    assert!(second_calls.borrow().is_empty());
     cleanup_component(first_id);
     cleanup_component(second_id);
 }

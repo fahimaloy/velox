@@ -103,24 +103,20 @@ impl ResizeState {
         }
     }
 
-    #[cfg(test)]
     fn queue(&mut self, physical: (u32, u32)) {
         self.pending_resize = Some(physical);
     }
 
-    #[cfg(test)]
     fn take_pending(&mut self) -> Option<(u32, u32)> {
         self.pending_resize.take()
     }
 
-    #[cfg(test)]
     fn record_initial(&mut self, width: i32, height: i32, scale_factor: f32) -> (u32, u32) {
         let logical = viewport_logical_dimensions(width, height, scale_factor);
         self.last_resize_size = Some(logical);
         logical
     }
 
-    #[cfg(test)]
     fn frame_logical_size(
         &mut self,
         width: i32,
@@ -995,10 +991,7 @@ where
     let mut did_mount = false;
     // R-L3: coalesce rapid resize drags — only last size per frame materializes.
     // Surface recreation (raster_n32_premul) is deferred to RedrawRequested.
-    let ResizeState {
-        mut pending_resize,
-        mut last_resize_size,
-    } = ResizeState::new();
+    let mut resize_state = ResizeState::new();
 
     // Render first frame immediately before entering the event loop.
     // This ensures the window has content even on platforms where
@@ -1007,8 +1000,7 @@ where
 
     if let Some(s) = &mut renderer.surface {
         s.set_scale_factor(scale_factor);
-        let (vw, vh) = logical_size(s.width, s.height, scale_factor);
-        last_resize_size = Some((vw, vh));
+        let (vw, vh) = resize_state.record_initial(s.width, s.height, scale_factor);
         let (vnode_raw, sheet) = make_view(vw, vh);
         let mut next_id = 1u32;
         let vnode_tagged = with_hover_ids(&vnode_raw, &mut next_id);
@@ -1068,7 +1060,8 @@ where
                         ..
                     } => {
                         // R-L3: coalesce — do not touch raster surface here; defer to RedrawRequested.
-                        pending_resize = Some((new_size.width, new_size.height));
+                        resize_state.queue((new_size.width, new_size.height));
+                        // `ResizeState::queue` is the production `pending_resize = Some(...)` path.
                         if let Some(w) = window_opt.as_ref() {
                             w.request_redraw();
                         }
@@ -1094,7 +1087,7 @@ where
                             mouse_pos.1 = mouse_pos.1 * old_scale / scale_factor;
                         }
                         // R-L3: coalesce renderer/presenter resize to RedrawRequested as well.
-                        pending_resize = Some((new_inner_size.width, new_inner_size.height));
+                        resize_state.queue((new_inner_size.width, new_inner_size.height));
                         if let Some(s) = &mut renderer.surface {
                             s.set_scale_factor(scale_factor);
                         }
@@ -1292,7 +1285,8 @@ where
                     Event::RedrawRequested(_) => {
                         // R-L3: materialize any coalesced resize exactly once per frame.
                         let mut committed_resize = false;
-                        if let Some((pw, ph)) = pending_resize.take() {
+                        if let Some((pw, ph)) = resize_state.take_pending() {
+                            // `ResizeState::take_pending` is the production `pending_resize.take()` path.
                             match renderer.resize(pw as i32, ph as i32) {
                                 Ok(()) => committed_resize = true,
                                 Err(e) => {
@@ -1310,12 +1304,11 @@ where
                         // Render VNode -> Skia frame and present.
                         if let Some(s) = &mut renderer.surface {
                             s.set_scale_factor(scale_factor);
-                            let (vw, vh) = frame_logical_size(
+                            let (vw, vh) = resize_state.frame_logical_size(
                                 s.width,
                                 s.height,
                                 scale_factor,
                                 committed_resize,
-                                &mut last_resize_size,
                             );
                             let (vnode_raw, sheet) = make_view(vw, vh);
                             let mut next_id = 1u32;
@@ -1566,10 +1559,7 @@ where
     let _lifecycle_guard_hmr = LifecycleCleanupGuard;
     let mut did_mount_hmr = false;
     // R-L3: coalesce rapid resize drags in HMR loop too (only last size per frame).
-    let ResizeState {
-        mut pending_resize,
-        mut last_resize_size,
-    } = ResizeState::new();
+    let mut resize_state = ResizeState::new();
 
     // Render first frame immediately before entering the event loop.
     // This ensures the window has content even on platforms where
@@ -1577,8 +1567,7 @@ where
     // a RedrawRequested event (e.g. certain Wayland/X11 compositors).
     if let Some(s) = &mut renderer.surface {
         s.set_scale_factor(scale_factor);
-        let (vw, vh) = logical_size(s.width, s.height, scale_factor);
-        last_resize_size = Some((vw, vh));
+        let (vw, vh) = resize_state.record_initial(s.width, s.height, scale_factor);
         let (vnode_raw, sheet) = make_view(vw, vh);
         let mut next_id = 1u32;
         let vnode_tagged = with_hover_ids(&vnode_raw, &mut next_id);
@@ -1702,7 +1691,8 @@ where
                         ..
                     } => {
                         // R-L3: coalesce — defer surface recreation to RedrawRequested.
-                        pending_resize = Some((new_size.width, new_size.height));
+                        resize_state.queue((new_size.width, new_size.height));
+                        // `ResizeState::queue` is the production `pending_resize = Some(...)` path.
                         if let Some(w) = window_opt.as_ref() {
                             w.request_redraw();
                         }
@@ -1727,7 +1717,7 @@ where
                             mouse_pos.1 = mouse_pos.1 * old_scale / scale_factor;
                         }
                         // R-L3: coalesce renderer/presenter resize to RedrawRequested.
-                        pending_resize = Some((new_inner_size.width, new_inner_size.height));
+                        resize_state.queue((new_inner_size.width, new_inner_size.height));
                         if let Some(s) = &mut renderer.surface {
                             s.set_scale_factor(scale_factor);
                         }
@@ -1866,7 +1856,8 @@ where
                     Event::RedrawRequested(_) => {
                         // R-L3: materialize any coalesced resize exactly once per frame.
                         let mut committed_resize = false;
-                        if let Some((pw, ph)) = pending_resize.take() {
+                        if let Some((pw, ph)) = resize_state.take_pending() {
+                            // `ResizeState::take_pending` is the production `pending_resize.take()` path.
                             match renderer.resize(pw as i32, ph as i32) {
                                 Ok(()) => committed_resize = true,
                                 Err(e) => {
@@ -1883,12 +1874,11 @@ where
                         // Render VNode -> Skia frame and present.
                         if let Some(s) = &mut renderer.surface {
                             s.set_scale_factor(scale_factor);
-                            let (vw, vh) = frame_logical_size(
+                            let (vw, vh) = resize_state.frame_logical_size(
                                 s.width,
                                 s.height,
                                 scale_factor,
                                 committed_resize,
-                                &mut last_resize_size,
                             );
                             let (vnode_raw, sheet) = make_view(vw, vh);
                             let mut next_id = 1u32;
