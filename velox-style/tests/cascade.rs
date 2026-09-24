@@ -9,6 +9,26 @@ fn get_style(node: &VNode) -> Option<String> {
     }
 }
 
+/// Extract a single property value from a styled node's `style` attribute.
+/// Returns `None` when the node has no style attribute or no declaration
+/// for `key`.
+fn style_value(node: &VNode, key: &str) -> Option<String> {
+    let style = get_style(node)?;
+    style.split(';').find_map(|decl| {
+        let d = decl.trim();
+        d.split_once(':')
+            .and_then(|(k, v)| (k.trim() == key).then(|| v.trim().to_string()))
+    })
+}
+
+/// First child of an element node; panics on shape mismatch.
+fn first_child(node: &VNode) -> &VNode {
+    let VNode::Element { children, .. } = node else {
+        panic!("expected element, got: {node:?}");
+    };
+    &children[0]
+}
+
 #[test]
 fn ua_body_has_8px_margin_and_h1_has_em_margin() {
     let ua = ua_sheet();
@@ -89,5 +109,74 @@ fn ua_applies_body_margin_with_empty_author() {
         style.contains("8px"),
         "body should have UA margin 8px, got: {}",
         style
+    );
+}
+
+#[test]
+fn font_family_inherits() {
+    let author = Stylesheet::parse(".app{ font-family: monospace }");
+    let child = h("span", Props::new(), vec![]);
+    let app = h("div", Props::from_class("app"), vec![child]);
+    let styled = velox_style::apply_with_cascade(&app, &author);
+    assert_eq!(
+        style_value(first_child(&styled), "font-family"),
+        Some("monospace".to_string())
+    );
+}
+
+#[test]
+fn text_align_inherits() {
+    let author = Stylesheet::parse(".app{ text-align: center }");
+    let child = h("span", Props::new(), vec![]);
+    let app = h("div", Props::from_class("app"), vec![child]);
+    let styled = velox_style::apply_with_cascade(&app, &author);
+    assert_eq!(
+        style_value(first_child(&styled), "text-align"),
+        Some("center".to_string())
+    );
+}
+
+/// Pins the full browser-parity inheritable set: every property from the
+/// expansion (font-family, font-style, letter-spacing, text-align,
+/// visibility, cursor) plus the pre-existing members (color, font-size,
+/// font-weight, text-decoration, line-height) must propagate to children.
+/// A non-inheritable property (background) must NOT leak downward.
+#[test]
+fn full_inheritable_set_propagates_to_children() {
+    let author = Stylesheet::parse(concat!(
+        ".app{ color: red; font-size: 16px; font-family: monospace; ",
+        "font-weight: bold; font-style: italic; line-height: 1.5; ",
+        "letter-spacing: 2px; text-align: center; visibility: hidden; ",
+        "cursor: pointer; text-decoration: underline; background: #123456 }"
+    ));
+    let child = h("span", Props::new(), vec![]);
+    let app = h("div", Props::from_class("app"), vec![child]);
+    let styled = velox_style::apply_with_cascade(&app, &author);
+    let span = first_child(&styled);
+    let expected = [
+        ("color", "red"),
+        ("font-size", "16px"),
+        ("font-family", "monospace"),
+        ("font-weight", "bold"),
+        ("font-style", "italic"),
+        ("line-height", "1.5"),
+        ("letter-spacing", "2px"),
+        ("text-align", "center"),
+        ("visibility", "hidden"),
+        ("cursor", "pointer"),
+        ("text-decoration", "underline"),
+    ];
+    for (k, v) in expected {
+        assert_eq!(
+            style_value(span, k),
+            Some(v.to_string()),
+            "{k} should inherit to child span"
+        );
+    }
+    // Non-inheritable properties must not leak into children.
+    assert_eq!(
+        style_value(span, "background"),
+        None,
+        "background must not inherit"
     );
 }

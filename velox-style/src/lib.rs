@@ -631,6 +631,25 @@ where
     apply_styles_with_hover(node, &cascade, is_hovered)
 }
 
+/// Properties that inherit to descendants, per browser CSS behavior.
+/// The original filter carried `color`, `font-size`, `font-weight`,
+/// `text-decoration`, `line-height`; this set only ADDS properties
+/// (font-family, font-style, letter-spacing, text-align, visibility,
+/// cursor) — `text-decoration` is retained to avoid regressing behavior.
+const INHERITABLE: &[&str] = &[
+    "color",
+    "font-size",
+    "font-family",
+    "font-weight",
+    "font-style",
+    "line-height",
+    "letter-spacing",
+    "text-align",
+    "visibility",
+    "cursor",
+    "text-decoration",
+];
+
 /// Apply stylesheet with a custom hover predicate
 pub fn apply_styles_with_hover<F>(node: &VNode, sheet: &Stylesheet, is_hovered: &F) -> VNode
 where
@@ -647,12 +666,8 @@ where
                 if let Some((k, v)) = d.split_once(':') {
                     let k = k.trim();
                     let v = v.trim();
-                    match k {
-                        "color" | "font-size" | "font-weight" | "text-decoration"
-                        | "line-height" => {
-                            map.insert(k.to_string(), v.to_string());
-                        }
-                        _ => {}
+                    if INHERITABLE.contains(&k) {
+                        map.insert(k.to_string(), v.to_string());
                     }
                 }
             }
