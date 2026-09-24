@@ -901,16 +901,17 @@ pub fn lint_script(script: &str) -> Vec<String> {
 /// return its 0-based byte column, or `None` if there is none.
 ///
 /// A match must not be preceded or followed by an identifier byte
-/// (`[A-Za-z0-9_]`), so `Cell` inside `MyCell` or `RefCell` never matches.
+/// (`[A-Za-z0-9_]` or a non-ASCII alphanumeric character), so `Cell` inside
+/// `MyCell`, `RefCell` or `Cellé` never matches.
 fn find_whole_ident(line: &str, ident: &str) -> Option<usize> {
     debug_assert!(!ident.is_empty() && ident.is_ascii());
     let bytes = line.as_bytes();
     let mut start = 0;
     while let Some(rel) = line[start..].find(ident) {
         let at = start + rel;
-        let before_ok = at == 0 || !is_ident_byte(bytes[at - 1]);
+        let before_ok = at == 0 || !is_ident_at(line, at - 1);
         let end = at + ident.len();
-        let after_ok = end >= bytes.len() || !is_ident_byte(bytes[end]);
+        let after_ok = end >= bytes.len() || !is_ident_at(line, end);
         if before_ok && after_ok {
             return Some(at);
         }
@@ -919,18 +920,48 @@ fn find_whole_ident(line: &str, ident: &str) -> Option<usize> {
     None
 }
 
-fn is_ident_byte(b: u8) -> bool {
-    b.is_ascii_alphanumeric() || b == b'_'
+/// Is the byte at `idx` part of an identifier?
+///
+/// ASCII identifier bytes are the usual `[A-Za-z0-9_]`. Because the scanner
+/// works on bytes, a non-ASCII byte must also be treated as identifier
+/// material: `Cellé` is one identifier, so a match ending in front of `é` is
+/// not a whole-word match. Rust identifiers continue with Unicode
+/// alphanumerics, so a decoded character decides; a byte that cannot start a
+/// valid UTF-8 character is a continuation byte and therefore part of a
+/// multi-byte character too.
+fn is_ident_at(src: &str, idx: usize) -> bool {
+    let b = src.as_bytes()[idx];
+    if b.is_ascii() {
+        return b.is_ascii_alphanumeric() || b == b'_';
+    }
+    match src[idx..].chars().next() {
+        Some(c) => c.is_alphanumeric() || c == '_',
+        None => true,
+    }
 }
 
 /// Replace comments and string/char literals with spaces (preserving
 /// newlines) so [`lint_script`] can report accurate line/column numbers
 /// while ignoring prose that merely mentions `Cell`/`RefCell`.
 ///
-/// Same-length output keeps every offset identical to the input. Raw
-/// strings (`r"…"`/`r#"…"#`) are mostly handled too: their quoted body is
-/// blanked like a normal string, which at worst yields a warning-only false
-/// negative, never a missed occurrence in real code.
+/// This is a small state machine over the bytes of `src`, not a set of
+/// look-aheads:
+///
+/// - `//` and `/* … */` (nesting) blank through their end, keeping newlines.
+/// - A normal string (`"…"`, `b"…"`, `c"…"`) blanks through its closing quote,
+///   honouring `\` escapes.
+/// - A raw string (`r"…"`, `r#"…"#`, `r##"…"##` and the `br`/`cr` byte- and
+///   C-string forms) blanks through `"` plus exactly as many `#` as its opener
+///   had, so a `"` inside the body is just body text. Without this, `r#"a"
+///   Cell"#` ended the string at the embedded quote and the scanner read `Cell`
+///   — and everything after it — as code.
+/// - A `'` starts a char literal only when the exact Rust forms match (one
+///   character, or an escape such as `'\n'` / `'\u{1F600}'`); otherwise it is a
+///   lifetime, which is left alone. Treating a lifetime as a char literal
+///   blanks real code, i.e. hides a real occurrence.
+///
+/// Same-length output keeps every offset identical to the input, so the
+/// line/column numbers and surrounding text a warning quotes stay correct.
 fn strip_comments_and_strings(src: &str) -> String {
     let bytes = src.as_bytes();
     let mut out = Vec::with_capacity(bytes.len());
@@ -964,6 +995,17 @@ fn strip_comments_and_strings(src: &str) -> String {
                         out.push(if bytes[i] == b'\n' { b'\n' } else { b' ' });
                         i += 1;
                     }
+                }
+            }
+            // `b`/`c` may prefix a raw string, `r` may start one.
+            b'b' | b'c' | b'r' => {
+                if let Some((body_start, hashes)) = raw_string_at(src, i) {
+                    let end = raw_string_end(bytes, body_start, hashes);
+                    blank(&mut out, &bytes[i..end]);
+                    i = end;
+                } else {
+                    out.push(bytes[i]);
+                    i += 1;
                 }
             }
             b'"' => {
@@ -1003,24 +1045,118 @@ fn strip_comments_and_strings(src: &str) -> String {
     String::from_utf8(out).unwrap_or_default()
 }
 
-/// If `bytes` starts at `'` and forms a char literal, return its byte
-/// length; otherwise return `None` (the quote is likely a lifetime marker).
-fn char_literal_len(bytes: &[u8]) -> Option<usize> {
-    if bytes.first() != Some(&b'\'') {
+/// Blank `bytes` into `out`, keeping newlines so line numbers survive.
+fn blank(out: &mut Vec<u8>, bytes: &[u8]) {
+    for &b in bytes {
+        out.push(if b == b'\n' { b'\n' } else { b' ' });
+    }
+}
+
+/// If a raw string literal starts at `i`, return `(body_start, hash_count)`.
+/// The body ends at `"` followed by exactly `hash_count` `#`, which is what
+/// makes the embedded quotes of `r#"a" Cell"#` body text.
+///
+/// `None` means `i` is not a raw-string opener, so the byte is ordinary code.
+fn raw_string_at(src: &str, i: usize) -> Option<(usize, usize)> {
+    let bytes = src.as_bytes();
+    if i > 0 && is_ident_at(src, i - 1) {
         return None;
     }
-    // `'x'` and `'\…'` escapes are short; scan a small window for the
-    // closing quote and bail out (treating it as a lifetime) if none exists.
-    let limit = bytes.len().min(12);
-    let mut j = 1;
-    while j < limit {
-        match bytes[j] {
-            b'\'' => return Some(j + 1),
-            b'\n' => return None,
-            _ => j += 1,
-        }
+    let mut j = i;
+    if matches!(bytes.get(j), Some(b'b') | Some(b'c')) {
+        j += 1;
     }
-    None
+    if bytes.get(j) != Some(&b'r') {
+        return None;
+    }
+    j += 1;
+    let mut hashes = 0usize;
+    while bytes.get(j) == Some(&b'#') {
+        hashes += 1;
+        j += 1;
+    }
+    if bytes.get(j) == Some(&b'"') {
+        Some((j + 1, hashes))
+    } else {
+        None
+    }
+}
+
+/// The end offset of a raw string whose body starts at `body_start` and whose
+/// opener used `hashes` `#`. An unterminated raw string runs to the end of the
+/// input, which is still the safe answer: its remainder cannot be code.
+fn raw_string_end(bytes: &[u8], body_start: usize, hashes: usize) -> usize {
+    let mut j = body_start;
+    while j < bytes.len() {
+        let close = j + 1 + hashes;
+        if bytes[j] == b'"'
+            && close <= bytes.len()
+            && bytes[j + 1..close].iter().all(|&b| b == b'#')
+        {
+            return close;
+        }
+        j += 1;
+    }
+    bytes.len()
+}
+
+/// If `bytes` starts at `'` and forms a char literal, return its byte
+/// length; otherwise return `None` (the quote is likely a lifetime marker).
+///
+/// Only the forms Rust actually allows are accepted: one unescaped character
+/// (`'x'`, `'é'`, `'"'`) or one escape (`'\n'`, `'\''`, `'\x41'`,
+/// `'\u{1F600}'`). Anything else — a bare `'a`, a longer identifier, a
+/// half-written escape — is a lifetime and must stay in the output, because
+/// blanking it would hide real code.
+fn char_literal_len(bytes: &[u8]) -> Option<usize> {
+    let rest = bytes.strip_prefix(b"'")?;
+    // `body` counts the bytes between the quotes, including the backslash of
+    // an escape, so `rest.get(body)` lands on the closing quote.
+    let body = if let Some(escape) = rest.strip_prefix(b"\\") {
+        if escape.starts_with(b"u{") {
+            // `\u{1F600}`: backslash + `u{` + digits + `}`.
+            let inner = escape[2..].iter().position(|&b| b == b'}')?;
+            4 + inner
+        } else if escape.starts_with(b"x") {
+            // `\xNN`: backslash + `x` + up to two hex digits.
+            2 + hex_digits(&escape[1..], 2)
+        } else if escape.starts_with(b"u") {
+            // `\uNNNN`: backslash + `u` + up to four hex digits.
+            2 + hex_digits(&escape[1..], 4)
+        } else {
+            // `\n`, `\\`, `\'`, …: backslash plus the escaped character.
+            escape.first().is_some().then_some(2)?
+        }
+    } else {
+        utf8_char_len(*rest.first()?)
+    };
+    // The closing quote must follow immediately; otherwise this is a lifetime.
+    if rest.get(body) == Some(&b'\'') {
+        Some(1 + body + 1)
+    } else {
+        None
+    }
+}
+
+/// How many of the leading bytes of `bytes` are hex digits, capped at `max`.
+fn hex_digits(bytes: &[u8], max: usize) -> usize {
+    bytes
+        .iter()
+        .take(max)
+        .take_while(|b| b.is_ascii_hexdigit())
+        .count()
+}
+
+/// Byte length of the UTF-8 sequence starting with `lead`. A byte that cannot
+/// start a sequence counts as one byte, so malformed input stays in step.
+fn utf8_char_len(lead: u8) -> usize {
+    match lead {
+        0x00..=0x7F => 1,
+        0xC0..=0xDF => 2,
+        0xE0..=0xEF => 3,
+        0xF0..=0xF7 => 4,
+        _ => 1,
+    }
 }
 
 // ── Tests ────────────────────────────────────────────────────────────────────
@@ -1028,6 +1164,103 @@ fn char_literal_len(bytes: &[u8]) -> Option<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── Lint scanner tests ──
+
+    /// The stripper's contract: same length in, same length out, with the
+    /// newlines kept, so every reported line/column still points at the right
+    /// spot in the original source.
+    #[test]
+    fn strip_preserves_length_and_newlines() {
+        let src = "// Cell in a line comment\n\
+                   /* a RefCell in a block comment */\n\
+                   let a = \"Cell\";\n\
+                   let b = r#\"a\" Cell\"#;\n\
+                   let c = br##\"RefCell\"##;\n\
+                   let d = 'x';\n\
+                   let e = '\\u{1F600}';\n\
+                   fn f<'a>(g: &'a str, h: Cell<i32>) -> char { 'y' }\n\
+                   let Cellé = 1;\n";
+        let stripped = strip_comments_and_strings(src);
+        assert_eq!(
+            stripped.len(),
+            src.len(),
+            "stripped output must keep the input length"
+        );
+        assert_eq!(
+            stripped.matches('\n').count(),
+            src.matches('\n').count(),
+            "newlines must survive stripping"
+        );
+        // Real code is untouched, prose is blanked.
+        assert!(stripped.contains("let Cellé = 1;"));
+        assert!(stripped.contains("h: Cell<i32>"));
+        assert!(!stripped.contains("Cell in a line comment"));
+        assert!(!stripped.contains("Cell\""));
+    }
+
+    /// Rust's raw-string openers, and nothing that merely starts with `r`/`b`.
+    #[test]
+    fn raw_string_at_recognizes_every_rust_form() {
+        for src in [
+            "r\"x\"",
+            "r#\"x\"#",
+            "r##\"x\"##",
+            "br\"x\"",
+            "br#\"x\"#",
+            "cr#\"x\"#",
+        ] {
+            assert!(
+                raw_string_at(src, 0).is_some(),
+                "{src:?} must be recognized as a raw string"
+            );
+        }
+        for src in ["radius = 1", "let r = 2", "ref!();", "b = 3", "c = 4"] {
+            assert!(
+                raw_string_at(src, 0).is_none(),
+                "{src:?} is not a raw string"
+            );
+        }
+        // An `r` that is part of an identifier is not a raw-string opener,
+        // while a `r` token is one wherever it appears.
+        assert!(raw_string_at("foor#\"x\"#", 3).is_none());
+        assert!(raw_string_at("foo.r#\"x\"#", 4).is_some());
+    }
+
+    /// Only the char-literal forms Rust allows are treated as literals;
+    /// everything else is a lifetime and must stay in the output.
+    #[test]
+    fn char_literal_len_accepts_only_real_char_literals() {
+        assert_eq!(char_literal_len(b"'x'"), Some(3));
+        assert_eq!(char_literal_len(b"'\\n'"), Some(4));
+        assert_eq!(char_literal_len(b"'\n'"), Some(3));
+        assert_eq!(char_literal_len(b"'\\''"), Some(4));
+        assert_eq!(char_literal_len(b"'\\x41'"), Some(6));
+        assert_eq!(char_literal_len(b"'\\u{1F600}'"), Some(11));
+        assert_eq!(char_literal_len("'é'".as_bytes()), Some(4));
+        // Lifetimes and malformed literals.
+        assert_eq!(char_literal_len(b"'a"), None);
+        assert_eq!(char_literal_len(b"'a>"), None);
+        assert_eq!(char_literal_len(b"'static Cell"), None);
+        assert_eq!(char_literal_len(b"'"), None);
+        assert_eq!(char_literal_len(b"'\\"), None);
+        assert_eq!(char_literal_len(b"''"), None);
+    }
+
+    /// Non-ASCII identifier characters are identifier bytes; symbols are not.
+    #[test]
+    fn is_ident_at_handles_non_ascii() {
+        // "Cellé Cell→ Cell " — `é` starts at byte 4, `→` at 11 (3 bytes), the
+        // trailing space at 19.
+        let src = "Cellé Cell→ Cell ";
+        assert!(is_ident_at(src, 4), "`Cellé` is one identifier");
+        assert!(
+            !is_ident_at(src, 11),
+            "`Cell→` ends at an arrow, which is a boundary"
+        );
+        assert!(!is_ident_at(src, 19), "a space is a word boundary");
+        assert!(is_ident_at(src, 0), "an ASCII letter is an identifier byte");
+    }
 
     // ── Parser tests ──
 
