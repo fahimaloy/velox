@@ -121,6 +121,15 @@ fn find_element_attrs<'a>(
     }
 }
 
+fn vnode_contains_text(node: &velox_dom::VNode, needle: &str) -> bool {
+    match node {
+        velox_dom::VNode::Text(text) => text.contains(needle),
+        velox_dom::VNode::Element { children, .. } => children
+            .iter()
+            .any(|child| vnode_contains_text(child, needle)),
+    }
+}
+
 fn write_proof(name: &str, width: i32, height: i32, png: &[u8]) -> std::path::PathBuf {
     let path = proof_dir().join(format!("{name}-{width}x{height}.png"));
     std::fs::write(&path, png).expect("write proof png");
@@ -296,16 +305,53 @@ fn events_drive_the_visible_list() {
     assert_ne!(after_add, after_toggle, "toggle did not change the render");
     write_proof("todo-toggled", LARGE.0, LARGE.1, &png);
 
-    // Cycling the filter twice reaches "completed", which hides active rows.
+    // The generated dispatcher must remove the selected row, not merely call a
+    // handler. The typed item is the second item in the underlying list and
+    // is visible under the current "all" filter, so removing index 2 has a
+    // directly observable VNode and pixel result.
+    let before_remove_tree = build(&state);
+    assert!(
+        vnode_contains_text(&before_remove_tree, "Ship the rewrite"),
+        "the item selected for removal should be visible before remove"
+    );
+    let before_remove_rows = pixels_near(&after_toggle, ROW_BG, 8);
+    on_event("on_remove", Some("2"));
+    assert_eq!(
+        state.todoitem.todos.get().len(),
+        2,
+        "remove should drop the selected todo"
+    );
+    let (_, after_remove) = render(&state, LARGE.0, LARGE.1);
+    let after_remove_tree = build(&state);
+    assert!(
+        !vnode_contains_text(&after_remove_tree, "Ship the rewrite"),
+        "removed todo text should disappear from the rendered tree"
+    );
+    assert!(
+        vnode_contains_text(&after_remove_tree, "Learn Velox"),
+        "the remaining todo should still render"
+    );
+    assert_ne!(
+        after_toggle, after_remove,
+        "remove did not change the render"
+    );
+    assert!(
+        pixels_near(&after_remove, ROW_BG, 8) < before_remove_rows,
+        "removed todo should reduce the rendered row area"
+    );
+
+    // Cycling the filter twice reaches "completed", which hides the remaining
+    // active rows. This keeps the filter proof after the remove proof so both
+    // generated dispatch paths are exercised in a stable order.
     on_event("cycle_filter", None);
     on_event("cycle_filter", None);
     let (_, after_filter) = render(&state, LARGE.0, LARGE.1);
     assert_ne!(
-        after_toggle, after_filter,
+        after_remove, after_filter,
         "filter did not change the render"
     );
     assert!(
-        pixels_near(&after_filter, ROW_BG, 8) < pixels_near(&after_toggle, ROW_BG, 8),
+        pixels_near(&after_filter, ROW_BG, 8) < pixels_near(&after_remove, ROW_BG, 8),
         "completed filter should hide active cards"
     );
 }

@@ -104,7 +104,8 @@ pub fn init_project(name: &str) -> Result<PathBuf> {
     fs::create_dir_all(project_dir.join("src"))?;
     fs::create_dir_all(project_dir.join("assets"))?;
 
-    // Write files from templates
+    // Write files from the shipped project template so `velox init` and the
+    // checked-in template cannot drift into different event contracts.
     let cargo_toml = generate_cargo_toml(&package_name, &project_dir);
     fs::write(project_dir.join("Cargo.toml"), cargo_toml)?;
 
@@ -115,6 +116,14 @@ pub fn init_project(name: &str) -> Result<PathBuf> {
     fs::write(project_dir.join("src/App.vx"), app_vx)?;
 
     fs::create_dir_all(project_dir.join("src/components"))?;
+    fs::write(
+        project_dir.join("src/components/Todos.vx"),
+        generate_todos_vx(),
+    )?;
+    fs::write(
+        project_dir.join("src/components/TodoInput.vx"),
+        generate_todo_input_vx(),
+    )?;
     fs::write(
         project_dir.join("src/components/TodoItem.vx"),
         generate_todo_item_vx(),
@@ -316,234 +325,31 @@ velox-cli = {{ path = "{}", version = "0.1.0" }}
 }
 
 fn generate_main_rs() -> String {
-    r#"use std::sync::Arc;
-use velox_dom::VNode;
-use velox_style::Stylesheet;
-
-include!(concat!(env!("OUT_DIR"), "/app.rs"));
-
-fn main() {
-    println!("Starting {}...", env!("CARGO_PKG_NAME"));
-
-    let state = Arc::new(app::script_rs::State::new());
-
-    // Viewport contract (1A / X-H1): renderer passes logical viewport (w,h).
-    // Root .app fills viewport via `width:100%` / `min-height:100vh`
-    // (see src/App.vx) so layout reflows visibly on every resize.
-    let make_view = {
-        let state = Arc::clone(&state);
-        move |w: u32, h: u32| -> (VNode, Stylesheet) {
-            let _viewport = (w, h);
-            let vnode = app::render_with_state(Arc::clone(&state), |name| match name {
-                "title" => state.title(),
-                "counter" => state.counter().to_string(),
-                "positive" => state.positive().to_string(),
-                _ => String::new(),
-            });
-            let sheet = Stylesheet::parse(app::STYLE);
-            (vnode, sheet)
-        }
-    };
-
-    let on_event = app::make_on_event(Arc::clone(&state));
-    let get_title = {
-        let state = Arc::clone(&state);
-        move || state.title()
-    };
-
-    let _ = velox_renderer::run_window_vnode_skia("Velox App", make_view, on_event, get_title);
-}
-"#
-    .to_string()
+    include_str!("../../templates/project/src/main.rs").to_string()
 }
 
 fn generate_app_vx() -> String {
-    r#"<template>
-  <div class="app">
-    <header class="header">
-      <h1>{{ title }}</h1>
-    </header>
-    <div class="card">
-      <p class="count">{{ counter }}</p>
-      <p v-if="positive" class="positive">positive</p>
-      <p v-else class="neutral">not positive</p>
-      <button class="btn" @click="increment">+1</button>
-      <button class="btn" @click="decrement">-1</button>
-      <button class="btn" @click="reset">Reset</button>
-    </div>
-    <div class="card">
-      <h2>Todo List</h2>
-      <TodoItem />
-    </div>
-  </div>
-</template>
-
-<script setup>
-import TodoItem from './components/TodoItem.vx'
-use std::cell::{Cell, RefCell};
-
-pub struct State {
-    pub counter: Cell<i32>,
-}
-
-impl State {
-    pub fn new() -> Self {
-        Self {
-            counter: Cell::new(0),
-        }
-    }
-
-    pub fn title(&self) -> String { String::from("Velox App") }
-    pub fn counter(&self) -> i32 { self.counter.get() }
-    pub fn positive(&self) -> bool { self.counter.get() > 0 }
-    pub fn increment(&self) { self.counter.set(self.counter.get() + 1); }
-    pub fn decrement(&self) { self.counter.set(self.counter.get() - 1); }
-    pub fn reset(&self) { self.counter.set(0); }
-}
-</script>
-
-<style>
-.app { display: flex; flex-direction: column; width: 100%; min-height: 100vh; background: #1a1a2e; color: #e6edf3; font-family: system-ui, sans-serif; padding: 20px; }
-.header { padding: 20px; text-align: center; }
-.card { background: #16213e; padding: 24px; border-radius: 12px; text-align: center; margin-bottom: 16px; }
-.count { font-size: 48px; font-weight: bold; margin: 0; }
-.positive { color: #3fb950; margin: 8px 0; }
-.neutral { color: #8b949e; margin: 8px 0; }
-.btn { padding: 10px 20px; font-size: 16px; background: #3478f6; color: white; border: none; border-radius: 6px; cursor: pointer; margin: 4px; }
-</style>
-"#
-    .to_string()
+    include_str!("../../templates/project/src/App.vx").to_string()
 }
 
 fn generate_readme(name: &str) -> String {
-    format!(
-        r#"# {name}
-
-A Velox application.
-
-## Getting Started
-
-### Prerequisites
-
-- Rust toolchain (1.70+)
-- Velox CLI: `cargo install velox-cli`
-
-### Development
-
-```bash
-# Install dependencies
-cargo build
-
-# Run in development mode
-cargo run
-
-# Build for production
-cargo build --release
-```
-
-### Project Structure
-
-```
-{name}/
-├── Cargo.toml
-├── build.rs
-├── src/
-│   ├── main.rs       # Application entry point
-│   └── App.vx        # Main component
-├── assets/           # Static assets
-└── README.md
-```
-
-## Documentation
-
-For full documentation, visit: https://velox.dev/docs
-
-## License
-
-MIT
-"#
-    )
+    include_str!("../../templates/project/README.md").replace("{{project_name}}", name)
 }
 
 fn generate_build_rs() -> String {
-    r#"fn main() {
-    // build_cmd in Render mode recursively compiles the input .vx file
-    // and all imported components. It emits cargo:rerun-if-changed
-    // directives for every .vx file it reads.
-    let input = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("src/App.vx");
-
-    let out_dir = std::path::PathBuf::from(std::env::var("OUT_DIR").unwrap());
-
-    velox_cli::build_cmd(&input, Some(&out_dir), velox_cli::EmitMode::Render
-    ).expect("Failed to compile App.vx");
+    include_str!("../../templates/project/build.rs").to_string()
 }
-"#
-    .to_string()
+
+fn generate_todos_vx() -> String {
+    include_str!("../../templates/project/src/components/Todos.vx").to_string()
+}
+
+fn generate_todo_input_vx() -> String {
+    include_str!("../../templates/project/src/components/TodoInput.vx").to_string()
 }
 
 fn generate_todo_item_vx() -> String {
-    r#"<template>
-  <div class="todo-item" :class="{ completed: completed }">
-    <input
-      type="checkbox"
-      class="checkbox"
-      :checked="completed"
-      @click="on_toggle"
-    />
-    <span class="todo-text">{{ text }}</span>
-    <button class="btn btn-danger btn-small" @click="on_remove">×</button>
-  </div>
-</template>
-
-<script setup>
-// Props: receive todo data from parent component
-// :todo="item" passes the todo text
-// :completed="true/false" passes completion status
-// @toggle and @remove are event handlers
-
-pub struct Props {
-    pub todo: String,
-    pub completed: bool,
-}
-
-pub struct State {
-    pub props: Props,
-}
-
-impl State {
-    pub fn new() -> Self {
-        Self {
-            props: Props {
-                todo: String::new(),
-                completed: false,
-            }
-        }
-    }
-
-    pub fn text(&self) -> String {
-        self.props.todo.clone()
-    }
-
-    pub fn completed(&self) -> bool {
-        self.props.completed
-    }
-
-    pub fn on_toggle(&self) {}
-    pub fn on_remove(&self) {}
-}
-</script>
-
-<style>
-.todo-item { display: flex; align-items: center; justify-content: space-between; padding: 14px 16px; border-bottom: 1px solid #f3f4f6; }
-.todo-item.completed .todo-text { text-decoration: line-through; color: #9ca3af; }
-.todo-text { font-size: 15px; color: #374151; flex: 1; margin-left: 12px; }
-.checkbox { width: 20px; height: 20px; cursor: pointer; accent-color: #3b82f6; }
-.btn-small { padding: 4px 10px; font-size: 16px; border-radius: 4px; }
-.btn-danger { background-color: #ef4444; color: #ffffff; }
-</style>
-"#
-    .to_string()
+    include_str!("../../templates/project/src/components/TodoItem.vx").to_string()
 }
 
 #[doc(hidden)]

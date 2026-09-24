@@ -104,6 +104,31 @@ fn cli_stub_emits_lowercase_and_alias() {
 }
 
 #[test]
+fn init_writes_supported_todo_event_template() {
+    let project_dir =
+        std::env::temp_dir().join(format!("velox-init-template-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&project_dir);
+
+    velox_cli::commands::init::init_project(project_dir.to_str().unwrap())
+        .expect("init should write the project template");
+
+    let todos = fs::read_to_string(project_dir.join("src/components/Todos.vx"))
+        .expect("read generated Todos.vx");
+    let input = fs::read_to_string(project_dir.join("src/components/TodoInput.vx"))
+        .expect("read generated TodoInput.vx");
+    let item = fs::read_to_string(project_dir.join("src/components/TodoItem.vx"))
+        .expect("read generated TodoItem.vx");
+
+    assert!(todos.contains(r#"@click="add_todo""#));
+    assert!(!todos.contains("@submit"));
+    assert!(!input.contains("@submit"));
+    assert!(!input.contains("on_submit"));
+    assert!(!item.contains("on_submit"));
+
+    let _ = fs::remove_dir_all(project_dir);
+}
+
+#[test]
 fn workspace_detect_requires_marker_file() {
     let found = velox_cli::commands::init::find_velox_workspace_for_test();
     if let Some(ws) = found {

@@ -32,9 +32,9 @@ velox build --release
 │   ├── main.rs              # Application entry point
 │   ├── App.vx               # Root component
 │   └── components/
-│       ├── Todos.vx         # Owns the todo list; renders TodoInput + TodoItem
-│       ├── TodoInput.vx     # Text input + Add button (emits input/submit)
-│       └── TodoItem.vx      # A single todo row (emits toggle/remove)
+│       ├── Todos.vx         # Owns the todo list and dispatches input/add actions
+│       ├── TodoInput.vx     # Text input (the owning Todos component handles input)
+│       └── TodoItem.vx      # A single todo row; owning Todos handles row actions
 ├── assets/                  # Static assets (images, fonts)
 └── README.md
 ```
@@ -43,7 +43,7 @@ velox build --release
 
 - Component-based architecture with `.vx` single-file components
 - Props passing from parent to child components
-- Event emission from child to parent (`@event` handlers)
+- Renderer-dispatched input and click handlers owned by the component state
 - Conditional rendering (`v-if`, `v-else-if`, `v-else`)
 - List rendering with `v-for`
 - Scoped CSS styles per component
@@ -56,9 +56,9 @@ The generated project is a working todo app:
 
 - **App.vx** — root component; hosts the persistent `Todos` component state.
 - **Todos.vx** — owns the `todos` array (with default entries) and the input value;
-  renders `TodoInput` and a `v-for` list of `TodoItem`.
-- **TodoInput.vx** — text input + Add button; emits `input`/`submit` events.
-- **TodoItem.vx** — checkbox, text, and remove button; emits `toggle`/`remove` events.
+  renders `TodoInput`, a renderer-supported Add click, and a `v-for` list of `TodoItem`.
+- **TodoInput.vx** — text input; the owning `Todos` component handles input and Add.
+- **TodoItem.vx** — checkbox, text, and remove button; the owning `Todos` component handles the click actions.
 
 ## Documentation
 

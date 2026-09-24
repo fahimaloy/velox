@@ -1,6 +1,7 @@
 <template>
   <div class="todos">
-    <TodoInput :value="new_todo" @input="on_input" @submit="on_submit" />
+    <TodoInput :value="new_todo" @input="on_input" />
+    <button class="btn btn-add" @click="add_todo">Add</button>
     <div class="todo-list">
       <TodoItem
         v-for="(todo, idx) in todos"
@@ -57,7 +58,7 @@ impl State {
         self.new_todo.set(payload.to_string());
     }
 
-    pub fn on_submit(&self, _payload: &str) {
+    pub fn add_todo(&self) {
         let text = self.new_todo.get().trim().to_string();
         if text.is_empty() {
             return;

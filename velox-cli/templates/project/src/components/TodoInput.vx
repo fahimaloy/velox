@@ -7,7 +7,6 @@
       :placeholder="placeholder"
       @input="on_input"
     />
-    <button class="btn btn-add" @click="on_submit">Add</button>
   </div>
 </template>
 
@@ -39,10 +38,9 @@ impl State {
         self.props.placeholder.clone()
     }
 
-    // Events bubble to the owning (Todos) State via the root dispatcher; these
-    // no-ops keep the generated per-component dispatcher compiling.
+    // The root dispatcher routes the input handler to the owning Todos state.
+    // This signature keeps the generated component handler well-formed.
     pub fn on_input(&self) {}
-    pub fn on_submit(&self) {}
 }
 </script>
 

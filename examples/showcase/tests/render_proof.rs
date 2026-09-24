@@ -15,7 +15,6 @@ include!(concat!(env!("OUT_DIR"), "/app.rs"));
 
 /// Colors declared in `src/App.vx`.
 const SECTION_BG: [u8; 3] = [30, 41, 59]; // .section
-const CELL_BG: [u8; 3] = [51, 65, 85]; // .cell / .wrap-cell / .scroll-item
 const CENTERED_BG: [u8; 3] = [167, 139, 250]; // .centered
 const PAD_A_BG: [u8; 3] = [56, 189, 248]; // .box-a
 const PAD_B_BG: [u8; 3] = [74, 222, 128]; // .box-b
@@ -267,10 +266,10 @@ fn renders_large_viewport_proof_png() {
     let (png, rgba) = render(&state, LARGE.0, LARGE.1);
     assert_non_trivial("showcase-large", &png, &rgba);
     assert_feature_geometry(&state, LARGE.0, LARGE.1);
-    // Spacing cards, flex cells, the auto-margin centered block and the
-    // scroll/wrap sections all paint their own fills.
+    // The spacing, centered, and padding demonstrations paint their own
+    // targeted fills; flex/scroll/wrap behavior is covered by the geometry
+    // assertions rather than one pooled cell-color population.
     assert!(pixels_near(&rgba, SECTION_BG, 8) > 2000, "section cards");
-    assert!(pixels_near(&rgba, CELL_BG, 8) > 2000, "flex cells");
     assert!(pixels_near(&rgba, CENTERED_BG, 12) > 500, "centered block");
     assert!(pixels_near(&rgba, PAD_A_BG, 12) > 200, "padding card A");
     assert!(pixels_near(&rgba, PAD_B_BG, 12) > 200, "padding card B");
@@ -285,6 +284,55 @@ fn small_viewport_renders_visible_gallery_sections() {
     let (png, rgba) = render(&state, SMALL.0, SMALL.1);
     assert_non_trivial("showcase-small", &png, &rgba);
     assert_feature_geometry(&state, SMALL.0, SMALL.1);
+
+    // Prove that the later sections are still present in layout and are
+    // placed below the first viewport, rather than inferring that from pixels
+    // that happen to be in the first few sections.
+    let raw = app::render_with_state(Arc::clone(&state), app::make_resolve(Arc::clone(&state)));
+    let vnode = apply_with_cascade(&raw, &Stylesheet::parse(app::STYLE));
+    let layout = compute_layout(&vnode, SMALL.0, SMALL.1);
+    let centered = first_layout_match(&vnode, &layout, "centered");
+    let scroll = first_layout_match(&vnode, &layout, "scroll-box");
+    let wrap = first_layout_match(&vnode, &layout, "wrap-row");
+    let mut sections = Vec::new();
+    collect_layout_matches(&vnode, &layout, "section", &mut sections);
+    assert!(
+        sections.len() >= 7,
+        "all seven showcase sections must exist"
+    );
+    let centered_section = sections
+        .iter()
+        .find(|candidate| {
+            candidate.rect.x <= centered.rect.x
+                && candidate.rect.x + candidate.rect.w >= centered.rect.x + centered.rect.w
+        })
+        .expect("centered section should be present");
+    let scroll_section = sections
+        .iter()
+        .find(|candidate| {
+            candidate.rect.y <= scroll.rect.y
+                && candidate.rect.y + candidate.rect.h >= scroll.rect.y
+        })
+        .expect("scroll section should be present");
+    let wrap_section = sections
+        .iter()
+        .find(|candidate| {
+            candidate.rect.y <= wrap.rect.y && candidate.rect.y + candidate.rect.h >= wrap.rect.y
+        })
+        .expect("wrap section should be present");
+    assert!(
+        scroll_section.rect.y > centered_section.rect.y,
+        "scroll section should be placed after the centered section"
+    );
+    assert!(
+        wrap_section.rect.y > scroll_section.rect.y,
+        "wrap section should be placed after the scroll section"
+    );
+    assert!(
+        scroll_section.rect.y + scroll_section.rect.h > SMALL.1,
+        "scroll section should extend beyond the 480x360 viewport"
+    );
+
     write_proof("showcase", SMALL.0, SMALL.1, &png);
 
     // The first-viewport sections are rendered, centered by auto margins, and
