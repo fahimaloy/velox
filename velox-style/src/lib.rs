@@ -8,6 +8,7 @@
 //! - Style inheritance and cascading
 
 pub mod fonts;
+pub mod ua;
 pub mod visual_effects;
 
 // Re-export types from velox-dom
@@ -510,11 +511,32 @@ pub fn apply_styles(node: &VNode, sheet: &Stylesheet) -> VNode {
     apply_styles_with_hover(node, sheet, &|_, _| false)
 }
 
+/// Apply the 3-layer cascade UA < author < inline.
+///
+/// Composes the user-agent sheet (`ua::ua_sheet()`) under `author`, then
+/// delegates to `apply_styles_with_hover`. Inline styles win via `merge_styles`.
+pub fn apply_with_cascade(node: &VNode, author: &Stylesheet) -> VNode {
+    apply_with_cascade_with_hover(node, author, &|_, _| false)
+}
+
+/// Cascade with a custom hover predicate.
+pub fn apply_with_cascade_with_hover<F>(node: &VNode, author: &Stylesheet, is_hovered: &F) -> VNode
+where
+    F: Fn(&str, &Props) -> bool,
+{
+    let ua = crate::ua::ua_sheet();
+    let mut merged = ua.rules.clone();
+    merged.extend(author.rules.clone());
+    let cascade = Stylesheet { rules: merged };
+    apply_styles_with_hover(node, &cascade, is_hovered)
+}
+
 /// Apply stylesheet with a custom hover predicate
 pub fn apply_styles_with_hover<F>(node: &VNode, sheet: &Stylesheet, is_hovered: &F) -> VNode
 where
     F: Fn(&str, &Props) -> bool,
 {
+    #[allow(dead_code)]
     fn has_style_key(style: &str, key: &str) -> bool {
         for decl in style.split(';') {
             let d = decl.trim();
@@ -584,20 +606,7 @@ where
                 }
                 let mut new_props = props.clone();
                 let merged = merge_styles(new_props.attrs.get("style").map(|s| s.as_str()), &acc);
-                let mut final_style = merged.clone();
-                if tag == "button" {
-                    let has_padding = has_style_key(&final_style, "padding")
-                        || has_style_key(&final_style, "padding-left")
-                        || has_style_key(&final_style, "padding-right")
-                        || has_style_key(&final_style, "padding-top")
-                        || has_style_key(&final_style, "padding-bottom");
-                    if !has_padding {
-                        final_style.push_str(" padding: 6px 12px;");
-                    }
-                    if !has_style_key(&final_style, "text-align") {
-                        final_style.push_str(" text-align: center;");
-                    }
-                }
+                let final_style = merged.clone();
                 if !final_style.is_empty() {
                     new_props = new_props.set("style", final_style.clone());
                 }

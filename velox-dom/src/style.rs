@@ -760,8 +760,12 @@ impl TransformOp {
                 };
                 Some(TransformOp::Scale(x, y))
             }
-            "scalex" => Some(TransformOp::ScaleX(args.first()?.trim().parse::<f32>().ok()?)),
-            "scaley" => Some(TransformOp::ScaleY(args.first()?.trim().parse::<f32>().ok()?)),
+            "scalex" => Some(TransformOp::ScaleX(
+                args.first()?.trim().parse::<f32>().ok()?,
+            )),
+            "scaley" => Some(TransformOp::ScaleY(
+                args.first()?.trim().parse::<f32>().ok()?,
+            )),
             _ => None,
         }
     }
@@ -1546,6 +1550,8 @@ impl ComputedStyle {
     }
 }
 
+// Document-level defaults — UA sheet (velox-style::ua) supplies element-specific
+// margins/padding/display; ComputedStyle::default() remains the zero baseline.
 impl Default for ComputedStyle {
     fn default() -> Self {
         Self {
@@ -1838,7 +1844,10 @@ mod tests {
     #[test]
     fn test_set_property_transform() {
         let mut cs = ComputedStyle::new();
-        cs.set_property("transform", "translate(10px, 20px) rotate(45deg) scale(1.5)");
+        cs.set_property(
+            "transform",
+            "translate(10px, 20px) rotate(45deg) scale(1.5)",
+        );
         assert_eq!(
             cs.transform.operations,
             vec![
@@ -1851,7 +1860,10 @@ mod tests {
         cs.set_property("transform", "translateX(5px) scaleY(2)");
         assert_eq!(
             cs.transform.operations,
-            vec![TransformOp::TranslateX(Length::Px(5.0)), TransformOp::ScaleY(2.0)]
+            vec![
+                TransformOp::TranslateX(Length::Px(5.0)),
+                TransformOp::ScaleY(2.0)
+            ]
         );
         cs.set_property("transform", "none");
         assert!(cs.transform.is_empty());
