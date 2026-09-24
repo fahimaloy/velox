@@ -1,4 +1,4 @@
-use velox_dom::{Props, h, layout::compute_layout};
+use velox_dom::{Props, h, layout::compute_layout, text};
 
 fn find_child<'a>(
     layout: &'a velox_dom::layout::LayoutNode,
@@ -9,6 +9,48 @@ fn find_child<'a>(
         .iter()
         .find(|c| c.source_index == Some(idx))
         .expect("child not found")
+}
+
+#[test]
+fn repro_flex_item_descendants_use_resolved_item_position() {
+    let root = h(
+        "div",
+        Props::new().set(
+            "style",
+            "width:300px;height:100px;display:flex;\
+             justify-content:center;align-items:center;gap:20px;",
+        ),
+        vec![
+            h(
+                "button",
+                Props::new().set("style", "width:80px;height:30px;text-align:center;"),
+                vec![text("A")],
+            ),
+            h(
+                "button",
+                Props::new().set("style", "width:80px;height:30px;text-align:center;"),
+                vec![text("B")],
+            ),
+        ],
+    );
+
+    let layout = compute_layout(&root, 300, 100);
+    let first = find_child(&layout, 0);
+    let second = find_child(&layout, 1);
+
+    // Item roots: main cursor + cross alignment still correct.
+    assert_eq!(first.rect.x, 60);
+    assert_eq!(second.rect.x, 160);
+    assert_eq!(first.rect.y, 35);
+    assert_eq!(second.rect.y, 35);
+
+    // Descendants must sit inside their own resolved item, centered in it.
+    let a = &first.children[0];
+    let b = &second.children[0];
+    assert_eq!(a.rect.x, first.rect.x + (first.rect.w - a.rect.w) / 2);
+    assert_eq!(a.rect.y, first.rect.y + (first.rect.h - a.rect.h) / 2);
+    assert_eq!(b.rect.x, second.rect.x + (second.rect.w - b.rect.w) / 2);
+    assert_eq!(b.rect.y, second.rect.y + (second.rect.h - b.rect.h) / 2);
 }
 
 #[test]

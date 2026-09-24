@@ -217,6 +217,18 @@ pub fn is_scrollable(overflow: &str, content_h: f32, rect_h: f32) -> bool {
     matches!(overflow, "auto" | "scroll") && content_h > rect_h
 }
 
+fn translate_layout_subtree(node: &mut LayoutNode, dx: i32, dy: i32) {
+    node.rect.x += dx;
+    node.rect.y += dy;
+    if let Some(clip) = &mut node.clip {
+        clip.x += dx;
+        clip.y += dy;
+    }
+    for child in &mut node.children {
+        translate_layout_subtree(child, dx, dy);
+    }
+}
+
 #[allow(dead_code)]
 fn parse_px(s: &str) -> Option<i32> {
     let t = s.trim();
@@ -2276,6 +2288,8 @@ pub fn compute_layout(node: &VNode, viewport_w: i32, viewport_h: i32) -> LayoutN
                     for line in &lines {
                         for &(item_idx, main_pos) in &line.main_positions {
                             if let Some(mut ln) = items[item_idx].layout_node.take() {
+                                let pre_x = ln.rect.x;
+                                let pre_y = ln.rect.y;
                                 let has_flex = items[item_idx].flex_grow > 0.0
                                     || items[item_idx].flex_shrink > 0.0;
                                 if has_flex {
@@ -2315,29 +2329,36 @@ pub fn compute_layout(node: &VNode, viewport_w: i32, viewport_h: i32) -> LayoutN
                                     _ => 0.0,
                                 };
                                 let line_cross = cross_offset + cross_pos;
-                                if is_column {
-                                    ln.rect.x =
-                                        (content_x_scrolled as f32 + line_cross).round() as i32;
-                                    ln.rect.y =
+                                let (mut resolved_x, mut resolved_y) = if is_column {
+                                    (
+                                        (content_x_scrolled as f32 + line_cross).round() as i32,
                                         (content_y_scrolled as f32 + (main_pos - main_start))
-                                            .round() as i32;
+                                            .round() as i32,
+                                    )
                                 } else {
-                                    ln.rect.x =
+                                    (
                                         (content_x_scrolled as f32 + (main_pos - main_start))
-                                            .round() as i32;
-                                    ln.rect.y =
-                                        (content_y_scrolled as f32 + line_cross).round() as i32;
-                                }
+                                            .round() as i32,
+                                        (content_y_scrolled as f32 + line_cross).round() as i32,
+                                    )
+                                };
                                 if is_reverse {
                                     if is_column {
                                         let container_bottom =
                                             content_y_start + content_h_available;
-                                        ln.rect.y = container_bottom - ln.rect.y - ln.rect.h;
+                                        resolved_y = container_bottom - resolved_y - ln.rect.h;
                                     } else {
                                         let container_right = content_x_scrolled + content_w;
-                                        ln.rect.x = container_right - ln.rect.x - ln.rect.w;
+                                        resolved_x = container_right - resolved_x - ln.rect.w;
                                     }
                                 }
+                                translate_layout_subtree(
+                                    &mut ln,
+                                    resolved_x - pre_x,
+                                    resolved_y - pre_y,
+                                );
+                                ln.rect.x = resolved_x;
+                                ln.rect.y = resolved_y;
                                 let child_style = flex_children
                                     .iter()
                                     .find(|fc| fc.index == items[item_idx].child_index)
