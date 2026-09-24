@@ -163,3 +163,60 @@ impl State {
         "raw strings, block comments and Unicode identifiers must not warn, output was:\n{output}"
     );
 }
+
+/// A multi-byte character immediately before an identifier used to abort the
+/// lint process, because the boundary check sliced inside it. The CLI must
+/// finish, stay advisory, and report only the real occurrence.
+#[test]
+fn unicode_before_an_identifier_does_not_panic() {
+    let source = r#"<script setup>
+pub struct State {
+    pub count: std::rc::Rc<velox_core::signal::Signal<i32>>,
+}
+
+impl State {
+    pub fn new() -> Self {
+        Self { count: velox_core::signal!(count = 0) }
+    }
+
+    pub fn touch(&self) {
+        let éCell = Cell::new(0);
+        let other = Cell::new(1);
+        let _ = (éCell, other);
+    }
+}
+</script>
+
+<template>
+  <div>hi</div>
+</template>
+"#;
+    let file = ScratchFile::new("unicode-boundary", source);
+    let (success, output) = run_lint(file.path());
+
+    assert!(
+        success,
+        "the lint must stay advisory, output was:\n{output}"
+    );
+    assert!(
+        !output.contains("panicked"),
+        "the lint must not panic, output was:\n{output}"
+    );
+    let warnings = warning_lines(&output);
+    assert_eq!(
+        warnings.len(),
+        2,
+        "the two standalone `Cell`s are non-reactive storage, but `éCell` is one \
+         identifier and must not warn, output was:\n{output}"
+    );
+    assert!(
+        warnings[0].contains("script line 12, column 22"),
+        "expected the first Cell at line 12, column 22, got: {:?}",
+        warnings[0]
+    );
+    assert!(
+        warnings[1].contains("script line 13, column 21"),
+        "expected the second Cell at line 13, column 21, got: {:?}",
+        warnings[1]
+    );
+}

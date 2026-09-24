@@ -185,17 +185,81 @@ fn lifetime_does_not_hide_a_later_cell_usage() {
 
 /// A `Cell` type parameterized by a lifetime is real code and must warn; the
 /// lifetime must not blank the type or the usage.
+///
+/// Both occurrences on the line are separate real uses, so both are reported —
+/// with their own columns — instead of only the first one.
 #[test]
 fn cell_with_a_lifetime_parameter_still_warns() {
-    let warnings = lint_script("let c: Cell<'b> = Cell::new(0);\n");
+    let warnings = lint_script("let c: Cell<'b'> = Cell::new(0);\n");
     assert_eq!(
         warnings.len(),
-        1,
-        "a Cell<'b> type must warn, got: {warnings:?}"
+        2,
+        "every occurrence on the line must warn, got: {warnings:?}"
     );
     assert!(
         warnings[0].contains("script line 1, column 8"),
-        "the warning must point at the type (line 1, column 8), got: {:?}",
+        "the first warning must point at the type (line 1, column 8), got: {:?}",
+        warnings[0]
+    );
+    assert!(
+        warnings[1].contains("script line 1, column 20"),
+        "the second warning must point at the usage (line 1, column 20), got: {:?}",
+        warnings[1]
+    );
+}
+
+/// Every occurrence of a `Cell` on a line is a separate real use, and each one
+/// is reported with its own accurate line and column.
+#[test]
+fn every_cell_on_a_line_is_reported_with_its_own_column() {
+    let warnings = lint_script("let a = Cell::new(0);\nlet b = Cell::new(1) + Cell::new(2);\n");
+    assert_eq!(
+        warnings.len(),
+        3,
+        "three occurrences, three warnings, got: {warnings:?}"
+    );
+    for (index, (line, column)) in [(1, 9), (2, 9), (2, 24)].into_iter().enumerate() {
+        let expected = format!("script line {line}, column {column}");
+        assert!(
+            warnings[index].contains(&expected),
+            "warning {index} must point at {expected}, got: {:?}",
+            warnings[index]
+        );
+    }
+}
+
+/// A multi-byte character immediately BEFORE an identifier must not make the
+/// byte-indexed boundary check slice inside it: `is_ident_at` used to panic on
+/// the second byte of `é`.
+#[test]
+fn unicode_character_before_the_identifier_does_not_panic() {
+    let warnings = lint_script("let éCell = Cell::new(0);\n");
+    assert_eq!(
+        warnings.len(),
+        1,
+        "only the standalone Cell warns — éCell is one identifier, got: {warnings:?}"
+    );
+    assert!(
+        warnings[0].contains("script line 1, column 14"),
+        "the warning must point at the usage (line 1, column 14), got: {:?}",
+        warnings[0]
+    );
+}
+
+/// Same boundary rule for a multi-byte character directly in front of a
+/// raw-string prefix: the opener check must answer without slicing into `ü`.
+#[test]
+fn multi_byte_character_before_a_raw_string_prefix_does_not_panic() {
+    // Not valid Rust on purpose: the scanner must stay robust on any input.
+    let warnings = lint_script("fn f() { ür\"Cell\"; let c = Cell::new(0); }\n");
+    assert_eq!(
+        warnings.len(),
+        1,
+        "the raw-string body is prose, so only the usage warns, got: {warnings:?}"
+    );
+    assert!(
+        warnings[0].contains("script line 1, column 29"),
+        "the warning must point at the usage (line 1, column 29), got: {:?}",
         warnings[0]
     );
 }

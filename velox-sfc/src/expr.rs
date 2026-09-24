@@ -883,7 +883,7 @@ pub fn lint_script(script: &str) -> Vec<String> {
     let mut warnings = Vec::new();
     for (line_idx, line) in cleaned.lines().enumerate() {
         for token in ["RefCell", "Cell"] {
-            if let Some(col) = find_whole_ident(line, token) {
+            for col in find_whole_idents(line, token) {
                 warnings.push(format!(
                     "warning: `{token}` (script line {}, column {}) is not reactive — mutations do \
                      not notify the renderer; use ref!(…) for a single value or signal!(…) \
@@ -897,15 +897,21 @@ pub fn lint_script(script: &str) -> Vec<String> {
     warnings
 }
 
-/// Find the first whole-identifier occurrence of `ident` in `line` and
-/// return its 0-based byte column, or `None` if there is none.
+/// Find every whole-identifier occurrence of `ident` in `line` and return the
+/// 0-based byte columns, in order.
 ///
 /// A match must not be preceded or followed by an identifier byte
 /// (`[A-Za-z0-9_]` or a non-ASCII alphanumeric character), so `Cell` inside
 /// `MyCell`, `RefCell` or `Cellé` never matches.
-fn find_whole_ident(line: &str, ident: &str) -> Option<usize> {
+///
+/// Every occurrence on the line is reported, each with its own column. Tokens
+/// are searched in the caller's order (`RefCell` first), and a rejected match
+/// cannot swallow the next one, so `RefCell` is still reported exactly once and
+/// never as `Cell`.
+fn find_whole_idents(line: &str, ident: &str) -> Vec<usize> {
     debug_assert!(!ident.is_empty() && ident.is_ascii());
     let bytes = line.as_bytes();
+    let mut found = Vec::new();
     let mut start = 0;
     while let Some(rel) = line[start..].find(ident) {
         let at = start + rel;
@@ -913,11 +919,11 @@ fn find_whole_ident(line: &str, ident: &str) -> Option<usize> {
         let end = at + ident.len();
         let after_ok = end >= bytes.len() || !is_ident_at(line, end);
         if before_ok && after_ok {
-            return Some(at);
+            found.push(at);
         }
         start = end;
     }
-    None
+    found
 }
 
 /// Is the byte at `idx` part of an identifier?
@@ -926,13 +932,42 @@ fn find_whole_ident(line: &str, ident: &str) -> Option<usize> {
 /// works on bytes, a non-ASCII byte must also be treated as identifier
 /// material: `Cellé` is one identifier, so a match ending in front of `é` is
 /// not a whole-word match. Rust identifiers continue with Unicode
-/// alphanumerics, so a decoded character decides; a byte that cannot start a
-/// valid UTF-8 character is a continuation byte and therefore part of a
-/// multi-byte character too.
+/// alphanumerics, so a decoded character decides.
+///
+/// `idx` is frequently the byte *before* a match, which for `éCell` is the
+/// second byte of `é` — not a character boundary, so it must never be sliced.
+/// A byte that is not the start of a character is part of the character that
+/// precedes it, and that character decides. For the same reason the byte after
+/// a match is answered from the byte value alone: an ASCII identifier byte can
+/// never be a UTF-8 continuation byte, and an ASCII letter or digit as a
+/// standalone identifier is meaningless anyway.
+///
+/// Slicing with a byte index is only sound on a character boundary, so every
+/// other byte-to-character step in this module is audited to stay on one: the
+/// expression `Tokenizer` advances by `char::len_utf8` from a boundary-safe
+/// read, the parser indexes a token vector rather than the source, and
+/// `line[start..].find(ident)` only ever yields an ASCII match end, which is
+/// necessarily the next character's start.
 fn is_ident_at(src: &str, idx: usize) -> bool {
-    let b = src.as_bytes()[idx];
+    let Some(b) = src.as_bytes().get(idx).copied() else {
+        return false;
+    };
     if b.is_ascii() {
         return b.is_ascii_alphanumeric() || b == b'_';
+    }
+    if !src.is_char_boundary(idx) {
+        // A continuation byte belongs to the character that starts earlier, so
+        // walk back to that character's start — slicing anywhere else would
+        // split a character and panic. That start is a boundary, so reading the
+        // character from it is sound.
+        let mut start = idx;
+        while start > 0 && !src.is_char_boundary(start) {
+            start -= 1;
+        }
+        return src[start..]
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_alphanumeric() || c == '_');
     }
     match src[idx..].chars().next() {
         Some(c) => c.is_alphanumeric() || c == '_',
@@ -1260,6 +1295,59 @@ mod tests {
         );
         assert!(!is_ident_at(src, 19), "a space is a word boundary");
         assert!(is_ident_at(src, 0), "an ASCII letter is an identifier byte");
+    }
+
+    #[test]
+    fn is_ident_at_answers_for_a_utf8_continuation_byte() {
+        // `ü` is bytes 0..2, so index 1 is NOT a character boundary. The answer
+        // comes from the character that owns that byte, never from slicing at 1.
+        let src = "üCell";
+        assert!(!src.is_char_boundary(1), "fixture precondition");
+        assert!(
+            is_ident_at(src, 0),
+            "the start of `ü` is an identifier byte"
+        );
+        assert!(is_ident_at(src, 1), "byte 1 belongs to the identifier `ü`");
+        assert!(is_ident_at(src, 2), "`C` is an identifier byte");
+
+        // A non-alphanumeric multi-byte character keeps its bytes as boundaries,
+        // even though those bytes are continuation bytes.
+        let src = "→Cell";
+        assert!(!is_ident_at(src, 0), "`→` is not alphanumeric");
+        assert!(!is_ident_at(src, 1), "byte 1 belongs to the symbol `→`");
+        assert!(!is_ident_at(src, 2), "byte 2 belongs to the symbol `→`");
+        assert!(is_ident_at(src, 3), "`C` is an identifier byte");
+
+        // Out-of-range and boundary edges never panic.
+        let src = "é";
+        assert!(!is_ident_at(src, 2), "past the end of the string");
+    }
+
+    #[test]
+    fn find_whole_idents_reports_every_occurrence_with_its_column() {
+        assert_eq!(
+            find_whole_idents("let a = Cell::new(0) + Cell::new(1);", "Cell"),
+            vec![8, 23],
+            "both uses are reported, in order"
+        );
+        assert_eq!(
+            find_whole_idents("RefCell", "RefCell"),
+            vec![0],
+            "RefCell is one whole occurrence of itself"
+        );
+        assert!(
+            find_whole_idents("RefCell", "Cell").is_empty(),
+            "`RefCell` is never a whole `Cell`"
+        );
+        assert!(
+            find_whole_idents("Cellular MyCell Cell2", "Cell").is_empty(),
+            "identifier neighbours reject the match"
+        );
+        assert_eq!(
+            find_whole_idents("let éCell = Cell::new(0);", "Cell"),
+            vec![13],
+            "the byte before the match may be a continuation byte"
+        );
     }
 
     // ── Parser tests ──
