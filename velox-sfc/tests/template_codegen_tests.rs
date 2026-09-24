@@ -54,6 +54,14 @@ impl State {
     pub fn on_input(&self, payload: &str) {
         let _ = payload;
     }
+
+    /// Zero-argument, but nothing comes back, so there is no text to render.
+    pub fn reset(&self) {}
+
+    /// Zero-argument, but a collection has no `Display` form.
+    pub fn items(&self) -> Vec<String> {
+        Vec::new()
+    }
 }
 "#;
 
@@ -373,5 +381,164 @@ fn payload_taking_method_is_not_registered_as_a_getter() {
     assert!(
         !rs.contains("state.on_input()"),
         "generated code must never call a handler as a getter:\n{rs}"
+    );
+}
+
+/// A zero-argument method with no declared return type returns `()`, which has
+/// no `Display` form, so it must never become a resolver arm.
+#[test]
+fn zero_argument_method_without_return_type_is_not_registered_as_a_getter() {
+    let rs = compile_template_to_rs_full(
+        r#"<input :value="reset" />"#,
+        "TodoApp",
+        None,
+        Some(SCRIPT_WITH_GETTERS_AND_HANDLER),
+        None,
+    )
+    .unwrap();
+    println!("-- GENERATED RS --\n{}\n-- END RS --", rs);
+
+    let resolve = make_resolve_body(&rs);
+    assert!(
+        !resolve.contains(r#""reset" =>"#),
+        "a method with no declared return type is not a getter:\n{resolve}"
+    );
+    assert!(
+        !rs.contains("state.reset()"),
+        "generated code must never call a unit method as a getter:\n{rs}"
+    );
+}
+
+/// A zero-argument method whose return type cannot be rendered as text is not a
+/// getter either, for the same reason.
+#[test]
+fn zero_argument_method_with_unrenderable_return_type_is_not_registered_as_a_getter() {
+    let rs = compile_template_to_rs_full(
+        r#"<input :value="items" />"#,
+        "TodoApp",
+        None,
+        Some(SCRIPT_WITH_GETTERS_AND_HANDLER),
+        None,
+    )
+    .unwrap();
+    println!("-- GENERATED RS --\n{}\n-- END RS --", rs);
+
+    let resolve = make_resolve_body(&rs);
+    assert!(
+        !resolve.contains(r#""items" =>"#),
+        "a method returning `Vec<String>` is not a text getter:\n{resolve}"
+    );
+    assert!(
+        !rs.contains("state.items().to_string()"),
+        "generated code must never stringify an unrenderable value:\n{rs}"
+    );
+}
+
+/// A binding rooted at a `v-for` loop variable is read directly by the State
+/// renderer but goes through `resolve(...)` in the Resolve renderer, which has
+/// no loop value to read. The mode split is pinned here: the State body keeps
+/// the direct read, the Resolve body still looks the expression up, and no
+/// resolver arm is invented for it.
+#[test]
+fn loop_rooted_binding_reads_the_loop_item_in_state_mode_only() {
+    let script = r#"
+pub struct State {
+    pub todos: std::rc::Rc<velox_core::signal::Signal<Vec<String>>>,
+}
+
+impl State {
+    pub fn todos(&self) -> Vec<String> {
+        self.todos.get()
+    }
+}
+"#;
+    let rs = compile_template_to_rs_full(
+        r#"<div v-for="(todo, idx) in todos"><p :value="todo.text" :index="idx">x</p></div>"#,
+        "TodoApp",
+        None,
+        Some(script),
+        None,
+    )
+    .unwrap();
+    println!("-- GENERATED RS --\n{}\n-- END RS --", rs);
+
+    // Resolve mode: no loop context, so the expression is looked up verbatim.
+    assert!(
+        rs.contains(r#"resolve("todo.text")"#),
+        "Resolve mode must still look the loop expression up:\n{rs}"
+    );
+    // State mode: the loop item is read directly.
+    assert!(
+        rs.contains(r#"format!("{}", todo.text)"#),
+        "State mode must keep reading the loop item directly:\n{rs}"
+    );
+
+    let resolve = make_resolve_body(&rs);
+    assert!(
+        !resolve.contains(r#""todo.text" =>"#),
+        "a loop-variable expression must not be registered as a key:\n{resolve}"
+    );
+    assert!(
+        !resolve.contains(r#""idx" =>"#),
+        "a loop index must not be registered as a key:\n{resolve}"
+    );
+}
+
+/// `:key` generation is unchanged: the Resolve body still inserts the looked-up
+/// key and the State body still reads the loop field. Only the collector's
+/// understanding of it changed (it is reported, not registered).
+#[test]
+fn v_for_key_generation_is_unchanged() {
+    let rs = compile_template_to_rs_full(
+        r#"<div v-for="todo in todos" :key="todo.id">x</div>"#,
+        "TodoApp",
+        None,
+        None,
+        None,
+    )
+    .unwrap();
+    println!("-- GENERATED RS --\n{}\n-- END RS --", rs);
+
+    assert!(
+        rs.contains(r#"props.attrs.insert("key".to_string(), todo.id.to_string())"#),
+        "State mode keeps inserting the loop field:\n{rs}"
+    );
+    // Resolve mode still emits the double-interpolating form; that generation
+    // defect is queued separately, so today's output is pinned on purpose.
+    assert!(
+        rs.contains(r#"props.attrs.insert("key".to_string(), resolve({ let __v = resolve("todo")"#),
+        "Resolve mode `:key` generation must stay unchanged:\n{rs}"
+    );
+}
+
+/// A state field is not a getter, but a field that happens to share its name with
+/// a real getter must still resolve through that getter.
+#[test]
+fn field_with_a_same_named_getter_still_resolves_through_the_getter() {
+    let script = r#"
+pub struct State {
+    pub draft: std::rc::Rc<velox_core::signal::Signal<String>>,
+}
+
+impl State {
+    pub fn draft(&self) -> String {
+        self.draft.get().clone()
+    }
+}
+"#;
+    let rs = compile_template_to_rs_full(
+        r#"<input :value="draft" />"#,
+        "TodoApp",
+        None,
+        Some(script),
+        None,
+    )
+    .unwrap();
+    println!("-- GENERATED RS --\n{}\n-- END RS --", rs);
+
+    let resolve = make_resolve_body(&rs);
+    assert!(
+        resolve.contains(r#""draft" => state.draft().to_string()"#),
+        "a same-named getter must still register the key:\n{resolve}"
     );
 }

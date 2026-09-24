@@ -17,6 +17,11 @@ pub struct StateMethod {
     /// Whether the method accepts an event payload as a second parameter,
     /// e.g. `fn on_input(&self, payload: &str)`.
     pub takes_payload: bool,
+    /// The declared return type as written after `->`, e.g. `String` or
+    /// `Vec<String>`. `None` when the method declares no return type (it returns
+    /// `()`) or the signature is incomplete, so callers must not assume the
+    /// value can be rendered.
+    pub return_type: Option<String>,
 }
 
 /// Extract `pub fn <name>(&self[, ...])` method declarations from a script block.
@@ -47,9 +52,11 @@ pub fn extract_state_methods(script: &str) -> Vec<StateMethod> {
                 // constructors like `pub fn new()` are not.
                 if sig.contains("&self") {
                     let takes_payload = signature_takes_payload(&sig);
+                    let return_type = signature_return_type(&sig);
                     out.push(StateMethod {
                         name,
                         takes_payload,
+                        return_type,
                     });
                 }
                 i = j; // skip the consumed continuation lines
@@ -183,6 +190,26 @@ fn signature_takes_payload(sig: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// The return type declared after `->` in a method signature, or `None` when the
+/// method declares none (it returns `()`).
+///
+/// Only the part of the signature before the body is inspected, so an arrow
+/// appearing inside the body is never mistaken for a return type.
+fn signature_return_type(sig: &str) -> Option<String> {
+    let open = sig.find('(')?;
+    let close = open + 1 + sig[open + 1..].find(')')?;
+    let after = &sig[close + 1..];
+    let head_end = after.find('{').unwrap_or(after.len());
+    let head = &after[..head_end];
+    let arrow = head.find("->")?;
+    let ty = head[arrow + 2..].trim();
+    if ty.is_empty() {
+        None
+    } else {
+        Some(ty.to_string())
+    }
+}
+
 fn count_char(s: &str, c: char) -> usize {
     s.chars().filter(|&ch| ch == c).count()
 }
@@ -231,6 +258,44 @@ impl State {
         assert!(on_input.takes_payload);
         let increment = methods.iter().find(|m| m.name == "increment").unwrap();
         assert!(!increment.takes_payload);
+    }
+
+    #[test]
+    fn extracts_return_types_from_signatures() {
+        let script = r#"
+impl State {
+    pub fn title(&self) -> String { String::from("Velox App") }
+    pub fn count(&self) -> i32 { 0 }
+    pub fn positive(&self) -> bool { true }
+    pub fn label(&self) -> &'static str { "x" }
+    pub fn reset(&self) { self.count.set(0); }
+    pub fn items(&self) -> Vec<String> { Vec::new() }
+    pub fn maybe(
+        &self,
+        fallback: String,
+    ) -> String {
+        fallback
+    }
+}
+"#;
+        let methods = extract_state_methods(script);
+        let return_type = |name: &str| {
+            methods
+                .iter()
+                .find(|m| m.name == name)
+                .unwrap()
+                .return_type
+                .as_deref()
+        };
+
+        assert_eq!(return_type("title"), Some("String"));
+        assert_eq!(return_type("count"), Some("i32"));
+        assert_eq!(return_type("positive"), Some("bool"));
+        assert_eq!(return_type("label"), Some("&'static str"));
+        assert_eq!(return_type("items"), Some("Vec<String>"));
+        assert_eq!(return_type("maybe"), Some("String"));
+        // No `->` clause means the method returns `()`.
+        assert_eq!(return_type("reset"), None);
     }
 
     #[test]

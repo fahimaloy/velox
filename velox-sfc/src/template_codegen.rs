@@ -269,7 +269,7 @@ pub fn render_with_state<F>(state: std::sync::Arc<script_rs::State>, mut resolve
     // (interpolations and bound-attribute expressions) to State getters so
     // main.rs does not hand-write a resolve closure. Supports both bare
     // (`title()`) and prefixed (`get_title()`) getter conventions.
-    let resolver_keys = collect_resolver_keys(&nodes, &methods);
+    let resolver_keys = collect_resolver_keys(&nodes, &methods, &fields);
     for warning in &resolver_keys.warnings {
         eprintln!("velox: warning: {warning}");
     }
@@ -2222,22 +2222,90 @@ fn is_bare_identifier(expr: &str) -> bool {
     }
     chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
-
 /// The `State` method that provides the value for `key`, when that method is a
-/// genuine zero-argument getter. Payload-taking methods are event handlers, not
-/// getters: `state.on_input()` does not compile, so their names must never be
-/// registered as resolver keys.
+/// genuine zero-argument getter whose return type can be rendered as text.
+/// Payload-taking methods are event handlers, not getters: `state.on_input()`
+/// does not compile, so their names must never be registered as resolver keys.
+/// Neither can a method that returns nothing (`state.reset()` has no `Display`
+/// form), so the return type is checked as well.
 fn getter_method_name<'a>(methods: &'a [StateMethod], key: &'a str) -> Option<&'a str> {
-    if methods.iter().any(|m| m.name == key && !m.takes_payload) {
-        return Some(key);
+    let is_getter =
+        |m: &&StateMethod| !m.takes_payload && return_type_is_renderable(m.return_type.as_deref());
+    if let Some(m) = methods.iter().find(|m| m.name == key && is_getter(m)) {
+        return Some(m.name.as_str());
     }
     ["get_", "is_", "has_"].iter().find_map(|prefix| {
         let candidate = format!("{prefix}{key}");
         methods
             .iter()
-            .find(|m| m.name == candidate && !m.takes_payload)
+            .find(|m| m.name == candidate && is_getter(m))
             .map(|m| m.name.as_str())
     })
+}
+
+/// Can a method's declared return type be rendered as text?
+///
+/// A resolver arm calls `state.<getter>().to_string()`, so only types that
+/// implement `Display` qualify: the string types, `bool`, `char`, the integer
+/// and float primitives (templates already render `:class="{ done: completed }"`
+/// from a `bool` getter, and the truthy check matches the resulting `"true"`),
+/// and string wrappers. An absent return type means `()`, and collections,
+/// `Result`/`Option` and framework handles have no `Display` form, so they are
+/// rejected rather than guessed at.
+fn return_type_is_renderable(ty: Option<&str>) -> bool {
+    let Some(ty) = ty else {
+        return false;
+    };
+    let base = strip_borrow(ty);
+    if matches!(
+        base,
+        "String"
+            | "str"
+            | "bool"
+            | "char"
+            | "i8"
+            | "i16"
+            | "i32"
+            | "i64"
+            | "i128"
+            | "isize"
+            | "u8"
+            | "u16"
+            | "u32"
+            | "u64"
+            | "u128"
+            | "usize"
+            | "f32"
+            | "f64"
+    ) {
+        return true;
+    }
+    ["Rc<", "Arc<", "Cow<"].iter().any(|wrapper| {
+        base.strip_prefix(wrapper)
+            .and_then(|inner| inner.strip_suffix('>'))
+            .is_some_and(|inner| matches!(strip_borrow(inner.trim()), "String" | "str"))
+    })
+}
+
+/// Strip a leading borrow and lifetime from a type, e.g. `&'static str` → `str`.
+fn strip_borrow(ty: &str) -> &str {
+    let mut ty = ty.trim();
+    if let Some(rest) = ty.strip_prefix('&') {
+        ty = rest.trim_start();
+    }
+    if let Some(rest) = ty.strip_prefix('\'') {
+        // A lifetime: `'static`, `'a`, or the anonymous `'_` of `Cow<'_, str>`.
+        ty = match rest.strip_prefix("_,") {
+            Some(after) => after.trim_start(),
+            None => {
+                let end = rest
+                    .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+                    .unwrap_or(rest.len());
+                rest[end..].trim_start()
+            }
+        };
+    }
+    ty
 }
 
 /// Does `State` expose a zero-argument getter for `key`? Only expressions backed
@@ -2450,15 +2518,25 @@ struct ResolverKeys {
 /// as `resolve("..."")` just the same (`:value="draft"`, `:placeholder="hint"`,
 /// `:click-payload="index"`), as are the conditions of an object-syntax
 /// `:class`. Both sides are derived from [`emit_bind_attr`], so a key codegen
-/// emits is always a key this registers. Without that, those bindings fall
-/// through to the `_ => String::new()` arm and render empty.
-fn collect_resolver_keys(nodes: &[Node], methods: &[StateMethod]) -> ResolverKeys {
+/// emits is always a key this registers or a diagnostic it reports.
+///
+/// The generated module carries two renderers: `render_with` (Resolve mode,
+/// which only has the resolver's strings) and `render_with_state` (State mode,
+/// which reads loop items and fields directly). A binding rooted at a loop
+/// variable is a direct read in State mode but a resolver lookup in Resolve
+/// mode, so it registers no key and is reported instead of passing silently.
+fn collect_resolver_keys(
+    nodes: &[Node],
+    methods: &[StateMethod],
+    fields: &[String],
+) -> ResolverKeys {
     let mut keys = collect_interpolation_keys(nodes);
     let mut warnings: Vec<String> = Vec::new();
 
     fn walk(
         nodes: &[Node],
         methods: &[StateMethod],
+        fields: &[String],
         item_name: Option<&str>,
         idx_name: Option<&str>,
         keys: &mut Vec<String>,
@@ -2493,36 +2571,65 @@ fn collect_resolver_keys(nodes: &[Node], methods: &[StateMethod]) -> ResolverKey
                     continue;
                 };
                 let emission = emit_bind_attr(&attr.name, expr, item_name, idx_name);
+
+                // A loop-rooted binding registers no key: Resolve mode looks the
+                // authored expression up but has no loop value to read, so report
+                // it instead of leaving the lookup silently unresolved.
+                if matches!(emission.value, BindValue::Direct(_)) {
+                    warnings.push(format!(
+                        "bound attribute :{}=\"{}\" is rooted at a `v-for` loop variable — \
+                         State-mode rendering reads the loop item directly, but Resolve-mode \
+                         rendering has no loop value and renders the binding empty. Move the \
+                         value into a zero-argument State getter if it must render in both modes.",
+                        attr.name, emission.authored
+                    ));
+                    continue;
+                }
+
                 for key in &emission.keys {
                     if has_state_getter(methods, key) {
                         push_unique(keys, key);
                         continue;
                     }
-                    // Only bare, zero-argument State getters can be looked up.
-                    // A bare name with no method at all is a `Signal`/`Ref` field
-                    // binding, which resolves through interpolation-style props
-                    // and is left alone; anything else is a mistake worth saying
-                    // out loud rather than rendering as an empty string.
-                    let names_handler = methods.iter().any(|m| &m.name == key && m.takes_payload);
-                    if !is_bare_identifier(key) || names_handler {
-                        let reason = if names_handler {
+                    // Only bare, zero-argument State getters with a renderable
+                    // return type can be looked up. Everything else is a mistake
+                    // worth saying out loud rather than rendering as an empty
+                    // string.
+                    let named = methods.iter().find(|m| &m.name == key);
+                    let reason = match named {
+                        Some(m) if m.takes_payload => {
                             format!("`{key}` is a payload-taking State method, not a getter")
-                        } else {
-                            format!("`{key}` is not a bare zero-argument State getter")
-                        };
-                        warnings.push(format!(
-                            "bound attribute :{}=\"{}\" cannot be resolved — {reason}; \
-                             the binding renders empty. Bind a zero-argument State getter instead.",
-                            attr.name, emission.authored
-                        ));
-                    }
+                        }
+                        Some(m) if m.return_type.is_none() => format!(
+                            "`{key}` declares no return type, so there is no text to render"
+                        ),
+                        Some(m) => format!(
+                            "`{key}` returns `{}`, which cannot be rendered as text",
+                            m.return_type.as_deref().unwrap_or_default()
+                        ),
+                        None if fields.iter().any(|f| f == key) => format!(
+                            "`{key}` is a `State` field, not a getter — reading a field in a \
+                             template needs a typed field resolver, which is not implemented yet"
+                        ),
+                        None if !is_bare_identifier(key) => {
+                            format!("`{key}` is an expression, not a `State` getter name")
+                        }
+                        None => format!("`{key}` is not a zero-argument `State` getter"),
+                    };
+                    warnings.push(format!(
+                        "bound attribute :{}=\"{}\" cannot be resolved — {reason}; \
+                         the binding renders empty. Bind a zero-argument State getter instead.",
+                        attr.name, emission.authored
+                    ));
                 }
             }
-            walk(children, methods, item_name, idx_name, keys, warnings);
+            walk(
+                children, methods, fields, item_name, idx_name, keys, warnings,
+            );
         }
     }
 
-    walk(nodes, methods, None, None, &mut keys, &mut warnings);
+    walk(nodes, methods, fields, None, None, &mut keys, &mut warnings);
     ResolverKeys { keys, warnings }
 }
 
@@ -2548,7 +2655,7 @@ mod tests {
         let nodes =
             crate::template_parse::parse_template_to_ast(r#"<input :value="draft.trim()" />"#)
                 .unwrap();
-        let collected = collect_resolver_keys(&nodes, &methods(""));
+        let collected = collect_resolver_keys(&nodes, &methods(""), &[]);
 
         assert!(
             collected.keys.is_empty(),
@@ -2569,7 +2676,7 @@ mod tests {
         let script = "impl State { pub fn on_input(&self, payload: &str) { let _ = payload; } }";
         let nodes =
             crate::template_parse::parse_template_to_ast(r#"<input :value="on_input" />"#).unwrap();
-        let collected = collect_resolver_keys(&nodes, &methods(script));
+        let collected = collect_resolver_keys(&nodes, &methods(script), &[]);
 
         assert!(collected.keys.is_empty(), "{:?}", collected.keys);
         assert_eq!(collected.warnings.len(), 1, "{:?}", collected.warnings);
@@ -2580,14 +2687,161 @@ mod tests {
         );
     }
 
-    /// A binding over a `Signal`/`Ref` field has no getter, which is tolerated
-    /// (it resolves through interpolation-style props) and must stay quiet.
+    /// A binding over a `Signal`/`Ref` field has no getter, so it cannot be
+    /// looked up: the author is told instead of getting an empty render.
     #[test]
-    fn field_backed_binding_is_not_warned_about() {
+    fn field_backed_binding_is_reported_as_a_warning() {
+        let script = "pub struct State { pub count: std::rc::Rc<velox_core::signal::Signal<i32>> }";
         let nodes =
             crate::template_parse::parse_template_to_ast(r#"<input :value="count" />"#).unwrap();
-        let collected = collect_resolver_keys(&nodes, &methods(""));
-        assert!(collected.warnings.is_empty(), "{:?}", collected.warnings);
+        let collected = collect_resolver_keys(&nodes, &methods(script), &["count".to_string()]);
+
+        assert!(collected.keys.is_empty(), "{:?}", collected.keys);
+        assert_eq!(collected.warnings.len(), 1, "{:?}", collected.warnings);
+        let warning = &collected.warnings[0];
+        assert!(warning.contains(":value=\"count\""), "{warning}");
+        assert!(warning.contains("`count`"), "{warning}");
+        assert!(warning.contains("renders empty"), "{warning}");
+    }
+
+    /// A loop-rooted binding is read directly by the State renderer, but the
+    /// Resolve renderer looks the expression up, so the split is reported.
+    #[test]
+    fn loop_rooted_binding_is_reported_as_a_warning() {
+        let nodes = crate::template_parse::parse_template_to_ast(
+            r#"<div v-for="(todo, idx) in todos"><p :value="todo.text">x</p></div>"#,
+        )
+        .unwrap();
+        let collected = collect_resolver_keys(&nodes, &methods(""), &[]);
+
+        assert!(collected.keys.is_empty(), "{:?}", collected.keys);
+        assert_eq!(collected.warnings.len(), 1, "{:?}", collected.warnings);
+        let warning = &collected.warnings[0];
+        assert!(warning.contains(":value=\"todo.text\""), "{warning}");
+        assert!(
+            warning.contains("v-for") && warning.contains("Resolve"),
+            "the warning must name the mode split: {warning}"
+        );
+    }
+
+    /// `:key` on a `v-for` element is the same case: the Resolve renderer still
+    /// looks the loop field up, so the collector reports it.
+    #[test]
+    fn v_for_key_binding_is_reported_as_a_warning() {
+        let nodes = crate::template_parse::parse_template_to_ast(
+            r#"<div v-for="todo in todos" :key="todo.id">x</div>"#,
+        )
+        .unwrap();
+        let collected = collect_resolver_keys(&nodes, &methods(""), &[]);
+
+        assert!(collected.keys.is_empty(), "{:?}", collected.keys);
+        assert_eq!(collected.warnings.len(), 1, "{:?}", collected.warnings);
+        let warning = &collected.warnings[0];
+        assert!(warning.contains(":key=\"todo.id\""), "{warning}");
+    }
+
+    /// A zero-argument method that returns nothing is not a getter: the arm would
+    /// be `state.reset().to_string()`, which does not compile.
+    #[test]
+    fn method_without_return_type_is_reported_as_a_warning() {
+        let script = "impl State { pub fn reset(&self) {} }";
+        let nodes =
+            crate::template_parse::parse_template_to_ast(r#"<input :value="reset" />"#).unwrap();
+        let collected = collect_resolver_keys(&nodes, &methods(script), &[]);
+
+        assert!(collected.keys.is_empty(), "{:?}", collected.keys);
+        assert_eq!(collected.warnings.len(), 1, "{:?}", collected.warnings);
+        let warning = &collected.warnings[0];
+        assert!(warning.contains(":value=\"reset\""), "{warning}");
+        assert!(
+            warning.contains("return type") || warning.contains("returns"),
+            "the warning must explain the return type: {warning}"
+        );
+    }
+
+    /// A zero-argument method with an unrenderable return type is not a getter.
+    #[test]
+    fn unrenderable_return_type_is_reported_as_a_warning() {
+        let script = "impl State { pub fn items(&self) -> Vec<String> { Vec::new() } }";
+        let nodes =
+            crate::template_parse::parse_template_to_ast(r#"<input :value="items" />"#).unwrap();
+        let collected = collect_resolver_keys(&nodes, &methods(script), &[]);
+
+        assert!(collected.keys.is_empty(), "{:?}", collected.keys);
+        assert_eq!(collected.warnings.len(), 1, "{:?}", collected.warnings);
+        assert!(
+            collected.warnings[0].contains("Vec<String>"),
+            "the warning must name the return type: {}",
+            collected.warnings[0]
+        );
+    }
+
+    /// Only zero-argument methods whose return type renders as text are getters.
+    #[test]
+    fn getter_method_name_requires_a_zero_argument_renderable_getter() {
+        let script = r#"
+impl State {
+    pub fn title(&self) -> String { String::new() }
+    pub fn get_count(&self) -> i32 { 0 }
+    pub fn is_open(&self) -> bool { true }
+    pub fn has_items(&self) -> bool { true }
+    pub fn on_input(&self, payload: &str) { let _ = payload; }
+    pub fn pick(&self, index: usize) -> usize { index }
+    pub fn reset(&self) {}
+    pub fn rows(&self) -> Vec<String> { Vec::new() }
+    pub fn result(&self) -> Result<String, String> { Ok(String::new()) }
+}
+"#;
+        let methods = methods(script);
+
+        assert_eq!(getter_method_name(&methods, "title"), Some("title"));
+        assert_eq!(getter_method_name(&methods, "count"), Some("get_count"));
+        assert_eq!(getter_method_name(&methods, "open"), Some("is_open"));
+        // The prefixed convention still resolves a key whose exact-name method
+        // is not a getter, as long as the prefixed one is.
+        assert_eq!(getter_method_name(&methods, "items"), Some("has_items"));
+        assert_eq!(getter_method_name(&methods, "on_input"), None);
+        assert_eq!(getter_method_name(&methods, "pick"), None);
+        assert_eq!(getter_method_name(&methods, "reset"), None);
+        assert_eq!(getter_method_name(&methods, "rows"), None);
+        assert_eq!(getter_method_name(&methods, "result"), None);
+        assert!(has_state_getter(&methods, "title"));
+        assert!(!has_state_getter(&methods, "on_input"));
+        // A prefixed payload-taking method is a handler, not a getter either.
+        assert!(!has_state_getter(&methods, "input"));
+    }
+
+    /// The renderability gate accepts what `.to_string()` accepts for the scalar
+    /// and string types a template can show, and nothing else.
+    #[test]
+    fn return_type_is_renderable_accepts_only_display_types() {
+        for ty in [
+            Some("String"),
+            Some("&str"),
+            Some("&'static str"),
+            Some("str"),
+            Some("bool"),
+            Some("char"),
+            Some("i32"),
+            Some("usize"),
+            Some("f64"),
+            Some("Rc<String>"),
+            Some("Cow<'_, str>"),
+        ] {
+            assert!(return_type_is_renderable(ty), "{ty:?} should be renderable");
+        }
+        for ty in [
+            None,
+            Some("()"),
+            Some("Self"),
+            Some("Vec<String>"),
+            Some("Option<String>"),
+            Some("Result<String, String>"),
+            Some("Signal<i32>"),
+            Some("Todo"),
+        ] {
+            assert!(!return_type_is_renderable(ty), "{ty:?} is not renderable");
+        }
     }
 
     /// The condition keys collected must match the lookups
@@ -2622,33 +2876,6 @@ mod tests {
                 "condition `{cond}` emits {emitted:?} but collects {collected:?}"
             );
         }
-    }
-
-    /// Only zero-argument methods are getters.
-    #[test]
-    fn getter_method_name_ignores_payload_taking_methods() {
-        let script = r#"
-impl State {
-    pub fn title(&self) -> String { String::new() }
-    pub fn get_count(&self) -> i32 { 0 }
-    pub fn is_open(&self) -> bool { true }
-    pub fn has_items(&self) -> bool { true }
-    pub fn on_input(&self, payload: &str) { let _ = payload; }
-    pub fn pick(&self, index: usize) -> usize { index }
-}
-"#;
-        let methods = methods(script);
-
-        assert_eq!(getter_method_name(&methods, "title"), Some("title"));
-        assert_eq!(getter_method_name(&methods, "count"), Some("get_count"));
-        assert_eq!(getter_method_name(&methods, "open"), Some("is_open"));
-        assert_eq!(getter_method_name(&methods, "items"), Some("has_items"));
-        assert_eq!(getter_method_name(&methods, "on_input"), None);
-        assert_eq!(getter_method_name(&methods, "pick"), None);
-        assert!(has_state_getter(&methods, "title"));
-        assert!(!has_state_getter(&methods, "on_input"));
-        // A prefixed payload-taking method is a handler, not a getter either.
-        assert!(!has_state_getter(&methods, "input"));
     }
 }
 
