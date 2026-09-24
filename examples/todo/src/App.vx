@@ -1,5 +1,27 @@
 <template>
-  <div class="app"><h1 class="title">{{ title }}</h1><TodoInput :value="draft" :placeholder="input_placeholder" @input="on_input" @submit="on_submit" /><button class="filter" @click="cycle_filter">{{ filter_label }}</button><div class="list"><TodoItem v-for="(todo, idx) in visible" :todo="todo.text" :completed="todo.completed" :index="idx" @toggle="on_toggle" @remove="on_remove" /><p class="empty" v-if="empty_message">{{ empty_message }}</p></div></div>
+  <div class="app">
+    <h1 class="title">{{ title }}</h1>
+    <div class="entry">
+      <TodoInput
+        :value="draft"
+        :placeholder="input_placeholder"
+        @input="on_input"
+      />
+      <button class="add" @click="add_todo">Add</button>
+    </div>
+    <button class="filter" @click="cycle_filter">{{ filter_label }}</button>
+    <div class="list">
+      <TodoItem
+        v-for="(todo, idx) in visible"
+        :todo="todo.text"
+        :completed="todo.completed"
+        :index="idx"
+        @toggle="on_toggle"
+        @remove="on_remove"
+      />
+      <p class="empty" v-if="empty_message">{{ empty_message }}</p>
+    </div>
+  </div>
 </template>
 
 <script setup>
@@ -8,72 +30,22 @@ import TodoItem from './components/TodoItem.vx'
 
 use velox_core::signal::Signal;
 
-#[derive(Clone, Copy, PartialEq)]
-pub enum Filter {
-    All,
-    Active,
-    Completed,
-}
-
-#[derive(Clone, PartialEq)]
-pub struct Todo {
-    pub id: usize,
-    pub text: String,
-    pub completed: bool,
-}
-
 pub struct State {
-    // Every field is a reactive signal created with the `signal!()` macro,
-    // which expands to `std::rc::Rc::new(Signal::new(value))`.
-    pub todos: std::rc::Rc<Signal<Vec<Todo>>>,
-    pub draft: std::rc::Rc<Signal<String>>,
-    pub filter: std::rc::Rc<Signal<Filter>>,
-    pub next_id: std::rc::Rc<Signal<usize>>,
-    // A derived signal: it recomputes whenever `todos` or `filter` changes, so
-    // the template can v-for over the currently visible subset.
-    pub visible: std::rc::Rc<Signal<Vec<Todo>>>,
+    // The parent owns event handlers and delegates them to these persistent
+    // component states, so component inputs and actions are not inert.
+    pub todoinput: std::sync::Arc<super::todoinput::script_rs::State>,
+    pub todoitem: std::sync::Arc<super::todoitem::script_rs::State>,
+    pub visible: std::rc::Rc<Signal<Vec<super::todoitem::script_rs::Todo>>>,
 }
 
 impl State {
     pub fn new() -> Self {
-        let todos = velox_core::signal!(todos = vec![
-        Todo {
-            id: 0,
-            text: String::from("Build a todo app"),
-            completed: false,
-        },
-        Todo {
-            id: 1,
-            text: String::from("Learn Velox"),
-            completed: true,
-        },
-    ]);
-        let draft = velox_core::signal!(draft = String::new());
-        let filter = velox_core::signal!(filter = Filter::All);
-        let next_id = velox_core::signal!(next_id = 2usize);
-
-        let visible = {
-            let todos = std::rc::Rc::clone(&todos);
-            let filter = std::rc::Rc::clone(&filter);
-            velox_core::signal::computed(move || {
-                let list = todos.get();
-                match filter.get() {
-                    Filter::All => list,
-                    Filter::Active => {
-                        list.into_iter().filter(|todo| !todo.completed).collect()
-                    }
-                    Filter::Completed => {
-                        list.into_iter().filter(|todo| todo.completed).collect()
-                    }
-                }
-            })
-        };
-
+        let todoinput = std::sync::Arc::new(super::todoinput::script_rs::State::new());
+        let todoitem = std::sync::Arc::new(super::todoitem::script_rs::State::new());
+        let visible = todoitem.visible_signal();
         Self {
-            todos,
-            draft,
-            filter,
-            next_id,
+            todoinput,
+            todoitem,
             visible,
         }
     }
@@ -87,91 +59,40 @@ impl State {
     }
 
     pub fn draft(&self) -> String {
-        self.draft.get()
+        self.todoinput.draft()
     }
 
-    pub fn filter_label(&self) -> String {
-        match self.filter.get() {
-            Filter::All => String::from("Filter: all todos"),
-            Filter::Active => String::from("Filter: active todos"),
-            Filter::Completed => String::from("Filter: completed todos"),
-        }
-    }
-
-    // An empty string hides the empty state, and doubles as its v-if
-    // condition because interpolation keys are the ones make_resolve knows.
-    pub fn empty_message(&self) -> String {
-        if !self.visible.get().is_empty() {
-            return String::new();
-        }
-        match self.filter.get() {
-            Filter::All => String::from("Nothing to do yet. Add a todo above."),
-            Filter::Active => String::from("No active todos. Nice work!"),
-            Filter::Completed => String::from("No completed todos yet."),
-        }
-    }
-
-    pub fn on_input(&self, payload: &str) {
-        self.draft.set(payload.to_string());
-    }
-
-    pub fn on_submit(&self) {
-        let text = self.draft.get().trim().to_string();
+    pub fn add_todo(&self) {
+        let text = self.draft().trim().to_string();
         if text.is_empty() {
             return;
         }
-        let id = self.next_id.get();
-        self.next_id.set(id + 1);
-        self.todos.update(|mut todos| {
-            todos.push(Todo {
-                id,
-                text,
-                completed: false,
-            });
-            todos
-        });
-        self.draft.set(String::new());
+        self.todoitem.add_todo(&text);
+        self.todoinput.clear();
     }
 
-    // TodoItem reports its position within the *visible* (filtered) list, so
-    // resolve that index back to the item's id before mutating the source list.
+    pub fn filter_label(&self) -> String {
+        self.todoitem.filter_label()
+    }
+
+    pub fn empty_message(&self) -> String {
+        self.todoitem.empty_message()
+    }
+
+    pub fn on_input(&self, payload: &str) {
+        self.todoinput.on_input(payload)
+    }
+
     pub fn on_toggle(&self, payload: &str) {
-        if let Ok(vidx) = payload.trim().parse::<usize>() {
-            let visible = self.visible.get();
-            if let Some(target) = visible.get(vidx) {
-                let id = target.id;
-                self.todos.update(|mut todos| {
-                    if let Some(todo) = todos.iter_mut().find(|todo| todo.id == id) {
-                        todo.completed = !todo.completed;
-                    }
-                    todos
-                });
-            }
-        }
+        self.todoitem.on_toggle(payload)
     }
 
     pub fn on_remove(&self, payload: &str) {
-        if let Ok(vidx) = payload.trim().parse::<usize>() {
-            let visible = self.visible.get();
-            if let Some(target) = visible.get(vidx) {
-                let id = target.id;
-                self.todos.update(|mut todos| {
-                    todos.retain(|todo| todo.id != id);
-                    todos
-                });
-            }
-        }
+        self.todoitem.on_remove(payload)
     }
 
-    // One button cycles through the three filters, so the same control always
-    // shows the current selection in its label.
     pub fn cycle_filter(&self) {
-        let next = match self.filter.get() {
-            Filter::All => Filter::Active,
-            Filter::Active => Filter::Completed,
-            Filter::Completed => Filter::All,
-        };
-        self.filter.set(next);
+        self.todoitem.cycle_filter()
     }
 }
 </script>
@@ -180,7 +101,9 @@ impl State {
 .app {
     width: 100%;
     min-height: 100vh;
-    display: block;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
     padding: 6px 14px 20px;
     background: #0f172a;
     color: #e2e8f0;
@@ -188,18 +111,32 @@ impl State {
 }
 .title {
     display: block;
-    margin: 0 0 4px 0;
+    margin: 0;
     font-size: 20px;
     font-weight: 700;
 }
-/*
- * Velox lays buttons out as blocks, so the filter chip spans the content
- * width and centers its label with `text-align`.
- */
+.entry {
+    display: flex;
+    flex-direction: row;
+    align-items: center;
+    gap: 8px;
+}
+.add {
+    flex: 0 0 60px;
+    width: 60px;
+    height: 34px;
+    padding: 6px 12px;
+    border: none;
+    border-radius: 6px;
+    background: #38bdf8;
+    color: #0f172a;
+    font-size: 14px;
+    font-weight: 600;
+    cursor: pointer;
+}
 .filter {
-    display: block;
+    align-self: flex-start;
     height: 36px;
-    margin: 0 0 8px 0;
     padding: 6px 12px;
     border: 1px solid #475569;
     border-radius: 999px;
@@ -209,13 +146,12 @@ impl State {
     text-align: center;
     cursor: pointer;
 }
-/*
- * The list is a fixed-height block with `overflow: auto`, so a long todo list
- * scrolls inside the window instead of stretching the page.
- */
 .list {
-    display: block;
-    height: 46vh;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    flex: 1;
+    min-height: 0;
     overflow: auto;
     padding: 2px;
 }

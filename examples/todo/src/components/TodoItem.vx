@@ -3,6 +3,22 @@
 </template>
 
 <script setup>
+use velox_core::signal::Signal;
+
+#[derive(Clone, Copy, PartialEq)]
+pub enum Filter {
+    All,
+    Active,
+    Completed,
+}
+
+#[derive(Clone, PartialEq)]
+pub struct Todo {
+    pub id: usize,
+    pub text: String,
+    pub completed: bool,
+}
+
 pub struct Props {
     pub todo: String,
     pub completed: bool,
@@ -11,17 +27,61 @@ pub struct Props {
 
 pub struct State {
     pub props: Props,
+    pub todos: std::rc::Rc<Signal<Vec<Todo>>>,
+    pub filter: std::rc::Rc<Signal<Filter>>,
+    pub next_id: std::rc::Rc<Signal<usize>>,
+    pub visible: std::rc::Rc<Signal<Vec<Todo>>>,
 }
 
 impl State {
     pub fn new() -> Self {
+        let todos = velox_core::signal!(todos = vec![
+            Todo {
+                id: 0,
+                text: String::from("Build a todo app"),
+                completed: false,
+            },
+            Todo {
+                id: 1,
+                text: String::from("Learn Velox"),
+                completed: true,
+            },
+        ]);
+        let filter = velox_core::signal!(filter = Filter::All);
+        let next_id = velox_core::signal!(next_id = 2usize);
+        let visible = {
+            let todos = std::rc::Rc::clone(&todos);
+            let filter = std::rc::Rc::clone(&filter);
+            velox_core::signal::computed(move || {
+                let list = todos.get();
+                match filter.get() {
+                    Filter::All => list,
+                    Filter::Active => list
+                        .into_iter()
+                        .filter(|todo| !todo.completed)
+                        .collect(),
+                    Filter::Completed => list
+                        .into_iter()
+                        .filter(|todo| todo.completed)
+                        .collect(),
+                }
+            })
+        };
         Self {
             props: Props {
                 todo: String::new(),
                 completed: false,
                 index: String::from("0"),
             },
+            todos,
+            filter,
+            next_id,
+            visible,
         }
+    }
+
+    pub fn visible_signal(&self) -> std::rc::Rc<Signal<Vec<Todo>>> {
+        std::rc::Rc::clone(&self.visible)
     }
 
     pub fn todo(&self) -> String {
@@ -36,49 +96,113 @@ impl State {
         self.props.index.clone()
     }
 
-    // Toggle/remove payloads travel through the owning App state.
-    pub fn on_toggle(&self) {}
+    pub fn add_todo(&self, text: &str) {
+        let id = self.next_id.get();
+        self.next_id.set(id + 1);
+        self.todos.update(|mut todos| {
+            todos.push(Todo {
+                id,
+                text: text.to_string(),
+                completed: false,
+            });
+            todos
+        });
+    }
 
-    pub fn on_remove(&self) {}
+    pub fn on_toggle(&self, payload: &str) {
+        if let Ok(visible_index) = payload.trim().parse::<usize>() {
+            let visible = self.visible.get();
+            if let Some(target) = visible.get(visible_index) {
+                let id = target.id;
+                self.todos.update(|mut todos| {
+                    if let Some(todo) = todos.iter_mut().find(|todo| todo.id == id) {
+                        todo.completed = !todo.completed;
+                    }
+                    todos
+                });
+            }
+        }
+    }
+
+    pub fn on_remove(&self, payload: &str) {
+        if let Ok(visible_index) = payload.trim().parse::<usize>() {
+            let visible = self.visible.get();
+            if let Some(target) = visible.get(visible_index) {
+                let id = target.id;
+                self.todos.update(|mut todos| {
+                    todos.retain(|todo| todo.id != id);
+                    todos
+                });
+            }
+        }
+    }
+
+    pub fn cycle_filter(&self) {
+        let next = match self.filter.get() {
+            Filter::All => Filter::Active,
+            Filter::Active => Filter::Completed,
+            Filter::Completed => Filter::All,
+        };
+        self.filter.set(next);
+    }
+
+    pub fn filter_label(&self) -> String {
+        match self.filter.get() {
+            Filter::All => String::from("Filter: all todos"),
+            Filter::Active => String::from("Filter: active todos"),
+            Filter::Completed => String::from("Filter: completed todos"),
+        }
+    }
+
+    pub fn empty_message(&self) -> String {
+        if !self.visible.get().is_empty() {
+            return String::new();
+        }
+        match self.filter.get() {
+            Filter::All => String::from("Nothing to do yet. Add a todo above."),
+            Filter::Active => String::from("No active todos. Nice work!"),
+            Filter::Completed => String::from("No completed todos yet."),
+        }
+    }
 }
 </script>
 
 <style scoped>
-/*
- * A card per todo. `:class="{ done: completed }"` swaps in the `.done` class
- * when the item is completed, so the base typography lives on the descendant
- * selector below and `.done` only supplies the completed colour.
- */
 .todo-item {
-    display: block;
-    margin: 0 0 8px 0;
+    display: flex;
+    flex-direction: row;
+    align-items: center;
+    gap: 8px;
     padding: 10px 12px;
     border: 1px solid #334155;
     border-radius: 8px;
     background: #1e293b;
 }
 .todo-item p {
-    display: block;
-    margin: 0 0 6px 0;
+    flex: 0 1 50%;
+    width: 50%;
+    min-width: 0;
+    margin: 0;
     font-size: 15px;
 }
-.done {
+.todo-item p.done {
     color: #22c55e;
 }
 .btn {
-    display: block;
+    flex: 0 0 64px;
+    width: 64px;
     height: 28px;
-    margin: 0 0 4px 0;
     padding: 4px 8px;
     border: 1px solid #334155;
     border-radius: 6px;
     background: #0f172a;
     color: #cbd5e1;
     font-size: 12px;
-    text-align: center;
     cursor: pointer;
 }
 .remove {
+    flex-basis: 72px;
+    width: 72px;
     color: #fca5a5;
 }
 </style>

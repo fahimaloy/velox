@@ -2,18 +2,18 @@
 //!
 //! Rasterizes the compiled `App.vx` tree on the CPU (no window, no compositor)
 //! and writes proof PNGs to `target/velox-render-proof/todo-<W>x<H>.png`.
-
 use std::sync::Arc;
 
+use velox_dom::layout::{LayoutNode, Rect, compute_layout};
 use velox_renderer::{render_vnode_to_raster_png_with_scale, render_vnode_to_rgba};
-use velox_style::Stylesheet;
+use velox_style::{Stylesheet, apply_with_cascade};
 
 include!(concat!(env!("OUT_DIR"), "/app.rs"));
 
 /// Colors declared in `src/App.vx` and the child components.
-const ROW_BG: [u8; 3] = [30, 41, 59]; // .todo-item / .filters button
+const ROW_BG: [u8; 3] = [30, 41, 59]; // .todo-item
 const DONE_FG: [u8; 3] = [34, 197, 94]; // .done text, toggled through :class
-const ADD_BG: [u8; 3] = [56, 189, 248]; // .btn-add
+const ADD_BG: [u8; 3] = [56, 189, 248]; // .add
 const FILTER_BG: [u8; 3] = [51, 65, 85]; // .filter chip
 
 const LARGE: (i32, i32) = (1280, 800);
@@ -40,6 +40,63 @@ fn render(state: &Arc<app::script_rs::State>, width: i32, height: i32) -> (Vec<u
 
 fn build(state: &Arc<app::script_rs::State>) -> velox_dom::VNode {
     app::render_with_state(Arc::clone(state), app::make_resolve(Arc::clone(state)))
+}
+
+fn styled_build(state: &Arc<app::script_rs::State>) -> velox_dom::VNode {
+    apply_with_cascade(&build(state), &Stylesheet::parse(app::STYLE))
+}
+
+fn find_layout_rect<'a>(
+    layout: &'a LayoutNode,
+    vnode: &velox_dom::VNode,
+    tag: &str,
+) -> Option<Rect> {
+    if let velox_dom::VNode::Element { tag: node_tag, .. } = vnode
+        && node_tag == tag
+    {
+        return Some(layout.rect);
+    }
+    if let velox_dom::VNode::Element { children, .. } = vnode {
+        for child_layout in &layout.children {
+            let Some(source_index) = child_layout.source_index else {
+                continue;
+            };
+            if let Some(child) = children.get(source_index)
+                && let Some(rect) = find_layout_rect(child_layout, child, tag)
+            {
+                return Some(rect);
+            }
+        }
+    }
+    None
+}
+
+fn input_rect(state: &Arc<app::script_rs::State>, width: i32, height: i32) -> Rect {
+    let vnode = styled_build(state);
+    let layout = compute_layout(&vnode, width, height);
+    find_layout_rect(&layout, &vnode, "input").expect("input layout")
+}
+
+fn dark_pixels_in(rgba: &[u8], rect: Rect, width: i32, height: i32) -> usize {
+    let left = rect.x.saturating_add(4).clamp(0, width) as usize;
+    let top = rect.y.saturating_add(4).clamp(0, height) as usize;
+    let right = rect
+        .x
+        .saturating_add(rect.w)
+        .saturating_sub(4)
+        .clamp(0, width) as usize;
+    let bottom = rect
+        .y
+        .saturating_add(rect.h)
+        .saturating_sub(4)
+        .clamp(0, height) as usize;
+    (top..bottom)
+        .flat_map(|y| (left..right).map(move |x| (x, y)))
+        .filter(|(x, y)| {
+            let offset = (*y * width as usize + *x) * 4;
+            rgba[offset] < 120 && rgba[offset + 1] < 120 && rgba[offset + 2] < 120
+        })
+        .count()
 }
 
 /// Depth-first search for the first element with `tag`, returning its attributes.
@@ -113,7 +170,7 @@ fn renders_large_viewport_proof_png() {
         pixels_near(&rgba, DONE_FG, 10) > 40,
         "completed todo styling"
     );
-    assert!(pixels_near(&rgba, ADD_BG, 12) > 2_000, "add button");
+    assert!(pixels_near(&rgba, ADD_BG, 12) > 500, "add button");
     assert!(pixels_near(&rgba, FILTER_BG, 8) > 2_000, "filter chip");
     let path = write_proof("todo", LARGE.0, LARGE.1, &png);
     assert!(path.exists(), "proof png missing: {}", path.display());
@@ -132,7 +189,7 @@ fn small_viewport_renders_the_list_and_reacts_to_events() {
         "todo cards at 480x360"
     );
     assert!(
-        pixels_near(&rgba, ADD_BG, 12) > 2_000,
+        pixels_near(&rgba, ADD_BG, 12) > 500,
         "add button at 480x360"
     );
     assert!(
@@ -144,13 +201,14 @@ fn small_viewport_renders_the_list_and_reacts_to_events() {
 /// Regression proof for the component-prop defect: bound component attributes
 /// (`:value="draft"`, `:placeholder="input_placeholder"`) are emitted as
 /// `resolve("...")` calls, so the generated resolver must register those keys.
-/// The proof types into the input through the real event dispatcher, renders
-/// BEFORE submit, and checks the draft text and placeholder reach the rendered
-/// input element.
+/// The proof types into the input through the generated event dispatcher,
+/// renders before the Add click, and checks that the draft is painted.
 #[test]
-fn typed_draft_reaches_the_input_before_submit() {
+fn typed_draft_reaches_the_input_before_add() {
     let state = Arc::new(app::script_rs::State::new());
     let (empty_png, empty_rgba) = render(&state, LARGE.0, LARGE.1);
+    let empty_rect = input_rect(&state, LARGE.0, LARGE.1);
+    let empty_dark_pixels = dark_pixels_in(&empty_rgba, empty_rect, LARGE.0, LARGE.1);
 
     // The rendered input starts empty but carries the bound placeholder.
     let empty_tree = build(&state);
@@ -169,11 +227,7 @@ fn typed_draft_reaches_the_input_before_submit() {
     // Dispatch exactly what the renderer dispatches for `on:input`.
     let mut on_event = app::make_on_event(Arc::clone(&state));
     on_event("on_input", Some("Ship the rewrite"));
-    assert_eq!(
-        state.draft.get(),
-        "Ship the rewrite",
-        "draft should hold input"
-    );
+    assert_eq!(state.draft(), "Ship the rewrite", "draft should hold input");
 
     let (png, rgba) = render(&state, LARGE.0, LARGE.1);
     let typed_tree = build(&state);
@@ -188,40 +242,63 @@ fn typed_draft_reaches_the_input_before_submit() {
         Some("What needs to be done?"),
         "placeholder stays bound after typing"
     );
-    // The renderer paints the input's value, so the frame must differ from the
-    // empty-draft frame: the typed text is actually drawn, not just stored.
+    // The renderer paints the input's value. Count dark text pixels inside the
+    // laid-out input so a state-only change cannot pass this proof.
+    let typed_rect = input_rect(&state, LARGE.0, LARGE.1);
+    let typed_dark_pixels = dark_pixels_in(&rgba, typed_rect, LARGE.0, LARGE.1);
+    assert!(
+        typed_dark_pixels > empty_dark_pixels + 5,
+        "typed draft must add dark text pixels inside the input ({typed_dark_pixels} vs {empty_dark_pixels})"
+    );
     assert_ne!(empty_rgba, rgba, "typed draft did not change the render");
     let path = write_proof("todo-draft", LARGE.0, LARGE.1, &png);
     assert!(path.exists(), "proof png missing: {}", path.display());
     assert_ne!(empty_png, png, "typed draft did not change the png");
+
+    // Add is a real click handler, not a renderer submit event source.
+    on_event("add_todo", None);
+    assert_eq!(state.draft(), "", "draft should clear after Add");
+    assert_eq!(
+        state.todoitem.todos.get().len(),
+        3,
+        "todo should be appended"
+    );
 }
 
 #[test]
 fn events_drive_the_visible_list() {
     let state = Arc::new(app::script_rs::State::new());
+    let mut on_event = app::make_on_event(Arc::clone(&state));
     let (_, before) = render(&state, LARGE.0, LARGE.1);
 
-    state.on_input("Ship the rewrite");
-    state.on_submit();
-    assert_eq!(state.draft.get(), "", "draft should clear after submit");
-    assert_eq!(state.todos.get().len(), 3, "todo should be appended");
+    on_event("on_input", Some("Ship the rewrite"));
+    let (_, typed) = render(&state, LARGE.0, LARGE.1);
+    assert_ne!(before, typed, "input event did not change the render");
+
+    on_event("add_todo", None);
+    assert_eq!(state.draft(), "", "draft should clear after Add");
+    assert_eq!(
+        state.todoitem.todos.get().len(),
+        3,
+        "todo should be appended"
+    );
 
     let (_, after_add) = render(&state, LARGE.0, LARGE.1);
-    assert_ne!(before, after_add, "on_submit did not change the render");
+    assert_ne!(typed, after_add, "Add click did not change the render");
     assert!(
         pixels_near(&after_add, ROW_BG, 8) > pixels_near(&before, ROW_BG, 8),
         "added todo did not add a card"
     );
 
     // Toggling maps the rendered row back to its source todo.
-    state.on_toggle("1");
+    on_event("on_toggle", Some("1"));
     let (png, after_toggle) = render(&state, LARGE.0, LARGE.1);
     assert_ne!(after_add, after_toggle, "toggle did not change the render");
     write_proof("todo-toggled", LARGE.0, LARGE.1, &png);
 
     // Cycling the filter twice reaches "completed", which hides active rows.
-    state.cycle_filter();
-    state.cycle_filter();
+    on_event("cycle_filter", None);
+    on_event("cycle_filter", None);
     let (_, after_filter) = render(&state, LARGE.0, LARGE.1);
     assert_ne!(
         after_toggle, after_filter,

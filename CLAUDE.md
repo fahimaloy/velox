@@ -50,10 +50,10 @@ cargo test
 cargo test -p velox-sfc
 
 # Build example
-cargo build --example todo
+cargo build -p velox-example-todo
 
 # Run (requires display/compositor)
-cargo run --example todo
+cargo run -p velox-example-todo
 ```
 
 ## Key Files
@@ -99,7 +99,7 @@ cargo run --example todo
 - Event handlers: `@click={handler}`
 - Attribute binding: `:src={expr}`
 - Conditional: `v-if`, `v-else`
-- Lists: `v-for` with `:key`
+- Lists: `v-for`
 
 ## Known Issues
 

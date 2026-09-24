@@ -7,8 +7,9 @@
 
 use std::sync::Arc;
 
+use velox_dom::layout::{LayoutNode, Rect, compute_layout};
 use velox_renderer::{render_vnode_to_raster_png_with_scale, render_vnode_to_rgba};
-use velox_style::Stylesheet;
+use velox_style::{Stylesheet, apply_with_cascade};
 
 include!(concat!(env!("OUT_DIR"), "/app.rs"));
 
@@ -39,6 +40,65 @@ fn render(state: &Arc<app::script_rs::State>, width: i32, height: i32) -> (Vec<u
         .expect("raster png");
     let rgba = render_vnode_to_rgba(&vnode, &sheet, width, height).expect("raster rgba");
     (png, rgba)
+}
+
+fn styled_tree(state: &Arc<app::script_rs::State>) -> velox_dom::VNode {
+    let raw = app::render_with_state(Arc::clone(state), app::make_resolve(Arc::clone(state)));
+    apply_with_cascade(&raw, &Stylesheet::parse(app::STYLE))
+}
+
+fn find_layout_rect(
+    layout: &LayoutNode,
+    vnode: &velox_dom::VNode,
+    tag: &str,
+    class: &str,
+) -> Option<Rect> {
+    if let velox_dom::VNode::Element {
+        tag: node_tag,
+        props,
+        ..
+    } = vnode
+        && node_tag == tag
+        && props.attrs.get("class").map(String::as_str) == Some(class)
+    {
+        return Some(layout.rect);
+    }
+    if let velox_dom::VNode::Element { children, .. } = vnode {
+        for child_layout in &layout.children {
+            let Some(source_index) = child_layout.source_index else {
+                continue;
+            };
+            if let Some(child) = children.get(source_index)
+                && let Some(rect) = find_layout_rect(child_layout, child, tag, class)
+            {
+                return Some(rect);
+            }
+        }
+    }
+    None
+}
+
+fn pixels_near_in_rect(
+    rgba: &[u8],
+    rect: Rect,
+    width: usize,
+    height: usize,
+    color: [u8; 3],
+    tolerance: i32,
+) -> usize {
+    let left = rect.x.max(0) as usize;
+    let top = rect.y.max(0) as usize;
+    let right = ((rect.x + rect.w).max(0) as usize).min(width);
+    let bottom = ((rect.y + rect.h).max(0) as usize).min(height);
+    (top..bottom)
+        .flat_map(|y| (left..right).map(move |x| (x, y)))
+        .filter(|(x, y)| {
+            let offset = (*y * width + *x) * 4;
+            (rgba[offset] as i32 - color[0] as i32).abs() <= tolerance
+                && (rgba[offset + 1] as i32 - color[1] as i32).abs() <= tolerance
+                && (rgba[offset + 2] as i32 - color[2] as i32).abs() <= tolerance
+        })
+        .count()
 }
 
 fn write_proof(name: &str, width: i32, height: i32, png: &[u8]) -> std::path::PathBuf {
@@ -145,27 +205,54 @@ fn small_viewport_keeps_count_status_and_all_buttons_visible() {
     );
 
     // The status line is derived from the count, so incrementing must change
-    // the rendered pixels ("not positive" -> "positive").
-    let before = rgba.clone();
+    // the rendered pixels ("not positive" -> "positive"). Check the status
+    // element region independently of the count glyph.
+    let before_tree = styled_tree(&state);
+    let before_layout = compute_layout(&before_tree, SMALL.0, SMALL.1);
+    let status_rect =
+        find_layout_rect(&before_layout, &before_tree, "p", "status").expect("status layout");
+    let before_status_pixels =
+        pixels_near_in_rect(&rgba, status_rect, width, height, [148, 163, 184], 24);
+    assert!(
+        before_status_pixels > 5,
+        "status text missing before increment"
+    );
+
     state.increment();
     let (_, after) = render(&state, SMALL.0, SMALL.1);
-    assert_ne!(before, after, "status label did not react to increment()");
+    assert_ne!(rgba, after, "status label did not react to increment()");
+    let after_tree = styled_tree(&state);
+    let after_layout = compute_layout(&after_tree, SMALL.0, SMALL.1);
+    let after_status_rect = find_layout_rect(&after_layout, &after_tree, "p", "status")
+        .expect("status layout after increment");
+    let after_status_pixels = pixels_near_in_rect(
+        &after,
+        after_status_rect,
+        width,
+        height,
+        [148, 163, 184],
+        24,
+    );
+    assert!(
+        after_status_pixels > 5,
+        "status text missing after increment"
+    );
 
-    // All three buttons survive the small viewport. Velox lays them out as
-    // full-width blocks, so they are stacked: each one paints a wide band and
-    // the bands must not overlap.
-    let mut previous_band = 0usize;
+    // All three buttons survive the small viewport in one flex row.
+    let mut button_rows = Vec::new();
     for (label, color) in [("+1", INC_BG), ("-1", DEC_BG), ("reset", RESET_BG)] {
         let (row, pixels) = busiest_row(&rgba, width, height, color, 12);
-        assert!(pixels > 150, "{label} button missing at 480x360");
-        assert!(
-            row >= previous_band + 20,
-            "{label} button is not stacked below the previous one (row {row} vs {previous_band})"
-        );
-        previous_band = row;
+        assert!(pixels > 50, "{label} button missing at 480x360");
+        button_rows.push(row);
     }
+    assert!(
+        button_rows
+            .windows(2)
+            .all(|rows| rows[0].abs_diff(rows[1]) <= 4),
+        "flex action buttons are not on one row: {button_rows:?}"
+    );
 
-    // The lowest button is not clipped by the bottom edge.
+    // The row is not clipped by the bottom edge.
     let last_reset_row = last_row_with_color(&rgba, width, height, RESET_BG, 12);
     assert!(
         last_reset_row + 4 < height,

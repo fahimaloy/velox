@@ -1,5 +1,16 @@
 <template>
-  <div class="app"><h1 class="title">{{ title }}</h1><div class="card"><p class="count">{{ count }}</p><p class="status">{{ status }}</p><button class="btn inc" @click="increment">+1</button><button class="btn dec" @click="decrement">-1</button><button class="btn reset" @click="reset">Reset</button></div></div>
+  <div class="app">
+    <h1 class="title">{{ title }}</h1>
+    <div class="card">
+      <p class="count">{{ count }}</p>
+      <p class="status">{{ status }}</p>
+      <div class="actions">
+        <button class="btn inc" @click="increment">+1</button>
+        <button class="btn dec" @click="decrement">-1</button>
+        <button class="btn reset" @click="reset">Reset</button>
+      </div>
+    </div>
+  </div>
 </template>
 
 <script setup>
@@ -55,7 +66,9 @@ impl State {
 .app {
     width: 100%;
     min-height: 100vh;
-    display: block;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
     padding: 6px 14px 20px;
     background: #0f172a;
     color: #f1f5f9;
@@ -91,13 +104,14 @@ impl State {
     font-size: 13px;
     color: #94a3b8;
 }
-/*
- * Velox lays buttons out as blocks, so the three actions stack full width.
- * `text-align` centers each label inside its own button.
- */
+.actions {
+    display: flex;
+    flex-direction: row;
+    justify-content: center;
+    gap: 8px;
+}
 .btn {
-    display: block;
-    margin: 0 0 6px 0;
+    flex: 0 1 120px;
     padding: 7px 12px;
     border: none;
     border-radius: 8px;

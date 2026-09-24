@@ -1,8 +1,10 @@
 <template>
-  <div class="todo-input"><input type="text" class="input" :value="value" :placeholder="placeholder" @input="on_input" /><button class="btn-add" @click="on_submit">Add</button></div>
+  <div class="todo-input"><input type="text" class="input" :value="value" :placeholder="placeholder" @input="on_input" /></div>
 </template>
 
 <script setup>
+use velox_core::signal::Signal;
+
 pub struct Props {
     pub value: String,
     pub placeholder: String,
@@ -10,6 +12,7 @@ pub struct Props {
 
 pub struct State {
     pub props: Props,
+    pub draft: std::rc::Rc<Signal<String>>,
 }
 
 impl State {
@@ -19,6 +22,7 @@ impl State {
                 value: String::new(),
                 placeholder: String::from("What needs to be done?"),
             },
+            draft: velox_core::signal!(draft = String::new()),
         }
     }
 
@@ -30,44 +34,38 @@ impl State {
         self.props.placeholder.clone()
     }
 
-    // Child events bubble to the owning App state through the root
-    // dispatcher; these stubs keep the generated dispatcher compiling.
-    pub fn on_input(&self) {}
+    pub fn draft(&self) -> String {
+        self.draft.get()
+    }
 
-    pub fn on_submit(&self) {}
+    pub fn clear(&self) {
+        self.draft.set(String::new());
+    }
+
+    pub fn on_input(&self, payload: &str) {
+        self.draft.set(payload.to_string());
+    }
 }
 </script>
 
 <style scoped>
-/*
- * Velox stacks the input and the button as blocks, which keeps both their
- * fills and their labels inside their own boxes.
- */
 .todo-input {
-    display: block;
+    display: flex;
+    flex: 0 1 70%;
+    width: 70%;
+    min-width: 0;
+    align-items: center;
 }
 .input {
-    display: block;
+    flex: 1;
+    width: 100%;
+    min-width: 0;
     height: 34px;
-    margin: 0 0 6px 0;
     padding: 6px 10px;
     border: 1px solid #334155;
     border-radius: 6px;
     background: #1e293b;
     color: #e2e8f0;
     font-size: 14px;
-}
-.btn-add {
-    display: block;
-    height: 34px;
-    padding: 6px 12px;
-    border: none;
-    border-radius: 6px;
-    background: #38bdf8;
-    color: #0f172a;
-    font-size: 14px;
-    font-weight: 600;
-    text-align: center;
-    cursor: pointer;
 }
 </style>
