@@ -161,12 +161,16 @@ fn compile_component_tree(
         .filter(|s| velox_sfc::is_scoped(s))
         .map(|_| velox_sfc::generate_scope_id(name));
 
-    let render_fn = velox_sfc::compile_template_to_rs_full(
+    // Generated apps render through `render_with_state`, which reads Signal/Ref
+    // fields and `v-for` loop items directly, so compile in State mode: bindings
+    // that only a resolver cannot satisfy are not reported for them.
+    let render_fn = velox_sfc::compile_template_to_rs_full_with_mode(
         tpl_src,
         name,
         Some(&mut resolver),
         script_src,
         scope_id.as_deref(),
+        velox_sfc::RenderMode::State,
     )
     .map_err(|e| anyhow::anyhow!("template compilation error in {}: {}", vx_file.display(), e))?;
 

@@ -1,4 +1,7 @@
-use velox_sfc::{compile_template_to_rs, compile_template_to_rs_full};
+use velox_sfc::{
+    RenderMode, compile_template_to_rs, compile_template_to_rs_full,
+    compile_template_to_rs_full_with_mode,
+};
 
 const SCRIPT_WITH_GETTERS: &str = r#"
 pub struct State {
@@ -486,7 +489,8 @@ impl State {
 
 /// `:key` generation is unchanged: the Resolve body still inserts the looked-up
 /// key and the State body still reads the loop field. Only the collector's
-/// understanding of it changed (it is reported, not registered).
+/// understanding of it changed (it is reported for a Resolve-mode consumer, not
+/// registered). Both statements are pinned in full, not by fragment.
 #[test]
 fn v_for_key_generation_is_unchanged() {
     let rs = compile_template_to_rs_full(
@@ -499,15 +503,66 @@ fn v_for_key_generation_is_unchanged() {
     .unwrap();
     println!("-- GENERATED RS --\n{}\n-- END RS --", rs);
 
+    // State mode: the whole insertion statement.
     assert!(
-        rs.contains(r#"props.attrs.insert("key".to_string(), todo.id.to_string())"#),
+        rs.contains(
+            r#"if let velox_dom::VNode::Element { ref mut props, .. } = __node { props.attrs.insert("key".to_string(), todo.id.to_string()); } __node }"#,
+        ),
         "State mode keeps inserting the loop field:\n{rs}"
     );
-    // Resolve mode still emits the double-interpolating form; that generation
-    // defect is queued separately, so today's output is pinned on purpose.
+    // Resolve mode: the whole insertion statement, double-interpolating form
+    // included. That generation defect is queued separately, so today's output
+    // is pinned on purpose.
     assert!(
-        rs.contains(r#"props.attrs.insert("key".to_string(), resolve({ let __v = resolve("todo")"#),
+        rs.contains(
+            r#"if let velox_dom::VNode::Element { ref mut props, .. } = __node { props.attrs.insert("key".to_string(), resolve({ let __v = resolve("todo"); __v == "true" || (!__v.is_empty() && __v != "false") }.{ let __v = resolve("id"); __v == "true" || (!__v.is_empty() && __v != "false") }).to_string()); } __node }"#,
+        ),
         "Resolve mode `:key` generation must stay unchanged:\n{rs}"
+    );
+}
+
+/// The renderer's mode decides which diagnostics a component gets, never the
+/// generated module: the two entry points must produce identical code, and the
+/// State-mode wrapper must agree with passing [`RenderMode::State`] explicitly.
+#[test]
+fn render_mode_changes_diagnostics_not_generated_code() {
+    let template =
+        r#"<div v-for="(todo, idx) in todos"><TodoItem :todo="todo.text" :index="idx" /></div>"#;
+
+    let state = compile_template_to_rs_full_with_mode(
+        template,
+        "TodoApp",
+        None,
+        Some(SCRIPT_WITH_GETTERS_AND_HANDLER),
+        None,
+        RenderMode::State,
+    )
+    .unwrap();
+    let resolve = compile_template_to_rs_full_with_mode(
+        template,
+        "TodoApp",
+        None,
+        Some(SCRIPT_WITH_GETTERS_AND_HANDLER),
+        None,
+        RenderMode::Resolve,
+    )
+    .unwrap();
+    assert_eq!(
+        state, resolve,
+        "the mode must only select diagnostics, not codegen output"
+    );
+
+    let defaulted = compile_template_to_rs_full(
+        template,
+        "TodoApp",
+        None,
+        Some(SCRIPT_WITH_GETTERS_AND_HANDLER),
+        None,
+    )
+    .unwrap();
+    assert_eq!(
+        state, defaulted,
+        "the default entry point must compile in State mode"
     );
 }
 

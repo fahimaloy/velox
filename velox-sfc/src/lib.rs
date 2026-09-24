@@ -17,9 +17,11 @@ pub use expr::lint_script;
 pub use sfc::{Attr, ScriptBlock, Sfc, StyleBlock, TemplateBlock, parse_sfc, validate_sfc};
 
 pub use template_ast::{AttrKind, Node, TemplateAttr};
+pub use template_codegen::RenderMode;
 pub use template_codegen::collect_vmodel_expressions;
 pub use template_codegen::compile_template_to_rs;
 pub use template_codegen::compile_template_to_rs_full;
+pub use template_codegen::compile_template_to_rs_full_with_mode;
 pub use template_codegen::generate_vmodel_setters;
 pub use template_parse::parse_template_to_ast;
 pub use template_parse::{TemplateDiag, parse_template};

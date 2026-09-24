@@ -144,6 +144,24 @@ fn validate_template(nodes: &[Node]) -> Vec<String> {
     errors
 }
 
+/// Which renderer a compiled component is expected to be rendered through.
+///
+/// A generated module always exposes both entry points, so this is not a
+/// codegen switch: it records which one the consumer calls, which decides
+/// whether an unresolvable template binding is worth reporting.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum RenderMode {
+    /// The component is rendered through `render_with_state`, which reads
+    /// `Signal`/`Ref` fields and `v-for` loop items directly from the persistent
+    /// `State`. This is what `velox-cli` and every generated `main.rs` use.
+    #[default]
+    State,
+    /// The component is rendered through `render_with`/`render_with_props`,
+    /// which can only see strings a resolver closure supplies. A binding rooted
+    /// at a `v-for` loop item cannot resolve there, so it is reported.
+    Resolve,
+}
+
 /// Compile a `<template>` with no script indexing or cross-component handlers.
 /// Convenience wrapper used by tests and single-file compilation.
 pub fn compile_template_to_rs(
@@ -155,6 +173,9 @@ pub fn compile_template_to_rs(
 }
 
 /// Full public API: compile `<template>` string to a Rust module body with `render()`.
+///
+/// The component is assumed to be rendered in [`RenderMode::State`]; use
+/// [`compile_template_to_rs_full_with_mode`] for a resolver-only consumer.
 ///
 /// `script_setup` is the raw `<script setup>` block (if any); it is indexed so
 /// template keys can be resolved to the actual State method names and component
@@ -168,10 +189,33 @@ pub fn compile_template_to_rs(
 /// persistent State field.
 pub fn compile_template_to_rs_full(
     template_src: &str,
+    component_name: &str,
+    resolver: Option<&mut ComponentResolver>,
+    script_setup: Option<&str>,
+    scope_id: Option<&str>,
+) -> Result<String, String> {
+    compile_template_to_rs_full_with_mode(
+        template_src,
+        component_name,
+        resolver,
+        script_setup,
+        scope_id,
+        RenderMode::State,
+    )
+}
+
+/// [`compile_template_to_rs_full`] with the renderer's mode, which decides
+/// whether a binding the resolver cannot satisfy is reported: a `v-for`
+/// loop-rooted binding renders correctly in [`RenderMode::State`] and is only
+/// reported for [`RenderMode::Resolve`]. The generated module is identical in
+/// both modes — only the diagnostics differ.
+pub fn compile_template_to_rs_full_with_mode(
+    template_src: &str,
     _component_name: &str,
     mut resolver: Option<&mut ComponentResolver>,
     script_setup: Option<&str>,
     scope_id: Option<&str>,
+    mode: RenderMode,
 ) -> Result<String, String> {
     let nodes = crate::template_parse::parse_template_to_ast(template_src)?;
 
@@ -269,7 +313,7 @@ pub fn render_with_state<F>(state: std::sync::Arc<script_rs::State>, mut resolve
     // (interpolations and bound-attribute expressions) to State getters so
     // main.rs does not hand-write a resolve closure. Supports both bare
     // (`title()`) and prefixed (`get_title()`) getter conventions.
-    let resolver_keys = collect_resolver_keys(&nodes, &methods, &fields);
+    let resolver_keys = collect_resolver_keys(&nodes, &methods, &fields, mode);
     for warning in &resolver_keys.warnings {
         eprintln!("velox: warning: {warning}");
     }
@@ -2523,12 +2567,17 @@ struct ResolverKeys {
 /// The generated module carries two renderers: `render_with` (Resolve mode,
 /// which only has the resolver's strings) and `render_with_state` (State mode,
 /// which reads loop items and fields directly). A binding rooted at a loop
-/// variable is a direct read in State mode but a resolver lookup in Resolve
-/// mode, so it registers no key and is reported instead of passing silently.
+/// variable is therefore a direct read in State mode and a resolver lookup in
+/// Resolve mode, and `mode` — the renderer the consumer calls — decides which
+/// one it is: reported for [`RenderMode::Resolve`], silent for
+/// [`RenderMode::State`], which still registers no key for it. Every other
+/// diagnostic is mode-independent: it describes a key the resolver cannot
+/// satisfy in either renderer.
 fn collect_resolver_keys(
     nodes: &[Node],
     methods: &[StateMethod],
     fields: &[String],
+    mode: RenderMode,
 ) -> ResolverKeys {
     let mut keys = collect_interpolation_keys(nodes);
     let mut warnings: Vec<String> = Vec::new();
@@ -2537,6 +2586,7 @@ fn collect_resolver_keys(
         nodes: &[Node],
         methods: &[StateMethod],
         fields: &[String],
+        mode: RenderMode,
         item_name: Option<&str>,
         idx_name: Option<&str>,
         keys: &mut Vec<String>,
@@ -2572,17 +2622,22 @@ fn collect_resolver_keys(
                 };
                 let emission = emit_bind_attr(&attr.name, expr, item_name, idx_name);
 
-                // A loop-rooted binding registers no key: Resolve mode looks the
-                // authored expression up but has no loop value to read, so report
-                // it instead of leaving the lookup silently unresolved.
+                // A loop-rooted binding registers no key. In State mode that is
+                // all it needs: the binding is a direct read of the loop item. In
+                // Resolve mode the same binding is a resolver lookup with no loop
+                // value behind it, so report it rather than leaving that lookup
+                // silently unresolved.
                 if matches!(emission.value, BindValue::Direct(_)) {
-                    warnings.push(format!(
-                        "bound attribute :{}=\"{}\" is rooted at a `v-for` loop variable — \
-                         State-mode rendering reads the loop item directly, but Resolve-mode \
-                         rendering has no loop value and renders the binding empty. Move the \
-                         value into a zero-argument State getter if it must render in both modes.",
-                        attr.name, emission.authored
-                    ));
+                    if mode == RenderMode::Resolve {
+                        warnings.push(format!(
+                            "bound attribute :{}=\"{}\" is rooted at a `v-for` loop variable and \
+                             this component is rendered in Resolve mode, which has no loop value \
+                             — the binding renders empty. Render the component through \
+                             `render_with_state` to read the loop item directly, or move the value \
+                             into a zero-argument State getter.",
+                            attr.name, emission.authored
+                        ));
+                    }
                     continue;
                 }
 
@@ -2624,12 +2679,21 @@ fn collect_resolver_keys(
                 }
             }
             walk(
-                children, methods, fields, item_name, idx_name, keys, warnings,
+                children, methods, fields, mode, item_name, idx_name, keys, warnings,
             );
         }
     }
 
-    walk(nodes, methods, fields, None, None, &mut keys, &mut warnings);
+    walk(
+        nodes,
+        methods,
+        fields,
+        mode,
+        None,
+        None,
+        &mut keys,
+        &mut warnings,
+    );
     ResolverKeys { keys, warnings }
 }
 
@@ -2655,7 +2719,7 @@ mod tests {
         let nodes =
             crate::template_parse::parse_template_to_ast(r#"<input :value="draft.trim()" />"#)
                 .unwrap();
-        let collected = collect_resolver_keys(&nodes, &methods(""), &[]);
+        let collected = collect_resolver_keys(&nodes, &methods(""), &[], RenderMode::State);
 
         assert!(
             collected.keys.is_empty(),
@@ -2676,7 +2740,7 @@ mod tests {
         let script = "impl State { pub fn on_input(&self, payload: &str) { let _ = payload; } }";
         let nodes =
             crate::template_parse::parse_template_to_ast(r#"<input :value="on_input" />"#).unwrap();
-        let collected = collect_resolver_keys(&nodes, &methods(script), &[]);
+        let collected = collect_resolver_keys(&nodes, &methods(script), &[], RenderMode::State);
 
         assert!(collected.keys.is_empty(), "{:?}", collected.keys);
         assert_eq!(collected.warnings.len(), 1, "{:?}", collected.warnings);
@@ -2694,7 +2758,12 @@ mod tests {
         let script = "pub struct State { pub count: std::rc::Rc<velox_core::signal::Signal<i32>> }";
         let nodes =
             crate::template_parse::parse_template_to_ast(r#"<input :value="count" />"#).unwrap();
-        let collected = collect_resolver_keys(&nodes, &methods(script), &["count".to_string()]);
+        let collected = collect_resolver_keys(
+            &nodes,
+            &methods(script),
+            &["count".to_string()],
+            RenderMode::State,
+        );
 
         assert!(collected.keys.is_empty(), "{:?}", collected.keys);
         assert_eq!(collected.warnings.len(), 1, "{:?}", collected.warnings);
@@ -2705,14 +2774,15 @@ mod tests {
     }
 
     /// A loop-rooted binding is read directly by the State renderer, but the
-    /// Resolve renderer looks the expression up, so the split is reported.
+    /// Resolve renderer looks the expression up, so only a Resolve-mode consumer
+    /// hears about it.
     #[test]
-    fn loop_rooted_binding_is_reported_as_a_warning() {
+    fn loop_rooted_binding_is_reported_in_resolve_mode() {
         let nodes = crate::template_parse::parse_template_to_ast(
             r#"<div v-for="(todo, idx) in todos"><p :value="todo.text">x</p></div>"#,
         )
         .unwrap();
-        let collected = collect_resolver_keys(&nodes, &methods(""), &[]);
+        let collected = collect_resolver_keys(&nodes, &methods(""), &[], RenderMode::Resolve);
 
         assert!(collected.keys.is_empty(), "{:?}", collected.keys);
         assert_eq!(collected.warnings.len(), 1, "{:?}", collected.warnings);
@@ -2722,22 +2792,79 @@ mod tests {
             warning.contains("v-for") && warning.contains("Resolve"),
             "the warning must name the mode split: {warning}"
         );
+        assert!(
+            warning.contains("render_with_state"),
+            "the warning must point at the renderer that reads the loop item: {warning}"
+        );
+    }
+
+    /// The same binding in a State-mode component is a correct direct read, so it
+    /// is neither registered nor reported — that is what keeps the shipped
+    /// `examples/todo` build and a generated project warning-free.
+    #[test]
+    fn loop_rooted_binding_is_silent_in_state_mode() {
+        let nodes = crate::template_parse::parse_template_to_ast(
+            r#"<div v-for="(todo, idx) in todos"><p :value="todo.text">x</p></div>"#,
+        )
+        .unwrap();
+        let collected = collect_resolver_keys(&nodes, &methods(""), &[], RenderMode::State);
+
+        assert!(collected.keys.is_empty(), "{:?}", collected.keys);
+        assert!(
+            collected.warnings.is_empty(),
+            "a State-mode component reads the loop item directly: {:?}",
+            collected.warnings
+        );
+    }
+
+    /// A `State` field resolves through no renderer, so its diagnostic is
+    /// mode-independent.
+    #[test]
+    fn field_backed_binding_is_reported_in_both_modes() {
+        let script = "pub struct State { pub count: Rc<Signal<i32>> }";
+        let nodes =
+            crate::template_parse::parse_template_to_ast(r#"<input :value="count" />"#).unwrap();
+        let methods = methods(script);
+        let fields = ["count".to_string()];
+
+        for mode in [RenderMode::State, RenderMode::Resolve] {
+            let collected = collect_resolver_keys(&nodes, &methods, &fields, mode);
+            assert!(collected.keys.is_empty(), "{mode:?}: {:?}", collected.keys);
+            assert_eq!(
+                collected.warnings.len(),
+                1,
+                "{mode:?}: {:?}",
+                collected.warnings
+            );
+            assert!(
+                collected.warnings[0].contains(":value=\"count\""),
+                "{mode:?}: {}",
+                collected.warnings[0]
+            );
+        }
     }
 
     /// `:key` on a `v-for` element is the same case: the Resolve renderer still
-    /// looks the loop field up, so the collector reports it.
+    /// looks the loop field up, so a Resolve-mode consumer is warned.
     #[test]
-    fn v_for_key_binding_is_reported_as_a_warning() {
+    fn v_for_key_binding_is_reported_in_resolve_mode() {
         let nodes = crate::template_parse::parse_template_to_ast(
             r#"<div v-for="todo in todos" :key="todo.id">x</div>"#,
         )
         .unwrap();
-        let collected = collect_resolver_keys(&nodes, &methods(""), &[]);
 
-        assert!(collected.keys.is_empty(), "{:?}", collected.keys);
-        assert_eq!(collected.warnings.len(), 1, "{:?}", collected.warnings);
-        let warning = &collected.warnings[0];
-        assert!(warning.contains(":key=\"todo.id\""), "{warning}");
+        let resolve = collect_resolver_keys(&nodes, &methods(""), &[], RenderMode::Resolve);
+        assert!(resolve.keys.is_empty(), "{:?}", resolve.keys);
+        assert_eq!(resolve.warnings.len(), 1, "{:?}", resolve.warnings);
+        assert!(
+            resolve.warnings[0].contains(":key=\"todo.id\""),
+            "{}",
+            resolve.warnings[0]
+        );
+
+        let state = collect_resolver_keys(&nodes, &methods(""), &[], RenderMode::State);
+        assert!(state.keys.is_empty(), "{:?}", state.keys);
+        assert!(state.warnings.is_empty(), "{:?}", state.warnings);
     }
 
     /// A zero-argument method that returns nothing is not a getter: the arm would
@@ -2747,7 +2874,7 @@ mod tests {
         let script = "impl State { pub fn reset(&self) {} }";
         let nodes =
             crate::template_parse::parse_template_to_ast(r#"<input :value="reset" />"#).unwrap();
-        let collected = collect_resolver_keys(&nodes, &methods(script), &[]);
+        let collected = collect_resolver_keys(&nodes, &methods(script), &[], RenderMode::State);
 
         assert!(collected.keys.is_empty(), "{:?}", collected.keys);
         assert_eq!(collected.warnings.len(), 1, "{:?}", collected.warnings);
@@ -2765,7 +2892,7 @@ mod tests {
         let script = "impl State { pub fn items(&self) -> Vec<String> { Vec::new() } }";
         let nodes =
             crate::template_parse::parse_template_to_ast(r#"<input :value="items" />"#).unwrap();
-        let collected = collect_resolver_keys(&nodes, &methods(script), &[]);
+        let collected = collect_resolver_keys(&nodes, &methods(script), &[], RenderMode::State);
 
         assert!(collected.keys.is_empty(), "{:?}", collected.keys);
         assert_eq!(collected.warnings.len(), 1, "{:?}", collected.warnings);
