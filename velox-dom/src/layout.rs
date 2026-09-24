@@ -177,7 +177,44 @@ pub struct LayoutNode {
     pub scroll_y: i32,
     pub clip: Option<Rect>,
     pub stacking_context: bool,
+    /// Total scrollable content height (content_h + padding + border).
+    pub scroll_height: i32,
+    /// Maximum vertical scroll offset (scroll_height - rect.h) clamped to 0.
+    pub max_scroll_y: i32,
+    /// True when overflow is auto/scroll and content exceeds rect.
+    pub scrollable: bool,
     pub children: Vec<LayoutNode>,
+}
+
+/// ScrollState tracks the current vertical scroll offset and its clamp.
+/// Mutated by `on_wheel(delta)` / `scroll_by(delta)`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ScrollState {
+    pub offset_y: f32,
+    pub max_y: f32,
+}
+
+impl ScrollState {
+    pub fn new(max_y: f32) -> Self {
+        Self {
+            offset_y: 0.0,
+            max_y,
+        }
+    }
+    /// Advance by `delta` and clamp to `[0, max_y]`.
+    pub fn scroll_by(&mut self, delta: f32) {
+        self.offset_y = (self.offset_y + delta).clamp(0.0, self.max_y.max(0.0));
+    }
+    /// Wheel entry point: advance by a wheel `delta` (positive increases the
+    /// offset, i.e. content moves up) and clamp to `[0, max_y]`.
+    pub fn on_wheel(&mut self, delta: f32) {
+        self.scroll_by(delta);
+    }
+}
+
+/// Returns true when `overflow` is `auto` or `scroll` and content exceeds viewport.
+pub fn is_scrollable(overflow: &str, content_h: f32, rect_h: f32) -> bool {
+    matches!(overflow, "auto" | "scroll") && content_h > rect_h
 }
 
 #[allow(dead_code)]
@@ -1020,6 +1057,9 @@ pub fn compute_layout(node: &VNode, viewport_w: i32, viewport_h: i32) -> LayoutN
                     scroll_y: 0,
                     clip: None,
                     stacking_context: false,
+                    scroll_height: h,
+                    max_scroll_y: 0,
+                    scrollable: false,
                     children: vec![],
                 }
             }
@@ -1203,7 +1243,8 @@ pub fn compute_layout(node: &VNode, viewport_w: i32, viewport_h: i32) -> LayoutN
 
                 let overflow =
                     style_lookup_str(style, "overflow").unwrap_or_else(|| "visible".to_string());
-                let scroll_x = style_lookup_len_full(
+                // Deprecated synthetic scroll-left/top — keep parsing for compat with warning, map to ScrollState
+                let raw_scroll_x = style_lookup_len_full(
                     style,
                     "scroll-left",
                     content_w as f32,
@@ -1211,9 +1252,8 @@ pub fn compute_layout(node: &VNode, viewport_w: i32, viewport_h: i32) -> LayoutN
                     root_font_size,
                     vw_f,
                     vh_f,
-                )
-                .unwrap_or(0);
-                let scroll_y = style_lookup_len_full(
+                );
+                let raw_scroll_y = style_lookup_len_full(
                     style,
                     "scroll-top",
                     content_h_available as f32,
@@ -1221,8 +1261,21 @@ pub fn compute_layout(node: &VNode, viewport_w: i32, viewport_h: i32) -> LayoutN
                     root_font_size,
                     vw_f,
                     vh_f,
-                )
-                .unwrap_or(0);
+                );
+                if raw_scroll_x.is_some() || raw_scroll_y.is_some() {
+                    // Deprecated synthetic scroll-left/scroll-top: still parsed and
+                    // applied for compat, but warn once per process.
+                    static SCROLL_DEPRECATION_WARNED: std::sync::atomic::AtomicBool =
+                        std::sync::atomic::AtomicBool::new(false);
+                    if !SCROLL_DEPRECATION_WARNED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                        eprintln!(
+                            "[velox] warning: scroll-left/scroll-top styles are deprecated; \
+                             use overflow:auto/scroll with wheel scrolling instead"
+                        );
+                    }
+                }
+                let scroll_x = raw_scroll_x.unwrap_or(0);
+                let scroll_y = raw_scroll_y.unwrap_or(0);
                 let content_x_scrolled = content_x - scroll_x;
                 let content_y_scrolled = content_y_start - scroll_y;
 
@@ -1263,6 +1316,9 @@ pub fn compute_layout(node: &VNode, viewport_w: i32, viewport_h: i32) -> LayoutN
                         scroll_y: 0,
                         clip: None,
                         stacking_context: false,
+                        scroll_height: 0,
+                        max_scroll_y: 0,
+                        scrollable: false,
                         children: vec![],
                     };
                 }
@@ -2411,6 +2467,9 @@ pub fn compute_layout(node: &VNode, viewport_w: i32, viewport_h: i32) -> LayoutN
                                     scroll_y: 0,
                                     clip: None,
                                     stacking_context: false,
+                                    scroll_height: line.height,
+                                    max_scroll_y: 0,
+                                    scrollable: false,
                                     children: vec![],
                                 };
                                 cur_y += line.height;
@@ -2597,7 +2656,12 @@ pub fn compute_layout(node: &VNode, viewport_w: i32, viewport_h: i32) -> LayoutN
                     child.rect.x = content_x + offset_x;
                 }
 
-                let clip = if matches!(overflow.as_str(), "hidden" | "scroll" | "auto") {
+                // Scrollable overflow model: scrollHeight separation, is_scrollable, clip logic
+                let scroll_height = content_h + pt + pb + bt + bb;
+                let overflow_lower = overflow.to_ascii_lowercase();
+                let scrollable =
+                    is_scrollable(&overflow_lower, scroll_height as f32, rect_h as f32);
+                let clip = if scrollable || overflow_lower == "hidden" {
                     Some(Rect {
                         x: elem_x,
                         y: elem_y,
@@ -2607,6 +2671,11 @@ pub fn compute_layout(node: &VNode, viewport_w: i32, viewport_h: i32) -> LayoutN
                 } else {
                     None
                 };
+                let max_scroll_y = (scroll_height - rect_h).max(0);
+                // Synthetic scroll-left/scroll-top stay raw here for compat: children
+                // are positioned from the raw values above, so the stored fields must
+                // match or render/hit-test would disagree. Wheel-driven scrolling
+                // clamps via ScrollState / apply_scroll_offsets instead.
                 laid_children.extend(abs_children);
                 LayoutNode {
                     rect: Rect {
@@ -2622,6 +2691,9 @@ pub fn compute_layout(node: &VNode, viewport_w: i32, viewport_h: i32) -> LayoutN
                     scroll_y,
                     clip,
                     stacking_context,
+                    scroll_height,
+                    max_scroll_y,
+                    scrollable,
                     children: laid_children,
                 }
             }

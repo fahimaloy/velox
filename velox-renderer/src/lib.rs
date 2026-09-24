@@ -843,6 +843,10 @@ where
     let mut input_targets: Vec<crate::events::InputTarget> = Vec::new();
     // Path (child source indices) to the focused text input, if any.
     let mut focused_input: Option<Vec<usize>> = None;
+    // Scrollable overflow model: wheel clamping + deepest hit_test
+    let mut scroll_offsets: std::collections::HashMap<Vec<usize>, f32> =
+        std::collections::HashMap::new();
+    let mut last_layout: Option<velox_dom::layout::LayoutNode> = None;
     // Lifecycle: ensure on_mounted fires once on first RedrawRequested and
     // on_unmounted/before_destroy fire on CloseRequested or drop.
     let _lifecycle_guard = LifecycleCleanupGuard;
@@ -870,7 +874,12 @@ where
                 .map(|id| Some(id) == hovered_id)
                 .unwrap_or(false)
         });
-        let layout = velox_dom::layout::compute_layout(&vnode, vw as i32, vh as i32);
+        let mut layout = velox_dom::layout::compute_layout(&vnode, vw as i32, vh as i32);
+        {
+            let mut path = Vec::new();
+            crate::events::apply_scroll_offsets(&mut layout, &scroll_offsets, &mut path);
+        }
+        last_layout = Some(layout.clone());
         recompute_targets(
             &vnode,
             &layout,
@@ -1009,8 +1018,17 @@ where
                                             .unwrap_or(false)
                                     },
                                 );
-                                let layout =
+                                let mut layout =
                                     velox_dom::layout::compute_layout(&vnode, vw as i32, vh as i32);
+                                {
+                                    let mut path = Vec::new();
+                                    crate::events::apply_scroll_offsets(
+                                        &mut layout,
+                                        &scroll_offsets,
+                                        &mut path,
+                                    );
+                                }
+                                last_layout = Some(layout.clone());
                                 recompute_targets(
                                     &vnode,
                                     &layout,
@@ -1097,6 +1115,34 @@ where
                             }
                         }
                     }
+                    Event::WindowEvent {
+                        event: WindowEvent::MouseWheel { delta, .. },
+                        ..
+                    } => {
+                        // Scrollable overflow: deepest scrollable under the cursor,
+                        // clamped via ScrollState. Winit reports positive y for
+                        // wheel-up, so negate for the natural direction (wheel-down
+                        // increases the offset and reveals content below). One
+                        // line ~= 40 logical px; PixelDelta is physical.
+                        let delta_y: f32 = match delta {
+                            winit::event::MouseScrollDelta::LineDelta(_, y) => -y * 40.0,
+                            winit::event::MouseScrollDelta::PixelDelta(pos) => {
+                                -(pos.y as f32) / scale_factor
+                            }
+                        };
+                        if let Some(layout) = last_layout.as_ref()
+                            && crate::events::apply_wheel_scroll(
+                                layout,
+                                mouse_pos.0,
+                                mouse_pos.1,
+                                &mut scroll_offsets,
+                                delta_y,
+                            )
+                            && let Some(w) = window_opt.as_ref()
+                        {
+                            w.request_redraw();
+                        }
+                    }
                     Event::RedrawRequested(_) => {
                         // R-L3: materialize any coalesced resize exactly once per frame.
                         if let Some((pw, ph)) = pending_resize.take() {
@@ -1128,8 +1174,17 @@ where
                                         .unwrap_or(false)
                                 });
                             last_vnode = Some(vnode.clone());
-                            let layout =
+                            let mut layout =
                                 velox_dom::layout::compute_layout(&vnode, vw as i32, vh as i32);
+                            {
+                                let mut path = Vec::new();
+                                crate::events::apply_scroll_offsets(
+                                    &mut layout,
+                                    &scroll_offsets,
+                                    &mut path,
+                                );
+                            }
+                            last_layout = Some(layout.clone());
                             recompute_targets(
                                 &vnode,
                                 &layout,
@@ -1334,6 +1389,9 @@ where
     let mut hover_targets: Vec<crate::events::HoverTarget> = Vec::new();
     let mut input_targets: Vec<crate::events::InputTarget> = Vec::new();
     let mut _last_vnode: Option<velox_dom::VNode> = None;
+    let mut scroll_offsets_hmr: std::collections::HashMap<Vec<usize>, f32> =
+        std::collections::HashMap::new();
+    let mut last_layout_hmr: Option<velox_dom::layout::LayoutNode> = None;
     let _lifecycle_guard_hmr = LifecycleCleanupGuard;
     let mut did_mount_hmr = false;
     // R-L3: coalesce rapid resize drags in HMR loop too (only last size per frame).
@@ -1358,7 +1416,12 @@ where
                 .unwrap_or(false)
         });
         _last_vnode = Some(vnode.clone());
-        let layout = velox_dom::layout::compute_layout(&vnode, vw as i32, vh as i32);
+        let mut layout = velox_dom::layout::compute_layout(&vnode, vw as i32, vh as i32);
+        {
+            let mut path = Vec::new();
+            crate::events::apply_scroll_offsets(&mut layout, &scroll_offsets_hmr, &mut path);
+        }
+        last_layout_hmr = Some(layout.clone());
         recompute_targets(
             &vnode,
             &layout,
@@ -1420,9 +1483,18 @@ where
                                         },
                                     );
                                     _last_vnode = Some(vnode2.clone());
-                                    let layout = velox_dom::layout::compute_layout(
+                                    let mut layout = velox_dom::layout::compute_layout(
                                         &vnode2, vw2 as i32, vh2 as i32,
                                     );
+                                    {
+                                        let mut path = Vec::new();
+                                        crate::events::apply_scroll_offsets(
+                                            &mut layout,
+                                            &scroll_offsets_hmr,
+                                            &mut path,
+                                        );
+                                    }
+                                    last_layout_hmr = Some(layout.clone());
                                     recompute_targets(
                                         &vnode2,
                                         &layout,
@@ -1542,8 +1614,17 @@ where
                                     },
                                 );
                                 _last_vnode = Some(vnode.clone());
-                                let layout =
+                                let mut layout =
                                     velox_dom::layout::compute_layout(&vnode, vw as i32, vh as i32);
+                                {
+                                    let mut path = Vec::new();
+                                    crate::events::apply_scroll_offsets(
+                                        &mut layout,
+                                        &scroll_offsets_hmr,
+                                        &mut path,
+                                    );
+                                }
+                                last_layout_hmr = Some(layout.clone());
                                 recompute_targets(
                                     &vnode,
                                     &layout,
@@ -1581,6 +1662,32 @@ where
                             }
                         }
                     }
+                    Event::WindowEvent {
+                        event: WindowEvent::MouseWheel { delta, .. },
+                        ..
+                    } => {
+                        // Scrollable overflow: deepest scrollable under the cursor,
+                        // clamped via ScrollState. Negate winit's y (positive = wheel
+                        // up) for the natural direction; one line ~= 40 logical px.
+                        let delta_y: f32 = match delta {
+                            winit::event::MouseScrollDelta::LineDelta(_, y) => -y * 40.0,
+                            winit::event::MouseScrollDelta::PixelDelta(pos) => {
+                                -(pos.y as f32) / scale_factor
+                            }
+                        };
+                        if let Some(layout) = last_layout_hmr.as_ref()
+                            && crate::events::apply_wheel_scroll(
+                                layout,
+                                mouse_pos.0,
+                                mouse_pos.1,
+                                &mut scroll_offsets_hmr,
+                                delta_y,
+                            )
+                            && let Some(w) = window_opt.as_ref()
+                        {
+                            w.request_redraw();
+                        }
+                    }
                     Event::RedrawRequested(_) => {
                         // R-L3: materialize any coalesced resize exactly once per frame.
                         if let Some((pw, ph)) = pending_resize.take() {
@@ -1611,8 +1718,17 @@ where
                                         .unwrap_or(false)
                                 });
                             _last_vnode = Some(vnode.clone());
-                            let layout =
+                            let mut layout =
                                 velox_dom::layout::compute_layout(&vnode, vw as i32, vh as i32);
+                            {
+                                let mut path = Vec::new();
+                                crate::events::apply_scroll_offsets(
+                                    &mut layout,
+                                    &scroll_offsets_hmr,
+                                    &mut path,
+                                );
+                            }
+                            last_layout_hmr = Some(layout.clone());
                             recompute_targets(
                                 &vnode,
                                 &layout,

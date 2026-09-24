@@ -358,6 +358,144 @@ pub fn hit_test_hover(targets: &[HoverTarget], x: f32, y: f32) -> Option<u32> {
     None
 }
 
+/// Find the deepest scrollable LayoutNode containing `point`.
+/// Returns the path (source_index chain) to the deepest match.
+pub fn hit_test_scrollable(
+    layout: &velox_dom::layout::LayoutNode,
+    x: f32,
+    y: f32,
+) -> Option<Vec<usize>> {
+    fn contains(rect: velox_dom::layout::Rect, x: f32, y: f32) -> bool {
+        let x0 = rect.x as f32;
+        let y0 = rect.y as f32;
+        let x1 = (rect.x + rect.w) as f32;
+        let y1 = (rect.y + rect.h) as f32;
+        x >= x0 && x <= x1 && y >= y0 && y <= y1
+    }
+    fn dfs(
+        node: &velox_dom::layout::LayoutNode,
+        x: f32,
+        y: f32,
+        path: &mut Vec<usize>,
+        best: &mut Option<(Vec<usize>, usize)>,
+        depth: usize,
+    ) {
+        if node.scrollable && contains(node.rect, x, y) {
+            // Prefer deeper depth; if same depth, later (higher source order) but depth is primary
+            let candidate = path.clone();
+            match best {
+                Some((_, best_depth)) if depth <= *best_depth => {}
+                _ => *best = Some((candidate, depth)),
+            }
+        }
+        for child in &node.children {
+            if let Some(idx) = child.source_index {
+                path.push(idx);
+                dfs(child, x, y, path, best, depth + 1);
+                path.pop();
+            } else {
+                dfs(child, x, y, path, best, depth + 1);
+            }
+        }
+    }
+    let mut best: Option<(Vec<usize>, usize)> = None;
+    let mut path = Vec::new();
+    dfs(layout, x, y, &mut path, &mut best, 0);
+    best.map(|(p, _)| p)
+}
+
+/// Resolve a LayoutNode by its source_index path (as produced by
+/// `hit_test_scrollable`). The empty path resolves to the root.
+pub fn node_at_path<'a>(
+    layout: &'a velox_dom::layout::LayoutNode,
+    path: &[usize],
+) -> Option<&'a velox_dom::layout::LayoutNode> {
+    let mut node = layout;
+    for &idx in path {
+        node = node.children.iter().find(|c| c.source_index == Some(idx))?;
+    }
+    Some(node)
+}
+
+/// Shift a node and all its descendants vertically by `dy` (logical px).
+/// Descendant clips move with their owners; the scroll container's own clip
+/// is left untouched (callers only shift the container's children).
+fn shift_subtree_y(node: &mut velox_dom::layout::LayoutNode, dy: i32) {
+    node.rect.y += dy;
+    if let Some(clip) = node.clip.as_mut() {
+        clip.y += dy;
+    }
+    for child in &mut node.children {
+        shift_subtree_y(child, dy);
+    }
+}
+
+/// Apply stored scroll offsets (keyed by source_index path) into a freshly
+/// computed layout tree. For each scrollable node with a stored offset the
+/// children subtree is shifted so that `content_y_scrolled = content_y -
+/// scroll_y` holds in the layout rects themselves — render, hit-testing and
+/// click targets all consume the same shifted rects. Without a stored entry
+/// the layout is untouched (synthetic scroll-top/scroll-left bake stays).
+pub fn apply_scroll_offsets(
+    layout: &mut velox_dom::layout::LayoutNode,
+    offsets: &std::collections::HashMap<Vec<usize>, f32>,
+    path: &mut Vec<usize>,
+) {
+    if layout.scrollable
+        && let Some(&off) = offsets.get(path)
+    {
+        let max = (layout.max_scroll_y as f32).max(0.0);
+        let target = off.clamp(0.0, max).round() as i32;
+        let dy = layout.scroll_y - target;
+        if dy != 0 {
+            for child in &mut layout.children {
+                shift_subtree_y(child, dy);
+            }
+        }
+        layout.scroll_y = target;
+    }
+    for child in &mut layout.children {
+        if let Some(idx) = child.source_index {
+            path.push(idx);
+            apply_scroll_offsets(child, offsets, path);
+            path.pop();
+        } else {
+            apply_scroll_offsets(child, offsets, path);
+        }
+    }
+}
+
+/// Wheel handler: hit-test the deepest scrollable node under the cursor and
+/// advance its stored offset by `delta_y` (positive = content moves up),
+/// clamped to `[0, max_scroll_y]` via `ScrollState::on_wheel`. The first
+/// wheel over a node seeds the offset from its synthetic scroll-top (the
+/// deprecated style is thereby mapped into the ScrollState model). Returns
+/// true when the offset changed and a redraw is needed.
+pub fn apply_wheel_scroll(
+    layout: &velox_dom::layout::LayoutNode,
+    x: f32,
+    y: f32,
+    offsets: &mut std::collections::HashMap<Vec<usize>, f32>,
+    delta_y: f32,
+) -> bool {
+    let Some(path) = hit_test_scrollable(layout, x, y) else {
+        return false;
+    };
+    let Some(node) = node_at_path(layout, &path) else {
+        return false;
+    };
+    // Seed from the node's current (possibly synthetic scroll-top) offset.
+    let entry = offsets.entry(path).or_insert(node.scroll_y as f32);
+    let before = *entry;
+    let mut state = velox_dom::layout::ScrollState {
+        offset_y: before,
+        max_y: node.max_scroll_y as f32,
+    };
+    state.on_wheel(delta_y);
+    *entry = state.offset_y;
+    state.offset_y != before
+}
+
 /// Dispatches an event by scanning the VNode tree for props of the form
 /// `on:<event>` and invoking registered callbacks with the string value.
 /// Also collects `on:<event>-payload` values and forwards them.

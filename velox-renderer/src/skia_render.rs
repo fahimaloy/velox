@@ -1294,6 +1294,9 @@ pub mod skia_impl {
                     );
                     let did_clip =
                         apply_clips(canvas, rect, clip_rrect, overflow_hidden, clip_inset);
+                    // Scroll offset is applied in the layout itself (children rects
+                    // are shifted by events::apply_scroll_offsets so render and
+                    // hit-testing agree) — content renders at content_y - scroll_y.
                     let mut ordered: Vec<(i32, usize)> = layout
                         .children
                         .iter()
@@ -1324,6 +1327,34 @@ pub mod skia_impl {
                                 opacity,
                             );
                         }
+                    }
+                    // Paint scrollbar thumb when scrollable && max > 0.
+                    // (Headless-provable via render_vnode_to_rgba pixel tests.)
+                    if layout.scrollable && layout.max_scroll_y > 0 {
+                        let scrollbar_w = 8.0;
+                        let track_x = rect.right - scrollbar_w - 2.0;
+                        let track_y = rect.top + 2.0;
+                        let track_h = (rect.height() - 4.0).max(0.0);
+                        // Thumb size ~ viewport^2 / scrollHeight, floored at 20px
+                        // (or track_h for tiny containers — clamp(min, max) must
+                        // never see min > max) and capped at the track height.
+                        let min_thumb = 20.0_f32.min(track_h);
+                        let thumb_h = ((rect.height() * rect.height())
+                            / (layout.scroll_height as f32).max(1.0))
+                        .clamp(min_thumb, track_h);
+                        let max_y = layout.max_scroll_y as f32;
+                        let thumb_y = if max_y > 0.0 {
+                            track_y + (layout.scroll_y as f32 / max_y) * (track_h - thumb_h)
+                        } else {
+                            track_y
+                        };
+                        let mut sb_paint = sk::Paint::default();
+                        sb_paint.set_anti_alias(true);
+                        sb_paint.set_color(sk::Color::from_argb(120, 100, 100, 100));
+                        let thumb_rect =
+                            sk::Rect::from_xywh(track_x, thumb_y, scrollbar_w, thumb_h);
+                        let rrect = sk::RRect::new_rect_xy(thumb_rect, 4.0, 4.0);
+                        canvas.draw_rrect(rrect, &sb_paint);
                     }
                     if did_clip {
                         canvas.restore();

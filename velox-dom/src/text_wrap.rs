@@ -372,6 +372,9 @@ pub fn create_text_nodes(
             scroll_y: 0,
             clip: None,
             stacking_context: false,
+            scroll_height: line.height,
+            max_scroll_y: 0,
+            scrollable: false,
             children: vec![],
         });
         cur_y += line.height;
