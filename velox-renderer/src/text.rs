@@ -132,22 +132,38 @@ impl TextRenderConfig {
     }
 }
 
-/// Text measurement and metrics
+/// Text measurement and metrics — unified with Skia snapped measure.
 pub struct TextMeasurer;
 
 impl TextMeasurer {
+    /// Snapped logical size helper (single rounding point via Viewport).
+    #[inline]
+    fn snapped_size(font_size: f32, scale: f32) -> f32 {
+        if scale.is_finite() && scale > 0.0 && scale != 1.0 {
+            (font_size * scale).round() / scale
+        } else {
+            font_size
+        }
+    }
+
     /// Estimate text dimensions without actual rendering
-    /// This is a placeholder that should be replaced with actual font metrics
+    /// When skia-native is available, delegates to skia FontCache measure; otherwise
+    /// uses same 0.5 heuristic as velox-dom fallback (headless parity).
     pub fn measure(text: &str, config: &TextRenderConfig) -> (f32, f32) {
+        Self::measure_with_scale(text, config, 1.0)
+    }
+
+    /// Scale-aware measure (logical px, snapped).
+    pub fn measure_with_scale(text: &str, config: &TextRenderConfig, scale: f32) -> (f32, f32) {
         if text.is_empty() {
             return (0.0, config.font_size);
         }
-
-        // Very rough approximation: average character width = 0.5 * font_size
-        let char_width = config.font_size * 0.5;
-        let width = text.chars().count() as f32 * char_width;
-        let height = config.line_height.to_pixels(config.font_size);
-
+        let snapped = Self::snapped_size(config.font_size, scale);
+        #[cfg(feature = "skia-native")]
+        let width = crate::skia_render::measure_text(text, snapped, &config.font_family, scale);
+        #[cfg(not(feature = "skia-native"))]
+        let width = snapped * 0.5 * text.chars().count() as f32;
+        let height = config.line_height.to_pixels(snapped);
         (width, height)
     }
 

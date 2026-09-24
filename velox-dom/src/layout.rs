@@ -2358,7 +2358,29 @@ pub fn compute_layout(node: &VNode, viewport_w: i32, viewport_h: i32) -> LayoutN
                                 .unwrap_or_else(|| "left".to_string());
 
                             let line_limit = content_w;
-                            let wrapped = crate::text_wrap::wrap_text(t, line_limit, font_sz);
+                            // Thread white-space, text-overflow, font-family, scale into wrap (CX-06)
+                            let ws_str = style_lookup_str(style, "white-space")
+                                .unwrap_or_else(|| "normal".to_string());
+                            let ws = match ws_str.trim().to_ascii_lowercase().as_str() {
+                                "nowrap" => crate::style::WhiteSpace::Nowrap,
+                                "pre" => crate::style::WhiteSpace::Pre,
+                                "pre-wrap" => crate::style::WhiteSpace::PreWrap,
+                                "pre-line" => crate::style::WhiteSpace::PreLine,
+                                _ => crate::style::WhiteSpace::Normal,
+                            };
+                            let to_str = style_lookup_str(style, "text-overflow")
+                                .unwrap_or_else(|| "clip".to_string());
+                            let to = if to_str.trim().eq_ignore_ascii_case("ellipsis") {
+                                crate::style::TextOverflow::Ellipsis
+                            } else {
+                                crate::style::TextOverflow::Clip
+                            };
+                            let fam = style_lookup_str(style, "font-family")
+                                .unwrap_or_else(|| "system-ui".to_string());
+                            let scale = crate::text_wrap::current_scale();
+                            let wrapped = crate::text_wrap::wrap_text_with_options(
+                                t, line_limit, font_sz, &fam, scale, ws, to,
+                            );
 
                             for line in &wrapped {
                                 // Calculate x offset based on text-align

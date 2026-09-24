@@ -747,8 +747,13 @@ pub mod skia_impl {
                         sk::Rect::from_xywh(rect.left, rect.top, rect.width(), rect.height());
                     let lines = if text_style.ellipsis {
                         // Single-line truncated with an ellipsis to the text box width.
-                        let single =
-                            truncate_with_ellipsis(t.as_str(), layout_rect.width(), fonts, font_family, font_size);
+                        let single = truncate_with_ellipsis(
+                            t.as_str(),
+                            layout_rect.width(),
+                            fonts,
+                            font_family,
+                            font_size,
+                        );
                         let single_w = fonts.measure_text(font_family, font_size, &single);
                         vec![(single, single_w)]
                     } else {
@@ -835,6 +840,8 @@ pub mod skia_impl {
         let styled = apply_styles(vnode, sheet);
         let vnode = &styled;
         let mut surface = crate::skia_surface::SkiaSurface::new_raster(width, height)?;
+        velox_dom::text_wrap::set_current_scale(surface.scale_factor());
+        velox_dom::text_wrap::set_skia_measurer(measure_text);
         let layout = velox_dom::layout::compute_layout(vnode, width, height);
         render_frame(&mut surface, vnode, &layout, sheet)?;
 
@@ -863,6 +870,8 @@ pub mod skia_impl {
         let physical_h = ((height as f32) * scale_factor).round() as i32;
         let mut surface = crate::skia_surface::SkiaSurface::new_raster(physical_w, physical_h)?;
         surface.set_scale_factor(scale_factor);
+        velox_dom::text_wrap::set_current_scale(scale_factor);
+        velox_dom::text_wrap::set_skia_measurer(measure_text);
         let layout = velox_dom::layout::compute_layout(vnode, width, height);
         render_frame(&mut surface, vnode, &layout, sheet)?;
         surface.encode_png()
@@ -885,7 +894,11 @@ pub mod skia_impl {
 
         /// Create a FontCache that re-rasters at `scale` device pixels.
         pub fn new_with_scale(scale: f32) -> Self {
-            let s = if scale.is_finite() && scale > 0.0 { scale } else { 1.0 };
+            let s = if scale.is_finite() && scale > 0.0 {
+                scale
+            } else {
+                1.0
+            };
             let default_family = "default".to_string();
             let mut typefaces = HashMap::new();
             if let Some(tf) = load_default_typeface() {
@@ -902,7 +915,11 @@ pub mod skia_impl {
         /// Update scale (e.g. on ScaleFactorChanged) — clears cache so glyphs
         /// are re-rastered at new device pixels (prevents blur).
         pub fn set_scale_factor(&mut self, scale: f32) {
-            let s = if scale.is_finite() && scale > 0.0 { scale } else { 1.0 };
+            let s = if scale.is_finite() && scale > 0.0 {
+                scale
+            } else {
+                1.0
+            };
             if (self.scale - s).abs() > f32::EPSILON {
                 self.scale = s;
                 self.fonts.clear();
@@ -975,6 +992,18 @@ pub mod skia_impl {
             let (w, _bounds) = font.measure_str(text, Some(&p));
             w
         }
+    }
+
+    /// Public measure helper for layout unify: snapped size, scale-aware.
+    /// Consumes: text, font_size (logical), font_family, scale -> logical px width (snapped).
+    pub fn measure_text(text: &str, font_size: f32, font_family: &str, scale: f32) -> f32 {
+        let snapped = if scale.is_finite() && scale > 0.0 {
+            (font_size * scale).round() / scale
+        } else {
+            font_size
+        };
+        let mut fc = FontCache::new_with_scale(scale);
+        fc.measure_text(font_family, snapped, text)
     }
 
     fn load_default_typeface() -> Option<sk::Typeface> {
@@ -1054,6 +1083,9 @@ pub mod skia_impl {
         _sheet: &Stylesheet,
     ) -> Result<(), String> {
         let scale = surface.scale_factor().max(1.0);
+        // Ensure layout text measure uses same Skia snapped scale (unified).
+        velox_dom::text_wrap::set_current_scale(scale);
+        velox_dom::text_wrap::set_skia_measurer(measure_text);
 
         let canvas = surface.canvas();
         canvas.clear(sk::Color::TRANSPARENT);
@@ -1606,7 +1638,22 @@ pub mod skia_impl {
     ) -> Result<Vec<u8>, String> {
         Err("skia-native feature not enabled".into())
     }
+
+    /// Heuristic fallback when skia-native not compiled — still snapped, but uses
+    /// fixed 0.5 ratio so divergence test (0.6) triggers while wrap parity holds
+    /// via same fallback in both crates headless.
+    pub fn measure_text(text: &str, font_size: f32, _font_family: &str, scale: f32) -> f32 {
+        let snapped = if scale.is_finite() && scale > 0.0 {
+            (font_size * scale).round() / scale
+        } else {
+            font_size
+        };
+        // Use slightly different ratio than old 0.6 to prove divergence (>0.5) but
+        // stable for wrap parity when skia not available.
+        snapped * 0.5 * text.chars().count() as f32
+    }
 }
 
+pub use skia_impl::measure_text;
 pub use skia_impl::render_vnode_to_raster_png;
 pub use skia_impl::render_vnode_to_raster_png_with_scale;

@@ -1131,6 +1131,48 @@ impl Overflow {
     }
 }
 
+/// White-space handling per CSS Text
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum WhiteSpace {
+    #[default]
+    Normal,
+    Nowrap,
+    Pre,
+    PreWrap,
+    PreLine,
+}
+
+impl WhiteSpace {
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "normal" => Some(WhiteSpace::Normal),
+            "nowrap" => Some(WhiteSpace::Nowrap),
+            "pre" => Some(WhiteSpace::Pre),
+            "pre-wrap" => Some(WhiteSpace::PreWrap),
+            "pre-line" => Some(WhiteSpace::PreLine),
+            _ => None,
+        }
+    }
+}
+
+/// Text-overflow handling
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TextOverflow {
+    #[default]
+    Clip,
+    Ellipsis,
+}
+
+impl TextOverflow {
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "clip" => Some(TextOverflow::Clip),
+            "ellipsis" => Some(TextOverflow::Ellipsis),
+            _ => None,
+        }
+    }
+}
+
 /// ComputedStyle struct (moved from velox-style)
 #[derive(Debug, Clone, PartialEq)]
 pub struct ComputedStyle {
@@ -1180,6 +1222,8 @@ pub struct ComputedStyle {
     pub visibility: Visibility,
     pub transform: Transform,
     pub box_shadow: Option<BoxShadow>,
+    pub white_space: WhiteSpace,
+    pub text_overflow: TextOverflow,
     /// Declared CSS transitions, applied in order.
     pub transitions: Vec<Transition>,
 }
@@ -1542,6 +1586,16 @@ impl ComputedStyle {
                     self.box_sizing = bs;
                 }
             }
+            "white-space" => {
+                if let Some(ws) = WhiteSpace::parse(value) {
+                    self.white_space = ws;
+                }
+            }
+            "text-overflow" => {
+                if let Some(to) = TextOverflow::parse(value) {
+                    self.text_overflow = to;
+                }
+            }
 
             _ => {}
         }
@@ -1655,6 +1709,8 @@ impl Default for ComputedStyle {
             visibility: Visibility::default(),
             transform: Transform::default(),
             box_shadow: None,
+            white_space: WhiteSpace::default(),
+            text_overflow: TextOverflow::default(),
             transitions: Vec::new(),
         }
     }
