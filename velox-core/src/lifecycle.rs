@@ -1,6 +1,7 @@
 // velox-core/src/lifecycle.rs
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
+use std::rc::Rc;
 
 /// A unique identifier for a component instance
 type ComponentId = usize;
@@ -175,6 +176,104 @@ pub fn has_updated_hooks(id: ComponentId) -> bool {
     UPDATED_HOOKS.with(|h| h.borrow().get(&id).is_some_and(|hooks| !hooks.is_empty()))
 }
 
+// ===== on_resize =====
+//
+// Resize hooks are re-runnable, like updated hooks, and remain registered until
+// the owning component is cleaned up. Each hook is kept behind an `Rc<RefCell<_>>`
+// so the registry map can be released before user code runs; this permits a
+// hook to register another hook or touch component state without a registry
+// borrow panic.
+
+type ResizeHook = dyn FnMut(u32, u32);
+type ResizeHookRef = Rc<RefCell<ResizeHook>>;
+
+thread_local! {
+    #[allow(clippy::type_complexity, clippy::missing_const_for_thread_local)]
+    static RESIZE_HOOKS: RefCell<HashMap<ComponentId, Vec<ResizeHookRef>>> = RefCell::new(HashMap::new());
+    #[allow(clippy::missing_const_for_thread_local)]
+    static LAST_RESIZE_SIZE: Cell<Option<(u32, u32)>> = Cell::new(None);
+}
+
+/// Register a hook to run when the current component's viewport changes.
+///
+/// `width` and `height` are logical/CSS pixels, not physical framebuffer
+/// pixels. The hook is re-runnable and is removed by [`cleanup_component`].
+pub fn on_resize(f: impl FnMut(u32, u32) + 'static) {
+    if let Some(id) = current_component_id() {
+        RESIZE_HOOKS.with(|h| {
+            h.borrow_mut()
+                .entry(id)
+                .or_default()
+                .push(Rc::new(RefCell::new(f)));
+        });
+    } else {
+        log::warn!(
+            "on_resize called without a current component context. \
+             Did you forget to call set_current_component()? The hook will not be registered."
+        );
+    }
+}
+
+/// Run all registered resize hooks for a committed logical viewport size.
+///
+/// The first call establishes the last-seen size and dispatches. Repeated
+/// calls with the same size are ignored. The renderer deliberately does not
+/// call this on its initial frame, so `make_view` remains the sole initial
+/// viewport notification.
+pub fn run_resize_hooks(width: u32, height: u32) {
+    let changed = LAST_RESIZE_SIZE.with(|last| {
+        let previous = last.replace(Some((width, height)));
+        previous != Some((width, height))
+    });
+    if !changed {
+        return;
+    }
+
+    // Clone handles while the registry is borrowed, then drop that borrow
+    // before invoking any user code. A newly registered hook is intentionally
+    // deferred until the next committed change.
+    let hooks: Vec<ResizeHookRef> = RESIZE_HOOKS.with(|h| {
+        h.borrow()
+            .values()
+            .flat_map(|component_hooks| component_hooks.iter().cloned())
+            .collect()
+    });
+
+    for hook in hooks {
+        // `try_borrow_mut` keeps a nested dispatch from panicking if a hook
+        // re-enters this dispatcher while it is already running. The outer
+        // invocation still completes normally, and no registry map guard is
+        // held across either call.
+        if let Ok(mut callback) = hook.try_borrow_mut() {
+            callback(width, height);
+        }
+    }
+}
+
+/// Compatibility name matching the renderer's other global lifecycle helpers.
+pub fn run_all_resize_hooks(width: u32, height: u32) {
+    run_resize_hooks(width, height);
+}
+
+/// Clear all resize hooks for a component (call when component is destroyed).
+pub fn clear_resize_hooks(id: ComponentId) {
+    RESIZE_HOOKS.with(|h| {
+        let mut hooks = h.borrow_mut();
+        hooks.remove(&id);
+        if hooks.is_empty() {
+            // A later component starts with its own initial viewport supplied
+            // by `make_view`; do not let a prior component's last size suppress
+            // its first real committed change.
+            LAST_RESIZE_SIZE.with(|last| last.set(None));
+        }
+    });
+}
+
+/// Check whether a component has any registered resize hooks.
+pub fn has_resize_hooks(id: ComponentId) -> bool {
+    RESIZE_HOOKS.with(|h| h.borrow().get(&id).is_some_and(|hooks| !hooks.is_empty()))
+}
+
 /// Run *all* queued `on_mounted` hooks that have not yet fired.
 ///
 /// Mounted hooks are removed after they run, so this call is idempotent — the
@@ -195,15 +294,17 @@ pub fn run_all_updated_hooks() {
 }
 
 /// Run (and remove) all `before_destroy` / `on_unmounted` hooks for every
-/// component and clear their `on_updated` hooks. The renderer calls this from
-/// `CloseRequested` (window close) and from the drop guard around the event
-/// loop.
+/// component and clear their `on_updated` and resize hooks. The renderer calls
+/// this from `CloseRequested` (window close) and from the drop guard around the
+/// event loop.
 pub fn run_all_destroy_hooks() {
     let ids: Vec<ComponentId> = DESTROY_HOOKS.with(|h| h.borrow().keys().copied().collect());
     for id in ids {
         run_destroy_hooks(id);
     }
     UPDATED_HOOKS.with(|h| h.borrow_mut().clear());
+    RESIZE_HOOKS.with(|h| h.borrow_mut().clear());
+    LAST_RESIZE_SIZE.with(|last| last.set(None));
     MOUNTED_HOOKS.with(|h| h.borrow_mut().clear());
     // `DESTROY_HOOKS` entries were already removed by `run_destroy_hooks`; the
     // clear above covers cases where cleanup_component was not yet called.
@@ -220,6 +321,7 @@ pub fn cleanup_component(id: ComponentId) {
     UPDATED_HOOKS.with(|h| {
         h.borrow_mut().remove(&id);
     });
+    clear_resize_hooks(id);
 }
 
 /// RAII handle that owns a component id and runs destroy+cleanup on drop.
@@ -328,6 +430,23 @@ macro_rules! on_updated {
     };
     ($f:expr) => {
         $crate::lifecycle::on_updated($f)
+    };
+}
+
+/// Register a hook to run when the viewport is resized.
+///
+/// Pass a closure with two logical-pixel arguments:
+/// ```rust,ignore
+/// velox_core::lifecycle::set_current_component(velox_core::lifecycle::generate_component_id());
+/// velox_core::on_resize!(|width, height| println!("resized: {width}x{height}"));
+/// ```
+#[macro_export]
+macro_rules! on_resize {
+    ({ $($body:tt)* }) => {
+        $crate::lifecycle::on_resize(move |width, height| { $($body)* })
+    };
+    ($f:expr) => {
+        $crate::lifecycle::on_resize($f)
     };
 }
 

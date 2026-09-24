@@ -55,6 +55,20 @@ pub fn logical_size(width: i32, height: i32, scale_factor: f32) -> (u32, u32) {
     vp.logical_size()
 }
 
+/// Notify resize hooks only after a coalesced physical resize has committed and
+/// its logical viewport differs from the last committed size.
+#[cfg(feature = "skia-native")]
+fn dispatch_resize_if_changed(
+    committed: bool,
+    logical: (u32, u32),
+    last_logical: &mut Option<(u32, u32)>,
+) {
+    if committed && *last_logical != Some(logical) {
+        velox_core::lifecycle::run_resize_hooks(logical.0, logical.1);
+        *last_logical = Some(logical);
+    }
+}
+
 /// Build hit-test targets from a precomputed layout. No layout recompute here.
 #[cfg(feature = "skia-native")]
 fn recompute_targets(
@@ -913,6 +927,9 @@ where
     // R-L3: coalesce rapid resize drags — only last size per frame materializes.
     // Surface recreation (raster_n32_premul) is deferred to RedrawRequested.
     let mut pending_resize: Option<(u32, u32)> = None;
+    // The initial viewport is delivered through `make_view`; only a later
+    // committed resize should notify lifecycle hooks.
+    let mut last_resize_size: Option<(u32, u32)> = None;
 
     // Render first frame immediately before entering the event loop.
     // This ensures the window has content even on platforms where
@@ -922,6 +939,7 @@ where
     if let Some(s) = &mut renderer.surface {
         s.set_scale_factor(scale_factor);
         let (vw, vh) = logical_size(s.width, s.height, scale_factor);
+        last_resize_size = Some((vw, vh));
         let (vnode_raw, sheet) = make_view(vw, vh);
         let mut next_id = 1u32;
         let vnode_tagged = with_hover_ids(&vnode_raw, &mut next_id);
@@ -1204,9 +1222,13 @@ where
                     }
                     Event::RedrawRequested(_) => {
                         // R-L3: materialize any coalesced resize exactly once per frame.
+                        let mut committed_resize = false;
                         if let Some((pw, ph)) = pending_resize.take() {
-                            if let Err(e) = renderer.resize(pw as i32, ph as i32) {
-                                log::warn!("renderer resize failed ({}x{}): {}", pw, ph, e);
+                            match renderer.resize(pw as i32, ph as i32) {
+                                Ok(()) => committed_resize = true,
+                                Err(e) => {
+                                    log::warn!("renderer resize failed ({}x{}): {}", pw, ph, e);
+                                }
                             }
                             if let Some(presenter) = presenter.as_mut() {
                                 if let Err(e) = presenter.resize(pw, ph) {
@@ -1220,6 +1242,11 @@ where
                         if let Some(s) = &mut renderer.surface {
                             s.set_scale_factor(scale_factor);
                             let (vw, vh) = logical_size(s.width, s.height, scale_factor);
+                            dispatch_resize_if_changed(
+                                committed_resize,
+                                (vw, vh),
+                                &mut last_resize_size,
+                            );
                             let (vnode_raw, sheet) = make_view(vw, vh);
                             let mut next_id = 1u32;
                             let vnode_tagged = with_hover_ids(&vnode_raw, &mut next_id);
@@ -1470,6 +1497,9 @@ where
     let mut did_mount_hmr = false;
     // R-L3: coalesce rapid resize drags in HMR loop too (only last size per frame).
     let mut pending_resize: Option<(u32, u32)> = None;
+    // The initial viewport is delivered through `make_view`; only a later
+    // committed resize should notify lifecycle hooks.
+    let mut last_resize_size: Option<(u32, u32)> = None;
 
     // Render first frame immediately before entering the event loop.
     // This ensures the window has content even on platforms where
@@ -1478,6 +1508,7 @@ where
     if let Some(s) = &mut renderer.surface {
         s.set_scale_factor(scale_factor);
         let (vw, vh) = logical_size(s.width, s.height, scale_factor);
+        last_resize_size = Some((vw, vh));
         let (vnode_raw, sheet) = make_view(vw, vh);
         let mut next_id = 1u32;
         let vnode_tagged = with_hover_ids(&vnode_raw, &mut next_id);
@@ -1764,9 +1795,13 @@ where
                     }
                     Event::RedrawRequested(_) => {
                         // R-L3: materialize any coalesced resize exactly once per frame.
+                        let mut committed_resize = false;
                         if let Some((pw, ph)) = pending_resize.take() {
-                            if let Err(e) = renderer.resize(pw as i32, ph as i32) {
-                                log::warn!("renderer resize failed ({}x{}): {}", pw, ph, e);
+                            match renderer.resize(pw as i32, ph as i32) {
+                                Ok(()) => committed_resize = true,
+                                Err(e) => {
+                                    log::warn!("renderer resize failed ({}x{}): {}", pw, ph, e);
+                                }
                             }
                             if let Some(presenter) = presenter.as_mut() {
                                 if let Err(e) = presenter.resize(pw, ph) {
@@ -1779,6 +1814,11 @@ where
                         if let Some(s) = &mut renderer.surface {
                             s.set_scale_factor(scale_factor);
                             let (vw, vh) = logical_size(s.width, s.height, scale_factor);
+                            dispatch_resize_if_changed(
+                                committed_resize,
+                                (vw, vh),
+                                &mut last_resize_size,
+                            );
                             let (vnode_raw, sheet) = make_view(vw, vh);
                             let mut next_id = 1u32;
                             let vnode_tagged = with_hover_ids(&vnode_raw, &mut next_id);
