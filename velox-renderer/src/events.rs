@@ -40,6 +40,13 @@ pub struct ClickTarget {
     pub payload: Option<String>,
     pub z_index: i32,
     pub order: i32,
+    /// Intersected clip stack (`parent_clip ∩ node.clip`) at collection
+    /// time. Hit testing rejects points outside this rect: content that
+    /// protrudes past an `overflow:hidden`/scroll ancestor stays
+    /// unclickable even though its rect contains the point.
+    pub clip: Option<velox_dom::layout::Rect>,
+    /// Stacking-context position used for stacking-aware hit ordering.
+    pub sc: StackCtx,
 }
 
 #[derive(Debug, Clone)]
@@ -48,6 +55,10 @@ pub struct HoverTarget {
     pub id: u32,
     pub z_index: i32,
     pub order: i32,
+    /// Intersected clip stack at collection time (see `ClickTarget::clip`).
+    pub clip: Option<velox_dom::layout::Rect>,
+    /// Stacking-context position used for stacking-aware hit ordering.
+    pub sc: StackCtx,
 }
 
 /// A focusable text-input element. `path` records the child source-index path
@@ -59,6 +70,50 @@ pub struct InputTarget {
     pub path: Vec<usize>,
     pub z_index: i32,
     pub order: i32,
+    /// Intersected clip stack at collection time (see `ClickTarget::clip`).
+    pub clip: Option<velox_dom::layout::Rect>,
+    /// Stacking-context position used for stacking-aware hit ordering.
+    pub sc: StackCtx,
+}
+
+/// Stacking-context position of a node, threaded through the `collect_*`
+/// walk and stored on hit-test targets. Stacking contexts form atomic
+/// groups, so a descendant compares against outside targets by its
+/// outermost group's z-index, not its own:
+///
+/// - `group_z`: z-index of the outermost stacking-context ancestor-or-self
+///   (0 while no stacking context has been entered — the root flow).
+/// - `depth`: number of stacking-context ancestors-or-self; nested contexts
+///   paint above their parents' backgrounds and in-flow siblings.
+///
+/// Hit testing sorts by `(group_z, depth, z_index, order)` descending:
+/// stacking-context group first, depth before the z-index fallback, and
+/// source order as the final tiebreaker.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StackCtx {
+    pub group_z: i32,
+    pub depth: usize,
+}
+
+impl StackCtx {
+    /// Position of the tree root (no enclosing stacking context).
+    pub const ROOT: Self = Self {
+        group_z: 0,
+        depth: 0,
+    };
+
+    /// Position of `node` when entered from `self` (its parent context).
+    fn enter(&self, node: &velox_dom::layout::LayoutNode) -> Self {
+        let creates = node.stacking_context;
+        Self {
+            group_z: if self.depth == 0 && creates {
+                node.z_index
+            } else {
+                self.group_z
+            },
+            depth: self.depth + usize::from(creates),
+        }
+    }
 }
 
 pub fn is_hoverable(tag: &str, props: &velox_dom::Props) -> bool {
@@ -93,18 +148,34 @@ fn intersect(
     })
 }
 
+/// Advance the intersected clip stack one level: `parent_clip ∩ node.clip`.
+/// Returns `Some(next)` where `next` is the intersected clip (`None` when
+/// nothing clips this node), or `None` when the two clips are disjoint — the
+/// node and its subtree are fully clipped away and can never be hit, so
+/// callers must prune them instead of treating them as unclipped.
+fn clip_stack_next(
+    parent: Option<velox_dom::layout::Rect>,
+    node: &velox_dom::layout::LayoutNode,
+) -> Option<Option<velox_dom::layout::Rect>> {
+    match (parent, node.clip) {
+        (Some(c), Some(lc)) => intersect(c, lc).map(Some),
+        (None, Some(lc)) => Some(Some(lc)),
+        (Some(c), None) => Some(Some(c)),
+        (None, None) => Some(None),
+    }
+}
+
 pub fn collect_click_targets(
     vnode: &VNode,
     layout: &velox_dom::layout::LayoutNode,
     clip: Option<velox_dom::layout::Rect>,
+    sc: StackCtx,
     order: &mut i32,
     out: &mut Vec<ClickTarget>,
 ) {
-    let next_clip = match (clip, layout.clip) {
-        (Some(c), Some(lc)) => intersect(c, lc),
-        (None, Some(lc)) => Some(lc),
-        (Some(c), None) => Some(c),
-        (None, None) => None,
+    let sc = sc.enter(layout);
+    let Some(next_clip) = clip_stack_next(clip, layout) else {
+        return;
     };
     match vnode {
         VNode::Text(_) => {}
@@ -125,6 +196,8 @@ pub fn collect_click_targets(
                         payload,
                         z_index: layout.z_index,
                         order: ord,
+                        clip: next_clip,
+                        sc,
                     });
                 }
             }
@@ -146,7 +219,7 @@ pub fn collect_click_targets(
                     && let Some(src_idx) = child_layout.source_index
                     && let Some(child) = children.get(src_idx)
                 {
-                    collect_click_targets(child, child_layout, next_clip, order, out);
+                    collect_click_targets(child, child_layout, next_clip, sc, order, out);
                 }
             }
         }
@@ -157,14 +230,13 @@ pub fn collect_hover_targets(
     vnode: &VNode,
     layout: &velox_dom::layout::LayoutNode,
     clip: Option<velox_dom::layout::Rect>,
+    sc: StackCtx,
     order: &mut i32,
     out: &mut Vec<HoverTarget>,
 ) {
-    let next_clip = match (clip, layout.clip) {
-        (Some(c), Some(lc)) => intersect(c, lc),
-        (None, Some(lc)) => Some(lc),
-        (Some(c), None) => Some(c),
-        (None, None) => None,
+    let sc = sc.enter(layout);
+    let Some(next_clip) = clip_stack_next(clip, layout) else {
+        return;
     };
     match vnode {
         VNode::Text(_) => {}
@@ -191,6 +263,8 @@ pub fn collect_hover_targets(
                         id,
                         z_index: layout.z_index,
                         order: ord,
+                        clip: next_clip,
+                        sc,
                     });
                 }
             }
@@ -212,7 +286,7 @@ pub fn collect_hover_targets(
                     && let Some(src_idx) = child_layout.source_index
                     && let Some(child) = children.get(src_idx)
                 {
-                    collect_hover_targets(child, child_layout, next_clip, order, out);
+                    collect_hover_targets(child, child_layout, next_clip, sc, order, out);
                 }
             }
         }
@@ -227,21 +301,51 @@ fn rects_intersect(a: velox_dom::layout::Rect, b: velox_dom::layout::Rect) -> bo
     x1 > x0 && y1 > y0
 }
 
-pub fn hit_test_click(targets: &[ClickTarget], x: f32, y: f32) -> Option<(&str, Option<&str>)> {
-    let mut ordered: Vec<(i32, usize)> = targets
+/// Inclusive point-in-rect test on a layout-domain (integer logical px) rect.
+fn rect_contains_point(r: velox_dom::layout::Rect, x: f32, y: f32) -> bool {
+    let x0 = r.x as f32;
+    let y0 = r.y as f32;
+    let x1 = (r.x + r.w) as f32;
+    let y1 = (r.y + r.h) as f32;
+    x >= x0 && x <= x1 && y >= y0 && y <= y1
+}
+
+/// Stacking-aware topmost-first ordering for hit testing: sort descending by
+/// stacking-context group z-index, then context depth, then the target's
+/// own z-index (the fallback within the same group/depth), then collection
+/// order (source-order tiebreak).
+fn stack_order_desc<T>(
+    targets: &[T],
+    z_index: impl Fn(&T) -> i32,
+    order: impl Fn(&T) -> i32,
+    sc: impl Fn(&T) -> StackCtx,
+) -> Vec<usize> {
+    let mut ordered: Vec<(i32, usize, i32, i32, usize)> = targets
         .iter()
         .enumerate()
-        .map(|(i, t)| (t.order, i))
+        .map(|(i, t)| (sc(t).group_z, sc(t).depth, z_index(t), order(t), i))
         .collect();
-    ordered.sort_by(|a, b| b.0.cmp(&a.0).then(b.1.cmp(&a.1)));
-    for (_, idx) in ordered {
+    ordered.sort_by(|a, b| {
+        b.0.cmp(&a.0)
+            .then(b.1.cmp(&a.1))
+            .then(b.2.cmp(&a.2))
+            .then(b.3.cmp(&a.3))
+    });
+    ordered.into_iter().map(|(_, _, _, _, i)| i).collect()
+}
+
+pub fn hit_test_click(targets: &[ClickTarget], x: f32, y: f32) -> Option<(&str, Option<&str>)> {
+    for idx in stack_order_desc(targets, |t| t.z_index, |t| t.order, |t| t.sc) {
         let target = &targets[idx];
-        let r = target.rect;
-        let x0 = r.x as f32;
-        let y0 = r.y as f32;
-        let x1 = (r.x + r.w) as f32;
-        let y1 = (r.y + r.h) as f32;
-        if x >= x0 && x <= x1 && y >= y0 && y <= y1 {
+        // Reject points outside the target's intersected clip stack: a
+        // protrusion clipped away by an overflow/scroll ancestor is not
+        // clickable even though the target rect contains the point.
+        if let Some(c) = target.clip
+            && !rect_contains_point(c, x, y)
+        {
+            continue;
+        }
+        if rect_contains_point(target.rect, x, y) {
             return Some((target.handler.as_str(), target.payload.as_deref()));
         }
     }
@@ -254,15 +358,14 @@ pub fn collect_input_targets(
     vnode: &VNode,
     layout: &velox_dom::layout::LayoutNode,
     clip: Option<velox_dom::layout::Rect>,
+    sc: StackCtx,
     path: &mut Vec<usize>,
     order: &mut i32,
     out: &mut Vec<InputTarget>,
 ) {
-    let next_clip = match (clip, layout.clip) {
-        (Some(c), Some(lc)) => intersect(c, lc),
-        (None, Some(lc)) => Some(lc),
-        (Some(c), None) => Some(c),
-        (None, None) => None,
+    let sc = sc.enter(layout);
+    let Some(next_clip) = clip_stack_next(clip, layout) else {
+        return;
     };
     match vnode {
         VNode::Text(_) => {}
@@ -286,6 +389,8 @@ pub fn collect_input_targets(
                     path: path.clone(),
                     z_index: layout.z_index,
                     order: ord,
+                    clip: next_clip,
+                    sc,
                 });
             }
             let mut ordered: Vec<(i32, usize)> = layout
@@ -307,7 +412,7 @@ pub fn collect_input_targets(
                     && let Some(child) = children.get(src_idx)
                 {
                     path.push(src_idx);
-                    collect_input_targets(child, child_layout, next_clip, path, order, out);
+                    collect_input_targets(child, child_layout, next_clip, sc, path, order, out);
                     path.pop();
                 }
             }
@@ -317,20 +422,15 @@ pub fn collect_input_targets(
 
 /// Return the topmost text-input target under a point, if any.
 pub fn hit_test_input(targets: &[InputTarget], x: f32, y: f32) -> Option<&InputTarget> {
-    let mut ordered: Vec<(i32, usize)> = targets
-        .iter()
-        .enumerate()
-        .map(|(i, t)| (t.order, i))
-        .collect();
-    ordered.sort_by(|a, b| b.0.cmp(&a.0).then(b.1.cmp(&a.1)));
-    for (_, idx) in ordered {
+    for idx in stack_order_desc(targets, |t| t.z_index, |t| t.order, |t| t.sc) {
         let target = &targets[idx];
-        let r = target.rect;
-        let x0 = r.x as f32;
-        let y0 = r.y as f32;
-        let x1 = (r.x + r.w) as f32;
-        let y1 = (r.y + r.h) as f32;
-        if x >= x0 && x <= x1 && y >= y0 && y <= y1 {
+        // Points outside the intersected clip stack cannot focus the input.
+        if let Some(c) = target.clip
+            && !rect_contains_point(c, x, y)
+        {
+            continue;
+        }
+        if rect_contains_point(target.rect, x, y) {
             return Some(target);
         }
     }
@@ -338,20 +438,15 @@ pub fn hit_test_input(targets: &[InputTarget], x: f32, y: f32) -> Option<&InputT
 }
 
 pub fn hit_test_hover(targets: &[HoverTarget], x: f32, y: f32) -> Option<u32> {
-    let mut ordered: Vec<(i32, usize)> = targets
-        .iter()
-        .enumerate()
-        .map(|(i, t)| (t.order, i))
-        .collect();
-    ordered.sort_by(|a, b| b.0.cmp(&a.0).then(b.1.cmp(&a.1)));
-    for (_, idx) in ordered {
+    for idx in stack_order_desc(targets, |t| t.z_index, |t| t.order, |t| t.sc) {
         let target = &targets[idx];
-        let r = target.rect;
-        let x0 = r.x as f32;
-        let y0 = r.y as f32;
-        let x1 = (r.x + r.w) as f32;
-        let y1 = (r.y + r.h) as f32;
-        if x >= x0 && x <= x1 && y >= y0 && y <= y1 {
+        // Points outside the intersected clip stack do not hover the target.
+        if let Some(c) = target.clip
+            && !rect_contains_point(c, x, y)
+        {
+            continue;
+        }
+        if rect_contains_point(target.rect, x, y) {
             return Some(target.id);
         }
     }
@@ -381,7 +476,9 @@ pub fn hit_test_scrollable(
         depth: usize,
     ) {
         if node.scrollable && contains(node.rect, x, y) {
-            // Prefer deeper depth; if same depth, later (higher source order) but depth is primary
+            // Prefer deeper depth; at equal depth the first candidate found
+            // (earliest source order) wins — the guard below keeps the
+            // existing best on ties.
             let candidate = path.clone();
             match best {
                 Some((_, best_depth)) if depth <= *best_depth => {}
@@ -487,10 +584,8 @@ pub fn apply_wheel_scroll(
     // Seed from the node's current (possibly synthetic scroll-top) offset.
     let entry = offsets.entry(path).or_insert(node.scroll_y as f32);
     let before = *entry;
-    let mut state = velox_dom::layout::ScrollState {
-        offset_y: before,
-        max_y: node.max_scroll_y as f32,
-    };
+    let mut state = velox_dom::layout::ScrollState::new(node.max_scroll_y as f32);
+    state.offset_y = before;
     state.on_wheel(delta_y);
     *entry = state.offset_y;
     state.offset_y != before

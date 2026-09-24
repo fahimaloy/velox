@@ -56,14 +56,36 @@ fn recompute_targets(
 ) {
     click_targets.clear();
     let mut order = 0;
-    crate::events::collect_click_targets(vnode, layout, None, &mut order, click_targets);
+    crate::events::collect_click_targets(
+        vnode,
+        layout,
+        None,
+        crate::events::StackCtx::ROOT,
+        &mut order,
+        click_targets,
+    );
     hover_targets.clear();
     let mut order = 0;
-    crate::events::collect_hover_targets(vnode, layout, None, &mut order, hover_targets);
+    crate::events::collect_hover_targets(
+        vnode,
+        layout,
+        None,
+        crate::events::StackCtx::ROOT,
+        &mut order,
+        hover_targets,
+    );
     input_targets.clear();
     let mut order = 0;
     let mut path = Vec::new();
-    crate::events::collect_input_targets(vnode, layout, None, &mut path, &mut order, input_targets);
+    crate::events::collect_input_targets(
+        vnode,
+        layout,
+        None,
+        crate::events::StackCtx::ROOT,
+        &mut path,
+        &mut order,
+        input_targets,
+    );
 }
 
 #[cfg(feature = "skia-native")]

@@ -141,6 +141,7 @@ fn single_layout_per_redraw_shares_layout() {
         &vnode,
         &layout,
         None,
+        velox_renderer::events::StackCtx::ROOT,
         &mut order,
         &mut click_targets,
     );
