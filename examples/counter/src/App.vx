@@ -1,36 +1,53 @@
 <template>
-  <div class="app">
-    <h1 class="title">{{ title }}</h1>
-    <div class="card">
-      <p class="count">{{ count }}</p>
-      <div class="buttons">
-        <button class="btn inc" @click="increment">+1</button>
-        <button class="btn dec" @click="decrement">-1</button>
-        <button class="btn reset" @click="reset">Reset</button>
-      </div>
-    </div>
-  </div>
+  <div class="app"><h1 class="title">{{ title }}</h1><div class="card"><p class="count">{{ count }}</p><p class="status">{{ status }}</p><button class="btn inc" @click="increment">+1</button><button class="btn dec" @click="decrement">-1</button><button class="btn reset" @click="reset">Reset</button></div></div>
 </template>
 
 <script setup>
 use velox_core::ergonomics::Ref;
 
 pub struct State {
-    // `Ref<i32>` (created with the `r#ref!()` macro) wraps `Rc<Signal<i32>>`,
-    // so `set()` notifies subscribers and the renderer redraws reactively —
-    // unlike `Cell`, whose mutations the reactivity system cannot see.
+    // A single reactive integer. `r#ref!` expands to
+    // `Ref::new(value)`, which is the ergonomic wrapper around
+    // `Rc<Signal<T>>` for scalar state.
     counter: Ref<i32>,
 }
 
 impl State {
     pub fn new() -> Self {
-        Self { counter: velox_core::r#ref!(0) }
+        Self {
+            counter: velox_core::r#ref!(0),
+        }
     }
-    pub fn title(&self) -> String { String::from("Velox Counter") }
-    pub fn count(&self) -> i32 { self.counter.get() }
-    pub fn increment(&self) { self.counter.set(self.counter.get() + 1); }
-    pub fn decrement(&self) { self.counter.set(self.counter.get() - 1); }
-    pub fn reset(&self) { self.counter.set(0); }
+
+    pub fn title(&self) -> String {
+        String::from("Velox Counter")
+    }
+
+    pub fn count(&self) -> i32 {
+        self.counter.get()
+    }
+
+    // Derived label rendered under the number. It reads the same signal, so
+    // the renderer picks it up on the next frame after an increment.
+    pub fn status(&self) -> String {
+        if self.counter.get() > 0 {
+            String::from("positive")
+        } else {
+            String::from("not positive")
+        }
+    }
+
+    pub fn increment(&self) {
+        self.counter.set(self.counter.get() + 1);
+    }
+
+    pub fn decrement(&self) {
+        self.counter.set(self.counter.get() - 1);
+    }
+
+    pub fn reset(&self) {
+        self.counter.set(0);
+    }
 }
 </script>
 
@@ -39,48 +56,64 @@ impl State {
     width: 100%;
     min-height: 100vh;
     display: block;
+    padding: 6px 14px 20px;
     background: #0f172a;
-    color: #f8fafc;
+    color: #f1f5f9;
     font-family: system-ui, -apple-system, sans-serif;
 }
 .title {
+    display: block;
+    margin: 0 0 8px 0;
     text-align: center;
-    font-size: 32px;
-    font-weight: bold;
-    padding: 32px 0 16px;
-    margin: 0;
+    font-size: 18px;
+    font-weight: 700;
 }
+/* A fixed width plus `margin: 0 auto` centers the card in the viewport. */
 .card {
+    display: block;
+    width: 420px;
+    margin: 0 auto;
+    padding: 12px 14px;
     background: #1e293b;
-    border-radius: 16px;
-    padding: 40px;
+    border-radius: 12px;
     text-align: center;
-    margin: 0 32px;
 }
 .count {
-    font-size: 64px;
-    font-weight: bold;
+    display: block;
+    margin: 0 0 4px 0;
+    font-size: 34px;
+    font-weight: 700;
     color: #38bdf8;
-    margin: 0 0 24px;
 }
-.buttons {
-    display: flex;
-    gap: 16px;
-    justify-content: center;
+.status {
+    display: block;
+    margin: 0 0 6px 0;
+    font-size: 13px;
+    color: #94a3b8;
 }
+/*
+ * Velox lays buttons out as blocks, so the three actions stack full width.
+ * `text-align` centers each label inside its own button.
+ */
 .btn {
-    padding: 12px 24px;
-    font-size: 18px;
-    font-weight: 600;
+    display: block;
+    margin: 0 0 6px 0;
+    padding: 7px 12px;
     border: none;
     border-radius: 8px;
+    font-size: 15px;
+    font-weight: 600;
+    color: #0f172a;
+    text-align: center;
     cursor: pointer;
-    color: #ffffff;
 }
-.inc { background: #22c55e; }
-.inc:hover { background: #16a34a; }
-.dec { background: #ef4444; }
-.dec:hover { background: #dc2626; }
-.reset { background: #64748b; }
-.reset:hover { background: #475569; }
+.inc {
+    background: #4ade80;
+}
+.dec {
+    background: #fbbf24;
+}
+.reset {
+    background: #94a3b8;
+}
 </style>

@@ -24,7 +24,7 @@ fn main() {
 
     let on_event = app::make_on_event(Arc::clone(&state));
 
-    let get_title = || "Velox Counter".to_string();
+    let get_title = || "Velox Showcase".to_string();
 
     // HMR when the dev server is running; otherwise a normal window.
     if let Some(port) = velox_renderer::hmr_config() {
@@ -32,7 +32,7 @@ fn main() {
         let hmr_rx = Arc::new(std::sync::Mutex::new(hmr_rx));
         velox_renderer::run_hmr_client(port, hmr_tx);
         let _ = velox_renderer::run_window_vnode_skia_with_hmr(
-            "Velox Counter",
+            "Velox Showcase",
             make_view,
             on_event,
             get_title,
@@ -40,6 +40,6 @@ fn main() {
         );
     } else {
         let _ =
-            velox_renderer::run_window_vnode_skia("Velox Counter", make_view, on_event, get_title);
+            velox_renderer::run_window_vnode_skia("Velox Showcase", make_view, on_event, get_title);
     }
 }

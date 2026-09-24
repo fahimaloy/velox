@@ -29,32 +29,24 @@ fn template_project_main_rs_uses_w_h() {
     );
 }
 
-#[test]
-fn example_counter_main_rs_uses_w_h() {
-    let p = workspace_root().join("examples/counter/src/main.rs");
-    let s = read_template_main(&p);
-    assert!(
-        !s.contains("|_w"),
-        "counter main.rs must not contain |_w discard"
-    );
-    assert!(
-        s.contains("w: u32, h: u32"),
-        "counter main.rs must declare w,h viewport params"
-    );
-}
+/// Every shipped example must wire the renderer viewport through `make_view`
+/// the same way the `velox init` template does.
+const EXAMPLES: [&str; 3] = ["counter", "todo", "showcase"];
 
 #[test]
-fn example_todo_main_rs_uses_w_h() {
-    let p = workspace_root().join("examples/todo/src/main.rs");
-    let s = read_template_main(&p);
-    assert!(
-        !s.contains("|_w"),
-        "todo main.rs must not contain |_w discard"
-    );
-    assert!(
-        s.contains("w: u32, h: u32"),
-        "todo main.rs must declare w,h viewport params"
-    );
+fn example_main_rs_uses_w_h() {
+    for name in EXAMPLES {
+        let p = workspace_root().join(format!("examples/{name}/src/main.rs"));
+        let s = read_template_main(&p);
+        assert!(
+            !s.contains("|_w"),
+            "{name} main.rs must not contain |_w discard"
+        );
+        assert!(
+            s.contains("w: u32, h: u32"),
+            "{name} main.rs must declare w,h viewport params"
+        );
+    }
 }
 
 #[test]
@@ -79,6 +71,7 @@ fn app_vx_roots_are_viewport_filling() {
         manifest.join("templates/project/src/App.vx"),
         ws.join("examples/counter/src/App.vx"),
         ws.join("examples/todo/src/App.vx"),
+        ws.join("examples/showcase/src/App.vx"),
     ];
     for p in &paths {
         let s = std::fs::read_to_string(p).unwrap_or_else(|e| panic!("read {}: {e}", p.display()));

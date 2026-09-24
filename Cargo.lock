@@ -2973,6 +2973,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "velox-example-showcase"
+version = "0.1.0"
+dependencies = [
+ "velox-cli",
+ "velox-core",
+ "velox-dom",
+ "velox-renderer",
+ "velox-style",
+]
+
+[[package]]
 name = "velox-example-todo"
 version = "0.1.0"
 dependencies = [

@@ -50,8 +50,9 @@ The Velox repository is organized into modular crates:
 - **`velox-cli`** — Developer workflow commands
 
 Plus examples:
-- `examples/counter`
-- `examples/todo`
+- `examples/counter` — reactive counter (signals, event handlers)
+- `examples/todo` — todo list (components, `v-for`, filters, scrolling)
+- `examples/showcase` — layout gallery (spacing, flex, centering, scrolling)
 
 ---
 
@@ -268,7 +269,7 @@ cd temp-counter
 # Or build an example from the Velox repository:
 cd /path/to/velox
 velox build examples/counter/src/App.vx
-cargo run --example counter
+cargo run -p velox-example-counter
 ```
 
 ---
@@ -584,6 +585,9 @@ cargo run -p velox-example-counter
 
 # Build and run the todo app
 cargo run -p velox-example-todo
+
+# Build and run the layout showcase
+cargo run -p velox-example-showcase
 ```
 
 ---
@@ -662,9 +666,8 @@ velox build src/App.vx
 cd ..
 
 # 4. Build and test examples
-cd examples/counter
-velox lint src/
-cargo run
+cargo run -p velox-cli -- lint examples   # lints every example .vx file
+cargo run -p velox-example-counter
 
 # 5. Final manual review
 # - Verify documentation accuracy
