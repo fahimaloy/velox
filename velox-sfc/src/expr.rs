@@ -857,6 +857,172 @@ fn flatten_dot_path(expr: &Expr) -> Option<String> {
     }
 }
 
+// ── Script lint ─────────────────────────────────────────────────────────────
+
+/// Lint a `<script>` body for non-reactive interior-mutability storage.
+///
+/// `std::cell::Cell` and `std::cell::RefCell` hold state that Velox's
+/// reactivity system cannot observe: mutating them does not notify
+/// subscribers, so the UI only updates when something else happens to
+/// trigger a redraw. Scripts should use the reactive primitives instead —
+/// `ref!(…)` for a single value, `signal!(…)` (i.e. `Rc<Signal<T>>`) for
+/// shared or derived state.
+///
+/// This is a warning-only lint: it never fails a build. Callers such as the
+/// `velox lint` command decide how (or whether) to surface the messages;
+/// the compile path stays quiet.
+///
+/// Matching is identifier-aware:
+/// - `Cell` is matched as a whole identifier, so `RefCell` (which merely
+///   ends in "Cell") is reported once, as `RefCell`, and reactive names
+///   such as `ref!`, `Ref`, `Signal`, and `ShallowRef` never match.
+/// - Comments and string/char literals are ignored, so prose that merely
+///   mentions `Cell` does not trigger the lint.
+pub fn lint_script(script: &str) -> Vec<String> {
+    let cleaned = strip_comments_and_strings(script);
+    let mut warnings = Vec::new();
+    for (line_idx, line) in cleaned.lines().enumerate() {
+        for token in ["RefCell", "Cell"] {
+            if let Some(col) = find_whole_ident(line, token) {
+                warnings.push(format!(
+                    "warning: `{token}` (script line {}, column {}) is not reactive — mutations do \
+                     not notify the renderer; use ref!(…) for a single value or signal!(…) \
+                     for shared/derived state instead",
+                    line_idx + 1,
+                    col + 1,
+                ));
+            }
+        }
+    }
+    warnings
+}
+
+/// Find the first whole-identifier occurrence of `ident` in `line` and
+/// return its 0-based byte column, or `None` if there is none.
+///
+/// A match must not be preceded or followed by an identifier byte
+/// (`[A-Za-z0-9_]`), so `Cell` inside `MyCell` or `RefCell` never matches.
+fn find_whole_ident(line: &str, ident: &str) -> Option<usize> {
+    debug_assert!(!ident.is_empty() && ident.is_ascii());
+    let bytes = line.as_bytes();
+    let mut start = 0;
+    while let Some(rel) = line[start..].find(ident) {
+        let at = start + rel;
+        let before_ok = at == 0 || !is_ident_byte(bytes[at - 1]);
+        let end = at + ident.len();
+        let after_ok = end >= bytes.len() || !is_ident_byte(bytes[end]);
+        if before_ok && after_ok {
+            return Some(at);
+        }
+        start = end;
+    }
+    None
+}
+
+fn is_ident_byte(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || b == b'_'
+}
+
+/// Replace comments and string/char literals with spaces (preserving
+/// newlines) so [`lint_script`] can report accurate line/column numbers
+/// while ignoring prose that merely mentions `Cell`/`RefCell`.
+///
+/// Same-length output keeps every offset identical to the input. Raw
+/// strings (`r"…"`/`r#"…"#`) are mostly handled too: their quoted body is
+/// blanked like a normal string, which at worst yields a warning-only false
+/// negative, never a missed occurrence in real code.
+fn strip_comments_and_strings(src: &str) -> String {
+    let bytes = src.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'/' if bytes.get(i + 1) == Some(&b'/') => {
+                // Line comment: blank to the end of the line, keep the newline.
+                out.extend_from_slice(b"  ");
+                i += 2;
+                while i < bytes.len() && bytes[i] != b'\n' {
+                    out.push(b' ');
+                    i += 1;
+                }
+            }
+            b'/' if bytes.get(i + 1) == Some(&b'*') => {
+                // Block comment: blank through the closing `*/`, keep newlines.
+                out.extend_from_slice(b"  ");
+                i += 2;
+                let mut depth = 1;
+                while i < bytes.len() && depth > 0 {
+                    if bytes[i] == b'/' && bytes.get(i + 1) == Some(&b'*') {
+                        depth += 1;
+                        out.extend_from_slice(b"  ");
+                        i += 2;
+                    } else if bytes[i] == b'*' && bytes.get(i + 1) == Some(&b'/') {
+                        depth -= 1;
+                        out.extend_from_slice(b"  ");
+                        i += 2;
+                    } else {
+                        out.push(if bytes[i] == b'\n' { b'\n' } else { b' ' });
+                        i += 1;
+                    }
+                }
+            }
+            b'"' => {
+                // String literal: blank through the closing quote.
+                out.push(b' ');
+                i += 1;
+                while i < bytes.len() {
+                    if bytes[i] == b'\\' && i + 1 < bytes.len() {
+                        out.extend_from_slice(b"  ");
+                        i += 2;
+                    } else if bytes[i] == b'"' {
+                        out.push(b' ');
+                        i += 1;
+                        break;
+                    } else {
+                        out.push(if bytes[i] == b'\n' { b'\n' } else { b' ' });
+                        i += 1;
+                    }
+                }
+            }
+            b'\'' => {
+                // Char literal ('x', '\n', '\u{1F600}', '"') vs lifetime ('a).
+                if let Some(len) = char_literal_len(&bytes[i..]) {
+                    out.extend(std::iter::repeat(b' ').take(len));
+                    i += len;
+                } else {
+                    out.push(b'\'');
+                    i += 1;
+                }
+            }
+            b => {
+                out.push(b);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8(out).unwrap_or_default()
+}
+
+/// If `bytes` starts at `'` and forms a char literal, return its byte
+/// length; otherwise return `None` (the quote is likely a lifetime marker).
+fn char_literal_len(bytes: &[u8]) -> Option<usize> {
+    if bytes.first() != Some(&b'\'') {
+        return None;
+    }
+    // `'x'` and `'\…'` escapes are short; scan a small window for the
+    // closing quote and bail out (treating it as a lifetime) if none exists.
+    let limit = bytes.len().min(12);
+    let mut j = 1;
+    while j < limit {
+        match bytes[j] {
+            b'\'' => return Some(j + 1),
+            b'\n' => return None,
+            _ => j += 1,
+        }
+    }
+    None
+}
+
 // ── Tests ────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]

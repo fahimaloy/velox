@@ -13,15 +13,18 @@
 </template>
 
 <script setup>
-use std::cell::Cell;
+use velox_core::ergonomics::Ref;
 
 pub struct State {
-    counter: Cell<i32>,
+    // `Ref<i32>` (created with the `r#ref!()` macro) wraps `Rc<Signal<i32>>`,
+    // so `set()` notifies subscribers and the renderer redraws reactively —
+    // unlike `Cell`, whose mutations the reactivity system cannot see.
+    counter: Ref<i32>,
 }
 
 impl State {
     pub fn new() -> Self {
-        Self { counter: Cell::new(0) }
+        Self { counter: velox_core::r#ref!(0) }
     }
     pub fn title(&self) -> String { String::from("Velox Counter") }
     pub fn count(&self) -> i32 { self.counter.get() }

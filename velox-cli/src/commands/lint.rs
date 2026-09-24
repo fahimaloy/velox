@@ -2,6 +2,20 @@ use anyhow::Result;
 use std::fs;
 use std::path::Path;
 
+/// Print reactive-idiom warnings (Cell/RefCell usage in `<script>`) for a
+/// parsed SFC. These are advisory style warnings: they never count as lint
+/// errors and never fail the command — only parse errors do.
+fn print_script_warnings(sfc: &velox_sfc::Sfc, path: &Path) {
+    for block in [sfc.script_setup.as_ref(), sfc.script.as_ref()]
+        .into_iter()
+        .flatten()
+    {
+        for warning in velox_sfc::lint_script(&block.content) {
+            println!("⚠️  {} - {}", path.display(), warning);
+        }
+    }
+}
+
 /// Lint a single .vx file. Returns `true` if the file failed to parse.
 fn lint_file_error(path: &Path) -> bool {
     let content = match fs::read_to_string(path) {
@@ -12,7 +26,10 @@ fn lint_file_error(path: &Path) -> bool {
         }
     };
     match velox_sfc::parse_sfc(&content) {
-        Ok(_) => false,
+        Ok(sfc) => {
+            print_script_warnings(&sfc, path);
+            false
+        }
         Err(e) => {
             println!("❌ {} - Parse error: {}", path.display(), e);
             true
@@ -48,10 +65,15 @@ fn fix_file(path: &Path) -> bool {
         }
     };
 
-    if let Err(e) = velox_sfc::parse_sfc(&original) {
-        println!("❌ {} - Parse error: {}", path.display(), e);
-        return true;
-    }
+    let sfc = match velox_sfc::parse_sfc(&original) {
+        Ok(sfc) => sfc,
+        Err(e) => {
+            println!("❌ {} - Parse error: {}", path.display(), e);
+            return true;
+        }
+    };
+
+    print_script_warnings(&sfc, path);
 
     let fixed = normalize_source(&original);
     if fixed == original {
