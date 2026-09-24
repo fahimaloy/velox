@@ -37,6 +37,17 @@ pub struct Sfc {
     pub script_setup: Option<ScriptBlock>,
     pub script: Option<ScriptBlock>,
     pub style: Option<StyleBlock>,
+    /// Non-fatal template diagnostics collected during parsing: structural
+    /// leniency notes (unclosed/unmatched tags) and `unknown component`
+    /// warnings for PascalCase tags that are not registered component
+    /// imports.
+    ///
+    /// Computed by the shared template-diagnostics channel
+    /// ([`crate::template_parse::parse_template`]) — the same computation the
+    /// compile path prints to stderr — so the two surfaces cannot diverge.
+    /// `parse_sfc` stores warnings for programmatic consumers but never
+    /// prints them, so users never see a warning twice.
+    pub warnings: Vec<String>,
 }
 
 /// Format a Pest parse error into a human-readable message with line number,
@@ -203,7 +214,43 @@ pub fn parse_sfc(source: &str) -> Result<Sfc, String> {
         }
     }
 
+    sfc.warnings = template_warnings(&sfc);
+
     Ok(sfc)
+}
+
+/// Collect non-fatal template diagnostics for a parsed SFC.
+///
+/// Warnings come from the shared template-diagnostics channel
+/// ([`crate::template_parse::parse_template`]), so the stored messages are
+/// identical to the ones the compile path
+/// (`template_codegen::compile_template_to_rs_full`) prints to stderr.
+///
+/// Known components are the imports declared in `<script setup>`, mirroring
+/// how `ComponentResolver` is populated during a build; imports in a plain
+/// `<script>` block do not register components (the compile path treats such
+/// tags as unknown too).
+///
+/// Hard template errors (e.g. an unclosed `{{` interpolation) are not
+/// warnings — they surface as `Err` from the compile path — so this function
+/// returns no warnings for them, leaving `parse_sfc`'s block-splitting
+/// semantics unchanged.
+fn template_warnings(sfc: &Sfc) -> Vec<String> {
+    let Some(template) = &sfc.template else {
+        return Vec::new();
+    };
+    let mut known: Vec<String> = Vec::new();
+    if let Some(script_setup) = &sfc.script_setup {
+        let mut resolver =
+            crate::component_resolver::ComponentResolver::new(std::path::PathBuf::from("."));
+        resolver.parse_imports(&script_setup.content);
+        known.extend(resolver.component_names());
+    }
+    let known_refs: Vec<&str> = known.iter().map(String::as_str).collect();
+    match crate::template_parse::parse_template(&template.content, &known_refs) {
+        Ok(diag) => diag.warnings,
+        Err(_) => Vec::new(),
+    }
 }
 
 fn consume_top_level(node: Pair<Rule>, sfc: &mut Sfc) {
