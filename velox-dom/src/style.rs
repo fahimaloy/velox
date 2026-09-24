@@ -20,6 +20,10 @@ pub enum Length {
     Vw(f32),
     /// Viewport height (vh)
     Vh(f32),
+    /// Dynamic viewport height (dvh) - treated as vh for layout
+    Dvh(f32),
+    /// Dynamic viewport width (dvw) - treated as vw for layout
+    Dvw(f32),
     /// Auto length
     Auto,
     /// Zero (unitless)
@@ -57,6 +61,14 @@ impl Length {
             return val.trim().parse::<f32>().ok().map(Length::Em);
         }
 
+        if let Some(val) = s.strip_suffix("dvw") {
+            return val.trim().parse::<f32>().ok().map(Length::Dvw);
+        }
+
+        if let Some(val) = s.strip_suffix("dvh") {
+            return val.trim().parse::<f32>().ok().map(Length::Dvh);
+        }
+
         if let Some(val) = s.strip_suffix("vw") {
             return val.trim().parse::<f32>().ok().map(Length::Vw);
         }
@@ -78,6 +90,8 @@ impl Length {
             Length::Em(v) => v * parent_size,
             Length::Vw(v) => v * viewport.0 / 100.0,
             Length::Vh(v) => v * viewport.1 / 100.0,
+            Length::Dvw(v) => v * viewport.0 / 100.0,
+            Length::Dvh(v) => v * viewport.1 / 100.0,
             Length::Auto => 0.0, // Auto needs special handling
             Length::Zero => 0.0,
         }
@@ -98,6 +112,8 @@ impl fmt::Display for Length {
             Length::Em(v) => write!(f, "{}em", v),
             Length::Vw(v) => write!(f, "{}vw", v),
             Length::Vh(v) => write!(f, "{}vh", v),
+            Length::Dvw(v) => write!(f, "{}dvw", v),
+            Length::Dvh(v) => write!(f, "{}dvh", v),
             Length::Auto => write!(f, "auto"),
             Length::Zero => write!(f, "0"),
         }
@@ -1548,6 +1564,44 @@ impl ComputedStyle {
     pub fn is_hidden(&self) -> bool {
         self.visibility == Visibility::Hidden
     }
+}
+
+/// Viewport-filling predicate for `ComputedStyle`, expanded to handle
+/// `100% | 100vw | 100dvw | 100vh | 100dvh | min-height`.
+/// `is_root_index` should be true when `source_index == 0` (first VNode always fills).
+pub fn is_viewport_filling(style: &ComputedStyle, is_root_index: bool) -> bool {
+    if is_root_index {
+        return true;
+    }
+    let is_100 = |l: Length| match l {
+        Length::Percent(v) => (v - 100.0).abs() < 0.01,
+        Length::Vw(v) => (v - 100.0).abs() < 0.01,
+        Length::Dvw(v) => (v - 100.0).abs() < 0.01,
+        Length::Vh(v) => (v - 100.0).abs() < 0.01,
+        Length::Dvh(v) => (v - 100.0).abs() < 0.01,
+        _ => false,
+    };
+    let has_100pct_w = is_100(style.width) && matches!(style.width, Length::Percent(_));
+    let has_vw = matches!(
+        style.width,
+        Length::Vw(v) | Length::Dvw(v) if (v - 100.0).abs() < 0.01
+    );
+    let has_viewport_h = is_100(style.height)
+        && matches!(
+            style.height,
+            Length::Percent(_) | Length::Vh(_) | Length::Dvh(_)
+        )
+        || matches!(
+            style.min_height,
+            Length::Percent(v) | Length::Vh(v) | Length::Dvh(v) if (v - 100.0).abs() < 0.01
+        );
+    // strict combo retained as sufficient condition; root handles implicit fill.
+    (has_100pct_w || has_vw) && has_viewport_h
+}
+
+/// Root-is-viewport-filling helper: index == 0 ⇒ true (first VNode always fills).
+pub fn root_is_viewport_filling(index: usize) -> bool {
+    index == 0
 }
 
 // Document-level defaults — UA sheet (velox-style::ua) supplies element-specific

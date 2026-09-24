@@ -25,6 +25,16 @@ impl Props {
         self.attrs.insert(k.into(), v.into());
         self
     }
+    pub fn from_inline(style: impl Into<String>) -> Self {
+        let mut p = Self::new();
+        p.attrs.insert("style".to_string(), style.into());
+        p
+    }
+    pub fn from_class(class: impl Into<String>) -> Self {
+        let mut p = Self::new();
+        p.attrs.insert("class".to_string(), class.into());
+        p
+    }
 }
 
 // Allow concise props creation

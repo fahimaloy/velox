@@ -27,6 +27,77 @@ impl FontMetrics {
     }
 }
 
+/// Returns true when the given source index corresponds to the root VNode.
+/// Per spec, the first VNode (index 0 or None for the outermost) always fills the viewport.
+/// Only the outermost `compute_layout` call (None) is considered the viewport root;
+/// children with `Some(0)` are *not* viewport roots — otherwise every first child
+/// would incorrectly fill the viewport and break fit-content sizing.
+pub fn root_is_viewport_filling(source_index: Option<usize>) -> bool {
+    source_index.is_none()
+}
+
+/// Compatibility helper for flat lists where caller tracks numeric index.
+/// Index 0 => viewport root per spec phrasing.
+pub fn root_is_viewport_filling_index(index: usize) -> bool {
+    index == 0
+}
+
+/// Expanded viewport-filling predicate for layout's inline-style path.
+/// Handles 100% | 100vw | 100dvw | 100vh | 100dvh and min-height variants.
+/// `is_root_index` should be `root_is_viewport_filling(source_index)` for the element being laid out.
+/// Per spec the first VNode always fills the viewport; explicit fixed sizes are
+/// still respected via rect priority (declared wins) so this may return true
+/// even when width is fixed — the layout rect will prefer the declared value.
+pub fn is_viewport_filling(style: Option<&str>, is_root_index: bool) -> bool {
+    if is_root_index {
+        return true;
+    }
+    let parse = |key: &str| -> Option<Length> {
+        let s = style?;
+        for decl in s.split(';') {
+            let d = decl.trim();
+            if d.is_empty() {
+                continue;
+            }
+            if let Some((k, v)) = d.split_once(':')
+                && k.trim() == key
+            {
+                return Length::parse(v.trim());
+            }
+        }
+        None
+    };
+    let width = parse("width");
+    let height = parse("height");
+    let min_h = parse("min-height");
+    // shallow helper for ~100 checks
+    let is_100 = |l: Length| match l {
+        Length::Percent(v) => (v - 100.0).abs() < 0.01,
+        Length::Vw(v) => (v - 100.0).abs() < 0.01,
+        Length::Dvw(v) => (v - 100.0).abs() < 0.01,
+        Length::Vh(v) => (v - 100.0).abs() < 0.01,
+        Length::Dvh(v) => (v - 100.0).abs() < 0.01,
+        _ => false,
+    };
+    let has_100pct_w =
+        width.map(is_100).unwrap_or(false) && matches!(width, Some(Length::Percent(_)));
+    let has_vw = matches!(
+        width,
+        Some(Length::Vw(v)) | Some(Length::Dvw(v)) if (v - 100.0).abs() < 0.01
+    );
+    let has_viewport_h = match height {
+        Some(Length::Vh(v)) | Some(Length::Dvh(v)) if (v - 100.0).abs() < 0.01 => true,
+        Some(Length::Percent(v)) if (v - 100.0).abs() < 0.01 => true,
+        _ => false,
+    } || match min_h {
+        Some(Length::Vh(v)) | Some(Length::Dvh(v)) if (v - 100.0).abs() < 0.01 => true,
+        Some(Length::Percent(v)) if (v - 100.0).abs() < 0.01 => true,
+        _ => false,
+    };
+    // keep old strict combo as sufficient (width 100%|vw) && viewport_h, but root already true covers implicit fill.
+    (has_100pct_w || has_vw) && has_viewport_h
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Rect {
     pub x: i32,
@@ -218,6 +289,22 @@ fn parse_length_value(
     {
         let v = if v.is_finite() { v } else { 0.0 };
         return Some(v * parent_font_size);
+    }
+
+    // dynamic viewport width
+    if let Some(dvw) = val.strip_suffix("dvw")
+        && let Ok(v) = dvw.trim().parse::<f32>()
+    {
+        let v = if v.is_finite() { v } else { 0.0 };
+        return Some((v / 100.0) * viewport.0);
+    }
+
+    // dynamic viewport height
+    if let Some(dvh) = val.strip_suffix("dvh")
+        && let Ok(v) = dvh.trim().parse::<f32>()
+    {
+        let v = if v.is_finite() { v } else { 0.0 };
+        return Some((v / 100.0) * viewport.1);
     }
 
     // viewport width
@@ -588,6 +675,8 @@ fn length_to_px(len: Length, parent_size: f32, root_size: f32, viewport: (f32, f
         Length::Em(v) => v * parent_size,
         Length::Vw(v) => v * viewport.0 / 100.0,
         Length::Vh(v) => v * viewport.1 / 100.0,
+        Length::Dvw(v) => v * viewport.0 / 100.0,
+        Length::Dvh(v) => v * viewport.1 / 100.0,
         Length::Auto => 0.0,
         Length::Zero => 0.0,
     }
@@ -756,9 +845,8 @@ fn style_border_widths(
             default_border = Some(0);
         }
     }
-    let (mut bl, mut br, mut bt, mut bb) = default_border
-        .map(|v| (v, v, v, v))
-        .unwrap_or((0, 0, 0, 0));
+    let (mut bl, mut br, mut bt, mut bb) =
+        default_border.map(|v| (v, v, v, v)).unwrap_or((0, 0, 0, 0));
 
     // `border-width` shorthand (1-4 values) overrides `border` default if present
     let has_border_width = style.is_some_and(|s| {
@@ -923,9 +1011,13 @@ pub fn compute_layout(node: &VNode, viewport_w: i32, viewport_h: i32) -> LayoutN
                     .map(|s| s.trim().to_ascii_lowercase())
                     .unwrap_or_else(|| "content-box".to_string());
                 let is_border_box = box_sizing == "border-box";
-                let is_root = matches!(tag.as_str(), "body" | "html");
+                let is_root_tag = matches!(tag.as_str(), "body" | "html");
+                let is_root_index = root_is_viewport_filling(source_index);
+                // Viewport root normalization: first VNode (and html/body) always fills.
+                // Expanded predicate handles 100% | 100vw | 100dvw | 100vh | 100dvh | min-height:100%/vh/dvh
+                let is_viewport_filling = is_viewport_filling(style, is_root_tag || is_root_index);
 
-                // Check if element has height: 100vh or min-height: 100vh (viewport-relative)
+                // Check if element has height: 100vh / 100dvh (viewport-relative) — pixel equality covers both vh/dvh
                 let has_viewport_height = style_lookup_len_full(
                     style,
                     "height",
@@ -935,7 +1027,7 @@ pub fn compute_layout(node: &VNode, viewport_w: i32, viewport_h: i32) -> LayoutN
                     vw_f,
                     vh_f,
                 )
-                .map(|h| h as f32 == vh_f)
+                .map(|h| (h as f32 - vh_f).abs() < 0.5)
                 .unwrap_or(false);
                 let min_height_vh = style_lookup_len_full(
                     style,
@@ -946,8 +1038,30 @@ pub fn compute_layout(node: &VNode, viewport_w: i32, viewport_h: i32) -> LayoutN
                     vw_f,
                     vh_f,
                 )
-                .map(|h| h as f32 == vh_f)
+                .map(|h| (h as f32 - vh_f).abs() < 0.5)
                 .unwrap_or(false);
+
+                // Also treat min-height:100% as viewport-filling when it resolves to available/viewport height
+                let min_height_is_100pct = {
+                    let raw = style.and_then(|s| {
+                        for decl in s.split(';') {
+                            let d = decl.trim();
+                            if d.is_empty() {
+                                continue;
+                            }
+                            if let Some((k, v)) = d.split_once(':')
+                                && k.trim() == "min-height"
+                            {
+                                return Some(v.trim().to_string());
+                            }
+                        }
+                        None
+                    });
+                    raw.as_deref()
+                        .and_then(|v| crate::Length::parse(v))
+                        .map(|l| matches!(l, crate::Length::Percent(p) if (p - 100.0).abs() < 0.01))
+                        .unwrap_or(false)
+                };
 
                 // Element outer position with margins
                 let elem_x = x + ml;
@@ -975,41 +1089,45 @@ pub fn compute_layout(node: &VNode, viewport_w: i32, viewport_h: i32) -> LayoutN
                     vh_f,
                 );
 
-                // Check for percentage-based viewport filling
-                // An element with width: 100% and height: 100% should behave like root
+                // Legacy 100% viewport-filling pair still respected, but root already true covers implicit fill
                 let has_100p_width = declared_w
-                    .map(|w| w as f32 == avail_w as f32)
+                    .map(|w| (w as f32 - avail_w as f32).abs() < 0.5)
                     .unwrap_or(false);
                 let has_100p_height = declared_h
-                    .map(|h| h as f32 == avail_h as f32)
+                    .map(|h| (h as f32 - avail_h as f32).abs() < 0.5)
                     .unwrap_or(false);
-                let is_viewport_filling = has_100p_width && has_100p_height;
+                let legacy_pair = has_100p_width && has_100p_height;
 
                 // Update is_viewport_height to include viewport-filling elements (must be before rect calcs)
-                let is_viewport_height =
-                    is_root || is_viewport_filling || has_viewport_height || min_height_vh;
+                // Covers root, expanded predicate, legacy 100% pair, explicit vh/dvh, and min-height variants
+                let is_viewport_height = is_viewport_filling
+                    || legacy_pair
+                    || has_viewport_height
+                    || min_height_vh
+                    || min_height_is_100pct;
 
-                let rect_w = if is_root || is_viewport_filling {
-                    (avail_w - ml - mr).max(1)
-                } else if let Some(dw) = declared_w {
+                let rect_w = if let Some(dw) = declared_w {
                     if is_border_box {
                         dw
                     } else {
                         dw + pl + pr + bl + br
                     }
+                } else if is_viewport_filling || legacy_pair {
+                    (avail_w - ml - mr).max(1)
                 } else {
                     avail_w
                 };
 
                 // For viewport-height elements, use viewport height as the base, otherwise box-sizing adjusted
-                let mut _rect_h = if is_viewport_height {
-                    (avail_h - mt - mb).max(1)
-                } else if let Some(dh) = declared_h {
+                // Declared height takes precedence over viewport filling so explicit fixed heights are respected
+                let mut _rect_h = if let Some(dh) = declared_h {
                     if is_border_box {
                         dh
                     } else {
                         dh + pt + pb + bt + bb
                     }
+                } else if is_viewport_height {
+                    (avail_h - mt - mb).max(1)
                 } else {
                     declared_h.unwrap_or(avail_h)
                 };
@@ -1017,8 +1135,7 @@ pub fn compute_layout(node: &VNode, viewport_w: i32, viewport_h: i32) -> LayoutN
                 // Content box (border inside padding offset)
                 let content_x = elem_x + bl + pl;
                 let content_y_start = elem_y + bt + pt;
-                let content_w =
-                    (rect_w - pl - pr - bl - br).max(0);
+                let content_w = (rect_w - pl - pr - bl - br).max(0);
                 let content_h_available = (_rect_h - pt - pb - bt - bb).max(0);
 
                 let overflow =
@@ -1057,7 +1174,11 @@ pub fn compute_layout(node: &VNode, viewport_w: i32, viewport_h: i32) -> LayoutN
                     0
                 };
                 let opacity = style_lookup_str(style, "opacity")
-                    .and_then(|v| v.parse::<f32>().ok().map(|f| if f.is_finite() { f } else { 1.0 }))
+                    .and_then(|v| {
+                        v.parse::<f32>()
+                            .ok()
+                            .map(|f| if f.is_finite() { f } else { 1.0 })
+                    })
                     .unwrap_or(1.0);
                 let transform =
                     style_lookup_str(style, "transform").unwrap_or_else(|| "none".to_string());
@@ -1230,8 +1351,10 @@ pub fn compute_layout(node: &VNode, viewport_w: i32, viewport_h: i32) -> LayoutN
                     let mut flex_dir_val = flex_dir.clone();
                     let mut flex_wrap_val = flex_wrap.clone();
                     if let Some(flow_raw) = style_lookup_str(style, "flex-flow") {
-                        let tokens: Vec<String> =
-                            flow_raw.split_whitespace().map(|s| s.to_ascii_lowercase()).collect();
+                        let tokens: Vec<String> = flow_raw
+                            .split_whitespace()
+                            .map(|s| s.to_ascii_lowercase())
+                            .collect();
                         for tok in &tokens {
                             match tok.as_str() {
                                 "row" | "row-reverse" | "column" | "column-reverse" => {
@@ -1271,8 +1394,7 @@ pub fn compute_layout(node: &VNode, viewport_w: i32, viewport_h: i32) -> LayoutN
                     if has_wrap {
                         flex_wrap_val = flex_wrap.clone();
                     }
-                    let is_column =
-                        flex_dir_val == "column" || flex_dir_val == "column-reverse";
+                    let is_column = flex_dir_val == "column" || flex_dir_val == "column-reverse";
                     let is_reverse =
                         flex_dir_val == "row-reverse" || flex_dir_val == "column-reverse";
                     let is_wrap = flex_wrap_val == "wrap" || flex_wrap_val == "wrap-reverse";
@@ -1311,7 +1433,7 @@ pub fn compute_layout(node: &VNode, viewport_w: i32, viewport_h: i32) -> LayoutN
                         vw_f,
                         vh_f,
                     );
-                    
+
                     // Determine if flex container has a definite cross-size
                     // For row flex (is_column=false): cross-size = height
                     // For column flex (is_column=true): cross-size = width (always definite = content_w)
@@ -1347,7 +1469,7 @@ pub fn compute_layout(node: &VNode, viewport_w: i32, viewport_h: i32) -> LayoutN
                         );
                         explicit_h_content.is_some() || min_h.is_some() || max_h.is_some()
                     };
-                    
+
                     // Initial cross_size: if definite, use it; if indefinite, start with 0 (will compute from children)
                     let cross_size = if is_column {
                         content_w
@@ -1370,69 +1492,83 @@ pub fn compute_layout(node: &VNode, viewport_w: i32, viewport_h: i32) -> LayoutN
                     }
 
                     // L-H4: order support — stable sort flex children by `order`
-                    flex_children.sort_by_key(|fc| {
-                        style_lookup_i32(fc.style, "order").unwrap_or(0)
-                    });
+                    flex_children
+                        .sort_by_key(|fc| style_lookup_i32(fc.style, "order").unwrap_or(0));
 
                     // Helper to parse `flex` shorthand per CSS spec
-                    let parse_flex_shorthand = |style: Option<&str>| -> Option<(f32, f32, Option<String>)> {
-                        let raw = style_lookup_str(style, "flex")?;
-                        let raw = raw.trim();
-                        if raw.is_empty() {
-                            return None;
-                        }
-                        if raw.eq_ignore_ascii_case("auto") {
-                            Some((1.0, 1.0, None))
-                        } else if raw.eq_ignore_ascii_case("none") {
-                            Some((0.0, 0.0, None))
-                        } else if raw.eq_ignore_ascii_case("initial") {
-                            Some((0.0, 1.0, None))
-                        } else {
-                            let toks: Vec<&str> = raw.split_whitespace().collect();
-                            match toks.len() {
-                                1 => {
-                                    if let Ok(g) = toks[0].parse::<f32>() {
-                                        if g.is_finite() {
-                                            Some((g, 1.0, Some("0".to_string())))
+                    let parse_flex_shorthand =
+                        |style: Option<&str>| -> Option<(f32, f32, Option<String>)> {
+                            let raw = style_lookup_str(style, "flex")?;
+                            let raw = raw.trim();
+                            if raw.is_empty() {
+                                return None;
+                            }
+                            if raw.eq_ignore_ascii_case("auto") {
+                                Some((1.0, 1.0, None))
+                            } else if raw.eq_ignore_ascii_case("none") {
+                                Some((0.0, 0.0, None))
+                            } else if raw.eq_ignore_ascii_case("initial") {
+                                Some((0.0, 1.0, None))
+                            } else {
+                                let toks: Vec<&str> = raw.split_whitespace().collect();
+                                match toks.len() {
+                                    1 => {
+                                        if let Ok(g) = toks[0].parse::<f32>() {
+                                            if g.is_finite() {
+                                                Some((g, 1.0, Some("0".to_string())))
+                                            } else {
+                                                Some((1.0, 1.0, Some(toks[0].to_string())))
+                                            }
                                         } else {
+                                            // single length basis e.g. "100px"
                                             Some((1.0, 1.0, Some(toks[0].to_string())))
                                         }
-                                    } else {
-                                        // single length basis e.g. "100px"
-                                        Some((1.0, 1.0, Some(toks[0].to_string())))
                                     }
-                                }
-                                2 => {
-                                    // either grow shrink or grow basis
-                                    if let Ok(g) = toks[0].parse::<f32>() {
-                                        if g.is_finite() {
-                                            // second token: check if it's a number (shrink) or length
-                                            if let Ok(s) = toks[1].parse::<f32>() {
-                                                if s.is_finite() && !toks[1].contains('%') && !toks[1].contains("px") && !toks[1].contains("rem") && !toks[1].contains("em") && !toks[1].contains("vw") && !toks[1].contains("vh") && toks[1] != "auto" {
-                                                    Some((g, s, Some("0".to_string())))
+                                    2 => {
+                                        // either grow shrink or grow basis
+                                        if let Ok(g) = toks[0].parse::<f32>() {
+                                            if g.is_finite() {
+                                                // second token: check if it's a number (shrink) or length
+                                                if let Ok(s) = toks[1].parse::<f32>() {
+                                                    if s.is_finite()
+                                                        && !toks[1].contains('%')
+                                                        && !toks[1].contains("px")
+                                                        && !toks[1].contains("rem")
+                                                        && !toks[1].contains("em")
+                                                        && !toks[1].contains("vw")
+                                                        && !toks[1].contains("vh")
+                                                        && toks[1] != "auto"
+                                                    {
+                                                        Some((g, s, Some("0".to_string())))
+                                                    } else {
+                                                        Some((g, 1.0, Some(toks[1].to_string())))
+                                                    }
                                                 } else {
+                                                    // otherwise basis
                                                     Some((g, 1.0, Some(toks[1].to_string())))
                                                 }
                                             } else {
-                                                // otherwise basis
-                                                Some((g, 1.0, Some(toks[1].to_string())))
+                                                None
                                             }
                                         } else {
                                             None
                                         }
-                                    } else {
-                                        None
                                     }
+                                    3 => {
+                                        let g = toks[0]
+                                            .parse::<f32>()
+                                            .ok()
+                                            .filter(|v| v.is_finite())?;
+                                        let s = toks[1]
+                                            .parse::<f32>()
+                                            .ok()
+                                            .filter(|v| v.is_finite())?;
+                                        Some((g, s, Some(toks[2].to_string())))
+                                    }
+                                    _ => None,
                                 }
-                                3 => {
-                                    let g = toks[0].parse::<f32>().ok().filter(|v| v.is_finite())?;
-                                    let s = toks[1].parse::<f32>().ok().filter(|v| v.is_finite())?;
-                                    Some((g, s, Some(toks[2].to_string())))
-                                }
-                                _ => None,
                             }
-                        }
-                    };
+                        };
 
                     let mut items: Vec<FlexItem> = Vec::new();
                     for fc in &flex_children {
@@ -1494,10 +1630,18 @@ pub fn compute_layout(node: &VNode, viewport_w: i32, viewport_h: i32) -> LayoutN
                             } else {
                                 (
                                     style_lookup_str(fc.style, "flex-grow")
-                                        .and_then(|v| v.parse::<f32>().ok().map(|f| if f.is_finite() { f } else { 0.0 }))
+                                        .and_then(|v| {
+                                            v.parse::<f32>()
+                                                .ok()
+                                                .map(|f| if f.is_finite() { f } else { 0.0 })
+                                        })
                                         .unwrap_or(0.0),
                                     style_lookup_str(fc.style, "flex-shrink")
-                                        .and_then(|v| v.parse::<f32>().ok().map(|f| if f.is_finite() { f } else { 1.0 }))
+                                        .and_then(|v| {
+                                            v.parse::<f32>()
+                                                .ok()
+                                                .map(|f| if f.is_finite() { f } else { 1.0 })
+                                        })
                                         .unwrap_or(1.0),
                                     None,
                                 )
@@ -1505,23 +1649,27 @@ pub fn compute_layout(node: &VNode, viewport_w: i32, viewport_h: i32) -> LayoutN
 
                         // If flex shorthand present, also use it for basis unless longhand overrides
                         // For `flex: 1` => basis 0% (not auto); for `flex: auto` => auto; for shorthand_basis "auto" => auto.
-                        let shorthand_basis_px: Option<f32> = shorthand_basis.as_deref().and_then(|raw| {
-                            if raw.eq_ignore_ascii_case("auto") {
-                                return None; // handled as auto below
-                            }
-                            if raw == "0" || raw == "0%" || raw == "0px" {
-                                // 0 can be unitless -> 0px, already 0
-                                return Some(0.0);
-                            }
-                            parse_length_value(
-                                raw,
-                                main_size as f32,
-                                my_font_size,
-                                root_font_size,
-                                (vw_f, vh_f),
-                            )
-                        });
-                        let is_flex_one_zero = flex_shorthand.is_some() && flex_grow == 1.0 && flex_shrink == 1.0 && shorthand_basis.is_none(); // flex: auto case handled else
+                        let shorthand_basis_px: Option<f32> =
+                            shorthand_basis.as_deref().and_then(|raw| {
+                                if raw.eq_ignore_ascii_case("auto") {
+                                    return None; // handled as auto below
+                                }
+                                if raw == "0" || raw == "0%" || raw == "0px" {
+                                    // 0 can be unitless -> 0px, already 0
+                                    return Some(0.0);
+                                }
+                                parse_length_value(
+                                    raw,
+                                    main_size as f32,
+                                    my_font_size,
+                                    root_font_size,
+                                    (vw_f, vh_f),
+                                )
+                            });
+                        let is_flex_one_zero = flex_shorthand.is_some()
+                            && flex_grow == 1.0
+                            && flex_shrink == 1.0
+                            && shorthand_basis.is_none(); // flex: auto case handled else
 
                         // Determine effective basis:
                         // - shorthand_basis_px if explicit
@@ -1530,25 +1678,46 @@ pub fn compute_layout(node: &VNode, viewport_w: i32, viewport_h: i32) -> LayoutN
                         // - else auto vs 0% depending on shorthand semantics
                         let flex_basis = if let Some(v) = shorthand_basis_px {
                             v
-                        } else if shorthand_basis.as_deref().map(|s| s.eq_ignore_ascii_case("auto")).unwrap_or(false) && is_flex_one_zero {
+                        } else if shorthand_basis
+                            .as_deref()
+                            .map(|s| s.eq_ignore_ascii_case("auto"))
+                            .unwrap_or(false)
+                            && is_flex_one_zero
+                        {
                             // auto => content size
-                            if is_column { ln.rect.h as f32 } else { ln.rect.w as f32 }
-                        } else if flex_shorthand.is_some() && shorthand_basis.as_deref() == Some("0") {
+                            if is_column {
+                                ln.rect.h as f32
+                            } else {
+                                ln.rect.w as f32
+                            }
+                        } else if flex_shorthand.is_some()
+                            && shorthand_basis.as_deref() == Some("0")
+                        {
                             0.0
                         } else if let Some(fb) = flex_basis_val {
                             fb as f32
                         } else if let Some(exp) = explicit_main {
                             // If flex shorthand existed and gave implicit 0 basis, ignore explicit width for basis 0 case
-                            if flex_shorthand.is_some() && shorthand_basis == Some("0".to_string()) {
+                            if flex_shorthand.is_some() && shorthand_basis == Some("0".to_string())
+                            {
                                 0.0
                             } else {
                                 exp as f32
                             }
-                        } else if let Some(raw) = flex_shorthand.as_ref().map(|_| style_lookup_str(fc.style, "flex").unwrap_or_default().trim().to_ascii_lowercase()) {
+                        } else if let Some(raw) = flex_shorthand.as_ref().map(|_| {
+                            style_lookup_str(fc.style, "flex")
+                                .unwrap_or_default()
+                                .trim()
+                                .to_ascii_lowercase()
+                        }) {
                             // flex shorthand present without basis token => 0%
                             // unless it's `auto` / `none` / `initial` handled above
                             if raw == "auto" || raw == "none" || raw == "initial" {
-                                if is_column { ln.rect.h as f32 } else { ln.rect.w as f32 }
+                                if is_column {
+                                    ln.rect.h as f32
+                                } else {
+                                    ln.rect.w as f32
+                                }
                             } else {
                                 0.0
                             }
@@ -1738,13 +1907,25 @@ pub fn compute_layout(node: &VNode, viewport_w: i32, viewport_h: i32) -> LayoutN
                         let n = line.items.len();
                         let per_gap_extra: f32 = match justify_content.as_str() {
                             "space-between" => {
-                                if n > 1 { extra_space / (n as f32 - 1.0) } else { 0.0 }
+                                if n > 1 {
+                                    extra_space / (n as f32 - 1.0)
+                                } else {
+                                    0.0
+                                }
                             }
                             "space-around" => {
-                                if n > 0 { extra_space / n as f32 } else { 0.0 }
+                                if n > 0 {
+                                    extra_space / n as f32
+                                } else {
+                                    0.0
+                                }
                             }
                             "space-evenly" => {
-                                if n > 0 { extra_space / (n as f32 + 1.0) } else { 0.0 }
+                                if n > 0 {
+                                    extra_space / (n as f32 + 1.0)
+                                } else {
+                                    0.0
+                                }
                             }
                             _ => 0.0,
                         };
@@ -1767,31 +1948,65 @@ pub fn compute_layout(node: &VNode, viewport_w: i32, viewport_h: i32) -> LayoutN
                         for &item_idx in &line.items {
                             let pos = cursor;
                             mpos.push((item_idx, pos));
-                            cursor = pos + items[item_idx].flex_basis + gap_val as f32 + extra_for_gap;
+                            cursor =
+                                pos + items[item_idx].flex_basis + gap_val as f32 + extra_for_gap;
                         }
                         line.main_positions = mpos;
                         // Compute line cross size
                         let mut max_cross_size: f32 = 0.0;
                         for &(item_idx, _) in &line.main_positions {
                             if let Some(ref ln) = items[item_idx].layout_node {
-                                let cross_sz = if is_column { ln.rect.w as f32 } else { ln.rect.h as f32 };
-                                if cross_sz > max_cross_size { max_cross_size = cross_sz; }
+                                let cross_sz = if is_column {
+                                    ln.rect.w as f32
+                                } else {
+                                    ln.rect.h as f32
+                                };
+                                if cross_sz > max_cross_size {
+                                    max_cross_size = cross_sz;
+                                }
                             }
                         }
                         // L-M5: stretch — only applies when cross-size is DEFINITE
                         // When cross-size is indefinite (fit-content), stretch behaves as flex-start
                         let effective_align_items = align_items.clone();
                         let is_single_line = pre_lines_len == 1;
-                        let can_stretch = has_definite_cross_size && effective_align_items == "stretch";
+                        let can_stretch =
+                            has_definite_cross_size && effective_align_items == "stretch";
                         if can_stretch {
-                            let stretch_target = if is_single_line { cross_size as f32 } else { max_cross_size };
+                            let stretch_target = if is_single_line {
+                                cross_size as f32
+                            } else {
+                                max_cross_size
+                            };
                             for &(item_idx, _) in &line.main_positions {
-                                let child_style = flex_children.iter().find(|fc| fc.index == items[item_idx].child_index).map(|fc| fc.style).unwrap_or(None);
-                                let explicit_cross = style_lookup_len_full(child_style, if is_column { "width" } else { "height" }, cross_size as f32, my_font_size, root_font_size, vw_f, vh_f);
+                                let child_style = flex_children
+                                    .iter()
+                                    .find(|fc| fc.index == items[item_idx].child_index)
+                                    .map(|fc| fc.style)
+                                    .unwrap_or(None);
+                                let explicit_cross = style_lookup_len_full(
+                                    child_style,
+                                    if is_column { "width" } else { "height" },
+                                    cross_size as f32,
+                                    my_font_size,
+                                    root_font_size,
+                                    vw_f,
+                                    vh_f,
+                                );
                                 // baseline fallback: treat as flex-start, so don't stretch baseline items
-                                let is_baseline = items[item_idx].align_self == "baseline" || (items[item_idx].align_self == "auto" && effective_align_items == "baseline");
-                                if explicit_cross.is_none() && items[item_idx].align_self == "auto" && !is_baseline && let Some(ref mut ln) = items[item_idx].layout_node {
-                                    if is_column { ln.rect.w = stretch_target as i32; } else { ln.rect.h = stretch_target as i32; }
+                                let is_baseline = items[item_idx].align_self == "baseline"
+                                    || (items[item_idx].align_self == "auto"
+                                        && effective_align_items == "baseline");
+                                if explicit_cross.is_none()
+                                    && items[item_idx].align_self == "auto"
+                                    && !is_baseline
+                                    && let Some(ref mut ln) = items[item_idx].layout_node
+                                {
+                                    if is_column {
+                                        ln.rect.w = stretch_target as i32;
+                                    } else {
+                                        ln.rect.h = stretch_target as i32;
+                                    }
                                 }
                             }
                             if is_single_line {
@@ -1803,8 +2018,11 @@ pub fn compute_layout(node: &VNode, viewport_w: i32, viewport_h: i32) -> LayoutN
                         line.cross_size = max_cross_size;
                     }
                     // Compute align-content distribution for multi-line
-                    let total_cross: f32 = if lines.is_empty() { 0.0 } else {
-                        lines.iter().map(|l| l.cross_size).sum::<f32>() + cross_gap * (lines.len() as f32 - 1.0)
+                    let total_cross: f32 = if lines.is_empty() {
+                        0.0
+                    } else {
+                        lines.iter().map(|l| l.cross_size).sum::<f32>()
+                            + cross_gap * (lines.len() as f32 - 1.0)
                     };
                     // For indefinite cross-size (fit-content), there's no free space to distribute
                     let free_cross = if has_definite_cross_size {
@@ -1822,24 +2040,41 @@ pub fn compute_layout(node: &VNode, viewport_w: i32, viewport_h: i32) -> LayoutN
                         "flex-end" | "end" => cross_start = free_cross,
                         "center" => cross_start = free_cross / 2.0,
                         "space-between" => {
-                            if n_lines > 1 { cross_extra_per_gap = free_cross / (n_lines as f32 - 1.0); }
+                            if n_lines > 1 {
+                                cross_extra_per_gap = free_cross / (n_lines as f32 - 1.0);
+                            }
                         }
                         "space-around" => {
-                            if n_lines > 0 { cross_extra_per_gap = free_cross / n_lines as f32; cross_start = cross_extra_per_gap / 2.0; }
+                            if n_lines > 0 {
+                                cross_extra_per_gap = free_cross / n_lines as f32;
+                                cross_start = cross_extra_per_gap / 2.0;
+                            }
                         }
                         "space-evenly" => {
-                            if n_lines > 0 { cross_extra_per_gap = free_cross / (n_lines as f32 + 1.0); cross_start = cross_extra_per_gap; }
+                            if n_lines > 0 {
+                                cross_extra_per_gap = free_cross / (n_lines as f32 + 1.0);
+                                cross_start = cross_extra_per_gap;
+                            }
                         }
                         "stretch" => {
                             if has_definite_cross_size && n_lines > 1 && free_cross > 0.0 {
                                 cross_line_extra = free_cross / n_lines as f32;
-                                for line in &mut lines { line.cross_size += cross_line_extra; }
+                                for line in &mut lines {
+                                    line.cross_size += cross_line_extra;
+                                }
                                 // Re-stretch items that were stretch to new line size
                                 if align_items == "stretch" {
                                     for line in &lines {
                                         for &(item_idx, _) in &line.main_positions {
-                                            if items[item_idx].align_self == "auto" && let Some(ref mut ln) = items[item_idx].layout_node {
-                                                if !is_column { ln.rect.h = line.cross_size as i32; } else { ln.rect.w = line.cross_size as i32; }
+                                            if items[item_idx].align_self == "auto"
+                                                && let Some(ref mut ln) =
+                                                    items[item_idx].layout_node
+                                            {
+                                                if !is_column {
+                                                    ln.rect.h = line.cross_size as i32;
+                                                } else {
+                                                    ln.rect.w = line.cross_size as i32;
+                                                }
                                             }
                                         }
                                     }
@@ -1850,48 +2085,108 @@ pub fn compute_layout(node: &VNode, viewport_w: i32, viewport_h: i32) -> LayoutN
                     }
                     // For indefinite cross-size, update cross_size to the computed total_cross
                     // so that the flex container's layout node gets the correct height
-                    let final_cross_size = if has_definite_cross_size { cross_size as f32 } else { total_cross };
+                    let final_cross_size = if has_definite_cross_size {
+                        cross_size as f32
+                    } else {
+                        total_cross
+                    };
                     // Second pass: position items with computed cross offsets
                     let mut cross_offset: f32 = cross_start;
                     let single_line_mode = n_lines == 1;
                     for line in &lines {
                         for &(item_idx, main_pos) in &line.main_positions {
                             if let Some(mut ln) = items[item_idx].layout_node.take() {
-                                let has_flex = items[item_idx].flex_grow > 0.0 || items[item_idx].flex_shrink > 0.0;
+                                let has_flex = items[item_idx].flex_grow > 0.0
+                                    || items[item_idx].flex_shrink > 0.0;
                                 if has_flex {
                                     let fb = items[item_idx].flex_basis.round() as i32;
-                                    if is_column { ln.rect.h = fb; } else { ln.rect.w = fb; }
+                                    if is_column {
+                                        ln.rect.h = fb;
+                                    } else {
+                                        ln.rect.w = fb;
+                                    }
                                 }
-                                let item_align = if items[item_idx].align_self == "auto" { align_items.clone() } else { items[item_idx].align_self.clone() };
-                                let item_cross_size = if is_column { ln.rect.w as f32 } else { ln.rect.h as f32 };
+                                let item_align = if items[item_idx].align_self == "auto" {
+                                    align_items.clone()
+                                } else {
+                                    items[item_idx].align_self.clone()
+                                };
+                                let item_cross_size = if is_column {
+                                    ln.rect.w as f32
+                                } else {
+                                    ln.rect.h as f32
+                                };
                                 // baseline fallback to flex-start
-                                let resolved_align = if item_align == "baseline" { "flex-start" } else { item_align.as_str() };
-                                let effective_cross = if single_line_mode { final_cross_size } else { line.cross_size };
+                                let resolved_align = if item_align == "baseline" {
+                                    "flex-start"
+                                } else {
+                                    item_align.as_str()
+                                };
+                                let effective_cross = if single_line_mode {
+                                    final_cross_size
+                                } else {
+                                    line.cross_size
+                                };
                                 let cross_pos = match resolved_align {
-                                    "flex-end" | "end" => (effective_cross - item_cross_size).max(0.0),
+                                    "flex-end" | "end" => {
+                                        (effective_cross - item_cross_size).max(0.0)
+                                    }
                                     "center" => (effective_cross - item_cross_size) / 2.0,
                                     _ => 0.0,
                                 };
                                 let line_cross = cross_offset + cross_pos;
                                 if is_column {
-                                    ln.rect.x = (content_x_scrolled as f32 + line_cross).round() as i32;
-                                    ln.rect.y = (content_y_scrolled as f32 + (main_pos - main_start)).round() as i32;
+                                    ln.rect.x =
+                                        (content_x_scrolled as f32 + line_cross).round() as i32;
+                                    ln.rect.y =
+                                        (content_y_scrolled as f32 + (main_pos - main_start))
+                                            .round() as i32;
                                 } else {
-                                    ln.rect.x = (content_x_scrolled as f32 + (main_pos - main_start)).round() as i32;
-                                    ln.rect.y = (content_y_scrolled as f32 + line_cross).round() as i32;
+                                    ln.rect.x =
+                                        (content_x_scrolled as f32 + (main_pos - main_start))
+                                            .round() as i32;
+                                    ln.rect.y =
+                                        (content_y_scrolled as f32 + line_cross).round() as i32;
                                 }
                                 if is_reverse {
                                     if is_column {
-                                        let container_bottom = content_y_start + content_h_available;
+                                        let container_bottom =
+                                            content_y_start + content_h_available;
                                         ln.rect.y = container_bottom - ln.rect.y - ln.rect.h;
                                     } else {
                                         let container_right = content_x_scrolled + content_w;
                                         ln.rect.x = container_right - ln.rect.x - ln.rect.w;
                                     }
                                 }
-                                let child_style = flex_children.iter().find(|fc| fc.index == items[item_idx].child_index).map(|fc| fc.style).unwrap_or(None);
-                                apply_relative_position(child_style, &mut ln, content_w, content_h_available, my_font_size, root_font_size, vw_f, vh_f);
-                                apply_sticky_position(child_style, &mut ln, content_x, content_y_start, content_w, content_h_available, scroll_x, scroll_y, my_font_size, root_font_size, vw_f, vh_f);
+                                let child_style = flex_children
+                                    .iter()
+                                    .find(|fc| fc.index == items[item_idx].child_index)
+                                    .map(|fc| fc.style)
+                                    .unwrap_or(None);
+                                apply_relative_position(
+                                    child_style,
+                                    &mut ln,
+                                    content_w,
+                                    content_h_available,
+                                    my_font_size,
+                                    root_font_size,
+                                    vw_f,
+                                    vh_f,
+                                );
+                                apply_sticky_position(
+                                    child_style,
+                                    &mut ln,
+                                    content_x,
+                                    content_y_start,
+                                    content_w,
+                                    content_h_available,
+                                    scroll_x,
+                                    scroll_y,
+                                    my_font_size,
+                                    root_font_size,
+                                    vw_f,
+                                    vh_f,
+                                );
                                 max_y_end = max_y_end.max(ln.rect.y + ln.rect.h);
                                 laid_children.push(ln);
                             }
@@ -2153,15 +2448,15 @@ pub fn compute_layout(node: &VNode, viewport_w: i32, viewport_h: i32) -> LayoutN
                 // Use max_y_end which correctly tracks the spatial extent of all children,
                 // including those positioned above content_y_start via negative margins/offsets.
                 let content_h = (max_y_end - content_y_start).max(0);
-                let mut rect_h = if is_root || is_viewport_filling || is_viewport_height {
-                    // viewport/root heights are viewport-relative - already computed as _rect_h outer
-                    _rect_h
-                } else if let Some(dh) = declared_h2 {
+                let mut rect_h = if let Some(dh) = declared_h2 {
                     if is_border_box {
                         dh
                     } else {
                         dh + pt + pb + bt + bb
                     }
+                } else if is_viewport_height {
+                    // viewport/root heights are viewport-relative - already computed as _rect_h outer
+                    _rect_h
                 } else {
                     content_h + pt + pb + bt + bb
                 };

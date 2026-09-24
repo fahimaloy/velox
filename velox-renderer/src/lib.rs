@@ -70,15 +70,26 @@ fn recompute_targets(
 fn with_hover_ids(vnode: &velox_dom::VNode, next_id: &mut u32) -> velox_dom::VNode {
     match vnode {
         velox_dom::VNode::Text(_) => vnode.clone(),
-        velox_dom::VNode::Element { tag, props, children } => {
+        velox_dom::VNode::Element {
+            tag,
+            props,
+            children,
+        } => {
             let mut new_props = props.clone();
             if crate::events::is_hoverable(tag, props) {
                 let id = *next_id;
                 *next_id += 1;
                 new_props = new_props.set("data-hover-id", id.to_string());
             }
-            let new_children = children.iter().map(|c| with_hover_ids(c, next_id)).collect();
-            velox_dom::VNode::Element { tag: tag.clone(), props: new_props, children: new_children }
+            let new_children = children
+                .iter()
+                .map(|c| with_hover_ids(c, next_id))
+                .collect();
+            velox_dom::VNode::Element {
+                tag: tag.clone(),
+                props: new_props,
+                children: new_children,
+            }
         }
     }
 }
@@ -128,7 +139,7 @@ pub mod hmr;
 pub mod text;
 pub mod viewport;
 
-pub use hmr::{HmrMessage, run_hmr_client, hmr_config, DEFAULT_HMR_PORT};
+pub use hmr::{DEFAULT_HMR_PORT, HmrMessage, hmr_config, run_hmr_client};
 pub use viewport::{LogicalSize, PhysicalSize, Viewport};
 
 // Native Skia GL helper module (feature-gated)
@@ -694,7 +705,7 @@ pub fn create_direct_context() -> Result<skia_safe::gpu::DirectContext, String> 
 
 /// Run a Skia window whose contents are produced by `make_view`.
 ///
-/// # Viewport contract (1A / X-H1)
+/// # Viewport contract (1A / X-H1) — Viewport Root Normalization (CX-04)
 ///
 /// `make_view` is `FnMut(w: u32, h: u32) -> (VNode, Stylesheet)` where
 /// `(w, h)` are **logical viewport dimensions** — `Viewport::from_i32(physical, scale).logical_size()`.
@@ -707,6 +718,14 @@ pub fn create_direct_context() -> Result<skia_safe::gpu::DirectContext, String> 
 /// With `width:100%` and `min-height:100vh`, `compute_layout(vnode, w as i32, h as i32)`
 /// reflows visibly on every window resize — no element hidden when it should be visible
 /// (Flutter invariant). Callers may also thread `(w,h)` into style/layout decisions if needed.
+///
+/// ## Root normalization
+///
+/// `velox_dom::layout::root_is_viewport_filling` ensures the *first* VNode (index 0 / `None`)
+/// always fills the logical viewport — even without explicit `width:100%`. The expanded
+/// predicate `is_viewport_filling(style, is_root_index)` additionally treats `100% | 100vw | 100dvw | 100vh | 100dvh | min-height:100%|vh|dvh`
+/// as viewport-filling, validated via `compute_layout` percent chains (`height:100%` fills
+/// when parent is definite) and `vw/vh/dvh` units that resolve against `Viewport::logical_size`.
 #[cfg(feature = "skia-native")]
 pub fn run_window_vnode_skia<F, G, H>(
     title: &str,
@@ -767,9 +786,7 @@ where
                     || lower.contains("no display server")
                     || lower.contains("failed to connect");
                 if headless_env || is_display_err {
-                    log::warn!(
-                        "window creation failed — continuing in headless mode: {msg}"
-                    );
+                    log::warn!("window creation failed — continuing in headless mode: {msg}");
                     (Some(event_loop), None, PhysicalSize::new(800, 600), 1.0)
                 } else {
                     panic!("failed to create window: {e}");
@@ -778,23 +795,23 @@ where
         }
     }))
     .unwrap_or_else(|_| {
-        log::warn!(
-            "window/event loop creation panicked — continuing in headless mode"
-        );
+        log::warn!("window/event loop creation panicked — continuing in headless mode");
         (None, None, PhysicalSize::new(800, 600), 1.0)
     });
 
     let window_opt: Option<winit::window::Window> = window;
-    let mut renderer =
-        match crate::skia_surface::SkiaSurface::new_raster(window_size.width as i32, window_size.height as i32) {
-            Ok(surface) => skia_backend::SkiaRenderer {
-                surface: Some(surface),
-                vnode: None,
-            },
-            Err(e) => {
-                return Err(format!("failed to create SkiaSurface: {e}"));
-            }
-        };
+    let mut renderer = match crate::skia_surface::SkiaSurface::new_raster(
+        window_size.width as i32,
+        window_size.height as i32,
+    ) {
+        Ok(surface) => skia_backend::SkiaRenderer {
+            surface: Some(surface),
+            vnode: None,
+        },
+        Err(e) => {
+            return Err(format!("failed to create SkiaSurface: {e}"));
+        }
+    };
     let mut presenter: Option<crate::presenter::SoftbufferPresenter> = None;
     if let Some(w) = window_opt.as_ref() {
         // softbuffer::Context::new() can panic when the display server is
@@ -814,9 +831,7 @@ where
                 }
             }
             Err(_) => {
-                log::warn!(
-                    "softbuffer presenter creation panicked — continuing in headless mode"
-                );
+                log::warn!("softbuffer presenter creation panicked — continuing in headless mode");
             }
         }
     }
@@ -878,248 +893,266 @@ where
         // The event loop can panic if the display server becomes unreachable
         // (e.g. "Io error: Broken pipe") — catch that and degrade gracefully.
         let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        event_loop.run(move |event, _, control_flow| {
-        *control_flow = ControlFlow::Wait;
-        match event {
-            Event::NewEvents(StartCause::Init) => {
-                if let Some(w) = window_opt.as_ref() {
-                    w.request_redraw();
-                }
-            }
-            Event::WindowEvent {
-                event: WindowEvent::CloseRequested,
-                ..
-            } => {
-                velox_core::lifecycle::run_all_destroy_hooks();
-                *control_flow = ControlFlow::Exit;
-            }
-            Event::WindowEvent {
-                event: WindowEvent::Resized(new_size),
-                ..
-            } => {
-                // R-L3: coalesce — do not touch raster surface here; defer to RedrawRequested.
-                pending_resize = Some((new_size.width, new_size.height));
-                if let Some(w) = window_opt.as_ref() {
-                    w.request_redraw();
-                }
-            }
-            Event::WindowEvent {
-                event:
-                    WindowEvent::ScaleFactorChanged {
-                        scale_factor: new_scale,
-                        new_inner_size,
-                        ..
-                    },
-                ..
-            } => {
-                let old_scale = scale_factor;
-                scale_factor = new_scale as f32;
-                // R-M1: atomically rescale mouse_pos to keep physical cursor stable
-                if old_scale.is_finite() && old_scale > 0.0 && scale_factor.is_finite() && scale_factor > 0.0 {
-                    mouse_pos.0 = mouse_pos.0 * old_scale / scale_factor;
-                    mouse_pos.1 = mouse_pos.1 * old_scale / scale_factor;
-                }
-                // R-L3: coalesce renderer/presenter resize to RedrawRequested as well.
-                pending_resize = Some((new_inner_size.width, new_inner_size.height));
-                if let Some(s) = &mut renderer.surface {
-                    s.set_scale_factor(scale_factor);
-                }
-                // Hit-test/layout refresh deferred to RedrawRequested (single layout/frame, R-H5).
-                if let Some(w) = window_opt.as_ref() {
-                    w.request_redraw();
-                }
-            }
-            Event::WindowEvent {
-                event: WindowEvent::CursorMoved { position, .. },
-                ..
-            } => {
-                mouse_pos = (
-                    position.x as f32 / scale_factor,
-                    position.y as f32 / scale_factor,
-                );
-                let now_hovered =
-                    crate::events::hit_test_hover(&hover_targets, mouse_pos.0, mouse_pos.1);
-                if now_hovered != hovered_id {
-                    hovered_id = now_hovered;
-                    if let Some(w) = window_opt.as_ref() {
-                        w.request_redraw();
+            event_loop.run(move |event, _, control_flow| {
+                *control_flow = ControlFlow::Wait;
+                match event {
+                    Event::NewEvents(StartCause::Init) => {
+                        if let Some(w) = window_opt.as_ref() {
+                            w.request_redraw();
+                        }
                     }
-                }
-            }
-            Event::WindowEvent {
-                event:
-                    WindowEvent::MouseInput {
-                        state: ElementState::Pressed,
-                        button: MouseButton::Left,
+                    Event::WindowEvent {
+                        event: WindowEvent::CloseRequested,
                         ..
-                    },
-                ..
-            } => {
-                // Text-input focus: clicking a text field focuses it; clicking
-                // anywhere else drops focus.
-                if let Some(target) =
-                    crate::events::hit_test_input(&input_targets, mouse_pos.0, mouse_pos.1)
-                {
-                    focused_input = Some(target.path.clone());
-                } else {
-                    focused_input = None;
-                }
-                if let Some((handler, payload_opt)) =
-                    crate::events::hit_test_click(&click_targets, mouse_pos.0, mouse_pos.1)
-                {
-                    let payload_owned = payload_opt.map(|p| p.to_string()).unwrap_or_else(|| {
-                        format!("{{\"x\":{},\"y\":{}}}", mouse_pos.0, mouse_pos.1)
-                    });
-                    on_event(handler, Some(&payload_owned));
-                    velox_core::lifecycle::run_all_updated_hooks();
-                    if let Some(s) = &mut renderer.surface {
-                        let (vw, vh) = logical_size(s.width, s.height, scale_factor);
-                        let (vnode_raw, sheet) = make_view(vw, vh);
-                        let mut next_id = 1u32;
-                        let vnode_tagged = with_hover_ids(&vnode_raw, &mut next_id);
-                        let vnode =
-                            apply_styles_with_hover(&vnode_tagged, &sheet, &|_tag, props| {
-                                props
-                                    .attrs
-                                    .get("data-hover-id")
-                                    .and_then(|v| v.parse::<u32>().ok())
-                                    .map(|id| Some(id) == hovered_id)
-                                    .unwrap_or(false)
-                            });
-                        let layout = velox_dom::layout::compute_layout(&vnode, vw as i32, vh as i32);
-                    recompute_targets(
-                        &vnode,
-                        &layout,
-                        &mut click_targets,
-                            &mut hover_targets,
-                            &mut input_targets,
+                    } => {
+                        velox_core::lifecycle::run_all_destroy_hooks();
+                        *control_flow = ControlFlow::Exit;
+                    }
+                    Event::WindowEvent {
+                        event: WindowEvent::Resized(new_size),
+                        ..
+                    } => {
+                        // R-L3: coalesce — do not touch raster surface here; defer to RedrawRequested.
+                        pending_resize = Some((new_size.width, new_size.height));
+                        if let Some(w) = window_opt.as_ref() {
+                            w.request_redraw();
+                        }
+                    }
+                    Event::WindowEvent {
+                        event:
+                            WindowEvent::ScaleFactorChanged {
+                                scale_factor: new_scale,
+                                new_inner_size,
+                                ..
+                            },
+                        ..
+                    } => {
+                        let old_scale = scale_factor;
+                        scale_factor = new_scale as f32;
+                        // R-M1: atomically rescale mouse_pos to keep physical cursor stable
+                        if old_scale.is_finite()
+                            && old_scale > 0.0
+                            && scale_factor.is_finite()
+                            && scale_factor > 0.0
+                        {
+                            mouse_pos.0 = mouse_pos.0 * old_scale / scale_factor;
+                            mouse_pos.1 = mouse_pos.1 * old_scale / scale_factor;
+                        }
+                        // R-L3: coalesce renderer/presenter resize to RedrawRequested as well.
+                        pending_resize = Some((new_inner_size.width, new_inner_size.height));
+                        if let Some(s) = &mut renderer.surface {
+                            s.set_scale_factor(scale_factor);
+                        }
+                        // Hit-test/layout refresh deferred to RedrawRequested (single layout/frame, R-H5).
+                        if let Some(w) = window_opt.as_ref() {
+                            w.request_redraw();
+                        }
+                    }
+                    Event::WindowEvent {
+                        event: WindowEvent::CursorMoved { position, .. },
+                        ..
+                    } => {
+                        mouse_pos = (
+                            position.x as f32 / scale_factor,
+                            position.y as f32 / scale_factor,
                         );
-                    }
-                    if let Some(w) = window_opt.as_ref() {
-                        w.set_title(&get_title());
-                        w.request_redraw();
-                    }
-                }
-            }
-            Event::WindowEvent {
-                event: WindowEvent::KeyboardInput { input, .. },
-                ..
-            } => {
-                // Handle keyboard shortcuts and text-input editing keys.
-                use winit::event::VirtualKeyCode;
-                if let Some(keycode) = input.virtual_keycode
-                    && input.state == ElementState::Pressed
-                {
-                    match keycode {
-                        VirtualKeyCode::R => {
-                            // Trigger reload (app will exit, dev server will restart it)
-                            velox_core::lifecycle::run_all_destroy_hooks();
-                            *control_flow = ControlFlow::Exit;
+                        let now_hovered =
+                            crate::events::hit_test_hover(&hover_targets, mouse_pos.0, mouse_pos.1);
+                        if now_hovered != hovered_id {
+                            hovered_id = now_hovered;
+                            if let Some(w) = window_opt.as_ref() {
+                                w.request_redraw();
+                            }
                         }
-                        VirtualKeyCode::Q => {
-                            velox_core::lifecycle::run_all_destroy_hooks();
-                            *control_flow = ControlFlow::Exit;
+                    }
+                    Event::WindowEvent {
+                        event:
+                            WindowEvent::MouseInput {
+                                state: ElementState::Pressed,
+                                button: MouseButton::Left,
+                                ..
+                            },
+                        ..
+                    } => {
+                        // Text-input focus: clicking a text field focuses it; clicking
+                        // anywhere else drops focus.
+                        if let Some(target) =
+                            crate::events::hit_test_input(&input_targets, mouse_pos.0, mouse_pos.1)
+                        {
+                            focused_input = Some(target.path.clone());
+                        } else {
+                            focused_input = None;
                         }
-                        VirtualKeyCode::Back => {
-                            if focused_input.is_some() {
-                                crate::dispatch_input_to_focused(
-                                    '\u{8}',
-                                    &last_vnode,
-                                    &focused_input,
-                                    &mut on_event,
+                        if let Some((handler, payload_opt)) =
+                            crate::events::hit_test_click(&click_targets, mouse_pos.0, mouse_pos.1)
+                        {
+                            let payload_owned =
+                                payload_opt.map(|p| p.to_string()).unwrap_or_else(|| {
+                                    format!("{{\"x\":{},\"y\":{}}}", mouse_pos.0, mouse_pos.1)
+                                });
+                            on_event(handler, Some(&payload_owned));
+                            velox_core::lifecycle::run_all_updated_hooks();
+                            if let Some(s) = &mut renderer.surface {
+                                let (vw, vh) = logical_size(s.width, s.height, scale_factor);
+                                let (vnode_raw, sheet) = make_view(vw, vh);
+                                let mut next_id = 1u32;
+                                let vnode_tagged = with_hover_ids(&vnode_raw, &mut next_id);
+                                let vnode = apply_styles_with_hover(
+                                    &vnode_tagged,
+                                    &sheet,
+                                    &|_tag, props| {
+                                        props
+                                            .attrs
+                                            .get("data-hover-id")
+                                            .and_then(|v| v.parse::<u32>().ok())
+                                            .map(|id| Some(id) == hovered_id)
+                                            .unwrap_or(false)
+                                    },
                                 );
-                                velox_core::lifecycle::run_all_updated_hooks();
-                                if let Some(w) = window_opt.as_ref() {
-                                    w.request_redraw();
+                                let layout =
+                                    velox_dom::layout::compute_layout(&vnode, vw as i32, vh as i32);
+                                recompute_targets(
+                                    &vnode,
+                                    &layout,
+                                    &mut click_targets,
+                                    &mut hover_targets,
+                                    &mut input_targets,
+                                );
+                            }
+                            if let Some(w) = window_opt.as_ref() {
+                                w.set_title(&get_title());
+                                w.request_redraw();
+                            }
+                        }
+                    }
+                    Event::WindowEvent {
+                        event: WindowEvent::KeyboardInput { input, .. },
+                        ..
+                    } => {
+                        // Handle keyboard shortcuts and text-input editing keys.
+                        use winit::event::VirtualKeyCode;
+                        if let Some(keycode) = input.virtual_keycode
+                            && input.state == ElementState::Pressed
+                        {
+                            match keycode {
+                                VirtualKeyCode::R => {
+                                    // Trigger reload (app will exit, dev server will restart it)
+                                    velox_core::lifecycle::run_all_destroy_hooks();
+                                    *control_flow = ControlFlow::Exit;
+                                }
+                                VirtualKeyCode::Q => {
+                                    velox_core::lifecycle::run_all_destroy_hooks();
+                                    *control_flow = ControlFlow::Exit;
+                                }
+                                VirtualKeyCode::Back => {
+                                    if focused_input.is_some() {
+                                        crate::dispatch_input_to_focused(
+                                            '\u{8}',
+                                            &last_vnode,
+                                            &focused_input,
+                                            &mut on_event,
+                                        );
+                                        velox_core::lifecycle::run_all_updated_hooks();
+                                        if let Some(w) = window_opt.as_ref() {
+                                            w.request_redraw();
+                                        }
+                                    }
+                                }
+                                VirtualKeyCode::Return => {
+                                    if focused_input.is_some() {
+                                        crate::dispatch_input_to_focused(
+                                            '\r',
+                                            &last_vnode,
+                                            &focused_input,
+                                            &mut on_event,
+                                        );
+                                        velox_core::lifecycle::run_all_updated_hooks();
+                                        if let Some(w) = window_opt.as_ref() {
+                                            w.request_redraw();
+                                        }
+                                    }
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                    Event::WindowEvent {
+                        event: WindowEvent::ReceivedCharacter(c),
+                        ..
+                    } => {
+                        // Printable characters go to the focused text input.
+                        if let Some(_) = &focused_input
+                            && !c.is_control()
+                            && c != '\u{7f}'
+                        {
+                            crate::dispatch_input_to_focused(
+                                c,
+                                &last_vnode,
+                                &focused_input,
+                                &mut on_event,
+                            );
+                            velox_core::lifecycle::run_all_updated_hooks();
+                            if let Some(w) = window_opt.as_ref() {
+                                w.request_redraw();
+                            }
+                        }
+                    }
+                    Event::RedrawRequested(_) => {
+                        // R-L3: materialize any coalesced resize exactly once per frame.
+                        if let Some((pw, ph)) = pending_resize.take() {
+                            if let Err(e) = renderer.resize(pw as i32, ph as i32) {
+                                log::warn!("renderer resize failed ({}x{}): {}", pw, ph, e);
+                            }
+                            if let Some(presenter) = presenter.as_mut() {
+                                if let Err(e) = presenter.resize(pw, ph) {
+                                    log::warn!("presenter resize failed: {}", e);
                                 }
                             }
                         }
-                        VirtualKeyCode::Return => {
-                            if focused_input.is_some() {
-                                crate::dispatch_input_to_focused(
-                                    '\r',
-                                    &last_vnode,
-                                    &focused_input,
-                                    &mut on_event,
-                                );
-                                velox_core::lifecycle::run_all_updated_hooks();
-                                if let Some(w) = window_opt.as_ref() {
-                                    w.request_redraw();
+                        // First mount: fire on_mounted once.
+                        ensure_mounted(&mut did_mount);
+                        // Render VNode -> Skia frame and present.
+                        if let Some(s) = &mut renderer.surface {
+                            s.set_scale_factor(scale_factor);
+                            let (vw, vh) = logical_size(s.width, s.height, scale_factor);
+                            let (vnode_raw, sheet) = make_view(vw, vh);
+                            let mut next_id = 1u32;
+                            let vnode_tagged = with_hover_ids(&vnode_raw, &mut next_id);
+                            let vnode =
+                                apply_styles_with_hover(&vnode_tagged, &sheet, &|_tag, props| {
+                                    props
+                                        .attrs
+                                        .get("data-hover-id")
+                                        .and_then(|v| v.parse::<u32>().ok())
+                                        .map(|id| Some(id) == hovered_id)
+                                        .unwrap_or(false)
+                                });
+                            last_vnode = Some(vnode.clone());
+                            let layout =
+                                velox_dom::layout::compute_layout(&vnode, vw as i32, vh as i32);
+                            recompute_targets(
+                                &vnode,
+                                &layout,
+                                &mut click_targets,
+                                &mut hover_targets,
+                                &mut input_targets,
+                            );
+                            if let Err(e) = crate::skia_render::skia_impl::render_frame(
+                                s, &vnode, &layout, &sheet,
+                            ) {
+                                log::error!("skia render error: {}", e);
+                            }
+                            if let Some(presenter) = presenter.as_mut() {
+                                if let Err(e) = presenter.present(s) {
+                                    log::error!("skia present error: {}", e);
                                 }
                             }
                         }
-                        _ => {}
                     }
+                    _ => {}
                 }
-            }
-            Event::WindowEvent {
-                event: WindowEvent::ReceivedCharacter(c),
-                ..
-            } => {
-                // Printable characters go to the focused text input.
-                if let Some(_) = &focused_input
-                    && !c.is_control()
-                    && c != '\u{7f}'
-                {
-                    crate::dispatch_input_to_focused(c, &last_vnode, &focused_input, &mut on_event);
-                    velox_core::lifecycle::run_all_updated_hooks();
-                    if let Some(w) = window_opt.as_ref() {
-                        w.request_redraw();
-                    }
-                }
-            }
-            Event::RedrawRequested(_) => {
-                // R-L3: materialize any coalesced resize exactly once per frame.
-                if let Some((pw, ph)) = pending_resize.take() {
-                    if let Err(e) = renderer.resize(pw as i32, ph as i32) {
-                        log::warn!("renderer resize failed ({}x{}): {}", pw, ph, e);
-                    }
-                    if let Some(presenter) = presenter.as_mut() {
-                        if let Err(e) = presenter.resize(pw, ph) {
-                            log::warn!("presenter resize failed: {}", e);
-                        }
-                    }
-                }
-                // First mount: fire on_mounted once.
-                ensure_mounted(&mut did_mount);
-                // Render VNode -> Skia frame and present.
-                if let Some(s) = &mut renderer.surface {
-                    s.set_scale_factor(scale_factor);
-                    let (vw, vh) = logical_size(s.width, s.height, scale_factor);
-                    let (vnode_raw, sheet) = make_view(vw, vh);
-                    let mut next_id = 1u32;
-                    let vnode_tagged = with_hover_ids(&vnode_raw, &mut next_id);
-                    let vnode = apply_styles_with_hover(&vnode_tagged, &sheet, &|_tag, props| {
-                        props
-                            .attrs
-                            .get("data-hover-id")
-                            .and_then(|v| v.parse::<u32>().ok())
-                            .map(|id| Some(id) == hovered_id)
-                            .unwrap_or(false)
-                    });
-                    last_vnode = Some(vnode.clone());
-                    let layout = velox_dom::layout::compute_layout(&vnode, vw as i32, vh as i32);
-                    recompute_targets(
-                        &vnode,
-                        &layout,
-                        &mut click_targets,
-                        &mut hover_targets,
-                        &mut input_targets,
-                    );
-                    if let Err(e) = crate::skia_render::skia_impl::render_frame(s, &vnode, &layout, &sheet) {
-                        log::error!("skia render error: {}", e);
-                    }
-                    if let Some(presenter) = presenter.as_mut() {
-                        if let Err(e) = presenter.present(s) {
-                            log::error!("skia present error: {}", e);
-                        }
-                    }
-                }
-            }
-            _ => {}
-        }
-     });
-    }));
+            });
+        }));
     } else {
         // Headless mode — no event loop, just run the initial render and return.
         log::info!("running in headless mode (no event loop)");
@@ -1190,10 +1223,14 @@ where
                     || lower.contains("no display server")
                     || lower.contains("failed to connect");
                 if headless_env_hmr || is_display_err {
-                    log::warn!(
-                        "window creation failed — continuing in headless mode: {msg}"
-                    );
-                    (Some(event_loop), Some(proxy), None, PhysicalSize::new(800, 600), 1.0)
+                    log::warn!("window creation failed — continuing in headless mode: {msg}");
+                    (
+                        Some(event_loop),
+                        Some(proxy),
+                        None,
+                        PhysicalSize::new(800, 600),
+                        1.0,
+                    )
                 } else {
                     panic!("failed to create window: {e}");
                 }
@@ -1201,9 +1238,7 @@ where
         }
     }))
     .unwrap_or_else(|_| {
-        log::warn!(
-            "window/event loop creation panicked — continuing in headless mode"
-        );
+        log::warn!("window/event loop creation panicked — continuing in headless mode");
         (None, None, None, PhysicalSize::new(800, 600), 1.0)
     });
 
@@ -1258,16 +1293,18 @@ where
 
     let window_opt: Option<winit::window::Window> = window;
     let mut scale_factor = scale_factor;
-    let mut renderer =
-        match crate::skia_surface::SkiaSurface::new_raster(window_size.width as i32, window_size.height as i32) {
-            Ok(surface) => skia_backend::SkiaRenderer {
-                surface: Some(surface),
-                vnode: None,
-            },
-            Err(e) => {
-                return Err(format!("failed to create SkiaSurface: {e}"));
-            }
-        };
+    let mut renderer = match crate::skia_surface::SkiaSurface::new_raster(
+        window_size.width as i32,
+        window_size.height as i32,
+    ) {
+        Ok(surface) => skia_backend::SkiaRenderer {
+            surface: Some(surface),
+            vnode: None,
+        },
+        Err(e) => {
+            return Err(format!("failed to create SkiaSurface: {e}"));
+        }
+    };
     let mut presenter: Option<crate::presenter::SoftbufferPresenter> = None;
     if let Some(w) = window_opt.as_ref() {
         // softbuffer::Context::new() can panic when the display server is
@@ -1287,9 +1324,7 @@ where
                 }
             }
             Err(_) => {
-                log::warn!(
-                    "softbuffer presenter creation panicked — continuing in headless mode"
-                );
+                log::warn!("softbuffer presenter creation panicked — continuing in headless mode");
             }
         }
     }
@@ -1342,242 +1377,265 @@ where
         }
     }
 
-
     if let Some(event_loop) = event_loop_opt {
         // The event loop can panic if the display server becomes unreachable
         // (e.g. "Io error: Broken pipe") — catch that and degrade gracefully.
         let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        event_loop.run(move |event, _, control_flow| {
-        *control_flow = ControlFlow::Wait;
-        match event {
-            Event::UserEvent(msg) => match msg {
-                HmrMessage::FullReload => {
-                    velox_core::lifecycle::run_all_destroy_hooks();
-                    *control_flow = ControlFlow::Exit;
-                }
-                HmrMessage::HotReload { module_path: _ } => {
-                    // Rebuild view and refresh all hit-test targets including
-                    // input_targets, then request a redraw so the new VNode
-                    // is painted on the next frame.
-                    if let Some(s) = renderer.surface.as_ref() {
-                        let (vw, vh) = logical_size(s.width, s.height, scale_factor);
-                        let (vnode_raw, _) = make_view(vw, vh);
-                        if let Err(e) = HmrRenderer::hot_update(&mut renderer, vnode_raw) {
-                            log::error!("hot_update failed: {}", e);
+            event_loop.run(move |event, _, control_flow| {
+                *control_flow = ControlFlow::Wait;
+                match event {
+                    Event::UserEvent(msg) => match msg {
+                        HmrMessage::FullReload => {
+                            velox_core::lifecycle::run_all_destroy_hooks();
+                            *control_flow = ControlFlow::Exit;
                         }
-                        // Recompute all targets from the updated view so
-                        // input focus / hit-test stays in sync after HMR.
-                        if let Some(s2) = renderer.surface.as_ref() {
-                            let (vw2, vh2) = logical_size(s2.width, s2.height, scale_factor);
-                            let (vnode2_raw, sheet2) = make_view(vw2, vh2);
-                            let mut nid = 1u32;
-                            let tagged = with_hover_ids(&vnode2_raw, &mut nid);
-                            let vnode2 = apply_styles_with_hover(&tagged, &sheet2, &|_tag, props| {
-                                props
-                                    .attrs
-                                    .get("data-hover-id")
-                                    .and_then(|v| v.parse::<u32>().ok())
-                                    .map(|id| Some(id) == hovered_id)
-                                    .unwrap_or(false)
-                            });
-                            _last_vnode = Some(vnode2.clone());
-                            let layout = velox_dom::layout::compute_layout(&vnode2, vw2 as i32, vh2 as i32);
-                    recompute_targets(
-                        &vnode2,
-                        &layout,
-                        &mut click_targets,
+                        HmrMessage::HotReload { module_path: _ } => {
+                            // Rebuild view and refresh all hit-test targets including
+                            // input_targets, then request a redraw so the new VNode
+                            // is painted on the next frame.
+                            if let Some(s) = renderer.surface.as_ref() {
+                                let (vw, vh) = logical_size(s.width, s.height, scale_factor);
+                                let (vnode_raw, _) = make_view(vw, vh);
+                                if let Err(e) = HmrRenderer::hot_update(&mut renderer, vnode_raw) {
+                                    log::error!("hot_update failed: {}", e);
+                                }
+                                // Recompute all targets from the updated view so
+                                // input focus / hit-test stays in sync after HMR.
+                                if let Some(s2) = renderer.surface.as_ref() {
+                                    let (vw2, vh2) =
+                                        logical_size(s2.width, s2.height, scale_factor);
+                                    let (vnode2_raw, sheet2) = make_view(vw2, vh2);
+                                    let mut nid = 1u32;
+                                    let tagged = with_hover_ids(&vnode2_raw, &mut nid);
+                                    let vnode2 = apply_styles_with_hover(
+                                        &tagged,
+                                        &sheet2,
+                                        &|_tag, props| {
+                                            props
+                                                .attrs
+                                                .get("data-hover-id")
+                                                .and_then(|v| v.parse::<u32>().ok())
+                                                .map(|id| Some(id) == hovered_id)
+                                                .unwrap_or(false)
+                                        },
+                                    );
+                                    _last_vnode = Some(vnode2.clone());
+                                    let layout = velox_dom::layout::compute_layout(
+                                        &vnode2, vw2 as i32, vh2 as i32,
+                                    );
+                                    recompute_targets(
+                                        &vnode2,
+                                        &layout,
+                                        &mut click_targets,
+                                        &mut hover_targets,
+                                        &mut input_targets,
+                                    );
+                                }
+                            }
+                            if let Some(w) = window_opt.as_ref() {
+                                w.request_redraw();
+                            }
+                        }
+                        HmrMessage::KeepWindow => {}
+                    },
+                    Event::NewEvents(StartCause::Init) => {
+                        if let Some(w) = window_opt.as_ref() {
+                            w.request_redraw();
+                        }
+                    }
+                    Event::WindowEvent {
+                        event: WindowEvent::CloseRequested,
+                        ..
+                    } => {
+                        velox_core::lifecycle::run_all_destroy_hooks();
+                        *control_flow = ControlFlow::Exit;
+                    }
+                    Event::WindowEvent {
+                        event: WindowEvent::Resized(new_size),
+                        ..
+                    } => {
+                        // R-L3: coalesce — defer surface recreation to RedrawRequested.
+                        pending_resize = Some((new_size.width, new_size.height));
+                        if let Some(w) = window_opt.as_ref() {
+                            w.request_redraw();
+                        }
+                    }
+                    Event::WindowEvent {
+                        event:
+                            WindowEvent::ScaleFactorChanged {
+                                scale_factor: new_scale,
+                                new_inner_size,
+                                ..
+                            },
+                        ..
+                    } => {
+                        let old_scale = scale_factor;
+                        scale_factor = new_scale as f32;
+                        if old_scale.is_finite()
+                            && old_scale > 0.0
+                            && scale_factor.is_finite()
+                            && scale_factor > 0.0
+                        {
+                            mouse_pos.0 = mouse_pos.0 * old_scale / scale_factor;
+                            mouse_pos.1 = mouse_pos.1 * old_scale / scale_factor;
+                        }
+                        // R-L3: coalesce renderer/presenter resize to RedrawRequested.
+                        pending_resize = Some((new_inner_size.width, new_inner_size.height));
+                        if let Some(s) = &mut renderer.surface {
+                            s.set_scale_factor(scale_factor);
+                        }
+                        // Hit-test/layout refresh deferred to RedrawRequested (single layout/frame, R-H5).
+                        if let Some(w) = window_opt.as_ref() {
+                            w.request_redraw();
+                        }
+                    }
+                    Event::WindowEvent {
+                        event: WindowEvent::CursorMoved { position, .. },
+                        ..
+                    } => {
+                        mouse_pos = (
+                            position.x as f32 / scale_factor,
+                            position.y as f32 / scale_factor,
+                        );
+                        let now_hovered =
+                            crate::events::hit_test_hover(&hover_targets, mouse_pos.0, mouse_pos.1);
+                        if now_hovered != hovered_id {
+                            hovered_id = now_hovered;
+                            if let Some(w) = window_opt.as_ref() {
+                                w.request_redraw();
+                            }
+                        }
+                    }
+                    Event::WindowEvent {
+                        event:
+                            WindowEvent::MouseInput {
+                                state: ElementState::Pressed,
+                                button: MouseButton::Left,
+                                ..
+                            },
+                        ..
+                    } => {
+                        if let Some((handler, payload_opt)) =
+                            crate::events::hit_test_click(&click_targets, mouse_pos.0, mouse_pos.1)
+                        {
+                            let payload_owned =
+                                payload_opt.map(|p| p.to_string()).unwrap_or_else(|| {
+                                    format!("{{\"x\":{},\"y\":{}}}", mouse_pos.0, mouse_pos.1)
+                                });
+                            on_event(handler, Some(&payload_owned));
+                            velox_core::lifecycle::run_all_updated_hooks();
+                            if let Some(s) = &mut renderer.surface {
+                                let (vw, vh) = logical_size(s.width, s.height, scale_factor);
+                                let (vnode_raw, sheet) = make_view(vw, vh);
+                                let mut next_id = 1u32;
+                                let vnode_tagged = with_hover_ids(&vnode_raw, &mut next_id);
+                                let vnode = apply_styles_with_hover(
+                                    &vnode_tagged,
+                                    &sheet,
+                                    &|_tag, props| {
+                                        props
+                                            .attrs
+                                            .get("data-hover-id")
+                                            .and_then(|v| v.parse::<u32>().ok())
+                                            .map(|id| Some(id) == hovered_id)
+                                            .unwrap_or(false)
+                                    },
+                                );
+                                _last_vnode = Some(vnode.clone());
+                                let layout =
+                                    velox_dom::layout::compute_layout(&vnode, vw as i32, vh as i32);
+                                recompute_targets(
+                                    &vnode,
+                                    &layout,
+                                    &mut click_targets,
+                                    &mut hover_targets,
+                                    &mut input_targets,
+                                );
+                            }
+                            if let Some(w) = window_opt.as_ref() {
+                                w.set_title(&get_title());
+                                w.request_redraw();
+                            }
+                        }
+                    }
+                    Event::WindowEvent {
+                        event: WindowEvent::KeyboardInput { input, .. },
+                        ..
+                    } => {
+                        // Handle keyboard shortcuts
+                        use winit::event::VirtualKeyCode;
+                        if let Some(keycode) = input.virtual_keycode
+                            && input.state == ElementState::Pressed
+                        {
+                            match keycode {
+                                VirtualKeyCode::R => {
+                                    // Trigger reload (app will exit, dev server will restart it)
+                                    velox_core::lifecycle::run_all_destroy_hooks();
+                                    *control_flow = ControlFlow::Exit;
+                                }
+                                VirtualKeyCode::Q => {
+                                    velox_core::lifecycle::run_all_destroy_hooks();
+                                    *control_flow = ControlFlow::Exit;
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                    Event::RedrawRequested(_) => {
+                        // R-L3: materialize any coalesced resize exactly once per frame.
+                        if let Some((pw, ph)) = pending_resize.take() {
+                            if let Err(e) = renderer.resize(pw as i32, ph as i32) {
+                                log::warn!("renderer resize failed ({}x{}): {}", pw, ph, e);
+                            }
+                            if let Some(presenter) = presenter.as_mut() {
+                                if let Err(e) = presenter.resize(pw, ph) {
+                                    log::warn!("presenter resize failed: {}", e);
+                                }
+                            }
+                        }
+                        ensure_mounted(&mut did_mount_hmr);
+                        // Render VNode -> Skia frame and present.
+                        if let Some(s) = &mut renderer.surface {
+                            s.set_scale_factor(scale_factor);
+                            let (vw, vh) = logical_size(s.width, s.height, scale_factor);
+                            let (vnode_raw, sheet) = make_view(vw, vh);
+                            let mut next_id = 1u32;
+                            let vnode_tagged = with_hover_ids(&vnode_raw, &mut next_id);
+                            let vnode =
+                                apply_styles_with_hover(&vnode_tagged, &sheet, &|_tag, props| {
+                                    props
+                                        .attrs
+                                        .get("data-hover-id")
+                                        .and_then(|v| v.parse::<u32>().ok())
+                                        .map(|id| Some(id) == hovered_id)
+                                        .unwrap_or(false)
+                                });
+                            _last_vnode = Some(vnode.clone());
+                            let layout =
+                                velox_dom::layout::compute_layout(&vnode, vw as i32, vh as i32);
+                            recompute_targets(
+                                &vnode,
+                                &layout,
+                                &mut click_targets,
                                 &mut hover_targets,
                                 &mut input_targets,
                             );
+                            if let Err(e) = crate::skia_render::skia_impl::render_frame(
+                                s, &vnode, &layout, &sheet,
+                            ) {
+                                log::error!("skia render error: {}", e);
+                            }
+                            if let Some(presenter) = presenter.as_mut() {
+                                if let Err(e) = presenter.present(s) {
+                                    log::error!("softbuffer present error: {}", e);
+                                }
+                            }
                         }
                     }
-                    if let Some(w) = window_opt.as_ref() {
-                        w.request_redraw();
-                    }
+                    _ => {}
                 }
-                HmrMessage::KeepWindow => {}
-            },
-            Event::NewEvents(StartCause::Init) => {
-                if let Some(w) = window_opt.as_ref() {
-                    w.request_redraw();
-                }
-            }
-            Event::WindowEvent {
-                event: WindowEvent::CloseRequested,
-                ..
-            } => {
-                velox_core::lifecycle::run_all_destroy_hooks();
-                *control_flow = ControlFlow::Exit;
-            }
-            Event::WindowEvent {
-                event: WindowEvent::Resized(new_size),
-                ..
-            } => {
-                // R-L3: coalesce — defer surface recreation to RedrawRequested.
-                pending_resize = Some((new_size.width, new_size.height));
-                if let Some(w) = window_opt.as_ref() {
-                    w.request_redraw();
-                }
-            }
-            Event::WindowEvent {
-                event:
-                    WindowEvent::ScaleFactorChanged {
-                        scale_factor: new_scale,
-                        new_inner_size,
-                        ..
-                    },
-                ..
-            } => {
-                let old_scale = scale_factor;
-                scale_factor = new_scale as f32;
-                if old_scale.is_finite() && old_scale > 0.0 && scale_factor.is_finite() && scale_factor > 0.0 {
-                    mouse_pos.0 = mouse_pos.0 * old_scale / scale_factor;
-                    mouse_pos.1 = mouse_pos.1 * old_scale / scale_factor;
-                }
-                // R-L3: coalesce renderer/presenter resize to RedrawRequested.
-                pending_resize = Some((new_inner_size.width, new_inner_size.height));
-                if let Some(s) = &mut renderer.surface {
-                    s.set_scale_factor(scale_factor);
-                }
-                // Hit-test/layout refresh deferred to RedrawRequested (single layout/frame, R-H5).
-                if let Some(w) = window_opt.as_ref() {
-                    w.request_redraw();
-                }
-            }
-            Event::WindowEvent {
-                event: WindowEvent::CursorMoved { position, .. },
-                ..
-            } => {
-                mouse_pos = (
-                    position.x as f32 / scale_factor,
-                    position.y as f32 / scale_factor,
-                );
-                let now_hovered =
-                    crate::events::hit_test_hover(&hover_targets, mouse_pos.0, mouse_pos.1);
-                if now_hovered != hovered_id {
-                    hovered_id = now_hovered;
-                    if let Some(w) = window_opt.as_ref() {
-                        w.request_redraw();
-                    }
-                }
-            }
-            Event::WindowEvent {
-                event:
-                    WindowEvent::MouseInput {
-                        state: ElementState::Pressed,
-                        button: MouseButton::Left,
-                        ..
-                    },
-                ..
-            } => {
-                if let Some((handler, payload_opt)) =
-                    crate::events::hit_test_click(&click_targets, mouse_pos.0, mouse_pos.1)
-                {
-                    let payload_owned = payload_opt.map(|p| p.to_string()).unwrap_or_else(|| {
-                        format!("{{\"x\":{},\"y\":{}}}", mouse_pos.0, mouse_pos.1)
-                    });
-                    on_event(handler, Some(&payload_owned));
-                    velox_core::lifecycle::run_all_updated_hooks();
-                    if let Some(s) = &mut renderer.surface {
-                        let (vw, vh) = logical_size(s.width, s.height, scale_factor);
-                        let (vnode_raw, sheet) = make_view(vw, vh);
-                        let mut next_id = 1u32;
-                        let vnode_tagged = with_hover_ids(&vnode_raw, &mut next_id);
-                        let vnode =
-                            apply_styles_with_hover(&vnode_tagged, &sheet, &|_tag, props| {
-                                props
-                                    .attrs
-                                    .get("data-hover-id")
-                                    .and_then(|v| v.parse::<u32>().ok())
-                                    .map(|id| Some(id) == hovered_id)
-                                    .unwrap_or(false)
-                            });
-                        _last_vnode = Some(vnode.clone());
-                        let layout = velox_dom::layout::compute_layout(&vnode, vw as i32, vh as i32);
-                    recompute_targets(
-                        &vnode,
-                        &layout,
-                        &mut click_targets, &mut hover_targets, &mut input_targets,
-                        );
-                    }
-                    if let Some(w) = window_opt.as_ref() {
-                        w.set_title(&get_title());
-                        w.request_redraw();
-                    }
-                }
-            }
-            Event::WindowEvent {
-                event: WindowEvent::KeyboardInput { input, .. },
-                ..
-            } => {
-                // Handle keyboard shortcuts
-                use winit::event::VirtualKeyCode;
-                if let Some(keycode) = input.virtual_keycode
-                    && input.state == ElementState::Pressed
-                {
-                    match keycode {
-                        VirtualKeyCode::R => {
-                            // Trigger reload (app will exit, dev server will restart it)
-                            velox_core::lifecycle::run_all_destroy_hooks();
-                            *control_flow = ControlFlow::Exit;
-                        }
-                        VirtualKeyCode::Q => {
-                            velox_core::lifecycle::run_all_destroy_hooks();
-                            *control_flow = ControlFlow::Exit;
-                        }
-                        _ => {}
-                    }
-                }
-            }
-            Event::RedrawRequested(_) => {
-                // R-L3: materialize any coalesced resize exactly once per frame.
-                if let Some((pw, ph)) = pending_resize.take() {
-                    if let Err(e) = renderer.resize(pw as i32, ph as i32) {
-                        log::warn!("renderer resize failed ({}x{}): {}", pw, ph, e);
-                    }
-                    if let Some(presenter) = presenter.as_mut() {
-                        if let Err(e) = presenter.resize(pw, ph) {
-                            log::warn!("presenter resize failed: {}", e);
-                        }
-                    }
-                }
-                ensure_mounted(&mut did_mount_hmr);
-                // Render VNode -> Skia frame and present.
-                if let Some(s) = &mut renderer.surface {
-                    s.set_scale_factor(scale_factor);
-                    let (vw, vh) = logical_size(s.width, s.height, scale_factor);
-                    let (vnode_raw, sheet) = make_view(vw, vh);
-                    let mut next_id = 1u32;
-                    let vnode_tagged = with_hover_ids(&vnode_raw, &mut next_id);
-                    let vnode = apply_styles_with_hover(&vnode_tagged, &sheet, &|_tag, props| {
-                        props
-                            .attrs
-                            .get("data-hover-id")
-                            .and_then(|v| v.parse::<u32>().ok())
-                            .map(|id| Some(id) == hovered_id)
-                            .unwrap_or(false)
-                    });
-                    _last_vnode = Some(vnode.clone());
-                    let layout = velox_dom::layout::compute_layout(&vnode, vw as i32, vh as i32);
-                    recompute_targets(
-                        &vnode,
-                        &layout,
-                        &mut click_targets, &mut hover_targets, &mut input_targets,
-                    );
-                    if let Err(e) = crate::skia_render::skia_impl::render_frame(s, &vnode, &layout, &sheet) {
-                        log::error!("skia render error: {}", e);
-                    }
-                    if let Some(presenter) = presenter.as_mut() {
-                        if let Err(e) = presenter.present(s) {
-                            log::error!("softbuffer present error: {}", e);
-                        }
-                    }
-                }
-            }
-            _ => {}
-        }
-     });
-    }));
+            });
+        }));
     } else {
         // Headless mode — no event loop, just run the initial render and return.
         log::info!("running in headless mode (no event loop)");
