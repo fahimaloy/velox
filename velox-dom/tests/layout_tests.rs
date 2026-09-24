@@ -521,3 +521,177 @@ fn flex_column_renders_children() {
         );
     }
 }
+
+// ===== Margin Collapsing Tests =====
+
+#[test]
+fn block_margin_collapse_adjacent_siblings() {
+    // Adjacent block siblings: vertical margins should collapse (max of margins)
+    let root = h(
+        "div",
+        Props::new().set("style", "width: 400px; height: 400px;"),
+        vec![
+            h("div", Props::new().set("style", "height: 50px; margin: 10px;"), vec![]),
+            h("div", Props::new().set("style", "height: 50px; margin: 10px;"), vec![]),
+        ],
+    );
+    let lt = compute_layout(&root, 800, 600);
+
+    assert_eq!(lt.children.len(), 2);
+    // First child: margin-top = 10px
+    assert_eq!(lt.children[0].rect.y, 10, "First child should have margin-top applied");
+    // Second child: collapsed margin = max(10, 10) = 10px
+    // Position = first_child_y + first_child_h + collapsed_margin = 10 + 50 + 10 = 70
+    assert_eq!(lt.children[1].rect.y, 70, "Margins should collapse: max(10,10)=10, not 20");
+}
+
+#[test]
+fn block_margin_collapse_different_margins() {
+    // Adjacent siblings with different margins: collapse to max
+    let root = h(
+        "div",
+        Props::new().set("style", "width: 400px; height: 400px;"),
+        vec![
+            h("div", Props::new().set("style", "height: 50px; margin-bottom: 30px;"), vec![]),
+            h("div", Props::new().set("style", "height: 50px; margin-top: 10px;"), vec![]),
+        ],
+    );
+    let lt = compute_layout(&root, 800, 600);
+
+    assert_eq!(lt.children.len(), 2);
+    // Collapsed margin = max(30, 10) = 30px
+    // Second child y = 0 + 50 + 30 = 80
+    assert_eq!(lt.children[1].rect.y, 80, "Margins should collapse to max(30,10)=30");
+}
+
+#[test]
+fn block_margin_no_collapse_with_parent_padding() {
+    // Parent padding prevents margin collapsing with first child
+    let root = h(
+        "div",
+        Props::new().set("style", "width: 400px; height: 400px; padding: 20px;"),
+        vec![
+            h("div", Props::new().set("style", "height: 50px; margin: 10px;"), vec![]),
+            h("div", Props::new().set("style", "height: 50px; margin: 10px;"), vec![]),
+        ],
+    );
+    let lt = compute_layout(&root, 800, 600);
+
+    assert_eq!(lt.children.len(), 2);
+    // First child: parent padding (20) + child margin-top (10) = 30
+    assert_eq!(lt.children[0].rect.y, 30, "First child: padding + margin-top = 30");
+    // Second child: collapsed margin = max(10, 10) = 10
+    // Position = 30 + 50 + 10 = 90
+    assert_eq!(lt.children[1].rect.y, 90, "Subsequent children still collapse");
+}
+
+// ===== Flex Fit-Content (Indefinite Cross-Size) Tests =====
+
+#[test]
+fn flex_row_fit_content_height() {
+    // Flex row without explicit height should size to content (fit-content)
+    let root = h(
+        "div",
+        Props::new().set("style", "width: 400px; height: 400px;"),
+        vec![
+            h(
+                "div",
+                Props::new().set("style", "display: flex; gap: 10px;"),
+                vec![
+                    h("div", Props::new().set("style", "padding: 10px 20px; font-size: 16px;"), 
+                        vec![velox_dom::VNode::Text("Button 1".to_string())]),
+                    h("div", Props::new().set("style", "padding: 10px 20px; font-size: 16px;"), 
+                        vec![velox_dom::VNode::Text("Button 2".to_string())]),
+                ],
+            ),
+        ],
+    );
+    let lt = compute_layout(&root, 800, 600);
+
+    assert_eq!(lt.children.len(), 1);
+    let flex_container = &lt.children[0];
+    // Flex container should size to content (~50-60px), not fill available height (400px)
+    assert!(
+        flex_container.rect.h > 40 && flex_container.rect.h < 100,
+        "Flex row without height should fit content (~50-60px), got {}",
+        flex_container.rect.h
+    );
+    // Children should have natural height, not stretched to 400px
+    for child in &flex_container.children {
+        assert!(
+            child.rect.h > 40 && child.rect.h < 100,
+            "Flex children should have natural height, got {}",
+            child.rect.h
+        );
+    }
+}
+
+#[test]
+fn flex_row_definite_height_stretches_children() {
+    // Flex row WITH explicit height should stretch children (align-items: stretch default)
+    let root = h(
+        "div",
+        Props::new().set("style", "width: 400px; height: 400px;"),
+        vec![
+            h(
+                "div",
+                Props::new().set("style", "display: flex; height: 200px; gap: 10px;"),
+                vec![
+                    h("div", Props::new().set("style", "padding: 10px 20px; font-size: 16px;"), 
+                        vec![velox_dom::VNode::Text("Button 1".to_string())]),
+                    h("div", Props::new().set("style", "padding: 10px 20px; font-size: 16px;"), 
+                        vec![velox_dom::VNode::Text("Button 2".to_string())]),
+                ],
+            ),
+        ],
+    );
+    let lt = compute_layout(&root, 800, 600);
+
+    assert_eq!(lt.children.len(), 1);
+    let flex_container = &lt.children[0];
+    // Flex container should have explicit height
+    assert_eq!(flex_container.rect.h, 200, "Flex container should have explicit height");
+    // Children should be stretched to fill cross-size (200px - padding)
+    for child in &flex_container.children {
+        // Child height should be close to container's content height (200 - padding)
+        assert!(
+            child.rect.h > 150 && child.rect.h <= 200,
+            "Flex children should stretch to fill definite cross-size, got {}",
+            child.rect.h
+        );
+    }
+}
+
+#[test]
+fn flex_row_align_items_flex_start_no_stretch() {
+    // Flex row with align-items: flex-start should NOT stretch children even with definite height
+    let root = h(
+        "div",
+        Props::new().set("style", "width: 400px; height: 400px;"),
+        vec![
+            h(
+                "div",
+                Props::new().set("style", "display: flex; height: 200px; align-items: flex-start; gap: 10px;"),
+                vec![
+                    h("div", Props::new().set("style", "padding: 10px 20px; font-size: 16px;"), 
+                        vec![velox_dom::VNode::Text("Button 1".to_string())]),
+                    h("div", Props::new().set("style", "padding: 10px 20px; font-size: 16px;"), 
+                        vec![velox_dom::VNode::Text("Button 2".to_string())]),
+                ],
+            ),
+        ],
+    );
+    let lt = compute_layout(&root, 800, 600);
+
+    assert_eq!(lt.children.len(), 1);
+    let flex_container = &lt.children[0];
+    assert_eq!(flex_container.rect.h, 200, "Flex container should have explicit height");
+    // Children should have natural height (not stretched) due to align-items: flex-start
+    for child in &flex_container.children {
+        assert!(
+            child.rect.h > 40 && child.rect.h < 100,
+            "Flex children with align-items: flex-start should NOT stretch, got {}",
+            child.rect.h
+        );
+    }
+}

@@ -3,6 +3,10 @@ use crate::{Length, VNode};
 /// Default font size for root element (used for rem calculations)
 const DEFAULT_ROOT_FONT_SIZE: f32 = 16.0;
 
+/// Sentinel value for unconstrained cross-size in flex layout (fit-content)
+/// CSS Flexbox spec: when cross-size is indefinite, children lay out at natural size
+const UNCONSTRAINED_CROSS_SIZE: f32 = i32::MAX as f32;
+
 /// Font metrics for text measurement
 pub struct FontMetrics {
     pub char_width: f32,
@@ -1307,10 +1311,50 @@ pub fn compute_layout(node: &VNode, viewport_w: i32, viewport_h: i32) -> LayoutN
                         vw_f,
                         vh_f,
                     );
+                    
+                    // Determine if flex container has a definite cross-size
+                    // For row flex (is_column=false): cross-size = height
+                    // For column flex (is_column=true): cross-size = width (always definite = content_w)
+                    // CSS Flexbox spec §9.2: definite cross-size when height/min-height/max-height is definite
+                    let has_definite_cross_size = if is_column {
+                        true // column flex cross-size (width) is always definite = content_w
+                    } else {
+                        // Row flex: cross-size is height - definite if explicit height, min-height, or max-height set
+                        let explicit_h_content = explicit_h_raw.map(|v| {
+                            if is_border_box {
+                                (v - pt - pb - bt - bb).max(0)
+                            } else {
+                                v
+                            }
+                        });
+                        let min_h = style_lookup_len_full(
+                            style,
+                            "min-height",
+                            avail_h as f32,
+                            my_font_size,
+                            root_font_size,
+                            vw_f,
+                            vh_f,
+                        );
+                        let max_h = style_lookup_len_full(
+                            style,
+                            "max-height",
+                            avail_h as f32,
+                            my_font_size,
+                            root_font_size,
+                            vw_f,
+                            vh_f,
+                        );
+                        explicit_h_content.is_some() || min_h.is_some() || max_h.is_some()
+                    };
+                    
+                    // Initial cross_size: if definite, use it; if indefinite, start with 0 (will compute from children)
                     let cross_size = if is_column {
                         content_w
-                    } else {
+                    } else if has_definite_cross_size {
                         explicit_h_content.unwrap_or(content_h_available).max(0)
+                    } else {
+                        0 // indefinite - will be computed from children's natural sizes
                     };
 
                     // Step 1: Compute flex-basis for each child
@@ -1398,10 +1442,13 @@ pub fn compute_layout(node: &VNode, viewport_w: i32, viewport_h: i32) -> LayoutN
                         } else {
                             main_size
                         };
+                        // For indefinite cross-size, give children unconstrained cross-size so they lay out at natural size
                         let child_avail_cross = if is_column {
-                            cross_size
+                            cross_size as f32 // column flex cross-size (width) is always definite
+                        } else if has_definite_cross_size {
+                            cross_size as f32 // definite cross-size: use it for children (align-items: stretch will apply)
                         } else {
-                            content_h_available
+                            UNCONSTRAINED_CROSS_SIZE // indefinite: unconstrained, children use natural size
                         };
                         let ln = at(
                             fc.node,
@@ -1731,10 +1778,12 @@ pub fn compute_layout(node: &VNode, viewport_w: i32, viewport_h: i32) -> LayoutN
                                 if cross_sz > max_cross_size { max_cross_size = cross_sz; }
                             }
                         }
-                        // L-M5: stretch — single line stretches to container, multi-line stretches to line max
+                        // L-M5: stretch — only applies when cross-size is DEFINITE
+                        // When cross-size is indefinite (fit-content), stretch behaves as flex-start
                         let effective_align_items = align_items.clone();
                         let is_single_line = pre_lines_len == 1;
-                        if effective_align_items == "stretch" {
+                        let can_stretch = has_definite_cross_size && effective_align_items == "stretch";
+                        if can_stretch {
                             let stretch_target = if is_single_line { cross_size as f32 } else { max_cross_size };
                             for &(item_idx, _) in &line.main_positions {
                                 let child_style = flex_children.iter().find(|fc| fc.index == items[item_idx].child_index).map(|fc| fc.style).unwrap_or(None);
@@ -1749,13 +1798,20 @@ pub fn compute_layout(node: &VNode, viewport_w: i32, viewport_h: i32) -> LayoutN
                                 max_cross_size = max_cross_size.max(cross_size as f32);
                             }
                         }
+                        // For indefinite cross-size, line.cross_size = max_cross_size (natural size)
+                        // For definite cross-size with stretch, line.cross_size may be stretched to cross_size
                         line.cross_size = max_cross_size;
                     }
                     // Compute align-content distribution for multi-line
                     let total_cross: f32 = if lines.is_empty() { 0.0 } else {
                         lines.iter().map(|l| l.cross_size).sum::<f32>() + cross_gap * (lines.len() as f32 - 1.0)
                     };
-                    let free_cross = (cross_size as f32 - total_cross).max(0.0);
+                    // For indefinite cross-size (fit-content), there's no free space to distribute
+                    let free_cross = if has_definite_cross_size {
+                        (cross_size as f32 - total_cross).max(0.0)
+                    } else {
+                        0.0
+                    };
                     let n_lines = lines.len();
                     let mut cross_start: f32 = 0.0;
                     let mut cross_extra_per_gap: f32 = 0.0;
@@ -1775,7 +1831,7 @@ pub fn compute_layout(node: &VNode, viewport_w: i32, viewport_h: i32) -> LayoutN
                             if n_lines > 0 { cross_extra_per_gap = free_cross / (n_lines as f32 + 1.0); cross_start = cross_extra_per_gap; }
                         }
                         "stretch" => {
-                            if n_lines > 1 && free_cross > 0.0 {
+                            if has_definite_cross_size && n_lines > 1 && free_cross > 0.0 {
                                 cross_line_extra = free_cross / n_lines as f32;
                                 for line in &mut lines { line.cross_size += cross_line_extra; }
                                 // Re-stretch items that were stretch to new line size
@@ -1792,6 +1848,9 @@ pub fn compute_layout(node: &VNode, viewport_w: i32, viewport_h: i32) -> LayoutN
                         }
                         _ => {}
                     }
+                    // For indefinite cross-size, update cross_size to the computed total_cross
+                    // so that the flex container's layout node gets the correct height
+                    let final_cross_size = if has_definite_cross_size { cross_size as f32 } else { total_cross };
                     // Second pass: position items with computed cross offsets
                     let mut cross_offset: f32 = cross_start;
                     let single_line_mode = n_lines == 1;
@@ -1807,7 +1866,7 @@ pub fn compute_layout(node: &VNode, viewport_w: i32, viewport_h: i32) -> LayoutN
                                 let item_cross_size = if is_column { ln.rect.w as f32 } else { ln.rect.h as f32 };
                                 // baseline fallback to flex-start
                                 let resolved_align = if item_align == "baseline" { "flex-start" } else { item_align.as_str() };
-                                let effective_cross = if single_line_mode { cross_size as f32 } else { line.cross_size };
+                                let effective_cross = if single_line_mode { final_cross_size } else { line.cross_size };
                                 let cross_pos = match resolved_align {
                                     "flex-end" | "end" => (effective_cross - item_cross_size).max(0.0),
                                     "center" => (effective_cross - item_cross_size) / 2.0,
@@ -1998,10 +2057,36 @@ pub fn compute_layout(node: &VNode, viewport_w: i32, viewport_h: i32) -> LayoutN
                             continue;
                         }
 
+                        // Get child's margins for collapsing
+                        let (_, _, cmt, cmb) = style_box_sides_full(
+                            child_style,
+                            "margin",
+                            content_w as f32,
+                            my_font_size,
+                            root_font_size,
+                            vw_f,
+                            vh_f,
+                        );
+
+                        // Margin collapsing: adjacent vertical margins collapse to max()
+                        // First child: no collapsing with parent (parent padding/border prevents it),
+                        // so child's margin-top is fully applied → collapsed_margin_top = cmt
+                        // Subsequent children: collapse with previous sibling's margin-bottom
+                        let collapsed_margin_top = if idx == 0 {
+                            cmt
+                        } else {
+                            last_bottom_margin.max(cmt)
+                        };
+
+                        // Adjust cur_y for collapsed margin.
+                        // at() will add cmt, so we pass cur_y + collapsed_margin_top - cmt
+                        // so that at() computes elem_y = (cur_y + collapsed_margin_top - cmt) + cmt = cur_y + collapsed_margin_top
+                        let adjusted_cur_y = cur_y + collapsed_margin_top - cmt;
+
                         let mut child_ln = at(
                             c,
                             cur_x,
-                            cur_y,
+                            adjusted_cur_y,
                             (content_w - (cur_x - content_x_scrolled)).max(0),
                             content_h_available,
                             viewport_w,
@@ -2040,17 +2125,10 @@ pub fn compute_layout(node: &VNode, viewport_w: i32, viewport_h: i32) -> LayoutN
                             vh_f,
                         );
 
-                        let (_cml, _cmr, _cmt, cmb) = style_box_sides_full(
-                            child_style,
-                            "margin",
-                            content_w as f32,
-                            my_font_size,
-                            root_font_size,
-                            vw_f,
-                            vh_f,
-                        );
+                        // child_ln.rect.y + child_ln.rect.h is the bottom of child's margin box (includes cmb)
+                        // No need to add cmb again - that was the double-counting bug
+                        cur_y = child_ln.rect.y + child_ln.rect.h;
                         last_bottom_margin = cmb;
-                        cur_y = child_ln.rect.y + child_ln.rect.h + cmb;
                         cur_x = content_x;
                         line_h = 0;
 

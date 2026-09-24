@@ -138,7 +138,7 @@ mod skia_gl;
 #[cfg(feature = "skia-native")]
 mod skia_render;
 #[cfg(feature = "skia-native")]
-mod skia_surface;
+pub mod skia_surface;
 // Softbuffer presenter for window rendering (feature-gated)
 #[cfg(feature = "skia-native")]
 mod presenter;
