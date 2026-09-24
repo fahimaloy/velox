@@ -167,11 +167,7 @@ pub fn dev_current(project_dir: &Path, release: bool) -> Result<()> {
 
         // Detect file changes (debounced).
         if let Some(changed) = changed_file(&watch_dir, &mut last_check) {
-            println!(
-                "{} {} changed — rebuilding",
-                yellow("↻"),
-                changed.display()
-            );
+            println!("{} {} changed — rebuilding", yellow("↻"), changed.display());
 
             // Try to send HMR reload to the still-running app.
             // The app will receive FullReload and exit, then we'll restart it.

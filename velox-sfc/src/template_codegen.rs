@@ -915,7 +915,12 @@ fn extract_vmodel(attrs: &[TemplateAttr], _tag: &str) -> (Vec<TemplateAttr>, Opt
     }
 }
 
-fn emit_node_with_mode(n: &Node, mode: TransformMode, fields: &[String], scope_id: Option<&str>) -> String {
+fn emit_node_with_mode(
+    n: &Node,
+    mode: TransformMode,
+    fields: &[String],
+    scope_id: Option<&str>,
+) -> String {
     match n {
         Node::Text(t) => format!(r#"text({})"#, string_lit(t)),
         Node::Interpolation(expr) => {
@@ -984,9 +989,9 @@ fn emit_node_with_mode(n: &Node, mode: TransformMode, fields: &[String], scope_i
 
                 // If the element already has a `style` attribute, we merge the
                 // display value. Otherwise, we add a style attribute.
-                let has_style = attrs
-                    .iter()
-                    .any(|a| a.name == "style" && matches!(a.kind, AttrKind::Static | AttrKind::Bind));
+                let has_style = attrs.iter().any(|a| {
+                    a.name == "style" && matches!(a.kind, AttrKind::Static | AttrKind::Bind)
+                });
 
                 if has_style {
                     // The style attr is already emitted by emit_node_with_mode.
@@ -1037,7 +1042,11 @@ fn emit_node_with_mode(n: &Node, mode: TransformMode, fields: &[String], scope_i
                 let has_props_events = clean_attrs
                     .iter()
                     .any(|a| matches!(a.kind, AttrKind::Bind | AttrKind::On));
-                if mode == TransformMode::State && !has_props_events && !has_slot_children && fields.contains(&field) {
+                if mode == TransformMode::State
+                    && !has_props_events
+                    && !has_slot_children
+                    && fields.contains(&field)
+                {
                     return format!(
                         r#"{comp_name}::render_with_state(std::sync::Arc::clone(&state.{field}), {comp_name}::make_resolve(std::sync::Arc::clone(&state.{field})))"#,
                     );
@@ -1065,7 +1074,10 @@ fn emit_node_with_mode(n: &Node, mode: TransformMode, fields: &[String], scope_i
                         if slot_vnodes.len() == 1 {
                             slot_vnodes[0].clone()
                         } else {
-                            format!("velox_dom::h(\"slot\", velox_dom::Props::new(), vec![{}])", slot_vnodes.join(", "))
+                            format!(
+                                "velox_dom::h(\"slot\", velox_dom::Props::new(), vec![{}])",
+                                slot_vnodes.join(", ")
+                            )
                         }
                     )
                 } else {
@@ -1253,7 +1265,11 @@ fn emit_node_with_mode(n: &Node, mode: TransformMode, fields: &[String], scope_i
 
             let props = emit_props_with(attrs);
             let kids = emit_children_with_mode(children, mode, fields, scope_id);
-            format!(r#"h("{}", {}, {kids})"#, tag, append_scope_attr(&props, scope_id))
+            format!(
+                r#"h("{}", {}, {kids})"#,
+                tag,
+                append_scope_attr(&props, scope_id)
+            )
         }
     }
 }
@@ -1492,7 +1508,12 @@ fn emit_props_with(attrs: &[TemplateAttr]) -> String {
     parts.join("")
 }
 
-fn emit_children_with_mode(children: &[Node], mode: TransformMode, fields: &[String], scope_id: Option<&str>) -> String {
+fn emit_children_with_mode(
+    children: &[Node],
+    mode: TransformMode,
+    fields: &[String],
+    scope_id: Option<&str>,
+) -> String {
     if children.is_empty() {
         return "vec![]".to_string();
     }
@@ -1652,7 +1673,8 @@ fn emit_children_with_mode(children: &[Node], mode: TransformMode, fields: &[Str
                                     idx_var = for_info.index_name
                                 ));
 
-                                let inner = emit_node_with_ctx_for_loop(&tmp_elem, &for_info, scope_id);
+                                let inner =
+                                    emit_node_with_ctx_for_loop(&tmp_elem, &for_info, scope_id);
 
                                 let inner_with_key = if let Some(Some(key_val)) = &key_expr {
                                     format!(
@@ -1765,7 +1787,12 @@ fn emit_node_with_state(n: &Node, fields: &[String], scope_id: Option<&str>) -> 
     emit_node_with_mode(n, TransformMode::State, fields, scope_id)
 }
 
-fn emit_node_with_ctx_state(n: &Node, item_name: Option<&str>, idx_name: Option<&str>, scope_id: Option<&str>) -> String {
+fn emit_node_with_ctx_state(
+    n: &Node,
+    item_name: Option<&str>,
+    idx_name: Option<&str>,
+    scope_id: Option<&str>,
+) -> String {
     match n {
         Node::Text(t) => format!(r#"text({})"#, string_lit(t)),
         Node::Interpolation(expr) => {
@@ -1849,9 +1876,9 @@ fn emit_node_with_ctx_state(n: &Node, item_name: Option<&str>, idx_name: Option<
 
                 // If the element already has a `style` attribute, we merge the
                 // display value. Otherwise, we add a style attribute.
-                let has_style = attrs
-                    .iter()
-                    .any(|a| a.name == "style" && matches!(a.kind, AttrKind::Static | AttrKind::Bind));
+                let has_style = attrs.iter().any(|a| {
+                    a.name == "style" && matches!(a.kind, AttrKind::Static | AttrKind::Bind)
+                });
 
                 if has_style {
                     // The style attr is already emitted by emit_node_with_ctx_state.
@@ -1918,7 +1945,10 @@ fn emit_node_with_ctx_state(n: &Node, item_name: Option<&str>, idx_name: Option<
                         if slot_vnodes.len() == 1 {
                             slot_vnodes[0].clone()
                         } else {
-                            format!("velox_dom::h(\"slot\", velox_dom::Props::new(), vec![{}])", slot_vnodes.join(", "))
+                            format!(
+                                "velox_dom::h(\"slot\", velox_dom::Props::new(), vec![{}])",
+                                slot_vnodes.join(", ")
+                            )
                         }
                     )
                 } else {
@@ -1978,7 +2008,11 @@ fn emit_node_with_ctx_state(n: &Node, item_name: Option<&str>, idx_name: Option<
                 k_items.push(emit_node_with_ctx_state(c, item_name, idx_name, scope_id));
             }
             let kids = format!("vec![{}]", k_items.join(", "));
-            format!(r#"h("{}", {}, {kids})"#, tag, append_scope_attr(&props, scope_id))
+            format!(
+                r#"h("{}", {}, {kids})"#,
+                tag,
+                append_scope_attr(&props, scope_id)
+            )
         }
     }
 }
@@ -2022,7 +2056,11 @@ fn emit_node_with_ctx(n: &Node, loop_var: Option<&str>, scope_id: Option<&str>) 
                 }
                 format!("vec![{}]", k_items.join(", "))
             };
-            format!(r#"h("{}", {}, {kids})"#, tag, append_scope_attr(&props, scope_id))
+            format!(
+                r#"h("{}", {}, {kids})"#,
+                tag,
+                append_scope_attr(&props, scope_id)
+            )
         }
     }
 }
@@ -2075,7 +2113,11 @@ fn emit_node_with_ctx_for_loop(n: &Node, for_info: &VForInfo, scope_id: Option<&
                 }
                 format!("vec![{}]", k_items.join(", "))
             };
-            format!(r#"h("{}", {}, {kids})"#, tag, append_scope_attr(&props, scope_id))
+            format!(
+                r#"h("{}", {}, {kids})"#,
+                tag,
+                append_scope_attr(&props, scope_id)
+            )
         }
     }
 }

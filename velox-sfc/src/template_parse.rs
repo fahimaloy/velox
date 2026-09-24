@@ -134,7 +134,8 @@ pub fn parse_template_to_ast(input: &str) -> Result<Vec<Node>, String> {
                 // of silently treating the remainder as text.
                 let (line, col) = crate::diagnostic::line_col_at(input, open_pos);
                 let message = "unclosed '{{' — expected a matching '}}'".to_string();
-                let suggestion = "close the interpolation with '}}', e.g. '{{ count }}'".to_string();
+                let suggestion =
+                    "close the interpolation with '}}', e.g. '{{ count }}'".to_string();
                 return Err(crate::diagnostic::render_parse_error(
                     input,
                     line,

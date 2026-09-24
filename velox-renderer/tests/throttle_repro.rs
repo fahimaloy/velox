@@ -34,9 +34,14 @@ fn resized_does_not_create_surface_per_event() {
             "Resized handler #{found} still contains raster_n32_premul (per-event alloc)"
         );
         offset = abs + 1;
-        if offset >= src.len() { break; }
+        if offset >= src.len() {
+            break;
+        }
     }
-    assert!(found >= 2, "expected at least 2 Resized handlers (plain + HMR), found {found}");
+    assert!(
+        found >= 2,
+        "expected at least 2 Resized handlers (plain + HMR), found {found}"
+    );
 }
 
 #[test]
@@ -70,7 +75,9 @@ fn redraw_deferred_surface_creation_via_pending_resize() {
             break;
         }
         offset = abs + 1;
-        if offset >= src.len() { break; }
+        if offset >= src.len() {
+            break;
+        }
     }
     assert!(
         has_deferred_in_redraw,
@@ -95,7 +102,11 @@ fn drag_resize_coalesces_to_last_size_only() {
     // RedrawRequested fires once per frame
     if let Some((w, h)) = pending.take() {
         // deferred single creation with last size
-        assert_eq!((w, h), (899, 699), "coalesced pending must be last drag size");
+        assert_eq!(
+            (w, h),
+            (899, 699),
+            "coalesced pending must be last drag size"
+        );
         surface_creations += 1;
     }
     assert_eq!(
@@ -111,6 +122,12 @@ fn drag_resize_coalesces_to_last_size_only() {
     // (store in Resized, take in RedrawRequested) to ensure coalescing.
     let store_count = src.matches("pending_resize = Some").count();
     let take_count = src.matches("pending_resize.take()").count();
-    assert!(store_count >= 2, "expected at least 2 stores of pending_resize (plain + HMR), found {store_count}");
-    assert!(take_count >= 2, "expected at least 2 takes of pending_resize (plain + HMR), found {take_count}");
+    assert!(
+        store_count >= 2,
+        "expected at least 2 stores of pending_resize (plain + HMR), found {store_count}"
+    );
+    assert!(
+        take_count >= 2,
+        "expected at least 2 takes of pending_resize (plain + HMR), found {take_count}"
+    );
 }

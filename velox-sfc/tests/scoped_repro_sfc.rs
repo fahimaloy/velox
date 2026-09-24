@@ -15,15 +15,42 @@ fn scope_css_media_not_corrupted() {
     let slice = &stub[start..std::cmp::min(stub.len(), start + 2000)];
     eprintln!("STYLE slice: {}", slice);
     // @media prelude must NOT have [data-v-
-    assert!(!slice.contains("@media (max-width: 600px) [data-v-"), "media prelude corrupted: {}", slice);
-    assert!(!slice.contains("@media (max-width: 600px)[data-v-"), "media prelude corrupted: {}", slice);
-    assert!(slice.contains("@media (max-width: 600px)"), "media prelude missing");
+    assert!(
+        !slice.contains("@media (max-width: 600px) [data-v-"),
+        "media prelude corrupted: {}",
+        slice
+    );
+    assert!(
+        !slice.contains("@media (max-width: 600px)[data-v-"),
+        "media prelude corrupted: {}",
+        slice
+    );
+    assert!(
+        slice.contains("@media (max-width: 600px)"),
+        "media prelude missing"
+    );
     // inner selectors must be scoped
-    assert!(slice.contains(".a[data-v-"), "inner .a not scoped: {}", slice);
-    assert!(slice.contains(".b[data-v-"), "outer .b not scoped: {}", slice);
+    assert!(
+        slice.contains(".a[data-v-"),
+        "inner .a not scoped: {}",
+        slice
+    );
+    assert!(
+        slice.contains(".b[data-v-"),
+        "outer .b not scoped: {}",
+        slice
+    );
     // keyframes inner must NOT be scoped
-    assert!(!slice.contains("from[data-v-"), "keyframes from incorrectly scoped: {}", slice);
-    assert!(!slice.contains("to[data-v-"), "keyframes to incorrectly scoped: {}", slice);
+    assert!(
+        !slice.contains("from[data-v-"),
+        "keyframes from incorrectly scoped: {}",
+        slice
+    );
+    assert!(
+        !slice.contains("to[data-v-"),
+        "keyframes to incorrectly scoped: {}",
+        slice
+    );
 }
 
 #[test]
@@ -42,8 +69,16 @@ fn scoped_template_gets_data_attr() {
     let rs = velox_sfc::compile_template_to_rs_full(tpl, "App", None, None, Some(scope)).unwrap();
     eprintln!("rs: {}", rs);
     // Every h("div" ...) and h("span" ...) should have .set("data-v-12345678", "")
-    assert!(rs.contains("data-v-12345678"), "scope attr not injected: {}", rs);
-    assert!(rs.matches("data-v-12345678").count() >= 2, "both div and span should be scoped, found {}", rs.matches("data-v-12345678").count());
+    assert!(
+        rs.contains("data-v-12345678"),
+        "scope attr not injected: {}",
+        rs
+    );
+    assert!(
+        rs.matches("data-v-12345678").count() >= 2,
+        "both div and span should be scoped, found {}",
+        rs.matches("data-v-12345678").count()
+    );
 }
 
 #[test]

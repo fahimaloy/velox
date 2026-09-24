@@ -168,9 +168,7 @@ fn compile_component_tree(
         script_src,
         scope_id.as_deref(),
     )
-    .map_err(|e| {
-        anyhow::anyhow!("template compilation error in {}: {}", vx_file.display(), e)
-    })?;
+    .map_err(|e| anyhow::anyhow!("template compilation error in {}: {}", vx_file.display(), e))?;
 
     // Generate component stub, passing the base path for correct import resolution.
     // Use unwrapped mode so the output is the module body (no `pub mod {name} { ... }`

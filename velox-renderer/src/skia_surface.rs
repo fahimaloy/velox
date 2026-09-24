@@ -153,7 +153,10 @@ mod native {
                 None => {
                     log::warn!(
                         "SkiaSurface::resize failed to create raster surface {}x{} — keeping previous {}x{}",
-                        w, h, self.width, self.height
+                        w,
+                        h,
+                        self.width,
+                        self.height
                     );
                     Err("skia: failed to create raster surface on resize".to_string())
                 }
@@ -200,10 +203,9 @@ mod native {
                     }
                     // Fallback to raster until the platform-specific path is implemented.
                     let viewport = Viewport::from_i32(cw, ch, 1.0);
-                    let surface =
-                        sk::surfaces::raster_n32_premul((cw, ch)).ok_or_else(|| {
-                            "skia: failed to create raster fallback surface".to_string()
-                        })?;
+                    let surface = sk::surfaces::raster_n32_premul((cw, ch)).ok_or_else(|| {
+                        "skia: failed to create raster fallback surface".to_string()
+                    })?;
                     return Ok(SkiaSurface {
                         surface,
                         viewport,

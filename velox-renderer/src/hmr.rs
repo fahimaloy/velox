@@ -32,9 +32,7 @@ pub enum HmrMessage {
 
     /// Signal the app to hot-reload a specific module. Currently
     /// treated as a FullReload (module-level HMR not yet implemented).
-    HotReload {
-        module_path: String,
-    },
+    HotReload { module_path: String },
 
     /// A keep-alive / no-op message.
     KeepWindow,
@@ -46,8 +44,7 @@ pub enum HmrMessage {
 /// `VELOX_HMR_PORT` (defaulting to [`DEFAULT_HMR_PORT`] if unset).
 /// Otherwise returns `None`.
 pub fn hmr_config() -> Option<u16> {
-    let hmr_enabled =
-        std::env::var("VELOX_HMR").as_deref() == Ok("1");
+    let hmr_enabled = std::env::var("VELOX_HMR").as_deref() == Ok("1");
     if !hmr_enabled {
         return None;
     }
@@ -92,10 +89,7 @@ pub fn run_hmr_client(port: u16, tx: std::sync::mpsc::Sender<HmrMessage>) {
                                         }
                                     }
                                     Err(e) => {
-                                        eprintln!(
-                                            "[velox] HMR: failed to parse message: {}",
-                                            e
-                                        );
+                                        eprintln!("[velox] HMR: failed to parse message: {}", e);
                                     }
                                 },
                                 Err(e) => {

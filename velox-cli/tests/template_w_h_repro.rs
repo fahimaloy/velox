@@ -33,7 +33,10 @@ fn template_project_main_rs_uses_w_h() {
 fn example_counter_main_rs_uses_w_h() {
     let p = workspace_root().join("examples/counter/src/main.rs");
     let s = read_template_main(&p);
-    assert!(!s.contains("|_w"), "counter main.rs must not contain |_w discard");
+    assert!(
+        !s.contains("|_w"),
+        "counter main.rs must not contain |_w discard"
+    );
     assert!(
         s.contains("w: u32, h: u32"),
         "counter main.rs must declare w,h viewport params"
@@ -44,7 +47,10 @@ fn example_counter_main_rs_uses_w_h() {
 fn example_todo_main_rs_uses_w_h() {
     let p = workspace_root().join("examples/todo/src/main.rs");
     let s = read_template_main(&p);
-    assert!(!s.contains("|_w"), "todo main.rs must not contain |_w discard");
+    assert!(
+        !s.contains("|_w"),
+        "todo main.rs must not contain |_w discard"
+    );
     assert!(
         s.contains("w: u32, h: u32"),
         "todo main.rs must declare w,h viewport params"
@@ -75,8 +81,7 @@ fn app_vx_roots_are_viewport_filling() {
         ws.join("examples/todo/src/App.vx"),
     ];
     for p in &paths {
-        let s = std::fs::read_to_string(p)
-            .unwrap_or_else(|e| panic!("read {}: {e}", p.display()));
+        let s = std::fs::read_to_string(p).unwrap_or_else(|e| panic!("read {}: {e}", p.display()));
         assert!(
             s.contains("width: 100%"),
             "{} must contain width: 100% for viewport fill",
@@ -104,7 +109,10 @@ fn renderer_make_view_contract_documented() {
     );
     // Must mention both width/height semantics (vw/vh or w/h)
     assert!(
-        s.to_ascii_lowercase().contains("logical") || s.contains("w, h") || s.contains("vw") || s.contains("viewport"),
+        s.to_ascii_lowercase().contains("logical")
+            || s.contains("w, h")
+            || s.contains("vw")
+            || s.contains("viewport"),
         "renderer docs must explain logical viewport dimensions"
     );
 }

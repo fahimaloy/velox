@@ -1,6 +1,9 @@
 use velox_dom::{Props, h, layout::compute_layout};
 
-fn find_child<'a>(layout: &'a velox_dom::layout::LayoutNode, idx: usize) -> &'a velox_dom::layout::LayoutNode {
+fn find_child<'a>(
+    layout: &'a velox_dom::layout::LayoutNode,
+    idx: usize,
+) -> &'a velox_dom::layout::LayoutNode {
     layout
         .children
         .iter()
@@ -32,12 +35,16 @@ fn repro_space_between_variable_sizes() {
     assert!(
         (x1 - 105).abs() <= 2,
         "space-between variable: x1 expected ~105 got {} (x0 {} x2 {})",
-        x1, x0, x2
+        x1,
+        x0,
+        x2
     );
     assert!(
         (x2 - 240).abs() <= 2,
         "space-between variable: x2 expected ~240 got {} (x0 {} x1 {})",
-        x2, x0, x1
+        x2,
+        x0,
+        x1
     );
     assert!((x0 - 0).abs() <= 2, "x0 expected 0 got {}", x0);
 }
@@ -53,9 +60,21 @@ fn repro_space_around_variable_sizes() {
             "display: flex; justify-content: space-around; gap: 10px; width: 300px; height: 100px;",
         ),
         vec![
-            h("div", Props::new().set("style", "width: 50px; height: 20px;"), vec![]),
-            h("div", Props::new().set("style", "width: 80px; height: 20px;"), vec![]),
-            h("div", Props::new().set("style", "width: 60px; height: 20px;"), vec![]),
+            h(
+                "div",
+                Props::new().set("style", "width: 50px; height: 20px;"),
+                vec![],
+            ),
+            h(
+                "div",
+                Props::new().set("style", "width: 80px; height: 20px;"),
+                vec![],
+            ),
+            h(
+                "div",
+                Props::new().set("style", "width: 60px; height: 20px;"),
+                vec![],
+            ),
         ],
     );
     let lt = compute_layout(&root, 800, 600);
@@ -78,9 +97,21 @@ fn repro_space_evenly_variable_sizes() {
             "display: flex; justify-content: space-evenly; gap: 10px; width: 300px; height: 100px;",
         ),
         vec![
-            h("div", Props::new().set("style", "width: 50px; height: 20px;"), vec![]),
-            h("div", Props::new().set("style", "width: 80px; height: 20px;"), vec![]),
-            h("div", Props::new().set("style", "width: 60px; height: 20px;"), vec![]),
+            h(
+                "div",
+                Props::new().set("style", "width: 50px; height: 20px;"),
+                vec![],
+            ),
+            h(
+                "div",
+                Props::new().set("style", "width: 80px; height: 20px;"),
+                vec![],
+            ),
+            h(
+                "div",
+                Props::new().set("style", "width: 60px; height: 20px;"),
+                vec![],
+            ),
         ],
     );
     let lt = compute_layout(&root, 800, 600);
@@ -211,7 +242,13 @@ fn repro_order_sort() {
     let x0 = find_child(&lt, 0).rect.x;
     let x1 = find_child(&lt, 1).rect.x;
     let x2 = find_child(&lt, 2).rect.x;
-    assert!(x1 < x2 && x2 < x0, "order sort failed: x1 {} x2 {} x0 {} should be x1 < x2 < x0", x1, x2, x0);
+    assert!(
+        x1 < x2 && x2 < x0,
+        "order sort failed: x1 {} x2 {} x0 {} should be x1 < x2 < x0",
+        x1,
+        x2,
+        x0
+    );
     assert!(x1 == 0, "first visual should be at 0, got {}", x1);
 }
 
@@ -225,17 +262,37 @@ fn repro_align_content_center() {
             "display: flex; flex-wrap: wrap; align-content: center; width: 200px; height: 200px;",
         ),
         vec![
-            h("div", Props::new().set("style", "width: 80px; height: 40px;"), vec![]),
-            h("div", Props::new().set("style", "width: 80px; height: 40px;"), vec![]),
-            h("div", Props::new().set("style", "width: 80px; height: 40px;"), vec![]),
+            h(
+                "div",
+                Props::new().set("style", "width: 80px; height: 40px;"),
+                vec![],
+            ),
+            h(
+                "div",
+                Props::new().set("style", "width: 80px; height: 40px;"),
+                vec![],
+            ),
+            h(
+                "div",
+                Props::new().set("style", "width: 80px; height: 40px;"),
+                vec![],
+            ),
         ],
     );
     let lt = compute_layout(&root, 800, 600);
     let y0 = find_child(&lt, 0).rect.y;
     let y2 = find_child(&lt, 2).rect.y;
     // y0 should be ~60, y2 = 60+40=100
-    assert!((y0 - 60).abs() <= 2, "align-content center y0 exp 60 got {}", y0);
-    assert!((y2 - 100).abs() <= 2, "align-content center y2 exp 100 got {}", y2);
+    assert!(
+        (y0 - 60).abs() <= 2,
+        "align-content center y0 exp 60 got {}",
+        y0
+    );
+    assert!(
+        (y2 - 100).abs() <= 2,
+        "align-content center y2 exp 100 got {}",
+        y2
+    );
 }
 
 #[test]
@@ -245,23 +302,50 @@ fn repro_flex_shorthand_and_flex_flow() {
         "div",
         Props::new().set("style", "display: flex; width: 400px; height: 100px;"),
         vec![
-            h("div", Props::new().set("style", "flex: 1 0 100px; height: 20px;"), vec![]),
-            h("div", Props::new().set("style", "width: 50px; height: 20px;"), vec![]),
+            h(
+                "div",
+                Props::new().set("style", "flex: 1 0 100px; height: 20px;"),
+                vec![],
+            ),
+            h(
+                "div",
+                Props::new().set("style", "width: 50px; height: 20px;"),
+                vec![],
+            ),
         ],
     );
     let lt = compute_layout(&root, 800, 600);
     let w0 = find_child(&lt, 0).rect.w;
     // free after basis: 400-100-50=250, grow distributes to first only (grow1) => 100+250=350
-    assert!((w0 - 350).abs() <= 2, "flex shorthand 1 0 100px w0 exp 350 got {}", w0);
+    assert!(
+        (w0 - 350).abs() <= 2,
+        "flex shorthand 1 0 100px w0 exp 350 got {}",
+        w0
+    );
 
     // flex-flow: row wrap + width 200 with 3 items 80 => wraps
     let root2 = h(
         "div",
-        Props::new().set("style", "display: flex; flex-flow: row wrap; width: 200px; height: 200px;"),
+        Props::new().set(
+            "style",
+            "display: flex; flex-flow: row wrap; width: 200px; height: 200px;",
+        ),
         vec![
-            h("div", Props::new().set("style", "width: 80px; height: 40px;"), vec![]),
-            h("div", Props::new().set("style", "width: 80px; height: 40px;"), vec![]),
-            h("div", Props::new().set("style", "width: 80px; height: 40px;"), vec![]),
+            h(
+                "div",
+                Props::new().set("style", "width: 80px; height: 40px;"),
+                vec![],
+            ),
+            h(
+                "div",
+                Props::new().set("style", "width: 80px; height: 40px;"),
+                vec![],
+            ),
+            h(
+                "div",
+                Props::new().set("style", "width: 80px; height: 40px;"),
+                vec![],
+            ),
         ],
     );
     let lt2 = compute_layout(&root2, 800, 600);
@@ -280,13 +364,26 @@ fn repro_baseline_fallback() {
             "display: flex; align-items: baseline; width: 300px; height: 100px;",
         ),
         vec![
-            h("div", Props::new().set("style", "width: 50px; height: 20px;"), vec![]),
-            h("div", Props::new().set("style", "width: 50px; height: 60px;"), vec![]),
+            h(
+                "div",
+                Props::new().set("style", "width: 50px; height: 20px;"),
+                vec![],
+            ),
+            h(
+                "div",
+                Props::new().set("style", "width: 50px; height: 60px;"),
+                vec![],
+            ),
         ],
     );
     let lt = compute_layout(&root, 800, 600);
     // both at y 0 (fallback to start)
     let y0 = find_child(&lt, 0).rect.y;
     let y1 = find_child(&lt, 1).rect.y;
-    assert!(y0 == y1 && y0 == lt.children[0].rect.y, "baseline fallback y0 {} y1 {} should be equal and at top", y0, y1);
+    assert!(
+        y0 == y1 && y0 == lt.children[0].rect.y,
+        "baseline fallback y0 {} y1 {} should be equal and at top",
+        y0,
+        y1
+    );
 }

@@ -155,5 +155,6 @@ impl State {
 }
 </style>
 "#;
-    body.replace("__KEBAB__", kebab).replace("__NAME__", struct_name)
+    body.replace("__KEBAB__", kebab)
+        .replace("__NAME__", struct_name)
 }

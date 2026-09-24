@@ -136,7 +136,10 @@ fn template_unclosed_interpolation_errors_with_context() {
     let result = parse_template_to_ast("<div>\n  {{ count </div>");
     let err = result.expect_err("unclosed interpolation should be an error");
     assert!(err.contains("SFC parse error at"), "got: {err}");
-    assert!(err.contains("'{{'"), "should name the offending token: {err}");
+    assert!(
+        err.contains("'{{'"),
+        "should name the offending token: {err}"
+    );
     assert!(err.contains("help:"), "should carry a suggestion: {err}");
     assert!(err.contains('^'), "should underline the position: {err}");
 }
@@ -164,7 +167,10 @@ fn sfc_parse_error_include_line_and_caret() {
     // formatted error should carry line/column, an excerpt, and a caret.
     let src = "<template>\n  <div>hello</div>\n";
     let err = parse_sfc(src).expect_err("missing </template> should fail");
-    assert!(err.contains("SFC parse error at") || err.contains("at "), "got: {err}");
+    assert!(
+        err.contains("SFC parse error at") || err.contains("at "),
+        "got: {err}"
+    );
     assert!(err.contains('^'), "should include a caret: {err}");
 }
 

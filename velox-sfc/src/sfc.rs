@@ -70,7 +70,11 @@ fn format_pest_error(err: pest::error::Error<Rule>, source: &str) -> String {
                 } else {
                     unexpected.join(", ")
                 };
-                format!("expected {} but found {}", expected.join(", "), unexpected_str)
+                format!(
+                    "expected {} but found {}",
+                    expected.join(", "),
+                    unexpected_str
+                )
             }
         }
         ErrorVariant::CustomError { message } => message.clone(),
@@ -79,21 +83,12 @@ fn format_pest_error(err: pest::error::Error<Rule>, source: &str) -> String {
     // Try to infer which block the error falls in by examining the source
     // up to the error position.
     let block_context = infer_block_context(source, line);
-    let message = format!(
-        "{description} while parsing the {block_context} block"
-    );
+    let message = format!("{description} while parsing the {block_context} block");
 
     // Build an actionable suggestion from the failure.
     let suggestion = suggest_pest_error(&expected, &unexpected, &block_context);
 
-    crate::diagnostic::render_parse_error(
-        source,
-        line,
-        column,
-        1,
-        &message,
-        suggestion.as_deref(),
-    )
+    crate::diagnostic::render_parse_error(source, line, column, 1, &message, suggestion.as_deref())
 }
 
 /// Heuristically produce a helpful `help:` line for common SFC mistakes, based

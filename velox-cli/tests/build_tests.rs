@@ -5,15 +5,23 @@ use std::path::PathBuf;
 fn cli_exposes_git_rev() {
     let rev = velox_cli::velox_git_rev();
     assert!(!rev.is_empty(), "rev must not be empty");
-    assert_ne!(rev, "MISSING", "build.rs must set VELOX_GIT_REV or fallback");
+    assert_ne!(
+        rev, "MISSING",
+        "build.rs must set VELOX_GIT_REV or fallback"
+    );
 }
 
 #[test]
 fn init_toml_pins_version_and_rev() {
-    unsafe { std::env::remove_var("VELOX_PATH"); }
+    unsafe {
+        std::env::remove_var("VELOX_PATH");
+    }
     let dir = std::env::temp_dir().join(format!("velox-pin-{}", std::process::id()));
     let toml = velox_cli::commands::init::generate_cargo_toml_for_test("demo", &dir);
-    assert!(toml.contains(r#"version = "0.1.0""#), "must bind version:\n{toml}");
+    assert!(
+        toml.contains(r#"version = "0.1.0""#),
+        "must bind version:\n{toml}"
+    );
 }
 
 #[test]
@@ -62,8 +70,14 @@ fn init_local_override_uses_given_path() {
     let ws = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..");
     let dir = std::env::temp_dir().join(format!("velox-local-{}", std::process::id()));
     let toml = velox_cli::commands::init::init_toml_with_local("demo", &dir, Some(ws.as_path()));
-    assert!(toml.contains(r#"version = "0.1.0""#), "local path must also pin version:\n{toml}");
-    assert!(toml.contains("path = "), "local override must use path deps:\n{toml}");
+    assert!(
+        toml.contains(r#"version = "0.1.0""#),
+        "local path must also pin version:\n{toml}"
+    );
+    assert!(
+        toml.contains("path = "),
+        "local override must use path deps:\n{toml}"
+    );
 }
 
 #[test]
@@ -74,16 +88,28 @@ fn cli_stub_emits_lowercase_and_alias() {
         .join("../target/velox-cli-tests")
         .join(format!("{}-stub-alias", std::process::id()));
     velox_cli::build_cmd(&input, Some(out_dir.as_path()), velox_cli::EmitMode::Stub).expect("stub");
-    assert!(out_dir.join("app.rs").exists(), "stub primary app.rs must exist");
-    assert!(out_dir.join("App.rs").exists(), "stub alias App.rs must exist");
+    assert!(
+        out_dir.join("app.rs").exists(),
+        "stub primary app.rs must exist"
+    );
+    assert!(
+        out_dir.join("App.rs").exists(),
+        "stub alias App.rs must exist"
+    );
     let content = std::fs::read_to_string(out_dir.join("app.rs")).expect("read");
-    assert!(content.contains("pub mod app"), "module must be lowercase app");
+    assert!(
+        content.contains("pub mod app"),
+        "module must be lowercase app"
+    );
 }
 
 #[test]
 fn workspace_detect_requires_marker_file() {
     let found = velox_cli::commands::init::find_velox_workspace_for_test();
     if let Some(ws) = found {
-        assert!(ws.join("velox-core").join("Cargo.toml").exists(), "workspace must contain marker");
+        assert!(
+            ws.join("velox-core").join("Cargo.toml").exists(),
+            "workspace must contain marker"
+        );
     }
 }

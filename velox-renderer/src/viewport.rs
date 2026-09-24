@@ -32,18 +32,32 @@ impl Viewport {
     pub fn new(physical_width: u32, physical_height: u32, scale: f32) -> Self {
         let pw = physical_width.max(1);
         let ph = physical_height.max(1);
-        let s = if scale.is_finite() && scale > 0.0 { scale } else { 1.0 };
+        let s = if scale.is_finite() && scale > 0.0 {
+            scale
+        } else {
+            1.0
+        };
         let (lw, lh) = Self::logical_from_physical(pw, ph, s);
         Self {
-            physical: PhysicalSize { width: pw, height: ph },
-            logical: LogicalSize { width: lw, height: lh },
+            physical: PhysicalSize {
+                width: pw,
+                height: ph,
+            },
+            logical: LogicalSize {
+                width: lw,
+                height: lh,
+            },
             scale: s,
         }
     }
 
     /// Create from i32 physical (SkiaSurface API) — clamps to max(1).
     pub fn from_i32(physical_width: i32, physical_height: i32, scale: f32) -> Self {
-        Self::new(physical_width.max(1) as u32, physical_height.max(1) as u32, scale)
+        Self::new(
+            physical_width.max(1) as u32,
+            physical_height.max(1) as u32,
+            scale,
+        )
     }
 
     #[inline]
@@ -58,7 +72,11 @@ impl Viewport {
     /// to avoid 0.25px subpixel edges at fractional scales (1.25/1.5/1.75).
     #[inline]
     pub fn physical_from_logical(logical_w: u32, logical_h: u32, scale: f32) -> (u32, u32) {
-        let s = if scale.is_finite() && scale > 0.0 { scale } else { 1.0 };
+        let s = if scale.is_finite() && scale > 0.0 {
+            scale
+        } else {
+            1.0
+        };
         let pw = ((logical_w as f32) * s).round().max(1.0) as u32;
         let ph = ((logical_h as f32) * s).round().max(1.0) as u32;
         (pw, ph)
@@ -67,11 +85,21 @@ impl Viewport {
     /// Create a Viewport from logical size + scale — derives physical via single rounding
     /// `physical = (logical * scale).round()`. Useful for tests and render snapping.
     pub fn from_logical(logical_width: u32, logical_height: u32, scale: f32) -> Self {
-        let s = if scale.is_finite() && scale > 0.0 { scale } else { 1.0 };
+        let s = if scale.is_finite() && scale > 0.0 {
+            scale
+        } else {
+            1.0
+        };
         let (pw, ph) = Self::physical_from_logical(logical_width, logical_height, s);
         Self {
-            physical: PhysicalSize { width: pw, height: ph },
-            logical: LogicalSize { width: logical_width.max(1), height: logical_height.max(1) },
+            physical: PhysicalSize {
+                width: pw,
+                height: ph,
+            },
+            logical: LogicalSize {
+                width: logical_width.max(1),
+                height: logical_height.max(1),
+            },
             scale: s,
         }
     }
@@ -81,7 +109,11 @@ impl Viewport {
     /// and no 0.25px hairline/blur at 1.25/1.5 appears after `canvas.scale(scale)`.
     #[inline]
     pub fn snap_logical_to_physical_grid(value: f32, scale: f32) -> f32 {
-        let s = if scale.is_finite() && scale > 0.0 { scale } else { 1.0 };
+        let s = if scale.is_finite() && scale > 0.0 {
+            scale
+        } else {
+            1.0
+        };
         (value * s).round() / s
     }
 
@@ -89,7 +121,8 @@ impl Viewport {
     pub fn set_physical(&mut self, width: u32, height: u32) {
         self.physical.width = width.max(1);
         self.physical.height = height.max(1);
-        let (lw, lh) = Self::logical_from_physical(self.physical.width, self.physical.height, self.scale);
+        let (lw, lh) =
+            Self::logical_from_physical(self.physical.width, self.physical.height, self.scale);
         self.logical.width = lw;
         self.logical.height = lh;
     }
@@ -103,7 +136,8 @@ impl Viewport {
     pub fn set_scale(&mut self, scale: f32) {
         if scale.is_finite() && scale > 0.0 {
             self.scale = scale;
-            let (lw, lh) = Self::logical_from_physical(self.physical.width, self.physical.height, self.scale);
+            let (lw, lh) =
+                Self::logical_from_physical(self.physical.width, self.physical.height, self.scale);
             self.logical.width = lw;
             self.logical.height = lh;
         }

@@ -6,13 +6,24 @@ use std::fs;
 use std::path::Path;
 
 fn read_src(rel: &str) -> String {
-    for p in [rel, &format!("velox-renderer/{rel}"), &format!("../velox-renderer/{rel}")] {
+    for p in [
+        rel,
+        &format!("velox-renderer/{rel}"),
+        &format!("../velox-renderer/{rel}"),
+    ] {
         if Path::new(p).exists() {
             return fs::read_to_string(p).unwrap();
         }
     }
     // fallback: try crate relative
-    for p in ["src/skia_surface.rs", "src/presenter.rs", "src/lib.rs", "velox-renderer/src/skia_surface.rs", "velox-renderer/src/presenter.rs", "velox-renderer/src/lib.rs"] {
+    for p in [
+        "src/skia_surface.rs",
+        "src/presenter.rs",
+        "src/lib.rs",
+        "velox-renderer/src/skia_surface.rs",
+        "velox-renderer/src/presenter.rs",
+        "velox-renderer/src/lib.rs",
+    ] {
         if rel.ends_with(p) && Path::new(p).exists() {
             return fs::read_to_string(p).unwrap();
         }
@@ -20,9 +31,15 @@ fn read_src(rel: &str) -> String {
     panic!("cannot find {rel}");
 }
 
-fn lib_rs() -> String { read_src("src/lib.rs") }
-fn surface_rs() -> String { read_src("src/skia_surface.rs") }
-fn presenter_rs() -> String { read_src("src/presenter.rs") }
+fn lib_rs() -> String {
+    read_src("src/lib.rs")
+}
+fn surface_rs() -> String {
+    read_src("src/skia_surface.rs")
+}
+fn presenter_rs() -> String {
+    read_src("src/presenter.rs")
+}
 
 #[test]
 fn viewport_struct_exists_and_has_fields() {
@@ -32,10 +49,19 @@ fn viewport_struct_exists_and_has_fields() {
     let viewport_src = read_src("src/viewport.rs");
     // Viewport struct must exist somewhere in renderer crate (lib, viewport.rs, surface, presenter)
     let combined = format!("{}\n{}\n{}\n{}", lib, surf, pres, viewport_src);
-    assert!(combined.contains("struct Viewport"), "Viewport struct missing — deduplication not done");
+    assert!(
+        combined.contains("struct Viewport"),
+        "Viewport struct missing — deduplication not done"
+    );
     // Must have physical, logical, scale fields (accepts physical/logical/scale as field names)
-    assert!(combined.contains("physical"), "Viewport missing `physical` field");
-    assert!(combined.contains("logical"), "Viewport missing `logical` field");
+    assert!(
+        combined.contains("physical"),
+        "Viewport missing `physical` field"
+    );
+    assert!(
+        combined.contains("logical"),
+        "Viewport missing `logical` field"
+    );
     assert!(combined.contains("scale"), "Viewport missing `scale` field");
 }
 
@@ -43,26 +69,39 @@ fn viewport_struct_exists_and_has_fields() {
 fn skia_surface_resize_clamps_max1_before_raster() {
     let src = surface_rs();
     // Find the resize fn and check it clamps before raster_n32_premul
-    let pos = src.find("fn resize").expect("resize fn not found in skia_surface.rs");
-    let slice = &src[pos..(pos+2000).min(src.len())];
+    let pos = src
+        .find("fn resize")
+        .expect("resize fn not found in skia_surface.rs");
+    let slice = &src[pos..(pos + 2000).min(src.len())];
     // Must clamp with max(1)
-    assert!(slice.contains("max(1)") || slice.contains("max( 1)") || slice.contains(".max(1)"), "SkiaSurface::resize must clamp width/height to max(1) before raster_n32_premul");
+    assert!(
+        slice.contains("max(1)") || slice.contains("max( 1)") || slice.contains(".max(1)"),
+        "SkiaSurface::resize must clamp width/height to max(1) before raster_n32_premul"
+    );
     // Must use clamped values for raster_n32_premul
     // Ensure raster_n32_premul is called with clamped variable, not raw width/height
     // At minimum, check clamping appears before the raster call
     let clamp_pos = slice.find("max(1)").expect("max(1) not in resize");
-    let raster_pos = slice.find("raster_n32_premul").expect("raster_n32_premul not found in resize");
-    assert!(clamp_pos < raster_pos, "max(1) clamp must appear before raster_n32_premul");
+    let raster_pos = slice
+        .find("raster_n32_premul")
+        .expect("raster_n32_premul not found in resize");
+    assert!(
+        clamp_pos < raster_pos,
+        "max(1) clamp must appear before raster_n32_premul"
+    );
 }
 
 #[test]
 fn skia_surface_resize_warns_and_keeps_previous_on_error() {
     let src = surface_rs();
     let pos = src.find("fn resize").expect("resize fn not found");
-    let slice = &src[pos..(pos+3000).min(src.len())];
+    let slice = &src[pos..(pos + 3000).min(src.len())];
     // Must log warn! on error and keep previous surface (not set width=0 blindly)
     // Check for warn! macro
-    assert!(slice.contains("warn!"), "SkiaSurface::resize must warn! on error instead of silently failing");
+    assert!(
+        slice.contains("warn!"),
+        "SkiaSurface::resize must warn! on error instead of silently failing"
+    );
     // The bug was: self.width = width; self.height = height; BEFORE attempting surface creation
     // Fix must set width/height AFTER success, or restore on failure.
     // Check that assignment is after the raster call or guarded.
@@ -77,8 +116,12 @@ fn skia_surface_resize_warns_and_keeps_previous_on_error() {
         // So we consider it failing if the slice has "self.width = width" literally before raster.
         // Fixed version should have "self.width = w" or "self.viewport" or assign after Ok.
         let pre = &slice[..rpos];
-        let has_raw_assign_before = pre.contains("self.width = width") || pre.contains("self.height = height");
-        assert!(!has_raw_assign_before, "BUG R-H1: SkiaSurface::resize sets self.width/height to raw (possibly 0) BEFORE surface creation — must clamp and only update on success, otherwise desyncs");
+        let has_raw_assign_before =
+            pre.contains("self.width = width") || pre.contains("self.height = height");
+        assert!(
+            !has_raw_assign_before,
+            "BUG R-H1: SkiaSurface::resize sets self.width/height to raw (possibly 0) BEFORE surface creation — must clamp and only update on success, otherwise desyncs"
+        );
     }
     // Also ensure error path does NOT leave width=0: the function must return Err but keep previous dims.
     // At least the code should not have an ok_or_else that still leaves width=0; the warn path must keep old.
@@ -92,9 +135,16 @@ fn lib_resize_does_not_swallow_error() {
     // After fix, it must handle Err with warn!
     // Count occurrences of swallowed resize
     let swallow_count = src.matches("let _ = renderer.resize").count();
-    assert_eq!(swallow_count, 0, "BUG R-H1: lib.rs still has `let _ = renderer.resize` swallowing errors — must handle with warn! and keep previous surface (found {} occurrences)", swallow_count);
+    assert_eq!(
+        swallow_count, 0,
+        "BUG R-H1: lib.rs still has `let _ = renderer.resize` swallowing errors — must handle with warn! and keep previous surface (found {} occurrences)",
+        swallow_count
+    );
     // Should have warn! near resize in lib.rs
-    assert!(src.contains("renderer.resize") && src.contains("warn!"), "lib.rs resize error handling must warn! on failure");
+    assert!(
+        src.contains("renderer.resize") && src.contains("warn!"),
+        "lib.rs resize error handling must warn! on failure"
+    );
 }
 
 #[test]
@@ -108,8 +158,14 @@ fn viewport_dedup_used_by_surface_and_presenter_and_lib() {
     let pres_uses_viewport = pres.contains("Viewport");
     let lib_uses_viewport = lib.contains("Viewport") || lib.contains("viewport");
     assert!(surf_uses_viewport, "SkiaSurface should use Viewport struct");
-    assert!(pres_uses_viewport, "SoftbufferPresenter should use Viewport struct");
-    assert!(lib_uses_viewport, "lib.rs should use Viewport struct (via `use viewport::Viewport` or logical_size delegation)");
+    assert!(
+        pres_uses_viewport,
+        "SoftbufferPresenter should use Viewport struct"
+    );
+    assert!(
+        lib_uses_viewport,
+        "lib.rs should use Viewport struct (via `use viewport::Viewport` or logical_size delegation)"
+    );
 }
 
 #[test]
@@ -148,7 +204,10 @@ fn skia_surface_resize_zero_keeps_previous_surface() {
     // With fix, resize(0,0) should succeed with clamped 1x1, or at least not set width to 0
     // Even if it returns Err, width must not be 0 (keep previous or 1)
     assert_ne!(s.width, 0, "surface width must not be 0 after resize(0,0)");
-    assert_ne!(s.height, 0, "surface height must not be 0 after resize(0,0)");
+    assert_ne!(
+        s.height, 0,
+        "surface height must not be 0 after resize(0,0)"
+    );
     // Restore should work
     let res2 = s.resize(800, 600);
     assert!(res2.is_ok(), "resize back to 800x600 must succeed");

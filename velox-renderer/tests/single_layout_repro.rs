@@ -84,9 +84,15 @@ fn no_recompute_in_resized_handler() {
         }
         count += 1;
         offset = abs + 1;
-        if offset >= src.len() { break; }
+        if offset >= src.len() {
+            break;
+        }
     }
-    assert!(count >= 2, "expected at least 2 Resized handlers (plain + HMR), found {}", count);
+    assert!(
+        count >= 2,
+        "expected at least 2 Resized handlers (plain + HMR), found {}",
+        count
+    );
 }
 
 #[test]
@@ -108,8 +114,8 @@ fn single_layout_per_redraw_shares_layout() {
     // This test constructs a VNode, computes layout once, and calls both hit-test
     // collection and a simulated render with the same layout. It will fail if either
     // path recomputes with different rounding.
-    use velox_dom::{Props, VNode, h, text};
     use velox_dom::layout::compute_layout;
+    use velox_dom::{Props, VNode, h, text};
 
     let vnode = h(
         "div",
@@ -131,12 +137,21 @@ fn single_layout_per_redraw_shares_layout() {
     // Collect targets using shared layout
     let mut click_targets = Vec::new();
     let mut order = 0;
-    velox_renderer::events::collect_click_targets(&vnode, &layout, None, &mut order, &mut click_targets);
+    velox_renderer::events::collect_click_targets(
+        &vnode,
+        &layout,
+        None,
+        &mut order,
+        &mut click_targets,
+    );
     // Simulate render using same layout: just ensure layout rect matches hit target rect
     // (Before fix, paint would recompute with possibly different rounding via surface.width/scale)
     // Here we verify the layout is stable: recomputing with same logical size gives identical rects.
     let layout2 = compute_layout(&vnode, logical_w, logical_h);
-    assert_eq!(layout.rect, layout2.rect, "layout must be stable for same logical size");
+    assert_eq!(
+        layout.rect, layout2.rect,
+        "layout must be stable for same logical size"
+    );
     // Also hit-test rect must equal layout rect for the child
     if let Some(t) = click_targets.first() {
         // ClickTarget contains handler but we can at least check events produced valid rects via layout

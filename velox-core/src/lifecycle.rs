@@ -172,9 +172,7 @@ pub fn clear_updated_hooks(id: ComponentId) {
 
 /// Check whether a component has any registered `on_updated` hooks.
 pub fn has_updated_hooks(id: ComponentId) -> bool {
-    UPDATED_HOOKS.with(|h| {
-        h.borrow().get(&id).is_some_and(|hooks| !hooks.is_empty())
-    })
+    UPDATED_HOOKS.with(|h| h.borrow().get(&id).is_some_and(|hooks| !hooks.is_empty()))
 }
 
 /// Run *all* queued `on_mounted` hooks that have not yet fired.

@@ -42,6 +42,7 @@ fn main() {
             hmr_rx,
         );
     } else {
-        let _ = velox_renderer::run_window_vnode_skia("Velox Counter", make_view, on_event, get_title);
+        let _ =
+            velox_renderer::run_window_vnode_skia("Velox Counter", make_view, on_event, get_title);
     }
 }

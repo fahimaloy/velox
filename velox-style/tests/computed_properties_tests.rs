@@ -22,7 +22,10 @@ fn resolves_position_and_overflow() {
 
 #[test]
 fn resolves_z_index_and_transform() {
-    let cs = computed("position: relative; z-index: 5; transform: scale(1.5) rotate(90deg);", None);
+    let cs = computed(
+        "position: relative; z-index: 5; transform: scale(1.5) rotate(90deg);",
+        None,
+    );
     assert_eq!(cs.z_index, Some(5));
     assert_eq!(
         cs.transform.operations,

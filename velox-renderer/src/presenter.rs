@@ -174,7 +174,9 @@ impl SoftbufferPresenter {
             Context::new(window).map_err(|e| {
                 let msg = e.to_string();
                 if is_broken_pipe_error(&msg) {
-                    VeloxError::Render(compositor_help(&format!("softbuffer context failed: {msg}")))
+                    VeloxError::Render(compositor_help(&format!(
+                        "softbuffer context failed: {msg}"
+                    )))
                 } else {
                     VeloxError::Render(format!("softbuffer context failed: {msg}"))
                 }
@@ -184,7 +186,9 @@ impl SoftbufferPresenter {
             Surface::new(&context, window).map_err(|e| {
                 let msg = e.to_string();
                 if is_broken_pipe_error(&msg) {
-                    VeloxError::Render(compositor_help(&format!("softbuffer surface failed: {msg}")))
+                    VeloxError::Render(compositor_help(&format!(
+                        "softbuffer surface failed: {msg}"
+                    )))
                 } else {
                     VeloxError::Render(format!("softbuffer surface failed: {msg}"))
                 }
@@ -202,7 +206,10 @@ impl SoftbufferPresenter {
                     "softbuffer resize failed: {msg}"
                 ))));
             } else {
-                return Err(VeloxError::Render(format!("softbuffer resize failed: {}", msg)));
+                return Err(VeloxError::Render(format!(
+                    "softbuffer resize failed: {}",
+                    msg
+                )));
             }
         }
         let viewport = Viewport::new(w, h, 1.0);
@@ -241,11 +248,16 @@ impl SoftbufferPresenter {
         ) {
             let msg = e.to_string();
             if is_broken_pipe_error(&msg) {
-                log::warn!("softbuffer resize failed (broken pipe) — degrading presenter to no-op: {msg}");
+                log::warn!(
+                    "softbuffer resize failed (broken pipe) — degrading presenter to no-op: {msg}"
+                );
                 self.degraded = true;
                 return Ok(());
             } else {
-                return Err(VeloxError::Render(format!("softbuffer resize failed: {}", msg)));
+                return Err(VeloxError::Render(format!(
+                    "softbuffer resize failed: {}",
+                    msg
+                )));
             }
         }
         self.viewport.set_physical(w, h);
@@ -296,11 +308,16 @@ impl SoftbufferPresenter {
             Err(e) => {
                 let msg = e.to_string();
                 if is_broken_pipe_error(&msg) {
-                    log::warn!("softbuffer buffer_mut failed (broken pipe) — degrading presenter to no-op: {msg}");
+                    log::warn!(
+                        "softbuffer buffer_mut failed (broken pipe) — degrading presenter to no-op: {msg}"
+                    );
                     self.degraded = true;
                     return Ok(());
                 } else {
-                    return Err(VeloxError::Render(format!("softbuffer buffer_mut failed: {}", msg)));
+                    return Err(VeloxError::Render(format!(
+                        "softbuffer buffer_mut failed: {}",
+                        msg
+                    )));
                 }
             }
         };
@@ -324,11 +341,16 @@ impl SoftbufferPresenter {
         if let Err(e) = buffer.present() {
             let msg = e.to_string();
             if is_broken_pipe_error(&msg) {
-                log::warn!("softbuffer present failed (broken pipe) — degrading presenter to no-op: {msg}");
+                log::warn!(
+                    "softbuffer present failed (broken pipe) — degrading presenter to no-op: {msg}"
+                );
                 self.degraded = true;
                 return Ok(());
             } else {
-                return Err(VeloxError::Render(format!("softbuffer present failed: {}", msg)));
+                return Err(VeloxError::Render(format!(
+                    "softbuffer present failed: {}",
+                    msg
+                )));
             }
         }
         Ok(())

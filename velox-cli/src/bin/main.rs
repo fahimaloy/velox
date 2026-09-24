@@ -94,8 +94,16 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Init { name, template, local } => {
-            let path = velox_cli::commands::init_project_with_template_local(&name, &template, local.as_deref())?;
+        Commands::Init {
+            name,
+            template,
+            local,
+        } => {
+            let path = velox_cli::commands::init_project_with_template_local(
+                &name,
+                &template,
+                local.as_deref(),
+            )?;
             println!("✅ Created Velox project at: {}", path.display());
             println!("\n📖 Next steps:");
             println!("   cd {}", path.display());

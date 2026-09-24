@@ -39,7 +39,8 @@ fn layout_reflows_with_viewport_size() {
     assert!(
         large.rect.w > small.rect.w,
         "layout must reflow: small w {} large w {}",
-        small.rect.w, large.rect.w
+        small.rect.w,
+        large.rect.w
     );
     assert!(
         (390..=410).contains(&small.rect.w),
@@ -53,10 +54,14 @@ fn layout_reflows_with_viewport_size() {
     );
     let small_child_w = small.children.first().map(|c| c.rect.w).unwrap_or(0);
     let large_child_w = large.children.first().map(|c| c.rect.w).unwrap_or(0);
-    assert!(small_child_w > 0 && large_child_w > 0, "children must be visible at both sizes");
+    assert!(
+        small_child_w > 0 && large_child_w > 0,
+        "children must be visible at both sizes"
+    );
     assert!(
         large_child_w > small_child_w,
         "child should scale with viewport (50%): small {} large {}",
-        small_child_w, large_child_w
+        small_child_w,
+        large_child_w
     );
 }

@@ -33,7 +33,11 @@ fn lifecycle_counting_via_per_component_api() {
 
     // --- mount: must fire exactly once ---
     run_mounted_hooks(id);
-    assert_eq!(*mounted.borrow(), 1, "on_mounted should fire once on first mount");
+    assert_eq!(
+        *mounted.borrow(),
+        1,
+        "on_mounted should fire once on first mount"
+    );
     run_mounted_hooks(id);
     assert_eq!(*mounted.borrow(), 1, "on_mounted must not fire twice");
 
@@ -46,7 +50,11 @@ fn lifecycle_counting_via_per_component_api() {
     // --- destroy: must fire once and cleanup ---
     run_destroy_hooks(id);
     cleanup_component(id);
-    assert_eq!(*destroyed.borrow(), 1, "on_unmounted/before_destroy should fire once");
+    assert_eq!(
+        *destroyed.borrow(),
+        1,
+        "on_unmounted/before_destroy should fire once"
+    );
 
     // after cleanup updated must not fire
     run_updated_hooks(id);

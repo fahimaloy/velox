@@ -67,10 +67,11 @@ fn diff_keyed_children_reorder_with_updates() {
     // ...and every keyed node is updated in place at its new index. The whole
     // diff is a pure reorder + in-place updates — no Insert/Remove — so keyed
     // identity is preserved across the reorder.
-    assert!(patches.iter().all(|p| matches!(
-        p,
-        Patch::MoveChild(_, _) | Patch::UpdateChild(_, _)
-    )));
+    assert!(
+        patches
+            .iter()
+            .all(|p| matches!(p, Patch::MoveChild(_, _) | Patch::UpdateChild(_, _)))
+    );
 }
 
 #[test]

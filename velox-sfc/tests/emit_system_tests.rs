@@ -390,12 +390,7 @@ fn codegen_parent_passes_slot_to_child() {
 /// Test that v-show uses display: none CSS instead of rendering empty text.
 #[test]
 fn template_codegen_v_show_uses_display_none() {
-    let rs = compile_template_to_rs(
-        r#"<div v-show="false">Hidden</div>"#,
-        "Parent",
-        None,
-    )
-    .unwrap();
+    let rs = compile_template_to_rs(r#"<div v-show="false">Hidden</div>"#, "Parent", None).unwrap();
 
     println!("-- V-SHOW RS --\n{}\n-- END --", rs);
 
@@ -431,10 +426,7 @@ fn template_codegen_v_show_with_existing_style() {
         rs.contains("display: none"),
         "Should merge display: none into existing style"
     );
-    assert!(
-        rs.contains("color: red"),
-        "Should preserve existing style"
-    );
+    assert!(rs.contains("color: red"), "Should preserve existing style");
 }
 
 /// Test that v-show inside v-for context also uses display: none.

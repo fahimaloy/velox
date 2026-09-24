@@ -5,7 +5,7 @@
 //! between the dev server (in `velox-cli`) and the app (via
 //! `run_hmr_client` in `velox-renderer::hmr`).
 
-use velox_renderer::{HmrMessage, DEFAULT_HMR_PORT};
+use velox_renderer::{DEFAULT_HMR_PORT, HmrMessage};
 
 #[test]
 fn default_hmr_port_is_well_known() {
@@ -20,7 +20,10 @@ fn full_reload_serializes_roundtrip() {
     let json = serde_json::to_string(&msg).expect("serialize FullReload");
 
     // The serialized form must be a single line (newline-delimited protocol).
-    assert!(!json.contains('\n'), "serialized message must not contain newlines");
+    assert!(
+        !json.contains('\n'),
+        "serialized message must not contain newlines"
+    );
 
     let back: HmrMessage = serde_json::from_str(&json).expect("deserialize FullReload");
     assert_eq!(back, HmrMessage::FullReload);

@@ -136,8 +136,9 @@ fn persistent_child_state_rendering() {
     tresolver.parse_imports(&todos_sfc.script_setup.as_ref().unwrap().content);
     let ttpl = todos_sfc.template.as_ref().unwrap().content.as_str();
     let tscript = todos_sfc.script_setup.as_ref().map(|s| s.content.as_str());
-    let trs = velox_sfc::compile_template_to_rs_full(ttpl, "todos", Some(&mut tresolver), tscript, None)
-        .expect("compile Todos template");
+    let trs =
+        velox_sfc::compile_template_to_rs_full(ttpl, "todos", Some(&mut tresolver), tscript, None)
+            .expect("compile Todos template");
     assert!(
         trs.contains("let __col = state.todos.get();"),
         "expected State-mode v-for to read state.todos, got:\n{trs}"
@@ -165,8 +166,9 @@ fn leaf_component_handlers_stay_local() {
     resolver.parse_imports(&todos_sfc.script_setup.as_ref().unwrap().content);
     let tpl = todos_sfc.template.as_ref().unwrap().content.as_str();
     let script = todos_sfc.script_setup.as_ref().map(|s| s.content.as_str());
-    let rs = velox_sfc::compile_template_to_rs_full(tpl, "todos", Some(&mut resolver), script, None)
-        .expect("compile Todos template");
+    let rs =
+        velox_sfc::compile_template_to_rs_full(tpl, "todos", Some(&mut resolver), script, None)
+            .expect("compile Todos template");
 
     assert!(
         rs.contains("state.on_remove(p)") && !rs.contains("state.script_rs.on_remove"),

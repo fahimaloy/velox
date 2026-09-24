@@ -108,7 +108,10 @@ pub fn lint_directory_fix(dir: &Path, fix: bool) -> Result<()> {
     }
 
     let label = if fix { "Lint+fix" } else { "Lint" };
-    println!("\n📊 {label} results: {} files, {} errors", file_count, error_count);
+    println!(
+        "\n📊 {label} results: {} files, {} errors",
+        file_count, error_count
+    );
 
     if error_count > 0 {
         anyhow::bail!("Lint failed with {} errors", error_count);

@@ -73,7 +73,12 @@ fn compute_relative_path(from: &Path, to: &Path) -> PathBuf {
 }
 
 #[allow(dead_code)]
-pub(crate) fn velox_dep_path(_prefix: &str, workspace: &std::path::Path, project_dir: &std::path::Path, leaf: &str) -> String {
+pub(crate) fn velox_dep_path(
+    _prefix: &str,
+    workspace: &std::path::Path,
+    project_dir: &std::path::Path,
+    leaf: &str,
+) -> String {
     let p = compute_relative_path(project_dir, &workspace.join(leaf));
     format!(r#"{{ path = "{}", version = "0.1.0" }}"#, p.display())
 }
@@ -136,13 +141,21 @@ pub fn init_project_with_template(name: &str, _template: &str) -> Result<PathBuf
     init_project(name)
 }
 
-pub fn init_project_with_template_local(name: &str, template: &str, local: Option<&Path>) -> Result<PathBuf> {
+pub fn init_project_with_template_local(
+    name: &str,
+    template: &str,
+    local: Option<&Path>,
+) -> Result<PathBuf> {
     if let Some(p) = local {
-        unsafe { std::env::set_var("VELOX_PATH", p); }
+        unsafe {
+            std::env::set_var("VELOX_PATH", p);
+        }
     }
     let out = init_project_with_template(name, template);
     if local.is_some() {
-        unsafe { std::env::remove_var("VELOX_PATH"); }
+        unsafe {
+            std::env::remove_var("VELOX_PATH");
+        }
     }
     out
 }
@@ -150,10 +163,14 @@ pub fn init_project_with_template_local(name: &str, template: &str, local: Optio
 #[doc(hidden)]
 pub fn init_toml_with_local(name: &str, dir: &Path, local: Option<&Path>) -> String {
     if let Some(p) = local {
-        unsafe { std::env::set_var("VELOX_PATH", p); }
+        unsafe {
+            std::env::set_var("VELOX_PATH", p);
+        }
     }
     let s = generate_cargo_toml(name, dir);
-    unsafe { std::env::remove_var("VELOX_PATH"); }
+    unsafe {
+        std::env::remove_var("VELOX_PATH");
+    }
     s
 }
 
@@ -246,7 +263,11 @@ pub(crate) fn generate_cargo_toml(name: &str, project_dir: &Path) -> String {
             let cli_path = compute_relative_path(project_dir, &ws.join("velox-cli"));
             return format!(
                 "[package]\nname = \"{name}\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[workspace]\n\n[dependencies]\nvelox-core = {{ path = \"{}\", version = \"0.1.0\" }}\nvelox-dom = {{ path = \"{}\", version = \"0.1.0\" }}\nvelox-style = {{ path = \"{}\", version = \"0.1.0\" }}\nvelox-renderer = {{ path = \"{}\", version = \"0.1.0\", features = [\"skia-native\"] }}\nserde_json = \"1.0\"\n\n[build-dependencies]\nvelox-cli = {{ path = \"{}\", version = \"0.1.0\" }}\n",
-                core_path.display(), dom_path.display(), style_path.display(), renderer_path.display(), cli_path.display()
+                core_path.display(),
+                dom_path.display(),
+                style_path.display(),
+                renderer_path.display(),
+                cli_path.display()
             );
         }
     }
