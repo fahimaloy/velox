@@ -35,8 +35,7 @@ fn proof_dir() -> std::path::PathBuf {
 fn render(state: &Arc<app::script_rs::State>, width: i32, height: i32) -> (Vec<u8>, Vec<u8>) {
     let vnode = app::render_with_state(Arc::clone(state), app::make_resolve(Arc::clone(state)));
     let sheet = Stylesheet::parse(app::STYLE);
-    let styled = velox_style::apply_styles(&vnode, &sheet);
-    let png = render_vnode_to_raster_png_with_scale(&styled, &sheet, width, height, 1.0)
+    let png = render_vnode_to_raster_png_with_scale(&vnode, &sheet, width, height, 1.0)
         .expect("raster png");
     let rgba = render_vnode_to_rgba(&vnode, &sheet, width, height).expect("raster rgba");
     (png, rgba)

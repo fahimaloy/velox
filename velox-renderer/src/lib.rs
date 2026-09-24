@@ -3,14 +3,24 @@
 
 use std::collections::{HashMap, HashSet};
 use velox_dom::VNode;
+use velox_style::Stylesheet;
 
-#[cfg(feature = "skia-native")]
-use velox_style::{Stylesheet, apply_styles_with_hover};
+/// Apply the renderer-wide UA < author < inline cascade before layout or paint.
+///
+/// The renderer always calls this once on a freshly-built VNode. Keeping the
+/// composition here prevents a backend from accidentally dropping the UA layer.
+pub fn style_vnode_with_hover<F>(vnode: &VNode, author: &Stylesheet, is_hovered: &F) -> VNode
+where
+    F: Fn(&str, &velox_dom::Props) -> bool,
+{
+    velox_style::apply_with_cascade_with_hover(vnode, author, is_hovered)
+}
 
 /// Lifecycle wiring helper — ensures `on_unmounted` / `before_destroy` hooks
 /// fire even if the event loop exits via `Drop` rather than `CloseRequested`.
 #[allow(dead_code)]
 pub struct LifecycleCleanupGuard;
+
 impl Drop for LifecycleCleanupGuard {
     fn drop(&mut self) {
         let _ = std::panic::catch_unwind(velox_core::lifecycle::run_all_destroy_hooks);
@@ -915,7 +925,7 @@ where
         let (vnode_raw, sheet) = make_view(vw, vh);
         let mut next_id = 1u32;
         let vnode_tagged = with_hover_ids(&vnode_raw, &mut next_id);
-        let vnode = apply_styles_with_hover(&vnode_tagged, &sheet, &|_tag, props| {
+        let vnode = crate::style_vnode_with_hover(&vnode_tagged, &sheet, &|_tag, props| {
             props
                 .attrs
                 .get("data-hover-id")
@@ -1055,7 +1065,7 @@ where
                                 let (vnode_raw, sheet) = make_view(vw, vh);
                                 let mut next_id = 1u32;
                                 let vnode_tagged = with_hover_ids(&vnode_raw, &mut next_id);
-                                let vnode = apply_styles_with_hover(
+                                let vnode = crate::style_vnode_with_hover(
                                     &vnode_tagged,
                                     &sheet,
                                     &|_tag, props| {
@@ -1213,15 +1223,18 @@ where
                             let (vnode_raw, sheet) = make_view(vw, vh);
                             let mut next_id = 1u32;
                             let vnode_tagged = with_hover_ids(&vnode_raw, &mut next_id);
-                            let vnode =
-                                apply_styles_with_hover(&vnode_tagged, &sheet, &|_tag, props| {
+                            let vnode = crate::style_vnode_with_hover(
+                                &vnode_tagged,
+                                &sheet,
+                                &|_tag, props| {
                                     props
                                         .attrs
                                         .get("data-hover-id")
                                         .and_then(|v| v.parse::<u32>().ok())
                                         .map(|id| Some(id) == hovered_id)
                                         .unwrap_or(false)
-                                });
+                                },
+                            );
                             last_vnode = Some(vnode.clone());
                             let mut layout =
                                 velox_dom::layout::compute_layout(&vnode, vw as i32, vh as i32);
@@ -1468,7 +1481,7 @@ where
         let (vnode_raw, sheet) = make_view(vw, vh);
         let mut next_id = 1u32;
         let vnode_tagged = with_hover_ids(&vnode_raw, &mut next_id);
-        let vnode = apply_styles_with_hover(&vnode_tagged, &sheet, &|_tag, props| {
+        let vnode = crate::style_vnode_with_hover(&vnode_tagged, &sheet, &|_tag, props| {
             props
                 .attrs
                 .get("data-hover-id")
@@ -1531,7 +1544,7 @@ where
                                     let (vnode2_raw, sheet2) = make_view(vw2, vh2);
                                     let mut nid = 1u32;
                                     let tagged = with_hover_ids(&vnode2_raw, &mut nid);
-                                    let vnode2 = apply_styles_with_hover(
+                                    let vnode2 = crate::style_vnode_with_hover(
                                         &tagged,
                                         &sheet2,
                                         &|_tag, props| {
@@ -1662,7 +1675,7 @@ where
                                 let (vnode_raw, sheet) = make_view(vw, vh);
                                 let mut next_id = 1u32;
                                 let vnode_tagged = with_hover_ids(&vnode_raw, &mut next_id);
-                                let vnode = apply_styles_with_hover(
+                                let vnode = crate::style_vnode_with_hover(
                                     &vnode_tagged,
                                     &sheet,
                                     &|_tag, props| {
@@ -1769,15 +1782,18 @@ where
                             let (vnode_raw, sheet) = make_view(vw, vh);
                             let mut next_id = 1u32;
                             let vnode_tagged = with_hover_ids(&vnode_raw, &mut next_id);
-                            let vnode =
-                                apply_styles_with_hover(&vnode_tagged, &sheet, &|_tag, props| {
+                            let vnode = crate::style_vnode_with_hover(
+                                &vnode_tagged,
+                                &sheet,
+                                &|_tag, props| {
                                     props
                                         .attrs
                                         .get("data-hover-id")
                                         .and_then(|v| v.parse::<u32>().ok())
                                         .map(|id| Some(id) == hovered_id)
                                         .unwrap_or(false)
-                                });
+                                },
+                            );
                             _last_vnode = Some(vnode.clone());
                             let mut layout =
                                 velox_dom::layout::compute_layout(&vnode, vw as i32, vh as i32);
@@ -2313,7 +2329,7 @@ where
                     || tag == "button"
                     || has_class(props, "btn"))
         };
-        let vnode = apply_styles_with_hover(vnode_raw, sheet, &is_hovered);
+        let vnode = crate::style_vnode_with_hover(vnode_raw, sheet, &is_hovered);
         // root styles
         if let velox_dom::VNode::Element { ref props, .. } = vnode {
             *bg_color = parse_color(
@@ -2630,13 +2646,16 @@ where
             } else {
                 frame_vnode_raw.clone()
             };
-            let frame_vnode =
-                apply_styles_with_hover(&frame_vnode_reconciled, &frame_sheet, &|tag, props| {
+            let frame_vnode = crate::style_vnode_with_hover(
+                &frame_vnode_reconciled,
+                &frame_sheet,
+                &|tag, props| {
                     hovered
                         && (props.attrs.contains_key("on:click")
                             || tag == "button"
                             || has_class(props, "btn"))
-                });
+                },
+            );
             fn collect_click_nodes<'a>(
                 vnode: &'a velox_dom::VNode,
                 layout: &velox_dom::layout::LayoutNode,
@@ -2775,7 +2794,7 @@ where
                 use wgpu_glyph::{FontId, HorizontalAlign, Layout, Section, Text, VerticalAlign};
                 let (x0, y0, x1, y1) = btn_rect;
                 let (vnode_raw, sheet) = make_view(config.width, config.height);
-                let vnode = apply_styles_with_hover(&vnode_raw, &sheet, &|tag, props| {
+                let vnode = crate::style_vnode_with_hover(&vnode_raw, &sheet, &|tag, props| {
                     hovered
                         && (props.attrs.contains_key("on:click")
                             || tag == "button"

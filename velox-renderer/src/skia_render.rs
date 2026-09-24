@@ -7,7 +7,7 @@
 #![allow(unused)]
 
 use velox_dom::VNode;
-use velox_style::{Stylesheet, apply_styles};
+use velox_style::{Stylesheet, apply_with_cascade};
 
 #[cfg(feature = "skia-native")]
 pub mod skia_impl {
@@ -600,7 +600,7 @@ pub mod skia_impl {
     ) -> Result<Vec<u8>, String> {
         // Apply stylesheet declarations to inline style attrs before drawing,
         // so backgrounds/colors from the sheet are actually painted.
-        let styled = apply_styles(vnode, sheet);
+        let styled = apply_with_cascade(vnode, sheet);
         let vnode = &styled;
         let mut surface = sk::surfaces::raster_n32_premul((width, height))
             .ok_or_else(|| "skia: failed to create raster surface".to_string())?;
@@ -837,7 +837,7 @@ pub mod skia_impl {
         width: i32,
         height: i32,
     ) -> Result<Vec<u8>, String> {
-        let styled = apply_styles(vnode, sheet);
+        let styled = apply_with_cascade(vnode, sheet);
         let vnode = &styled;
         let mut surface = crate::skia_surface::SkiaSurface::new_raster(width, height)?;
         velox_dom::text_wrap::set_current_scale(surface.scale_factor());
@@ -872,6 +872,10 @@ pub mod skia_impl {
         surface.set_scale_factor(scale_factor);
         velox_dom::text_wrap::set_current_scale(scale_factor);
         velox_dom::text_wrap::set_skia_measurer(measure_text);
+        // The scale helper owns the same one-pass cascade as the unscaled
+        // helpers. Layout and paint both consume this already-styled tree.
+        let styled = apply_with_cascade(vnode, sheet);
+        let vnode = &styled;
         let layout = velox_dom::layout::compute_layout(vnode, width, height);
         render_frame(&mut surface, vnode, &layout, sheet)?;
         surface.encode_png()
@@ -1076,6 +1080,10 @@ pub mod skia_impl {
     /// `logical_w,logical_h` were obtained via `logical_size(physical, scale)` — single rounding point.
     /// Hit-test and render must share the same `Viewport` (physical/logical/scale) so that
     /// fractional scales (1.25/1.5) have identical snapped edges and clicks hit the rendered pixel.
+    ///
+    /// `sheet` is retained for the renderer API, but paint-time code reads the
+    /// already-cascaded inline `style` attributes on `vnode`; it performs no
+    /// second style application or paint-time sheet lookup.
     pub fn render_frame(
         surface: &mut crate::skia_surface::SkiaSurface,
         vnode: &VNode,
