@@ -812,6 +812,18 @@ fn style_box_sides_full(
         .map(|f| f.round() as i32)
     };
 
+    // `margin` accepts `auto`, which has no numeric value until the block's
+    // free space is resolved (CSS 2.1 §10.3.3). Keep the whole shorthand
+    // intact by treating those sides as 0 here; the auto sides are tracked
+    // separately via `style_margin_auto_sides` and centered downstream.
+    let resolve_side = |val: &str| -> Option<i32> {
+        if base == "margin" && val.trim().eq_ignore_ascii_case("auto") {
+            Some(0)
+        } else {
+            resolve(val)
+        }
+    };
+
     // Try expanding the shorthand value into individual sides.
     // CSS shorthand rules: 1 val = all, 2 = v h, 3 = t h b, 4 = t r b l
     let shorthand_sides: Option<(i32, i32, i32, i32)> = style.and_then(|s| {
@@ -831,23 +843,23 @@ fn style_box_sides_full(
         let parts: Vec<&str> = raw.split_whitespace().collect();
         match parts.len() {
             0 => None,
-            1 => resolve(parts[0]).map(|v| (v, v, v, v)),
+            1 => resolve_side(parts[0]).map(|v| (v, v, v, v)),
             2 => {
-                let v = resolve(parts[0])?;
-                let h = resolve(parts[1])?;
+                let v = resolve_side(parts[0])?;
+                let h = resolve_side(parts[1])?;
                 Some((h, h, v, v)) // left, right, top, bottom
             }
             3 => {
-                let t = resolve(parts[0])?;
-                let h = resolve(parts[1])?;
-                let b = resolve(parts[2])?;
+                let t = resolve_side(parts[0])?;
+                let h = resolve_side(parts[1])?;
+                let b = resolve_side(parts[2])?;
                 Some((h, h, t, b))
             }
             4 => {
-                let t = resolve(parts[0])?;
-                let r = resolve(parts[1])?;
-                let b = resolve(parts[2])?;
-                let l = resolve(parts[3])?;
+                let t = resolve_side(parts[0])?;
+                let r = resolve_side(parts[1])?;
+                let b = resolve_side(parts[2])?;
+                let l = resolve_side(parts[3])?;
                 Some((l, r, t, b))
             }
             _ => None,
@@ -899,6 +911,45 @@ fn style_box_sides_full(
     )
     .unwrap_or(sh_b);
     (l, r, t, b)
+}
+
+/// Whether `margin-left` / `margin-right` resolve to `auto` for the given
+/// inline style. Honors the CSS shorthand expansion (1-4 values) and the
+/// longhand-over-shorthand precedence used by `style_box_sides_full`.
+fn style_margin_auto_sides(style: Option<&str>) -> (bool, bool) {
+    let Some(s) = style else {
+        return (false, false);
+    };
+    let is_auto = |tok: &str| tok.trim().eq_ignore_ascii_case("auto");
+    let mut shorthand: Option<(bool, bool)> = None; // (left, right)
+    let mut long_l: Option<bool> = None;
+    let mut long_r: Option<bool> = None;
+    for decl in s.split(';') {
+        let d = decl.trim();
+        if d.is_empty() {
+            continue;
+        }
+        let Some((k, v)) = d.split_once(':') else {
+            continue;
+        };
+        match k.trim() {
+            "margin" => {
+                let parts: Vec<&str> = v.split_whitespace().collect();
+                shorthand = match parts.as_slice() {
+                    [all] => Some((is_auto(all), is_auto(all))),
+                    [_, h] => Some((is_auto(h), is_auto(h))),
+                    [_, h, _] => Some((is_auto(h), is_auto(h))),
+                    [_, right, _, left] => Some((is_auto(left), is_auto(right))),
+                    _ => None,
+                };
+            }
+            "margin-left" => long_l = Some(is_auto(v)),
+            "margin-right" => long_r = Some(is_auto(v)),
+            _ => {}
+        }
+    }
+    let (sh_l, sh_r) = shorthand.unwrap_or((false, false));
+    (long_l.unwrap_or(sh_l), long_r.unwrap_or(sh_r))
 }
 
 fn style_border_widths(
@@ -1164,8 +1215,9 @@ pub fn compute_layout(node: &VNode, viewport_w: i32, viewport_h: i32) -> LayoutN
                         .unwrap_or(false)
                 };
 
-                // Element outer position with margins
-                let elem_x = x + ml;
+                // Element outer position with margins; `margin: auto` on a
+                // block-level box with a declared width centers it by
+                // splitting the free space equally (CSS 2.1 §10.3.3).
                 let elem_y = y + mt;
 
                 // Determine width: if set, use as content+padding width; else take available width
@@ -1178,6 +1230,30 @@ pub fn compute_layout(node: &VNode, viewport_w: i32, viewport_h: i32) -> LayoutN
                     vw_f,
                     vh_f,
                 );
+
+                let (ml_auto, mr_auto) = style_margin_auto_sides(style);
+                let (ml, mr) = if let Some(dw) = declared_w.filter(|_| ml_auto || mr_auto) {
+                    // Border-box: the declared width already includes
+                    // padding+border (content_size_for convention, F-04) —
+                    // no double subtraction.
+                    let outer_w = if is_border_box {
+                        dw as f32
+                    } else {
+                        dw as f32 + pl as f32 + pr as f32 + bl as f32 + br as f32
+                    };
+                    let (l, r) = crate::style::resolve_auto_margins_core(
+                        avail_w as f32,
+                        outer_w,
+                        ml as f32,
+                        mr as f32,
+                        ml_auto,
+                        mr_auto,
+                    );
+                    (l.round() as i32, r.round() as i32)
+                } else {
+                    (ml, mr)
+                };
+                let elem_x = x + ml;
 
                 // Determine height: handle viewport-relative heights (100vh, min-height: 100vh)
                 let declared_h = style_lookup_len_full(

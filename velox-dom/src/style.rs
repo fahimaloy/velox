@@ -1447,6 +1447,16 @@ impl ComputedStyle {
             "background-image" => {
                 self.background_image = Some(value.to_string());
             }
+            "background" => {
+                // Minimal shorthand: color-only tokens (e.g. `background: #1a1a2e`).
+                // Image/gradient tokens are out of scope and ignored here.
+                for token in value.split_whitespace() {
+                    if let Some(c) = Color::parse(token) {
+                        self.background_color = c;
+                        break;
+                    }
+                }
+            }
 
             // Typography
             "color" => {
@@ -1895,6 +1905,87 @@ fn parse_border_shorthand(value: &str) -> Option<Border> {
     })
 }
 
+/// Core auto-margin distribution (CSS 2.1 §10.3.3).
+///
+/// Given the containing block width (`avail_w`), the element's border-box
+/// outer width *excluding margins* (`outer_w`), the numerically resolved
+/// side margins (`ml`/`mr` — values on auto sides are ignored), and the
+/// per-side auto flags, spreads the free space `avail_w - outer_w - fixed
+/// margins` across the auto margins:
+///
+/// - both sides auto: free space splits equally between them;
+/// - one side auto: it absorbs the remainder after the fixed opposite margin;
+/// - negative free space resolves auto margins to `0`.
+pub fn resolve_auto_margins_core(
+    avail_w: f32,
+    outer_w: f32,
+    ml: f32,
+    mr: f32,
+    ml_auto: bool,
+    mr_auto: bool,
+) -> (f32, f32) {
+    if !ml_auto && !mr_auto {
+        return (ml, mr);
+    }
+    let fixed = (if ml_auto { 0.0 } else { ml }) + (if mr_auto { 0.0 } else { mr });
+    let free = avail_w - outer_w - fixed;
+    match (ml_auto, mr_auto) {
+        (true, true) => {
+            let each = (free / 2.0).max(0.0);
+            (each, each)
+        }
+        (true, false) => (free.max(0.0), mr),
+        (false, true) => (ml, free.max(0.0)),
+        (false, false) => (ml, mr),
+    }
+}
+
+/// Resolve `margin: auto` for a block-level box (CSS 2.1 §10.3.3).
+///
+/// Given the containing block width (`avail_w`), the computed style and the
+/// declared width in px (`None` when `width: auto`), returns the resolved
+/// `(margin_left, margin_right)` pair in px. When neither side is auto the
+/// declared margins resolve against `avail_w` unchanged. When `width` is
+/// auto the box fills the containing block and auto margins resolve to 0.
+///
+/// Resolution basis: percentage paddings/borders resolve against `avail_w`
+/// (the containing block width), `rem` against the default 16px root size.
+/// `em`/viewport-unit paddings are approximated because the pure helper has
+/// no font-size/viewport context; the layout path, which has full context,
+/// feeds exact px values into [`resolve_auto_margins_core`] instead.
+pub fn resolve_auto_margins(
+    avail_w: f32,
+    style: &ComputedStyle,
+    declared_w: Option<f32>,
+) -> (f32, f32) {
+    let px = |l: Length| l.to_px(avail_w, 16.0, (avail_w, avail_w));
+    let ml = px(style.margin.left);
+    let mr = px(style.margin.right);
+    let ml_auto = style.margin.left.is_auto();
+    let mr_auto = style.margin.right.is_auto();
+    if !ml_auto && !mr_auto {
+        return (ml, mr);
+    }
+    let Some(dw) = declared_w else {
+        return (
+            if ml_auto { 0.0 } else { ml },
+            if mr_auto { 0.0 } else { mr },
+        );
+    };
+    // Border-box: declared width already includes padding+border, so no
+    // double subtraction (reconciled with content_size_for, F-04).
+    let outer_w = match style.box_sizing {
+        BoxSizing::BorderBox => dw,
+        BoxSizing::ContentBox => {
+            dw + px(style.padding.left)
+                + px(style.padding.right)
+                + px(style.border.width.left)
+                + px(style.border.width.right)
+        }
+    };
+    resolve_auto_margins_core(avail_w, outer_w, ml, mr, ml_auto, mr_auto)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2012,5 +2103,158 @@ mod tests {
         // transition: none clears
         cs.set_property("transition", "none");
         assert!(cs.transitions.is_empty());
+    }
+
+    #[test]
+    fn test_margin_shorthand_preserves_auto() {
+        // `margin: 0 auto` => top/bottom = 0, left/right = auto
+        let mut cs = ComputedStyle::new();
+        cs.set_property("margin", "0 auto");
+        assert_eq!(cs.margin.top, Length::Zero);
+        assert_eq!(cs.margin.bottom, Length::Zero);
+        assert_eq!(cs.margin.left, Length::Auto);
+        assert_eq!(cs.margin.right, Length::Auto);
+
+        // `margin: 10px auto` => vertical margins preserved, horizontal auto
+        let mut cs = ComputedStyle::new();
+        cs.set_property("margin", "10px auto");
+        assert_eq!(cs.margin.top, Length::Px(10.0));
+        assert_eq!(cs.margin.bottom, Length::Px(10.0));
+        assert_eq!(cs.margin.left, Length::Auto);
+        assert_eq!(cs.margin.right, Length::Auto);
+
+        // 4-value shorthand: top right bottom left
+        let mut cs = ComputedStyle::new();
+        cs.set_property("margin", "1px auto 3px auto");
+        assert_eq!(cs.margin.top, Length::Px(1.0));
+        assert_eq!(cs.margin.bottom, Length::Px(3.0));
+        assert_eq!(cs.margin.left, Length::Auto);
+        assert_eq!(cs.margin.right, Length::Auto);
+
+        // longhand auto overrides shorthand value
+        let mut cs = ComputedStyle::new();
+        cs.set_property("margin", "8px");
+        cs.set_property("margin-left", "auto");
+        assert_eq!(cs.margin.top, Length::Px(8.0));
+        assert_eq!(cs.margin.left, Length::Auto);
+    }
+
+    #[test]
+    fn test_background_shorthand_parses_color() {
+        let mut cs = ComputedStyle::new();
+        cs.set_property("background", "#1a1a2e");
+        assert_eq!(cs.background_color, Color::new(0x1a, 0x1a, 0x2e, 255));
+
+        // bare named color token; non-color tokens are ignored
+        let mut cs = ComputedStyle::new();
+        cs.set_property("background", "red no-repeat");
+        assert_eq!(cs.background_color, Color::RED);
+
+        // unknown values must not panic or clear defaults unexpectedly
+        let mut cs = ComputedStyle::new();
+        cs.set_property("background", "url(img.png)");
+        assert_eq!(cs.background_color, Color::default());
+    }
+
+    #[test]
+    fn test_border_shorthand_width_style_color() {
+        let mut cs = ComputedStyle::new();
+        cs.set_property("border", "1px solid #fff");
+        assert_eq!(cs.border.width.top, Length::Px(1.0));
+        assert_eq!(cs.border.width.right, Length::Px(1.0));
+        assert_eq!(cs.border.style.top, BorderStyle::Solid);
+        assert_eq!(cs.border.color.top, Color::new(255, 255, 255, 255));
+
+        // partial shorthand keeps defaults for missing components
+        let mut cs = ComputedStyle::new();
+        cs.set_property("border", "4px solid");
+        assert_eq!(cs.border.width.top, Length::Px(4.0));
+        assert_eq!(cs.border.style.top, BorderStyle::Solid);
+        assert_eq!(cs.border.color.top, Color::BLACK);
+    }
+
+    #[test]
+    fn test_resolve_auto_margins_both_sides() {
+        let mut cs = ComputedStyle::new();
+        cs.set_property("margin", "0 auto");
+        let (ml, mr) = resolve_auto_margins(800.0, &cs, Some(200.0));
+        assert_eq!(ml, 300.0);
+        assert_eq!(mr, 300.0);
+    }
+
+    #[test]
+    fn test_resolve_auto_margins_single_side_subtracts_fixed_opposite() {
+        let mut cs = ComputedStyle::new();
+        cs.set_property("margin-left", "auto");
+        cs.set_property("margin-right", "40px");
+        let (ml, mr) = resolve_auto_margins(800.0, &cs, Some(200.0));
+        assert_eq!(ml, 560.0); // 800 - 200 - 40
+        assert_eq!(mr, 40.0);
+    }
+
+    #[test]
+    fn test_resolve_auto_margins_content_box_subtracts_padding_border_once() {
+        let mut cs = ComputedStyle::new();
+        cs.set_property("margin", "0 auto");
+        cs.set_property("padding", "0 20px");
+        cs.set_property("border", "2px solid");
+        // outer = 200 + 2*20 + 2*2 = 244; free = 556 -> 278 each
+        let (ml, mr) = resolve_auto_margins(800.0, &cs, Some(200.0));
+        assert_eq!(ml, 278.0);
+        assert_eq!(mr, 278.0);
+    }
+
+    #[test]
+    fn test_resolve_auto_margins_border_box_no_double_subtraction() {
+        let mut cs = ComputedStyle::new();
+        cs.set_property("box-sizing", "border-box");
+        cs.set_property("margin", "0 auto");
+        cs.set_property("padding", "0 20px");
+        // declared 200 already contains padding; free = 600 -> 300 each
+        let (ml, mr) = resolve_auto_margins(800.0, &cs, Some(200.0));
+        assert_eq!(ml, 300.0);
+        assert_eq!(mr, 300.0);
+    }
+
+    #[test]
+    fn test_resolve_auto_margins_declared_none_resolves_zero() {
+        let mut cs = ComputedStyle::new();
+        cs.set_property("margin", "0 auto");
+        let (ml, mr) = resolve_auto_margins(800.0, &cs, None);
+        assert_eq!((ml, mr), (0.0, 0.0));
+    }
+
+    #[test]
+    fn test_resolve_auto_margins_negative_free_space_resolves_zero() {
+        let mut cs = ComputedStyle::new();
+        cs.set_property("margin", "0 auto");
+        let (ml, mr) = resolve_auto_margins(800.0, &cs, Some(900.0));
+        assert_eq!((ml, mr), (0.0, 0.0));
+
+        // one auto side with negative free space also resolves to 0
+        let mut cs = ComputedStyle::new();
+        cs.set_property("margin-left", "auto");
+        let (ml, mr) = resolve_auto_margins(800.0, &cs, Some(900.0));
+        assert_eq!((ml, mr), (0.0, 0.0));
+    }
+
+    #[test]
+    fn test_resolve_auto_margins_without_auto_returns_declared() {
+        let mut cs = ComputedStyle::new();
+        // 2-value shorthand: top/bottom = 10px, left/right = 20px
+        cs.set_property("margin", "10px 20px");
+        let (ml, mr) = resolve_auto_margins(800.0, &cs, Some(200.0));
+        assert_eq!((ml, mr), (20.0, 20.0));
+    }
+
+    #[test]
+    fn test_resolve_auto_margins_percent_padding_resolves_against_avail() {
+        let mut cs = ComputedStyle::new();
+        cs.set_property("margin", "0 auto");
+        cs.set_property("padding", "0 10%");
+        // outer = 200 + 2*80 = 360; free = 440 -> 220 each
+        let (ml, mr) = resolve_auto_margins(800.0, &cs, Some(200.0));
+        assert_eq!(ml, 220.0);
+        assert_eq!(mr, 220.0);
     }
 }

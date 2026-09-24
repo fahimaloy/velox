@@ -42,6 +42,97 @@ fn border_box_avail_subtracts_correctly() {
 }
 
 #[test]
+fn margin_auto_centers_block() {
+    let lo = compute_layout(
+        &h(
+            "div",
+            Props::from_inline("width:200px; margin:0 auto"),
+            vec![],
+        ),
+        800,
+        600,
+    );
+    assert_eq!(lo.rect.x, 300); // (800-200)/2
+}
+
+#[test]
+fn margin_auto_left_only_absorbs_free_space() {
+    // margin-left:auto with a fixed right margin resolves left = free.
+    let lo = compute_layout(
+        &h(
+            "div",
+            Props::from_inline("width:200px; margin-left:auto; margin-right:40px"),
+            vec![],
+        ),
+        800,
+        600,
+    );
+    // free = 800 - 200 - 40 = 560
+    assert_eq!(lo.rect.x, 560);
+}
+
+#[test]
+fn margin_auto_negative_free_space_resolves_zero() {
+    let lo = compute_layout(
+        &h(
+            "div",
+            Props::from_inline("width:900px; margin:0 auto"),
+            vec![],
+        ),
+        800,
+        600,
+    );
+    assert_eq!(lo.rect.x, 0);
+}
+
+#[test]
+fn margin_auto_shorthand_keeps_vertical_margins() {
+    // `margin: 10px auto` must keep top/bottom at 10px (the shorthand must
+    // not be dropped because one side is auto) while left/right center.
+    let lo = compute_layout(
+        &h(
+            "div",
+            Props::from_inline("width:200px; margin:10px auto"),
+            vec![],
+        ),
+        800,
+        600,
+    );
+    assert_eq!(lo.rect.x, 300);
+    assert_eq!(lo.rect.y, 10);
+}
+
+#[test]
+fn margin_auto_content_box_subtracts_padding_once() {
+    // content-box: outer = 200 + 2*20 = 240; free = 800 - 240 = 560 -> 280 each.
+    let lo = compute_layout(
+        &h(
+            "div",
+            Props::from_inline("width:200px; padding:0 20px; margin:0 auto"),
+            vec![],
+        ),
+        800,
+        600,
+    );
+    assert_eq!(lo.rect.x, 280);
+}
+
+#[test]
+fn margin_auto_border_box_no_double_subtraction() {
+    // border-box: declared 200 already contains the padding; free = 600 -> 300.
+    let lo = compute_layout(
+        &h(
+            "div",
+            Props::from_inline("box-sizing:border-box; width:200px; padding:0 20px; margin:0 auto"),
+            vec![],
+        ),
+        800,
+        600,
+    );
+    assert_eq!(lo.rect.x, 300);
+}
+
+#[test]
 fn percent_margin_uses_width_basis() {
     let lo = compute_layout(
         &h(
