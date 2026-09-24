@@ -54,6 +54,42 @@ fn repro_flex_item_descendants_use_resolved_item_position() {
 }
 
 #[test]
+fn repro_positioned_flex_item_descendants_follow_item_position() {
+    let root = h(
+        "div",
+        Props::new().set(
+            "style",
+            "width:300px;height:100px;display:flex;\
+             justify-content:center;align-items:center;gap:20px;",
+        ),
+        vec![
+            h(
+                "button",
+                Props::new().set(
+                    "style",
+                    "width:80px;height:30px;position:relative;left:10px;top:6px;text-align:center;",
+                ),
+                vec![text("A")],
+            ),
+            h(
+                "button",
+                Props::new().set("style", "width:80px;height:30px;text-align:center;"),
+                vec![text("B")],
+            ),
+        ],
+    );
+
+    let layout = compute_layout(&root, 300, 100);
+    let first = find_child(&layout, 0);
+    assert_eq!(first.rect.x, 70);
+    assert_eq!(first.rect.y, 41);
+
+    let a = &first.children[0];
+    assert_eq!(a.rect.x, first.rect.x + (first.rect.w - a.rect.w) / 2);
+    assert_eq!(a.rect.y, first.rect.y + (first.rect.h - a.rect.h) / 2);
+}
+
+#[test]
 fn repro_space_between_variable_sizes() {
     // container 300, gap 10, 3 items 50,80,60 -> positions 0, 105, 240
     let root = h(

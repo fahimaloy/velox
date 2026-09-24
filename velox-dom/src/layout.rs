@@ -229,6 +229,12 @@ fn translate_layout_subtree(node: &mut LayoutNode, dx: i32, dy: i32) {
     }
 }
 
+fn translate_layout_descendants(node: &mut LayoutNode, dx: i32, dy: i32) {
+    for child in &mut node.children {
+        translate_layout_subtree(child, dx, dy);
+    }
+}
+
 #[allow(dead_code)]
 fn parse_px(s: &str) -> Option<i32> {
     let t = s.trim();
@@ -2388,6 +2394,9 @@ pub fn compute_layout(node: &VNode, viewport_w: i32, viewport_h: i32) -> LayoutN
                                     vw_f,
                                     vh_f,
                                 );
+                                let descendant_dx = ln.rect.x - resolved_x;
+                                let descendant_dy = ln.rect.y - resolved_y;
+                                translate_layout_descendants(&mut ln, descendant_dx, descendant_dy);
                                 max_y_end = max_y_end.max(ln.rect.y + ln.rect.h);
                                 laid_children.push(ln);
                             }
