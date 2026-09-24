@@ -73,6 +73,25 @@ fn force_backend(backend: &str) {
     }
 }
 
+/// One-line compositor/backend diagnostic (CX-13 / F-23).
+///
+/// Pure helper: reads the backend-selection env vars and formats them with
+/// `Debug`, so unset vars show as `Err(NotPresent)`. The
+/// `VELOX_DEBUG_COMPOSITOR`-gated `eprintln!` in [`prepare_backend`] is a
+/// thin wrapper around this — tests assert the exact output here.
+pub fn debug_compositor_choice() -> String {
+    format!(
+        "[velox] backend={:?} wayland={:?} display={:?}",
+        std::env::var("WINIT_UNIX_BACKEND"),
+        std::env::var("WAYLAND_DISPLAY"),
+        std::env::var("DISPLAY")
+    )
+}
+
+/// Ensures the `VELOX_DEBUG_COMPOSITOR` diagnostic is printed once per
+/// process even though `prepare_backend` runs for both window entry points.
+static DEBUG_COMPOSITOR_LOG: std::sync::Once = std::sync::Once::new();
+
 /// Prepares the winit backend selection to avoid Wayland `process::exit()` traps.
 ///
 /// winit 0.28's Wayland backend calls `process::exit(err_code)` on display
@@ -92,9 +111,18 @@ fn force_backend(backend: &str) {
 ///     socket is dead, there's no fallback — return true so caller goes headless.
 /// * If only `DISPLAY` is set: no action needed (winit defaults to X11).
 ///
+/// If `VELOX_DEBUG_COMPOSITOR` is set (any value), the backend choice is
+/// logged once via stderr — diagnostics only, never a behavior change.
+///
 /// Returns `true` if the caller should proceed in headless mode (no window
 /// creation attempted), `false` if window creation should be tried.
 pub fn prepare_backend() -> bool {
+    if std::env::var("VELOX_DEBUG_COMPOSITOR").is_ok() {
+        DEBUG_COMPOSITOR_LOG.call_once(|| {
+            eprintln!("{}", debug_compositor_choice());
+        });
+    }
+
     if std::env::var("VELOX_HEADLESS").as_deref() == Ok("1") {
         return true;
     }
@@ -140,6 +168,36 @@ fn compositor_help(err_detail: &str) -> String {
          Set VELOX_HEADLESS=1 to run without a window, or ensure WAYLAND_DISPLAY/DISPLAY is set \
          and a Wayland/X11 compositor is running."
     )
+}
+
+/// Process-global guard so the EPIPE degrade warning surfaces exactly once
+/// per session (F-23), even if more than one presenter instance degrades —
+/// per-frame spam is suppressed.
+static EPIPE_WARNED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Claims the right to report an EPIPE degrade against `flag`.
+/// Returns `true` only on the first call; every later call returns `false`.
+fn claim_epipe_warning(flag: &std::sync::atomic::AtomicBool) -> bool {
+    !flag.swap(true, std::sync::atomic::Ordering::SeqCst)
+}
+
+/// Surfaces a compositor broken-pipe (EPIPE) error once per session.
+///
+/// The presenter still degrades to a no-op so rendering continues offscreen,
+/// but the error is no longer silently masked: `eprintln!` reaches stderr
+/// even when no logger is initialized, and the static guard prevents
+/// per-frame spam.
+fn warn_epipe_once(detail: &str) {
+    if claim_epipe_warning(&EPIPE_WARNED) {
+        eprintln!(
+            "[velox] compositor connection lost (broken pipe) — presenter degraded to no-op, \
+             rendering continues offscreen. Error: {detail}"
+        );
+        eprintln!(
+            "[velox] hint: set VELOX_HEADLESS=1 to run without a window, or ensure \
+             WAYLAND_DISPLAY/DISPLAY points to a running compositor."
+        );
+    }
 }
 
 /// Presents Skia-rendered content to a window using softbuffer.
@@ -248,9 +306,7 @@ impl SoftbufferPresenter {
         ) {
             let msg = e.to_string();
             if is_broken_pipe_error(&msg) {
-                log::warn!(
-                    "softbuffer resize failed (broken pipe) — degrading presenter to no-op: {msg}"
-                );
+                warn_epipe_once(&msg);
                 self.degraded = true;
                 return Ok(());
             } else {
@@ -276,7 +332,8 @@ impl SoftbufferPresenter {
     /// presenter degrades to a no-op and subsequent calls return `Ok(())`
     /// instead of propagating the error — this prevents the event loop from
     /// crashing in headless / CI environments. The rendering itself still
-    /// runs offscreen into the raster Skia surface.
+    /// runs offscreen into the raster Skia surface. The first degrade
+    /// surfaces the error once per session on stderr (see `warn_epipe_once`).
     pub fn present(
         &mut self,
         skia_surface: &mut crate::skia_surface::SkiaSurface,
@@ -308,9 +365,7 @@ impl SoftbufferPresenter {
             Err(e) => {
                 let msg = e.to_string();
                 if is_broken_pipe_error(&msg) {
-                    log::warn!(
-                        "softbuffer buffer_mut failed (broken pipe) — degrading presenter to no-op: {msg}"
-                    );
+                    warn_epipe_once(&msg);
                     self.degraded = true;
                     return Ok(());
                 } else {
@@ -341,9 +396,7 @@ impl SoftbufferPresenter {
         if let Err(e) = buffer.present() {
             let msg = e.to_string();
             if is_broken_pipe_error(&msg) {
-                log::warn!(
-                    "softbuffer present failed (broken pipe) — degrading presenter to no-op: {msg}"
-                );
+                warn_epipe_once(&msg);
                 self.degraded = true;
                 return Ok(());
             } else {
@@ -354,5 +407,102 @@ impl SoftbufferPresenter {
             }
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// RAII guard that restores an env var to its prior value (or removes it)
+    /// on drop — including on assertion failure — so tests never leak state.
+    struct EnvVarGuard {
+        key: &'static str,
+        prev: Option<String>,
+    }
+
+    impl EnvVarGuard {
+        fn set(key: &'static str, value: &str) -> Self {
+            let prev = std::env::var(key).ok();
+            unsafe { std::env::set_var(key, value) };
+            Self { key, prev }
+        }
+
+        /// Removes the var now; restores the prior value on drop.
+        fn remove(key: &'static str) -> Self {
+            let prev = std::env::var(key).ok();
+            unsafe { std::env::remove_var(key) };
+            Self { key, prev }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            match self.prev.take() {
+                Some(v) => unsafe { std::env::set_var(self.key, v) },
+                None => unsafe { std::env::remove_var(self.key) },
+            };
+        }
+    }
+
+    /// CX-13 / F-23: `VELOX_DEBUG_COMPOSITOR` must log the backend choice but
+    /// must NOT change the degraded (headless / force-x11) code path.
+    ///
+    /// NOTE on parallelism: `std::env::set_var` is process-global and Rust
+    /// runs unit tests in the same binary on parallel threads. All env-var
+    /// assertions in this module are collected into this single test, and no
+    /// other unit test in velox-renderer reads or writes `WAYLAND_DISPLAY` /
+    /// `DISPLAY` / `WINIT_UNIX_BACKEND` / `VELOX_HEADLESS` /
+    /// `VELOX_DEBUG_COMPOSITOR`, which contains the race.
+    #[test]
+    fn debug_flag_does_not_change_degraded_path() {
+        let _g_backend = EnvVarGuard::remove("WINIT_UNIX_BACKEND");
+        let _g_wayland = EnvVarGuard::set("WAYLAND_DISPLAY", "wayland-test-0");
+        let _g_display = EnvVarGuard::set("DISPLAY", ":99");
+        let _g_debug = EnvVarGuard::set("VELOX_DEBUG_COMPOSITOR", "1");
+        let _g_headless = EnvVarGuard::remove("VELOX_HEADLESS");
+
+        // With both sockets configured the debug flag must not alter the
+        // existing force-x11 choice (Wayland process::exit() trap avoidance).
+        assert!(!prepare_backend());
+        assert_eq!(
+            std::env::var("WINIT_UNIX_BACKEND").as_deref(),
+            Ok("x11"),
+            "force-x11 must be kept when DISPLAY and WAYLAND_DISPLAY are both set"
+        );
+
+        // The pure helper renders the exact diagnostic format from the task
+        // brief, including the backend forced above.
+        assert_eq!(
+            debug_compositor_choice(),
+            "[velox] backend=Ok(\"x11\") wayland=Ok(\"wayland-test-0\") display=Ok(\":99\")"
+        );
+
+        // Unset vars render as Err(NotPresent).
+        {
+            let _g = EnvVarGuard::remove("WINIT_UNIX_BACKEND");
+            let s = debug_compositor_choice();
+            assert!(s.contains("backend=Err(NotPresent)"), "got: {s}");
+        }
+
+        // Headless degraded path is unchanged by the debug flag: compositor
+        // reports unavailable and prepare_backend still selects headless —
+        // the env-gated eprintln must log without panicking. Repeated calls
+        // exercise the "logged once" Once guard and must not panic either.
+        let _g_headless_on = EnvVarGuard::set("VELOX_HEADLESS", "1");
+        assert!(!is_compositor_available());
+        assert!(prepare_backend());
+        assert!(prepare_backend());
+    }
+
+    /// F-23: the EPIPE degrade warning must be claimable exactly once per
+    /// session (this drives `warn_epipe_once`'s no-spam guarantee).
+    /// Env-free and race-free.
+    #[test]
+    fn epipe_warning_claimed_once_per_session() {
+        let flag = std::sync::atomic::AtomicBool::new(false);
+        assert!(claim_epipe_warning(&flag));
+        assert!(!claim_epipe_warning(&flag));
+        assert!(!claim_epipe_warning(&flag));
     }
 }

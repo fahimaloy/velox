@@ -725,6 +725,21 @@ pub fn create_direct_context() -> Result<skia_safe::gpu::DirectContext, String> 
     crate::skia_gl::create_direct_context()
 }
 
+/// Extracts the human-readable message from a caught panic payload
+/// (`panic!("literal")` stores `&'static str`, `format!`-based panics store
+/// `String`). Used so compositor failures caught by `catch_unwind` are
+/// surfaced instead of silently discarded (CX-13 / F-23).
+#[cfg(feature = "skia-native")]
+fn panic_detail(payload: Box<dyn std::any::Any + Send>) -> String {
+    if let Some(s) = payload.downcast_ref::<&'static str>() {
+        (*s).to_string()
+    } else if let Some(s) = payload.downcast_ref::<String>() {
+        s.clone()
+    } else {
+        "unknown panic payload".to_string()
+    }
+}
+
 /// Run a Skia window whose contents are produced by `make_view`.
 ///
 /// # Viewport contract (1A / X-H1) — Viewport Root Normalization (CX-04)
@@ -816,8 +831,14 @@ where
             }
         }
     }))
-    .unwrap_or_else(|_| {
-        log::warn!("window/event loop creation panicked — continuing in headless mode");
+    .unwrap_or_else(|payload| {
+        // Surface the panic payload (usually the compositor error, e.g.
+        // broken pipe) instead of silently masking it — log::warn is
+        // invisible without an initialized logger (CX-13 / F-23).
+        eprintln!(
+            "[velox] window/event loop creation panicked — continuing in headless mode: {}",
+            panic_detail(payload)
+        );
         (None, None, PhysicalSize::new(800, 600), 1.0)
     });
 
@@ -852,8 +873,14 @@ where
                     return Err(format!("failed to create softbuffer presenter: {e}"));
                 }
             }
-            Err(_) => {
-                log::warn!("softbuffer presenter creation panicked — continuing in headless mode");
+            Err(payload) => {
+                // Surface the panic payload (softbuffer panics with a
+                // broken pipe when the display is unreachable) instead of
+                // silently masking it (CX-13 / F-23).
+                eprintln!(
+                    "[velox] softbuffer presenter creation panicked — continuing in headless mode: {}",
+                    panic_detail(payload)
+                );
             }
         }
     }
@@ -1314,8 +1341,14 @@ where
             }
         }
     }))
-    .unwrap_or_else(|_| {
-        log::warn!("window/event loop creation panicked — continuing in headless mode");
+    .unwrap_or_else(|payload| {
+        // Surface the panic payload (usually the compositor error, e.g.
+        // broken pipe) instead of silently masking it — log::warn is
+        // invisible without an initialized logger (CX-13 / F-23).
+        eprintln!(
+            "[velox] window/event loop creation panicked — continuing in headless mode: {}",
+            panic_detail(payload)
+        );
         (None, None, None, PhysicalSize::new(800, 600), 1.0)
     });
 
@@ -1400,8 +1433,14 @@ where
                     return Err(format!("failed to create softbuffer presenter: {e}"));
                 }
             }
-            Err(_) => {
-                log::warn!("softbuffer presenter creation panicked — continuing in headless mode");
+            Err(payload) => {
+                // Surface the panic payload (softbuffer panics with a
+                // broken pipe when the display is unreachable) instead of
+                // silently masking it (CX-13 / F-23).
+                eprintln!(
+                    "[velox] softbuffer presenter creation panicked — continuing in headless mode: {}",
+                    panic_detail(payload)
+                );
             }
         }
     }
