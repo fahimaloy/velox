@@ -98,6 +98,26 @@ pub fn is_viewport_filling(style: Option<&str>, is_root_index: bool) -> bool {
     (has_100pct_w || has_vw) && has_viewport_h
 }
 
+/// Spec-compliant margin collapse per CSS 2.1 §8.3.1 (positive/negative partition).
+/// Consumes two adjacent vertical margins (f32 px) and produces collapsed value:
+/// - both >=0 => max (positives)
+/// - both <=0 => min (most negative)
+/// - opposite signs => sum
+pub fn collapse_margins(a: f32, b: f32) -> f32 {
+    if a >= 0.0 && b >= 0.0 {
+        a.max(b)
+    } else if a <= 0.0 && b <= 0.0 {
+        a.min(b)
+    } else {
+        a + b
+    }
+}
+
+#[allow(dead_code)]
+fn collapse(a: f32, b: f32) -> f32 {
+    collapse_margins(a, b)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Rect {
     pub x: i32,
@@ -2363,19 +2383,25 @@ pub fn compute_layout(node: &VNode, viewport_w: i32, viewport_h: i32) -> LayoutN
                             vh_f,
                         );
 
-                        // Margin collapsing: adjacent vertical margins collapse to max()
-                        // First child: no collapsing with parent (parent padding/border prevents it),
-                        // so child's margin-top is fully applied → collapsed_margin_top = cmt
-                        // Subsequent children: collapse with previous sibling's margin-bottom
+                        // Margin collapsing: spec-compliant positive/negative partition
+                        // First child may collapse through parent if parent has no top border/padding
                         let collapsed_margin_top = if idx == 0 {
-                            cmt
+                            if pt == 0 && bt == 0 {
+                                collapse_margins(mt as f32, cmt as f32).round() as i32
+                            } else {
+                                cmt
+                            }
                         } else {
-                            last_bottom_margin.max(cmt)
+                            collapse_margins(last_bottom_margin as f32, cmt as f32).round() as i32
                         };
 
                         // Adjust cur_y for collapsed margin.
                         // at() will add cmt, so we pass cur_y + collapsed_margin_top - cmt
                         // so that at() computes elem_y = (cur_y + collapsed_margin_top - cmt) + cmt = cur_y + collapsed_margin_top
+                        // For parent-through, collapsed includes parent mt, but cur_y already includes parent mt via content_y_start;
+                        // per brief we keep parent rect y not offset and adjust child via collapsed difference, so the above
+                        // formula places child at cur_y + collapsed (where collapsed may be > cmt).
+                        // If parent had pt/bt, collapsed == cmt so child at cur_y + cmt as before.
                         let adjusted_cur_y = cur_y + collapsed_margin_top - cmt;
 
                         let mut child_ln = at(
@@ -2420,15 +2446,31 @@ pub fn compute_layout(node: &VNode, viewport_w: i32, viewport_h: i32) -> LayoutN
                             vh_f,
                         );
 
-                        // child_ln.rect.y + child_ln.rect.h is the bottom of child's margin box (includes cmb)
-                        // No need to add cmb again - that was the double-counting bug
-                        cur_y = child_ln.rect.y + child_ln.rect.h;
-                        last_bottom_margin = cmb;
-                        cur_x = content_x;
-                        line_h = 0;
+                        // Determine if this block child is empty (no content height, no children)
+                        // Empty blocks collapse their own margins together and do not advance cur_y
+                        let is_empty_block = child_ln.rect.h == 0 && child_ln.children.is_empty();
+                        if is_empty_block {
+                            // Effective collapsed for empty = collapse(collapsed_top, cmb)
+                            // collapsed_top already is collapse(prev, cmt) or collapse(parent,cmt)
+                            // This merges previous bottom, empty top, and empty bottom into one partition value
+                            last_bottom_margin =
+                                collapse_margins(collapsed_margin_top as f32, cmb as f32).round()
+                                    as i32;
+                            // Empty does not advance cur_y beyond previous position;
+                            // its collapsed margins are represented via last_bottom_margin for next sibling.
+                            cur_x = content_x;
+                            line_h = 0;
+                            max_y_end = max_y_end.max(cur_y);
+                            laid_children.push(child_ln);
+                        } else {
+                            cur_y = child_ln.rect.y + child_ln.rect.h;
+                            last_bottom_margin = cmb;
+                            cur_x = content_x;
+                            line_h = 0;
 
-                        max_y_end = max_y_end.max(child_ln.rect.y + child_ln.rect.h);
-                        laid_children.push(child_ln);
+                            max_y_end = max_y_end.max(child_ln.rect.y + child_ln.rect.h);
+                            laid_children.push(child_ln);
+                        }
                     }
                     if line_h > 0 {
                         max_y_end = max_y_end.max(cur_y + line_h);
