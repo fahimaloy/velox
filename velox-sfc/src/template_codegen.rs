@@ -266,12 +266,13 @@ pub fn render_with_state<F>(state: std::sync::Arc<script_rs::State>, mut resolve
         body_with_state = body_with_state
     ));
 
-    // make_resolve: maps template interpolation keys to State getters so main.rs
-    // does not hand-write a resolve closure. Supports both bare (`title()`) and
-    // prefixed (`get_title()`) getter conventions.
-    let interp_keys = collect_interpolation_keys(&nodes);
+    // make_resolve: maps every key the render path looks up through `resolve()`
+    // (interpolations and bound-attribute expressions) to State getters so
+    // main.rs does not hand-write a resolve closure. Supports both bare
+    // (`title()`) and prefixed (`get_title()`) getter conventions.
+    let resolver_keys = collect_resolver_keys(&nodes, &names);
     out.push_str("\n\n");
-    out.push_str(&generate_make_resolve(&interp_keys, &names));
+    out.push_str(&generate_make_resolve(&resolver_keys, &names));
 
     // make_on_event: dispatch every template handler (plus, for the root, every
     // handler anywhere in the component tree) to the owning State method.
@@ -282,7 +283,7 @@ pub fn render_with_state<F>(state: std::sync::Arc<script_rs::State>, mut resolve
     // render_with_props: for presentational child components. Props take
     // priority; interpolations fall back to State getters.
     out.push_str("\n\n");
-    out.push_str(&generate_render_with_props(&interp_keys, &names));
+    out.push_str(&generate_render_with_props(&resolver_keys, &names));
 
     Ok(out)
 }
@@ -2249,6 +2250,92 @@ pub fn collect_interpolation_keys(nodes: &[Node]) -> Vec<String> {
         }
     }
     walk(nodes, &mut keys);
+    keys
+}
+
+/// Is `expr` a bare identifier (no field access, call, or literal)?
+fn is_bare_identifier(expr: &str) -> bool {
+    let mut chars = expr.chars();
+    match chars.next() {
+        Some(c) if c.is_ascii_alphabetic() || c == '_' => {}
+        _ => return false,
+    }
+    chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+/// Does `State` expose a getter for `key`? Only expressions backed by a getter
+/// are registered as resolver keys, so a binding over a plain `Signal`/`Ref`
+/// field (which has no getter to call) keeps generating compiling code.
+fn has_state_getter(names: &[String], key: &str) -> bool {
+    names.iter().any(|m| m == key)
+        || ["get_", "is_", "has_"].iter().any(|prefix| {
+            let candidate = format!("{prefix}{key}");
+            names.iter().any(|m| *m == candidate)
+        })
+}
+
+/// Conditions of an object-syntax `:class="{ active: is_active, done: done }"`.
+/// Mirrors the split `emit_props_with` performs when generating the class value.
+fn class_object_conditions(expr: &str) -> Vec<String> {
+    let trimmed = expr.trim();
+    if !(trimmed.starts_with('{') && trimmed.ends_with('}')) {
+        return Vec::new();
+    }
+    let inner = &trimmed[1..trimmed.len() - 1];
+    inner
+        .split(',')
+        .filter_map(|pair| pair.split_once(':'))
+        .map(|(_, cond)| cond.trim().to_string())
+        .filter(|cond| !cond.is_empty())
+        .collect()
+}
+
+/// Collect every key the generated render path looks up through `resolve(...)`.
+///
+/// Interpolation keys are the historical source; bound attributes are emitted
+/// as `resolve("...")` just the same (`:value="draft"`, `:placeholder="hint"`,
+/// `:click-payload="index"`), as are the conditions of an object-syntax
+/// `:class`. Without registering them those bindings fall through to the
+/// `_ => String::new()` arm and render empty.
+pub fn collect_resolver_keys(nodes: &[Node], names: &[String]) -> Vec<String> {
+    let mut keys = collect_interpolation_keys(nodes);
+
+    fn push(out: &mut Vec<String>, key: &str) {
+        if !out.iter().any(|k| k == key) {
+            out.push(key.to_string());
+        }
+    }
+
+    fn walk(nodes: &[Node], names: &[String], out: &mut Vec<String>) {
+        for node in nodes {
+            let Node::Element {
+                attrs, children, ..
+            } = node
+            else {
+                continue;
+            };
+            for attr in attrs {
+                if !matches!(attr.kind, AttrKind::Bind) {
+                    continue;
+                }
+                let Some(expr) = attr.value.as_deref().map(str::trim) else {
+                    continue;
+                };
+                if attr.name == "class" {
+                    for cond in class_object_conditions(expr) {
+                        if is_bare_identifier(&cond) && has_state_getter(names, &cond) {
+                            push(out, &cond);
+                        }
+                    }
+                } else if is_bare_identifier(expr) && has_state_getter(names, expr) {
+                    push(out, expr);
+                }
+            }
+            walk(children, names, out);
+        }
+    }
+
+    walk(nodes, names, &mut keys);
     keys
 }
 
