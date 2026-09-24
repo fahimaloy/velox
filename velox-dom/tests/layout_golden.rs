@@ -52,3 +52,25 @@ fn dvh_and_min_height_viewport_filling() {
     // root fills anyway, but check not panics and fills
     assert_eq!(lo_min_pct.rect.w, 800);
 }
+
+#[test]
+fn flex_column_min_height_definite_children_shrink() {
+    let lo = compute_layout(
+        &h(
+            "div",
+            Props::from_inline("display:flex; flex-direction:column; min-height:100vh"),
+            vec![h(
+                "div",
+                Props::from_inline("height:auto"),
+                vec![text("hi")],
+            )],
+        ),
+        800,
+        600,
+    );
+    assert!(
+        lo.children[0].rect.h < 600,
+        "child should shrink-to-content, not stretch to 600, got {}",
+        lo.children[0].rect.h
+    );
+}

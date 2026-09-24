@@ -118,6 +118,47 @@ fn collapse(a: f32, b: f32) -> f32 {
     collapse_margins(a, b)
 }
 
+/// Definite cross-size helper per CX-03/05.
+/// For column flex (cross=width) definite if parent cross definite OR resolved width exists.
+/// For row flex (cross=height) definite only if resolved height exists.
+fn has_definite_cross(is_column: bool, parent_definite: bool, resolved_cross: Option<i32>) -> bool {
+    if is_column {
+        parent_definite || resolved_cross.is_some()
+    } else {
+        resolved_cross.is_some()
+    }
+}
+
+/// Content vs border-box outer size resolver (F-04).
+/// When border-box and no declared size, fallback to avail minus margins (outer fills).
+fn content_size_for(
+    declared: Option<i32>,
+    avail: i32,
+    is_border_box: bool,
+    pl: i32,
+    pr: i32,
+    bl: i32,
+    br: i32,
+    ml: i32,
+    mr: i32,
+    is_viewport_filling: bool,
+    legacy_pair: bool,
+) -> i32 {
+    if is_border_box {
+        if let Some(dw) = declared {
+            dw
+        } else {
+            (avail - ml - mr).max(1)
+        }
+    } else if let Some(dw) = declared {
+        dw + pl + pr + bl + br
+    } else if is_viewport_filling || legacy_pair {
+        (avail - ml - mr).max(1)
+    } else {
+        avail
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Rect {
     pub x: i32,
@@ -960,7 +1001,7 @@ pub fn compute_layout(node: &VNode, viewport_w: i32, viewport_h: i32) -> LayoutN
         viewport_h: i32,
         _containing_x: i32,
         _containing_y: i32,
-        _containing_w: i32,
+        containing_w: i32,
         _containing_h: i32,
         source_index: Option<usize>,
         root_font_size: f32,
@@ -1004,7 +1045,7 @@ pub fn compute_layout(node: &VNode, viewport_w: i32, viewport_h: i32) -> LayoutN
                 let (ml, mr, mt, mb) = style_box_sides_full(
                     style,
                     "margin",
-                    avail_w as f32,
+                    containing_w as f32,
                     parent_font_size,
                     root_font_size,
                     vw_f,
@@ -1013,7 +1054,7 @@ pub fn compute_layout(node: &VNode, viewport_w: i32, viewport_h: i32) -> LayoutN
                 let (pl, pr, pt, pb) = style_box_sides_full(
                     style,
                     "padding",
-                    avail_w as f32,
+                    containing_w as f32,
                     parent_font_size,
                     root_font_size,
                     vw_f,
@@ -1021,7 +1062,7 @@ pub fn compute_layout(node: &VNode, viewport_w: i32, viewport_h: i32) -> LayoutN
                 );
                 let (bl, br, bt, bb) = style_border_widths(
                     style,
-                    avail_w as f32,
+                    containing_w as f32,
                     parent_font_size,
                     root_font_size,
                     vw_f,
@@ -1126,17 +1167,19 @@ pub fn compute_layout(node: &VNode, viewport_w: i32, viewport_h: i32) -> LayoutN
                     || min_height_vh
                     || min_height_is_100pct;
 
-                let rect_w = if let Some(dw) = declared_w {
-                    if is_border_box {
-                        dw
-                    } else {
-                        dw + pl + pr + bl + br
-                    }
-                } else if is_viewport_filling || legacy_pair {
-                    (avail_w - ml - mr).max(1)
-                } else {
-                    avail_w
-                };
+                let rect_w = content_size_for(
+                    declared_w,
+                    avail_w,
+                    is_border_box,
+                    pl,
+                    pr,
+                    bl,
+                    br,
+                    ml,
+                    mr,
+                    is_viewport_filling,
+                    legacy_pair,
+                );
 
                 // For viewport-height elements, use viewport height as the base, otherwise box-sizing adjusted
                 // Declared height takes precedence over viewport filling so explicit fixed heights are respected
@@ -1454,41 +1497,26 @@ pub fn compute_layout(node: &VNode, viewport_w: i32, viewport_h: i32) -> LayoutN
                         vh_f,
                     );
 
-                    // Determine if flex container has a definite cross-size
-                    // For row flex (is_column=false): cross-size = height
-                    // For column flex (is_column=true): cross-size = width (always definite = content_w)
-                    // CSS Flexbox spec §9.2: definite cross-size when height/min-height/max-height is definite
-                    let has_definite_cross_size = if is_column {
-                        true // column flex cross-size (width) is always definite = content_w
-                    } else {
-                        // Row flex: cross-size is height - definite if explicit height, min-height, or max-height set
-                        let explicit_h_content = explicit_h_raw.map(|v| {
-                            if is_border_box {
-                                (v - pt - pb - bt - bb).max(0)
-                            } else {
-                                v
-                            }
-                        });
-                        let min_h = style_lookup_len_full(
-                            style,
-                            "min-height",
-                            avail_h as f32,
-                            my_font_size,
-                            root_font_size,
-                            vw_f,
-                            vh_f,
-                        );
-                        let max_h = style_lookup_len_full(
-                            style,
-                            "max-height",
-                            avail_h as f32,
-                            my_font_size,
-                            root_font_size,
-                            vw_f,
-                            vh_f,
-                        );
-                        explicit_h_content.is_some() || min_h.is_some() || max_h.is_some()
-                    };
+                    // Determine if flex container has a definite cross-size per CX-03/05
+                    // For row flex: cross = height, definite only if resolved height present
+                    // For column flex: cross = width, definite if parent cross definite OR resolved width present
+                    let explicit_w_content = _explicit_w.map(|v| {
+                        if is_border_box {
+                            (v - pl - pr - bl - br).max(0)
+                        } else {
+                            v
+                        }
+                    });
+                    let parent_definite = containing_w > 0;
+                    let has_definite_cross_size = has_definite_cross(
+                        is_column,
+                        parent_definite,
+                        if is_column {
+                            explicit_w_content
+                        } else {
+                            explicit_h_content
+                        },
+                    );
 
                     // Initial cross_size: if definite, use it; if indefinite, start with 0 (will compute from children)
                     let cross_size = if is_column {
