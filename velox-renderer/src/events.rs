@@ -460,13 +460,6 @@ pub fn hit_test_scrollable(
     x: f32,
     y: f32,
 ) -> Option<Vec<usize>> {
-    fn contains(rect: velox_dom::layout::Rect, x: f32, y: f32) -> bool {
-        let x0 = rect.x as f32;
-        let y0 = rect.y as f32;
-        let x1 = (rect.x + rect.w) as f32;
-        let y1 = (rect.y + rect.h) as f32;
-        x >= x0 && x <= x1 && y >= y0 && y <= y1
-    }
     fn dfs(
         node: &velox_dom::layout::LayoutNode,
         x: f32,
@@ -475,7 +468,7 @@ pub fn hit_test_scrollable(
         best: &mut Option<(Vec<usize>, usize)>,
         depth: usize,
     ) {
-        if node.scrollable && contains(node.rect, x, y) {
+        if node.scrollable && rect_contains_point(node.rect, x, y) {
             // Prefer deeper depth; at equal depth the first candidate found
             // (earliest source order) wins — the guard below keeps the
             // existing best on ties.
