@@ -214,7 +214,6 @@ pub fn compile_template_to_rs_full(
     // Index the script block so codegen can resolve template keys to the real
     // State method names and match component tags to persistent state fields.
     let methods = script_setup.map(extract_state_methods).unwrap_or_default();
-    let names = method_names(&methods);
     let fields = script_setup
         .map(crate::script_index::extract_state_fields)
         .unwrap_or_default();
@@ -270,9 +269,12 @@ pub fn render_with_state<F>(state: std::sync::Arc<script_rs::State>, mut resolve
     // (interpolations and bound-attribute expressions) to State getters so
     // main.rs does not hand-write a resolve closure. Supports both bare
     // (`title()`) and prefixed (`get_title()`) getter conventions.
-    let resolver_keys = collect_resolver_keys(&nodes, &names);
+    let resolver_keys = collect_resolver_keys(&nodes, &methods);
+    for warning in &resolver_keys.warnings {
+        eprintln!("velox: warning: {warning}");
+    }
     out.push_str("\n\n");
-    out.push_str(&generate_make_resolve(&resolver_keys, &names));
+    out.push_str(&generate_make_resolve(&resolver_keys.keys, &methods));
 
     // make_on_event: dispatch every template handler (plus, for the root, every
     // handler anywhere in the component tree) to the owning State method.
@@ -283,7 +285,7 @@ pub fn render_with_state<F>(state: std::sync::Arc<script_rs::State>, mut resolve
     // render_with_props: for presentational child components. Props take
     // priority; interpolations fall back to State getters.
     out.push_str("\n\n");
-    out.push_str(&generate_render_with_props(&resolver_keys, &names));
+    out.push_str(&generate_render_with_props(&resolver_keys.keys, &methods));
 
     Ok(out)
 }
@@ -602,10 +604,10 @@ pub fn make_on_event(state: std::sync::Arc<script_rs::State>) -> impl FnMut(&str
 
 /// Generate a `make_resolve(state)` helper that maps template interpolation keys
 /// to State getters. `main.rs` uses it instead of hand-writing a resolve closure.
-fn generate_make_resolve(interp_keys: &[String], names: &[String]) -> String {
+fn generate_make_resolve(interp_keys: &[String], methods: &[StateMethod]) -> String {
     let mut arms = String::new();
     for key in interp_keys {
-        let method = resolve_method_name(names, key);
+        let method = resolve_getter_call(methods, key);
         arms.push_str(&format!(
             "        \"{}\" => state.{}().to_string(),\n",
             key, method
@@ -625,7 +627,7 @@ pub fn make_resolve(state: std::sync::Arc<script_rs::State>) -> impl FnMut(&str)
 /// Generate `render_with_props` — props take priority, interpolations fall back
 /// to State getters so a presentational child renders correctly even when the
 /// parent omits a prop.
-fn generate_render_with_props(interp_keys: &[String], names: &[String]) -> String {
+fn generate_render_with_props(interp_keys: &[String], methods: &[StateMethod]) -> String {
     if interp_keys.is_empty() {
         return r#"pub fn render_with_props(props: std::collections::HashMap<&str, String>) -> velox_dom::VNode {
     let resolve_props = |key: &str| -> String {
@@ -637,7 +639,7 @@ fn generate_render_with_props(interp_keys: &[String], names: &[String]) -> Strin
     }
     let mut match_arms = String::new();
     for key in interp_keys {
-        let method = resolve_method_name(names, key);
+        let method = resolve_getter_call(methods, key);
         match_arms.push_str(&format!(
             "            \"{}\" => state.{}().to_string(),\n",
             key, method
@@ -1323,8 +1325,8 @@ fn generate_component_props_expr(clean_attrs: &[TemplateAttr]) -> (bool, String)
                 };
                 let key = string_lit(key);
                 let expr = a.value.clone().unwrap_or_else(|| a.name.clone());
-                let val_key = string_lit(expr.trim());
-                bind_entries.push(format!("({key}, resolve({val_key}).clone())"));
+                let value = bind_attr_value(&a.name, &expr, None, None);
+                bind_entries.push(format!("({key}, {value})"));
             }
             AttrKind::On => {
                 let key = string_lit(&format!("on:{}", a.name));
@@ -1385,12 +1387,8 @@ fn generate_component_props_expr_with_ctx(
                 };
                 let key = string_lit(key);
                 let expr = a.value.clone().unwrap_or_else(|| a.name.clone());
-                if let Some(direct) = rewrite_ctx_expr(&expr, item_name, idx_name) {
-                    bind_entries.push(format!("({key}, format!(\"{{}}\", {direct}))"));
-                } else {
-                    let val_key = string_lit(expr.trim());
-                    bind_entries.push(format!("({key}, resolve({val_key}).clone())"));
-                }
+                let value = bind_attr_value(&a.name, &expr, item_name, idx_name);
+                bind_entries.push(format!("({key}, {value})"));
             }
             AttrKind::On => {
                 let key = string_lit(&format!("on:{}", a.name));
@@ -1433,12 +1431,7 @@ fn emit_props_with_ctx(
                 } else {
                     &a.name
                 };
-                if let Some(direct) = rewrite_ctx_expr(&expr, item_name, idx_name) {
-                    parts.push(format!(r#".set("{}", &format!("{{}}", {}))"#, key, direct));
-                } else {
-                    let val_key = string_lit(expr.trim());
-                    parts.push(format!(r#".set("{}", &resolve({}))"#, key, val_key));
-                }
+                parts.push(bind_prop_entry(key, &a.name, &expr, item_name, idx_name));
             }
             AttrKind::Directive => {
                 // directives are not emitted as props
@@ -1480,45 +1473,12 @@ fn emit_props_with(attrs: &[TemplateAttr]) -> String {
             }
             AttrKind::Bind => {
                 let expr = a.value.clone().unwrap_or_else(|| a.name.clone());
-                // Special handling for :class with object syntax: { className: condition, ... }
-                if a.name == "class" && expr.trim().starts_with('{') && expr.trim().ends_with('}') {
-                    let inner = &expr.trim()[1..expr.trim().len() - 1];
-                    let mut class_parts: Vec<String> = Vec::new();
-                    for pair in inner.split(',') {
-                        let pair = pair.trim();
-                        if pair.is_empty() {
-                            continue;
-                        }
-                        if let Some((cls, cond)) = pair.split_once(':') {
-                            let cls = cls.trim().to_string();
-                            let cond = cond.trim().to_string();
-                            if !cls.is_empty() && !cond.is_empty() {
-                                // Generate: if condition is true, add class
-                                let rewritten = rewrite_if_expr(&cond);
-                                class_parts.push(format!(
-                                    "if {} {{ __classes.push({}); }}",
-                                    rewritten,
-                                    string_lit(&cls)
-                                ));
-                            }
-                        }
-                    }
-                    if !class_parts.is_empty() {
-                        let code = format!(
-                            "{{ let mut __classes: Vec<&str> = Vec::new(); {} __classes.join(\" \") }}",
-                            class_parts.join(" ")
-                        );
-                        parts.push(format!(r#".set("class", {})"#, code));
-                    }
+                let key_attr = if a.name == "click-payload" || a.name == "payload" {
+                    "on:click-payload"
                 } else {
-                    let key_attr = if a.name == "click-payload" || a.name == "payload" {
-                        "on:click-payload"
-                    } else {
-                        &a.name
-                    };
-                    let val_key = string_lit(expr.trim());
-                    parts.push(format!(r#".set("{}", &resolve({}))"#, key_attr, val_key));
-                }
+                    &a.name
+                };
+                parts.push(bind_prop_entry(key_attr, &a.name, &expr, None, None));
             }
             AttrKind::Directive => {
                 // do not emit directives as props
@@ -2263,20 +2223,178 @@ fn is_bare_identifier(expr: &str) -> bool {
     chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
-/// Does `State` expose a getter for `key`? Only expressions backed by a getter
-/// are registered as resolver keys, so a binding over a plain `Signal`/`Ref`
-/// field (which has no getter to call) keeps generating compiling code.
-fn has_state_getter(names: &[String], key: &str) -> bool {
-    names.iter().any(|m| m == key)
-        || ["get_", "is_", "has_"].iter().any(|prefix| {
-            let candidate = format!("{prefix}{key}");
-            names.iter().any(|m| *m == candidate)
-        })
+/// The `State` method that provides the value for `key`, when that method is a
+/// genuine zero-argument getter. Payload-taking methods are event handlers, not
+/// getters: `state.on_input()` does not compile, so their names must never be
+/// registered as resolver keys.
+fn getter_method_name<'a>(methods: &'a [StateMethod], key: &'a str) -> Option<&'a str> {
+    if methods.iter().any(|m| m.name == key && !m.takes_payload) {
+        return Some(key);
+    }
+    ["get_", "is_", "has_"].iter().find_map(|prefix| {
+        let candidate = format!("{prefix}{key}");
+        methods
+            .iter()
+            .find(|m| m.name == candidate && !m.takes_payload)
+            .map(|m| m.name.as_str())
+    })
 }
 
-/// Conditions of an object-syntax `:class="{ active: is_active, done: done }"`.
-/// Mirrors the split `emit_props_with` performs when generating the class value.
-fn class_object_conditions(expr: &str) -> Vec<String> {
+/// Does `State` expose a zero-argument getter for `key`? Only expressions backed
+/// by such a getter are registered as resolver keys, so a binding over a plain
+/// `Signal`/`Ref` field (which has no getter to call) keeps generating
+/// compiling code.
+fn has_state_getter(methods: &[StateMethod], key: &str) -> bool {
+    getter_method_name(methods, key).is_some()
+}
+
+/// The getter call a resolver arm should make for `key`.
+///
+/// Bound-attribute keys are already gated by [`has_state_getter`]. Interpolation
+/// keys are not (that is long-standing behavior, and scripts-less component
+/// codegen still has to emit arms), so those fall back to name-only resolution:
+/// the getter may be spelled `title`, `get_title`, `is_title` or `has_title`.
+fn resolve_getter_call(methods: &[StateMethod], key: &str) -> String {
+    match getter_method_name(methods, key) {
+        Some(method) => method.to_string(),
+        None => resolve_method_name(&method_names(methods), key),
+    }
+}
+
+/// The Rust value one `:attr="expr"` binding emits, together with the resolver
+/// keys that value looks up.
+enum BindValue {
+    /// `resolve("<key>")` — the authored expression is looked up verbatim.
+    Lookup(String),
+    /// Object-syntax `:class="{ cls: cond, ... }"` — a block that joins the
+    /// classes whose condition is truthy.
+    ClassObject(String),
+    /// A v-for loop variable or one of its fields, read directly.
+    Direct(String),
+}
+
+impl BindValue {
+    /// The emitted Rust expression, ready to be interpolated into generated
+    /// code (`resolve("key")`, a direct loop-variable read, or a block that
+    /// joins class names).
+    fn expr(&self) -> &str {
+        match self {
+            BindValue::Lookup(expr) | BindValue::ClassObject(expr) | BindValue::Direct(expr) => {
+                expr
+            }
+        }
+    }
+}
+
+/// One normalized bound attribute.
+struct BindEmission {
+    value: BindValue,
+    /// The resolver keys `value` looks up, in lookup order.
+    keys: Vec<String>,
+    /// The authored expression, kept for diagnostics.
+    authored: String,
+}
+
+/// Normalize a bound attribute for emission.
+///
+/// Every `resolve(...)` codegen emits for a `:attr="expr"` binding comes from
+/// this function, and [`collect_resolver_keys`] reads the `keys` it reports, so
+/// the lookups codegen emits and the keys the resolver registers cannot drift
+/// apart.
+fn emit_bind_attr(
+    attr_name: &str,
+    expr: &str,
+    item_name: Option<&str>,
+    idx_name: Option<&str>,
+) -> BindEmission {
+    let authored = expr.trim().to_string();
+
+    if attr_name == "class" {
+        let pairs = class_object_pairs(&authored);
+        if !pairs.is_empty() {
+            let mut conditions: Vec<String> = Vec::new();
+            let mut keys: Vec<String> = Vec::new();
+            for (cls, cond) in pairs {
+                if cls.is_empty() || cond.is_empty() {
+                    continue;
+                }
+                let value = match rewrite_ctx_expr(&cond, item_name, idx_name) {
+                    // A loop variable is read directly; nothing to resolve.
+                    Some(direct) => direct,
+                    None => {
+                        for key in condition_resolver_keys(&cond) {
+                            push_unique(&mut keys, key);
+                        }
+                        rewrite_if_expr(&cond)
+                    }
+                };
+                conditions.push(format!(
+                    "if {} {{ __classes.push({}); }}",
+                    value,
+                    string_lit(&cls)
+                ));
+            }
+            if !conditions.is_empty() {
+                let value = format!(
+                    "{{ let mut __classes: Vec<&str> = Vec::new(); {} __classes.join(\" \") }}",
+                    conditions.join(" ")
+                );
+                return BindEmission {
+                    value: BindValue::ClassObject(value),
+                    keys,
+                    authored,
+                };
+            }
+        }
+    }
+
+    if let Some(direct) = rewrite_ctx_expr(&authored, item_name, idx_name) {
+        return BindEmission {
+            value: BindValue::Direct(direct),
+            keys: Vec::new(),
+            authored,
+        };
+    }
+
+    BindEmission {
+        value: BindValue::Lookup(format!("resolve({})", string_lit(&authored))),
+        keys: vec![authored.clone()],
+        authored,
+    }
+}
+
+/// The component-prop form of a normalized binding value: both are `String`.
+fn bind_attr_value(
+    attr_name: &str,
+    expr: &str,
+    item_name: Option<&str>,
+    idx_name: Option<&str>,
+) -> String {
+    let emission = emit_bind_attr(attr_name, expr, item_name, idx_name);
+    match &emission.value {
+        BindValue::Direct(direct) => format!("format!(\"{{}}\", {direct})"),
+        _ => format!("{}.clone()", emission.value.expr()),
+    }
+}
+
+/// The element-prop form of a normalized binding value (`Props::set` entry).
+fn bind_prop_entry(
+    key: &str,
+    attr_name: &str,
+    expr: &str,
+    item_name: Option<&str>,
+    idx_name: Option<&str>,
+) -> String {
+    let emission = emit_bind_attr(attr_name, expr, item_name, idx_name);
+    match &emission.value {
+        BindValue::Direct(direct) => format!(r#".set("{}", &format!("{{}}", {direct}))"#, key),
+        BindValue::ClassObject(value) => format!(r#".set("class", {value})"#),
+        BindValue::Lookup(value) => format!(r#".set("{}", &{value})"#, key),
+    }
+}
+
+/// The `class: condition` pairs of an object-syntax `:class="{ ... }"` binding.
+fn class_object_pairs(expr: &str) -> Vec<(String, String)> {
     let trimmed = expr.trim();
     if !(trimmed.starts_with('{') && trimmed.ends_with('}')) {
         return Vec::new();
@@ -2285,28 +2403,67 @@ fn class_object_conditions(expr: &str) -> Vec<String> {
     inner
         .split(',')
         .filter_map(|pair| pair.split_once(':'))
-        .map(|(_, cond)| cond.trim().to_string())
-        .filter(|cond| !cond.is_empty())
+        .map(|(cls, cond)| (cls.trim().to_string(), cond.trim().to_string()))
+        .filter(|(cls, cond)| !cls.is_empty() && !cond.is_empty())
         .collect()
+}
+
+/// The resolver keys a `v-if`/`:class` condition expression looks up.
+///
+/// Mirrors the identifier runs `rewrite_if_expr` turns into `resolve("<key>")`
+/// lookups, so a condition's operands are registered as keys — `:class`
+/// conditions included — whether they are bare (`completed`), negated
+/// (`!completed`) or part of a comparison (`count > 0`).
+fn condition_resolver_keys(expr: &str) -> Vec<String> {
+    let chars: Vec<char> = expr.chars().collect();
+    let mut keys: Vec<String> = Vec::new();
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        if c.is_ascii_alphabetic() || c == '_' {
+            let start = i;
+            while i < chars.len() && (chars[i].is_ascii_alphanumeric() || chars[i] == '_') {
+                i += 1;
+            }
+            let token: String = chars[start..i].iter().collect();
+            // Literals and emitted code are not lookups.
+            if !matches!(token.as_str(), "true" | "false" | "resolve" | "state") {
+                keys.push(token);
+            }
+        } else {
+            i += 1;
+        }
+    }
+    keys
+}
+
+/// The resolver keys to register, plus diagnostics for bound expressions that
+/// cannot be resolved.
+struct ResolverKeys {
+    keys: Vec<String>,
+    warnings: Vec<String>,
 }
 
 /// Collect every key the generated render path looks up through `resolve(...)`.
 ///
 /// Interpolation keys are the historical source; bound attributes are emitted
-/// as `resolve("...")` just the same (`:value="draft"`, `:placeholder="hint"`,
+/// as `resolve("..."")` just the same (`:value="draft"`, `:placeholder="hint"`,
 /// `:click-payload="index"`), as are the conditions of an object-syntax
-/// `:class`. Without registering them those bindings fall through to the
-/// `_ => String::new()` arm and render empty.
-pub fn collect_resolver_keys(nodes: &[Node], names: &[String]) -> Vec<String> {
+/// `:class`. Both sides are derived from [`emit_bind_attr`], so a key codegen
+/// emits is always a key this registers. Without that, those bindings fall
+/// through to the `_ => String::new()` arm and render empty.
+fn collect_resolver_keys(nodes: &[Node], methods: &[StateMethod]) -> ResolverKeys {
     let mut keys = collect_interpolation_keys(nodes);
+    let mut warnings: Vec<String> = Vec::new();
 
-    fn push(out: &mut Vec<String>, key: &str) {
-        if !out.iter().any(|k| k == key) {
-            out.push(key.to_string());
-        }
-    }
-
-    fn walk(nodes: &[Node], names: &[String], out: &mut Vec<String>) {
+    fn walk(
+        nodes: &[Node],
+        methods: &[StateMethod],
+        item_name: Option<&str>,
+        idx_name: Option<&str>,
+        keys: &mut Vec<String>,
+        warnings: &mut Vec<String>,
+    ) {
         for node in nodes {
             let Node::Element {
                 attrs, children, ..
@@ -2314,29 +2471,185 @@ pub fn collect_resolver_keys(nodes: &[Node], names: &[String]) -> Vec<String> {
             else {
                 continue;
             };
+            // A `v-for` element is emitted — props and children alike — with its
+            // own loop variables in scope, which the bindings read directly.
+            let loop_scope = attrs
+                .iter()
+                .find(|a| matches!(a.kind, AttrKind::Directive) && a.name == "for")
+                .and_then(|a| a.value.as_deref())
+                .and_then(parse_v_for);
+            let (item_name, idx_name) = match &loop_scope {
+                Some(info) => (
+                    Some(info.item_name.as_str()),
+                    Some(info.index_name.as_str()),
+                ),
+                None => (item_name, idx_name),
+            };
             for attr in attrs {
                 if !matches!(attr.kind, AttrKind::Bind) {
                     continue;
                 }
-                let Some(expr) = attr.value.as_deref().map(str::trim) else {
+                let Some(expr) = attr.value.as_deref() else {
                     continue;
                 };
-                if attr.name == "class" {
-                    for cond in class_object_conditions(expr) {
-                        if is_bare_identifier(&cond) && has_state_getter(names, &cond) {
-                            push(out, &cond);
-                        }
+                let emission = emit_bind_attr(&attr.name, expr, item_name, idx_name);
+                for key in &emission.keys {
+                    if has_state_getter(methods, key) {
+                        push_unique(keys, key);
+                        continue;
                     }
-                } else if is_bare_identifier(expr) && has_state_getter(names, expr) {
-                    push(out, expr);
+                    // Only bare, zero-argument State getters can be looked up.
+                    // A bare name with no method at all is a `Signal`/`Ref` field
+                    // binding, which resolves through interpolation-style props
+                    // and is left alone; anything else is a mistake worth saying
+                    // out loud rather than rendering as an empty string.
+                    let names_handler = methods.iter().any(|m| &m.name == key && m.takes_payload);
+                    if !is_bare_identifier(key) || names_handler {
+                        let reason = if names_handler {
+                            format!("`{key}` is a payload-taking State method, not a getter")
+                        } else {
+                            format!("`{key}` is not a bare zero-argument State getter")
+                        };
+                        warnings.push(format!(
+                            "bound attribute :{}=\"{}\" cannot be resolved — {reason}; \
+                             the binding renders empty. Bind a zero-argument State getter instead.",
+                            attr.name, emission.authored
+                        ));
+                    }
                 }
             }
-            walk(children, names, out);
+            walk(children, methods, item_name, idx_name, keys, warnings);
         }
     }
 
-    walk(nodes, names, &mut keys);
-    keys
+    walk(nodes, methods, None, None, &mut keys, &mut warnings);
+    ResolverKeys { keys, warnings }
+}
+
+fn push_unique(out: &mut Vec<String>, key: impl AsRef<str>) {
+    let key = key.as_ref();
+    if !out.iter().any(|k| k == key) {
+        out.push(key.to_string());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn methods(script: &str) -> Vec<StateMethod> {
+        extract_state_methods(script)
+    }
+
+    /// A bound expression that cannot become a resolver lookup has to be
+    /// reported, not silently rendered as an empty string.
+    #[test]
+    fn unsupported_bound_expression_is_reported_as_a_warning() {
+        let nodes =
+            crate::template_parse::parse_template_to_ast(r#"<input :value="draft.trim()" />"#)
+                .unwrap();
+        let collected = collect_resolver_keys(&nodes, &methods(""));
+
+        assert!(
+            collected.keys.is_empty(),
+            "an unresolvable expression must not be registered: {:?}",
+            collected.keys
+        );
+        assert_eq!(collected.warnings.len(), 1, "{:?}", collected.warnings);
+        let warning = &collected.warnings[0];
+        assert!(warning.contains(":value=\"draft.trim()\""), "{warning}");
+        assert!(warning.contains("`draft.trim()`"), "{warning}");
+        assert!(warning.contains("renders empty"), "{warning}");
+    }
+
+    /// A bound name that is a payload-taking method is reported the same way:
+    /// registering it would emit `state.on_input().to_string()`.
+    #[test]
+    fn payload_taking_handler_binding_is_reported_as_a_warning() {
+        let script = "impl State { pub fn on_input(&self, payload: &str) { let _ = payload; } }";
+        let nodes =
+            crate::template_parse::parse_template_to_ast(r#"<input :value="on_input" />"#).unwrap();
+        let collected = collect_resolver_keys(&nodes, &methods(script));
+
+        assert!(collected.keys.is_empty(), "{:?}", collected.keys);
+        assert_eq!(collected.warnings.len(), 1, "{:?}", collected.warnings);
+        assert!(
+            collected.warnings[0].contains("payload-taking State method"),
+            "{}",
+            collected.warnings[0]
+        );
+    }
+
+    /// A binding over a `Signal`/`Ref` field has no getter, which is tolerated
+    /// (it resolves through interpolation-style props) and must stay quiet.
+    #[test]
+    fn field_backed_binding_is_not_warned_about() {
+        let nodes =
+            crate::template_parse::parse_template_to_ast(r#"<input :value="count" />"#).unwrap();
+        let collected = collect_resolver_keys(&nodes, &methods(""));
+        assert!(collected.warnings.is_empty(), "{:?}", collected.warnings);
+    }
+
+    /// The condition keys collected must match the lookups
+    /// `rewrite_if_expr` actually emits, for every supported condition shape.
+    #[test]
+    fn condition_resolver_keys_match_rewrite_if_expr_lookups() {
+        for cond in [
+            "completed",
+            "!completed",
+            "count > 0",
+            "todo.completed",
+            "is_empty()",
+            "true",
+            "!false",
+            "filter == \"all\"",
+        ] {
+            let rewritten = rewrite_if_expr(cond);
+            let emitted: Vec<&str> = rewritten
+                .match_indices("resolve(\"")
+                .map(|(i, _)| {
+                    let rest = &rewritten[i + "resolve(\"".len()..];
+                    &rest[..rest.find('"').expect("closing quote")]
+                })
+                .collect();
+            let collected = condition_resolver_keys(cond);
+            assert_eq!(
+                collected,
+                emitted
+                    .iter()
+                    .map(|k| k.to_string())
+                    .collect::<Vec<String>>(),
+                "condition `{cond}` emits {emitted:?} but collects {collected:?}"
+            );
+        }
+    }
+
+    /// Only zero-argument methods are getters.
+    #[test]
+    fn getter_method_name_ignores_payload_taking_methods() {
+        let script = r#"
+impl State {
+    pub fn title(&self) -> String { String::new() }
+    pub fn get_count(&self) -> i32 { 0 }
+    pub fn is_open(&self) -> bool { true }
+    pub fn has_items(&self) -> bool { true }
+    pub fn on_input(&self, payload: &str) { let _ = payload; }
+    pub fn pick(&self, index: usize) -> usize { index }
+}
+"#;
+        let methods = methods(script);
+
+        assert_eq!(getter_method_name(&methods, "title"), Some("title"));
+        assert_eq!(getter_method_name(&methods, "count"), Some("get_count"));
+        assert_eq!(getter_method_name(&methods, "open"), Some("is_open"));
+        assert_eq!(getter_method_name(&methods, "items"), Some("has_items"));
+        assert_eq!(getter_method_name(&methods, "on_input"), None);
+        assert_eq!(getter_method_name(&methods, "pick"), None);
+        assert!(has_state_getter(&methods, "title"));
+        assert!(!has_state_getter(&methods, "on_input"));
+        // A prefixed payload-taking method is a handler, not a getter either.
+        assert!(!has_state_getter(&methods, "input"));
+    }
 }
 
 /// Generate setter methods on the State struct for v-model fields.

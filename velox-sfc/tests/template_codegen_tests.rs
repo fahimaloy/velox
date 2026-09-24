@@ -20,6 +20,43 @@ impl State {
 }
 "#;
 
+/// Getter-backed State plus one payload-taking event handler, so tests can tell
+/// genuine zero-argument getters apart from handlers that share their name.
+/// The import makes `<TodoItem>` a real component tag rather than an element.
+const SCRIPT_WITH_GETTERS_AND_HANDLER: &str = r#"
+import TodoItem from './components/TodoItem.vx';
+
+pub struct State {
+    pub count: i32,
+}
+
+impl State {
+    pub fn new() -> Self {
+        Self { count: 0 }
+    }
+
+    pub fn draft(&self) -> String {
+        String::from("Buy milk")
+    }
+
+    pub fn input_placeholder(&self) -> String {
+        String::from("What needs to be done?")
+    }
+
+    pub fn active(&self) -> String {
+        String::from("active")
+    }
+
+    pub fn completed(&self) -> String {
+        String::from("true")
+    }
+
+    pub fn on_input(&self, payload: &str) {
+        let _ = payload;
+    }
+}
+"#;
+
 /// Extract the `make_resolve` function body so assertions only look at resolver arms.
 fn make_resolve_body(rs: &str) -> &str {
     rs.split_once("pub fn make_resolve")
@@ -126,7 +163,7 @@ fn codegen_attrs() {
 #[test]
 fn component_bound_attrs_are_registered_as_resolver_keys() {
     let rs = compile_template_to_rs_full(
-        r#"<TodoInput :value="draft" :placeholder="input_placeholder" />"#,
+        r#"<div data-velox-component="TodoInput" :value="draft" :placeholder="input_placeholder"></div>"#,
         "TodoApp",
         None,
         Some(SCRIPT_WITH_GETTERS),
@@ -206,5 +243,135 @@ pub struct State {
     assert!(
         !resolve.contains(r#""count" =>"#),
         "no getter means no resolver arm for a field-based binding:\n{resolve}"
+    );
+}
+
+/// A bare `:class="active"` binding is emitted as `resolve("active")`, so that
+/// exact key has to be registered or the class silently renders empty.
+#[test]
+fn bare_class_binding_is_registered_as_resolver_key() {
+    let rs = compile_template_to_rs_full(
+        r#"<div><p :class="active">x</p></div>"#,
+        "TodoApp",
+        None,
+        Some(SCRIPT_WITH_GETTERS_AND_HANDLER),
+        None,
+    )
+    .unwrap();
+    println!("-- GENERATED RS --\n{}\n-- END RS --", rs);
+
+    assert!(
+        rs.contains(r#"resolve("active")"#),
+        "`:class=\"active\"` must be read through the resolver:\n{rs}"
+    );
+    let resolve = make_resolve_body(&rs);
+    assert!(
+        resolve.contains(r#""active" => state.active().to_string()"#),
+        "`:class=\"active\"` must be a resolver key:\n{resolve}"
+    );
+}
+
+/// A negated object condition is emitted as a lookup of the operand, so the
+/// operand — not the `!`-prefixed text — is the key the resolver needs.
+#[test]
+fn negated_class_condition_registers_the_condition_key() {
+    let rs = compile_template_to_rs_full(
+        r#"<div><p :class="{ done: !completed }">x</p></div>"#,
+        "TodoApp",
+        None,
+        Some(SCRIPT_WITH_GETTERS_AND_HANDLER),
+        None,
+    )
+    .unwrap();
+    println!("-- GENERATED RS --\n{}\n-- END RS --", rs);
+
+    assert!(
+        rs.contains(r#"resolve("completed")"#),
+        "`:class=\"{{ done: !completed }}\"` must look up `completed`:\n{rs}"
+    );
+    let resolve = make_resolve_body(&rs);
+    assert!(
+        resolve.contains(r#""completed" => state.completed().to_string()"#),
+        "the condition operand must be a resolver key:\n{resolve}"
+    );
+    assert!(
+        !resolve.contains(r#""!completed" =>"#),
+        "the `!`-prefixed text is not a resolver key:\n{resolve}"
+    );
+}
+
+/// A component-bound object `:class` looked the whole literal up before, so the
+/// child never saw the condition. It must look up the condition key instead.
+#[test]
+fn component_bound_object_class_registers_the_condition_key() {
+    let rs = compile_template_to_rs_full(
+        r#"<div data-velox-component="TodoItem" :class="{ done: completed }"></div>"#,
+        "TodoApp",
+        None,
+        Some(SCRIPT_WITH_GETTERS_AND_HANDLER),
+        None,
+    )
+    .unwrap();
+    println!("-- GENERATED RS --\n{}\n-- END RS --", rs);
+
+    assert!(
+        !rs.contains(r#"resolve("{ done: completed }")"#),
+        "the whole class literal must not be used as a resolver key:\n{rs}"
+    );
+    assert!(
+        rs.contains(r#"resolve("completed")"#),
+        "the class condition must be read through the resolver:\n{rs}"
+    );
+    let resolve = make_resolve_body(&rs);
+    assert!(
+        resolve.contains(r#""completed" => state.completed().to_string()"#),
+        "the class condition must be a resolver key:\n{resolve}"
+    );
+}
+
+/// A bound expression that is not a bare identifier cannot become a resolver
+/// lookup: it is reported as a codegen warning (see the unit tests next to the
+/// collector) and never registered as a key, so no arm claims to resolve it.
+#[test]
+fn unsupported_bound_expression_is_not_registered_as_a_resolver_key() {
+    let rs = compile_template_to_rs_full(
+        r#"<input :value="draft.trim()" />"#,
+        "TodoApp",
+        None,
+        Some(SCRIPT_WITH_GETTERS_AND_HANDLER),
+        None,
+    )
+    .unwrap();
+    println!("-- GENERATED RS --\n{}\n-- END RS --", rs);
+
+    let resolve = make_resolve_body(&rs);
+    assert!(
+        !resolve.contains(r#""draft.trim()" =>"#),
+        "a non-bare expression must not be registered as a resolver key:\n{resolve}"
+    );
+}
+
+/// A payload-taking method is an event handler, not a getter. Registering its
+/// name would emit `state.on_input().to_string()`, which does not compile.
+#[test]
+fn payload_taking_method_is_not_registered_as_a_getter() {
+    let rs = compile_template_to_rs_full(
+        r#"<input :value="on_input" />"#,
+        "TodoApp",
+        None,
+        Some(SCRIPT_WITH_GETTERS_AND_HANDLER),
+        None,
+    )
+    .unwrap();
+    println!("-- GENERATED RS --\n{}\n-- END RS --", rs);
+
+    let resolve = make_resolve_body(&rs);
+    assert!(
+        !resolve.contains(r#""on_input" =>"#),
+        "a payload-taking handler must not be registered as a getter:\n{resolve}"
+    );
+    assert!(
+        !rs.contains("state.on_input()"),
+        "generated code must never call a handler as a getter:\n{rs}"
     );
 }
