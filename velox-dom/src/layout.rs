@@ -463,6 +463,100 @@ fn style_lookup_str(style: Option<&str>, key: &str) -> Option<String> {
     None
 }
 
+fn is_inline_formatting_participant(node: &VNode) -> bool {
+    match node {
+        VNode::Text(text) => !text.chars().all(|c| c.is_whitespace()),
+        VNode::Element { tag, props, .. } => {
+            let style = props.attrs.get("style").map(|s| s.as_str());
+            let display =
+                style_lookup_str(style, "display").map(|value| value.trim().to_ascii_lowercase());
+            let position = style_lookup_str(style, "position")
+                .map(|value| value.trim().to_ascii_lowercase())
+                .unwrap_or_else(|| "static".to_string());
+            if position == "absolute" || position == "fixed" || display.as_deref() == Some("none") {
+                return false;
+            }
+            match display.as_deref() {
+                Some("inline") | Some("inline-block") | Some("inline-flex")
+                | Some("inline-grid") => true,
+                Some(_) => false,
+                None => matches!(
+                    tag.to_ascii_lowercase().as_str(),
+                    "a" | "abbr"
+                        | "b"
+                        | "button"
+                        | "cite"
+                        | "code"
+                        | "data"
+                        | "del"
+                        | "em"
+                        | "i"
+                        | "input"
+                        | "kbd"
+                        | "label"
+                        | "mark"
+                        | "q"
+                        | "s"
+                        | "samp"
+                        | "small"
+                        | "span"
+                        | "strong"
+                        | "sub"
+                        | "sup"
+                        | "time"
+                        | "u"
+                        | "var"
+                ),
+            }
+        }
+    }
+}
+
+fn is_formatting_participant(node: &VNode) -> bool {
+    match node {
+        VNode::Text(text) => !text.chars().all(|c| c.is_whitespace()),
+        VNode::Element { props, .. } => {
+            let style = props.attrs.get("style").map(|s| s.as_str());
+            let display = style_lookup_str(style, "display")
+                .map(|value| value.trim().to_ascii_lowercase())
+                .unwrap_or_else(|| "static".to_string());
+            let position = style_lookup_str(style, "position")
+                .map(|value| value.trim().to_ascii_lowercase())
+                .unwrap_or_else(|| "static".to_string());
+            display != "none" && position != "absolute" && position != "fixed"
+        }
+    }
+}
+
+fn should_drop_collapsible_whitespace(
+    children: &[VNode],
+    idx: usize,
+    parent_style: Option<&str>,
+) -> bool {
+    let Some(VNode::Text(text)) = children.get(idx) else {
+        return false;
+    };
+    if !text.chars().all(|c| c.is_whitespace()) {
+        return false;
+    }
+    let white_space = style_lookup_str(parent_style, "white-space")
+        .map(|value| value.trim().to_ascii_lowercase())
+        .unwrap_or_else(|| "normal".to_string());
+    if !matches!(white_space.as_str(), "normal" | "nowrap") {
+        return false;
+    }
+    let has_inline_before = children[..idx]
+        .iter()
+        .rev()
+        .find(|candidate| is_formatting_participant(candidate))
+        .is_some_and(is_inline_formatting_participant);
+    let has_inline_after = children[idx + 1..]
+        .iter()
+        .find(|candidate| is_formatting_participant(candidate))
+        .is_some_and(is_inline_formatting_participant);
+    !has_inline_before || !has_inline_after
+}
+
 fn style_lookup_i32(style: Option<&str>, key: &str) -> Option<i32> {
     let s = style?;
     for decl in s.split(';') {
@@ -2419,6 +2513,9 @@ pub fn compute_layout(node: &VNode, viewport_w: i32, viewport_h: i32) -> LayoutN
                     let mut line_h = 0;
                     for (idx, c) in children.iter().enumerate() {
                         let is_text = matches!(c, VNode::Text(_));
+                        if should_drop_collapsible_whitespace(children, idx, style) {
+                            continue;
+                        }
                         let child_style = match c {
                             VNode::Element { props, .. } => {
                                 props.attrs.get("style").map(|s| s.as_str())

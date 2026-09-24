@@ -1,6 +1,7 @@
 use velox_dom::{
     Props, h,
     layout::{Rect, compute_layout},
+    text,
 };
 
 #[test]
@@ -35,6 +36,43 @@ fn block_stacks_children_and_uses_style_size() {
         lt.children[1].rect.y,
         lt.children[0].rect.h
     );
+}
+
+#[test]
+fn block_boundary_collapses_whitespace_only_text() {
+    let root = h(
+        "div",
+        Props::new(),
+        vec![
+            h("div", Props::new().set("style", "height:20px;"), vec![]),
+            text(" "),
+            h("div", Props::new().set("style", "height:20px;"), vec![]),
+        ],
+    );
+
+    let lt = compute_layout(&root, 800, 600);
+
+    assert_eq!(lt.children.len(), 2);
+    assert_eq!(lt.children[0].rect.y, 0);
+    assert_eq!(lt.children[1].rect.y, lt.children[0].rect.h);
+}
+
+#[test]
+fn block_boundary_preserves_whitespace_between_inline_participants() {
+    let root = h(
+        "div",
+        Props::new(),
+        vec![
+            h("span", Props::new(), vec![text("a")]),
+            text(" "),
+            h("span", Props::new(), vec![text("b")]),
+        ],
+    );
+
+    let lt = compute_layout(&root, 800, 600);
+
+    assert_eq!(lt.children.len(), 3);
+    assert_eq!(lt.children[1].source_index, Some(1));
 }
 
 // ===== Flexbox Tests =====
