@@ -823,6 +823,39 @@ fn unresolvable_key_reason(key: &str, methods: &[StateMethod], fields: &[String]
 /// the setter body would be `vmodel_set(&self.todo.text, …)` on a field the
 /// `State` does not have. Both are E0609, not a working binding. The same
 /// family and the same remedy sentence as [`resolve_loop_warning`].
+/// Why a `v-if` / `v-show` condition cannot be read, in the terms of the
+/// directive that reads it.
+///
+/// Both directives ask the same question of the same key through the same gate
+/// ([`key_is_answerable`]), so they say the same thing the same way — and each
+/// names the consequence ITS OWN emission has rather than a capability the
+/// emitted code lacks: an unregistered key answers `""`, which is falsy, so a
+/// `v-if` leaves the element and its subtree out of the tree and a `v-show`
+/// leaves the element hidden.
+///
+/// This is a DISTINCT condition from the Resolve-mode loop diagnostic
+/// ([`resolve_loop_warning`]): that one is about a loop that cannot render and
+/// reads no key set, and this one is about a key that has no getter. Neither is
+/// derived from the other.
+fn condition_unresolvable_warning(
+    directive: &str,
+    expr: &str,
+    key: &str,
+    methods: &[StateMethod],
+    fields: &[String],
+) -> String {
+    let consequence = if directive == "show" {
+        "the condition reads an empty value, so the element renders with `display: none`"
+    } else {
+        "the condition reads an empty value, so the element and everything inside it are not rendered"
+    };
+    format!(
+        "{directive}=\"{expr}\" cannot be resolved — {}; {consequence}. Bind a zero-argument \
+         State getter for `{key}` instead.",
+        unresolvable_key_reason(key, methods, fields)
+    )
+}
+
 fn vmodel_loop_write_warning(expr: &str) -> String {
     format!(
         "v-model=\"{expr}\" on a `v-for` item cannot be written — the event dispatcher resolves \
@@ -1022,7 +1055,64 @@ pub(crate) fn emit_children(children: &[Node]) -> String {
     format!("vec![{}]", items.join(", "))
 }
 
-#[cfg_attr(test, allow(non_snake_case))]
+/// Is this character part of a comparison operator? `==`, `!=`, `>=` and `<=`
+/// all END in one of these, so the last character of what has been emitted is
+/// enough to tell whether a token sits next to one.
+fn is_comparison_char(ch: char) -> bool {
+    matches!(ch, '=' | '!' | '<' | '>')
+}
+
+/// The end of the member path starting at `start`, where `chars[start]` is the
+/// first character of an identifier the caller has already accepted.
+///
+/// `user.name` is ONE key, not two identifiers, and `items[0].name` is one too:
+/// the arm that answers such a key is the method chain `state.user().name()`, so
+/// splitting the path would ask the resolver for `user` and `name` — keys no
+/// getter is named after — and leave a field access on a `String` in the middle
+/// of the emitted expression. [`condition_resolver_keys`] collects the same
+/// tokens through this same function, which is what keeps the registered keys
+/// and the emitted lookups one set; `condition_resolver_keys_match_rewrite_if_expr_lookups`
+/// pins their agreement.
+///
+/// A segment is `.` followed by an identifier, or an index `[…]` copied verbatim
+/// (brackets included, so [`member_path`] splits it back the same way). Anything
+/// else ends the path, leaving the caller looking at the character that stopped
+/// it.
+fn member_path_end(chars: &[char], start: usize) -> usize {
+    let mut i = start;
+    // The advance past the entry character is UNCONDITIONAL — see the contract on
+    // `is_ident_char`, and the note in `condition_resolver_keys` that this is why
+    // no scanner here can spin.
+    i += 1;
+    while i < chars.len() && is_ident_char(chars[i]) {
+        i += 1;
+    }
+    loop {
+        match chars.get(i) {
+            Some('.') => match chars.get(i + 1) {
+                Some(c) if c.is_ascii_alphabetic() || *c == '_' => {
+                    i += 2;
+                    while i < chars.len() && is_ident_char(chars[i]) {
+                        i += 1;
+                    }
+                }
+                _ => return i,
+            },
+            Some('[') => {
+                let mut j = i + 1;
+                while j < chars.len() && chars[j] != ']' {
+                    j += 1;
+                }
+                if j >= chars.len() {
+                    return i;
+                }
+                i = j + 1;
+            }
+            _ => return i,
+        }
+    }
+}
+
 pub(crate) fn rewrite_if_expr(expr: &str) -> String {
     let has_cmp = expr.contains("==")
         || expr.contains("!=")
@@ -1030,84 +1120,102 @@ pub(crate) fn rewrite_if_expr(expr: &str) -> String {
         || expr.contains("<=")
         || expr.contains('>')
         || expr.contains('<');
-    let has_logic = expr.contains("&&") || expr.contains("||");
     let has_negation = expr.contains('!');
 
+    let chars: Vec<char> = expr.chars().collect();
     let mut out = String::new();
-    let mut ident = String::new();
-    let mut chars = expr.chars().peekable();
+    let mut i = 0;
 
-    fn flush_ident(out: &mut String, ident: &mut String, has_cmp: bool, _has_logic: bool) {
-        if ident.is_empty() {
+    /// Emit one looked-up token. A token in `if` position is a CONDITION, so it
+    /// gets the string truthiness [`resolver_truthiness`] defines; a token next
+    /// to a comparison operator is an OPERAND of that comparison, which is a
+    /// number in every expression this has ever accepted.
+    fn flush_token(out: &mut String, token: &str, numeric: bool) {
+        if token.is_empty() {
             return;
         }
-        let token = ident.as_str();
-        let keep = token == "true"
-            || token == "false"
-            || token == "resolve"
-            || token == "state"
-            || token.contains('.')
-            || token.contains('(');
-        if keep {
+        // Literals and emitted code are values already, not lookups.
+        if matches!(token, "true" | "false" | "resolve" | "state") {
             out.push_str(token);
-        } else if has_cmp {
+        } else if numeric {
             out.push_str(&format!(
                 "resolve({}).parse::<f64>().unwrap_or(0.0)",
                 string_lit(token)
             ));
         } else {
-            // Use a let binding to avoid calling resolve() multiple times
-            out.push_str(&format!(
-                "{{ let __v = resolve({}); __v == \"true\" || (!__v.is_empty() && __v != \"false\") }}",
+            out.push_str(&resolver_truthiness(&format!(
+                "resolve({})",
                 string_lit(token)
-            ));
+            )));
         }
-        ident.clear();
     }
 
-    while let Some(ch) = chars.next() {
+    while i < chars.len() {
+        let ch = chars[i];
         if ch.is_ascii_alphabetic() || ch == '_' {
-            ident.push(ch);
-            while let Some(&next) = chars.peek() {
-                if is_ident_char(next) {
-                    ident.push(next);
-                    chars.next();
+            let end = member_path_end(&chars, i);
+            let token: String = chars[i..end].iter().collect();
+            i = end;
+            // Whitespace after the token is held back, not dropped, so a token
+            // followed by a comparison operator keeps the spacing it was
+            // authored with.
+            let mut pending = String::new();
+            let mut j = i;
+            let mut next_is_cmp = false;
+            while j < chars.len() {
+                if chars[j].is_whitespace() {
+                    pending.push(chars[j]);
+                    j += 1;
+                } else if is_comparison_char(chars[j]) {
+                    next_is_cmp = true;
+                    break;
                 } else {
                     break;
                 }
             }
-            flush_ident(&mut out, &mut ident, has_cmp, has_logic);
+            // The last character emitted is what decides what came before the
+            // token: `&`/`|`/`(`/`)`, a digit or `}` are all "not a comparison".
+            let prev_is_cmp = out
+                .trim_end()
+                .chars()
+                .last()
+                .is_some_and(is_comparison_char);
+            flush_token(&mut out, &token, has_cmp && (prev_is_cmp || next_is_cmp));
+            out.push_str(&pending);
         } else if has_cmp && ch.is_ascii_digit() {
             let mut num = String::new();
             num.push(ch);
-            while let Some(&next) = chars.peek() {
-                if next.is_ascii_digit() || next == '.' {
-                    num.push(next);
-                    chars.next();
-                } else {
-                    break;
-                }
+            i += 1;
+            while i < chars.len() && (chars[i].is_ascii_digit() || chars[i] == '.') {
+                num.push(chars[i]);
+                i += 1;
             }
             if !num.contains('.') {
                 num.push_str(".0");
             }
             out.push_str(&num);
         } else if ch == '!' && has_negation {
-            // `!` operator: if followed by an identifier, negate the truthy check
-            // e.g., `!is_positive` -> !(resolve("is_positive") == "true" || ...)
+            // `!` operator: if followed by an identifier, negate the truthy
+            // check, e.g. `!is_positive` -> !(resolve("is_positive") == "true"
+            // || ...). The identifier after `!` is consumed here because the
+            // closing paren has to follow it and the ident branch cannot know
+            // that.
             out.push_str("!(");
-            // The next token will be collected by the ident loop and flushed,
-            // but we need to close the paren after it. We'll handle this by
-            // tracking that we need a closing paren after the next ident flush.
-            // Instead, let's handle ! more carefully: consume the ident after !
+            i += 1;
+            // A negated condition is a PATH, not a bare name: `!user.name` reads
+            // `user.name` as one value, and scanning only the identifier would
+            // leave the `.` and the second segment to the main loop, which turns
+            // them into a field access on a `String`. The entry test is the one
+            // the main scanner uses, so `!=` — which also contains `!` — is left
+            // for it.
             let mut neg_ident = String::new();
-            while let Some(&next) = chars.peek() {
-                if is_ident_char(next) {
-                    neg_ident.push(next);
-                    chars.next();
-                } else {
-                    break;
-                }
+            if chars
+                .get(i)
+                .is_some_and(|c| c.is_ascii_alphabetic() || *c == '_')
+            {
+                let end = member_path_end(&chars, i);
+                neg_ident = chars[i..end].iter().collect();
+                i = end;
             }
             if neg_ident.is_empty() {
                 // standalone !, just emit it
@@ -1117,17 +1225,20 @@ pub(crate) fn rewrite_if_expr(expr: &str) -> String {
                 out.push_str(&neg_ident);
                 out.push(')');
             } else {
-                // Use a let binding to avoid calling resolve() multiple times
-                out.push_str(&format!(
-                    "{{ let __v = resolve({}); __v == \"true\" || (!__v.is_empty() && __v != \"false\") }})",
+                // A negated condition sits in `if` position, never in
+                // comparison-operand position, so it gets the same truthiness
+                // as a bare one.
+                out.push_str(&resolver_truthiness(&format!(
+                    "resolve({})",
                     string_lit(&neg_ident)
-                ));
+                )));
+                out.push(')');
             }
         } else {
             out.push(ch);
+            i += 1;
         }
     }
-    flush_ident(&mut out, &mut ident, has_cmp, has_logic);
     out
 }
 
@@ -1308,13 +1419,13 @@ fn emit_node_with_mode(
                     // The style attr is already emitted by emit_node_with_mode.
                     // We wrap the result: if expression is false, override display.
                     return format!(
-                        r#"{{ let __node = {inner}; if !({expr}) {{ if let velox_dom::VNode::Element {{ ref mut props, .. }} = __node {{ props.attrs.entry("style".to_string()).and_modify(|s| {{ if s.contains("display:") {{ /* preserve existing display */ }} else {{ s.push_str("; display: none"); }} }}).or_insert_with(|| "display: none".to_string()); }} }} __node }}"#,
+                        r#"{{ let mut __node = {inner}; if !({expr}) {{ if let velox_dom::VNode::Element {{ ref mut props, .. }} = __node {{ props.attrs.entry("style".to_string()).and_modify(|s| {{ if s.contains("display:") {{ /* preserve existing display */ }} else {{ s.push_str("; display: none"); }} }}).or_insert_with(|| "display: none".to_string()); }} }} __node }}"#,
                         inner = inner,
                         expr = expr.trim()
                     );
                 } else {
                     return format!(
-                        r#"{{ let __node = {inner}; if !({expr}) {{ if let velox_dom::VNode::Element {{ ref mut props, .. }} = __node {{ props.attrs.insert("style".to_string(), "display: none".to_string()); }} }} __node }}"#,
+                        r#"{{ let mut __node = {inner}; if !({expr}) {{ if let velox_dom::VNode::Element {{ ref mut props, .. }} = __node {{ props.attrs.insert("style".to_string(), "display: none".to_string()); }} }} __node }}"#,
                         inner = inner,
                         expr = expr.trim()
                     );
@@ -1719,7 +1830,73 @@ fn emit_props_in_loop(
         return "Props::new()".to_string();
     }
     let mut parts = vec!["Props::new()".to_string()];
-    for a in attrs {
+    // Vue MERGES a static `class` with a dynamic `:class` on the same element:
+    // the element's class list is both, in any order. `Props::set` replaces, so
+    // emitting them as two entries would let whichever came last win — which is
+    // order-dependent, and the opposite of what a browser does. One merged entry
+    // is emitted instead, in the position of the first class-related attribute.
+    //
+    // Only an element that HAS both gets a merged entry. A static class alone, a
+    // `:class` alone, and a static class on an element with no `:class` keep the
+    // exact bytes they had, so this cannot move a golden that has no `:class`
+    // next to a static one.
+    let static_class = attrs
+        .iter()
+        .position(|a| matches!(a.kind, AttrKind::Static) && a.name == "class");
+    let bound_class: Vec<usize> = attrs
+        .iter()
+        .enumerate()
+        .filter(|(_, a)| matches!(a.kind, AttrKind::Bind) && a.name == "class")
+        .map(|(i, _)| i)
+        .collect();
+    let merged_class = match (static_class, bound_class.first()) {
+        (Some(first_static), Some(&first_bound)) => {
+            let at = first_static.min(first_bound);
+            let mut additions: Vec<String> =
+                class_tokens(attrs[first_static].value.as_deref().unwrap_or_default())
+                    .iter()
+                    .map(|name| format!("__classes.push({});", string_lit(name)))
+                    .collect();
+            for &i in &bound_class {
+                let expr = attrs[i]
+                    .value
+                    .clone()
+                    .unwrap_or_else(|| attrs[i].name.clone());
+                let emission = emit_bind_attr("class", &expr, item_name, idx_name, resolve_loop);
+                match &emission.value {
+                    BindValue::ClassObject { conditions } => {
+                        additions.extend(conditions.iter().cloned());
+                    }
+                    // A `:class` that is not object syntax is a string of class
+                    // names — a resolver lookup, or a loop item's field in a loop
+                    // body — and it joins the list the same way, by name.
+                    // The value is bound first: a `for` head cannot hold a
+                    // borrow of a temporary, and the class list outlives this
+                    // statement, so the borrow has to have a name.
+                    other => additions.push(format!(
+                        "let __src = &{}; for __t in __src.split_whitespace() {{ __classes.push(__t); }}",
+                        other.expr()
+                    )),
+                }
+            }
+            Some((
+                at,
+                format!(r#".set("class", {})"#, class_block_value(&additions)),
+            ))
+        }
+        _ => None,
+    };
+    for (i, a) in attrs.iter().enumerate() {
+        if let Some((at, entry)) = &merged_class {
+            if *at == i {
+                parts.push(entry.clone());
+                continue;
+            }
+            let is_class = a.name == "class" && matches!(a.kind, AttrKind::Static | AttrKind::Bind);
+            if is_class {
+                continue;
+            }
+        }
         match a.kind {
             AttrKind::Static => {
                 let v = a.value.clone().unwrap_or_default();
@@ -2128,7 +2305,13 @@ fn emit_node_with_ctx_state(
             {
                 let mut attrs2 = attrs.clone();
                 let dir = attrs2.remove(pos);
-                let expr = rewrite_if_expr(&dir.value.unwrap_or_default());
+                // A condition rooted at the loop variable is a real field read
+                // here, so it goes through the one function that knows the loop
+                // scope — the same one `:class` conditions use. `resolve_loop` is
+                // `None` because this is the State renderer, where the loop item
+                // IS a binding.
+                let (expr, _keys) =
+                    condition_expr(&dir.value.unwrap_or_default(), item_name, idx_name, None);
 
                 // Build the element without the v-show directive, then conditionally
                 // set display style based on the expression value.
@@ -2154,13 +2337,13 @@ fn emit_node_with_ctx_state(
                     // The style attr is already emitted by emit_node_with_ctx_state.
                     // We wrap the result: if expression is false, override display.
                     return format!(
-                        r#"{{ let __node = {inner}; if !({expr}) {{ if let velox_dom::VNode::Element {{ ref mut props, .. }} = __node {{ props.attrs.entry("style".to_string()).and_modify(|s| {{ if s.contains("display:") {{ /* preserve existing display */ }} else {{ s.push_str("; display: none"); }} }}).or_insert_with(|| "display: none".to_string()); }} }} __node }}"#,
+                        r#"{{ let mut __node = {inner}; if !({expr}) {{ if let velox_dom::VNode::Element {{ ref mut props, .. }} = __node {{ props.attrs.entry("style".to_string()).and_modify(|s| {{ if s.contains("display:") {{ /* preserve existing display */ }} else {{ s.push_str("; display: none"); }} }}).or_insert_with(|| "display: none".to_string()); }} }} __node }}"#,
                         inner = inner,
                         expr = expr.trim()
                     );
                 }
                 return format!(
-                    r#"{{ let __node = {inner}; if !({expr}) {{ if let velox_dom::VNode::Element {{ ref mut props, .. }} = __node {{ props.attrs.insert("style".to_string(), "display: none".to_string()); }} }} __node }}"#,
+                    r#"{{ let mut __node = {inner}; if !({expr}) {{ if let velox_dom::VNode::Element {{ ref mut props, .. }} = __node {{ props.attrs.insert("style".to_string(), "display: none".to_string()); }} }} __node }}"#,
                     inner = inner,
                     expr = expr.trim()
                 );
@@ -2173,7 +2356,12 @@ fn emit_node_with_ctx_state(
             {
                 let mut attrs2 = attrs.clone();
                 let dir = attrs2.remove(pos);
-                let expr_if = rewrite_if_expr(&dir.value.unwrap_or_default());
+                // See the `v-show` branch above: a loop-rooted condition is a field
+                // read in this renderer, and a condition on a `State` getter is a
+                // resolver lookup. One function emits both, so the element appears
+                // for the same reason a root `v-if` does.
+                let (expr_if, _keys) =
+                    condition_expr(&dir.value.unwrap_or_default(), item_name, idx_name, None);
                 let tmp = Node::Element {
                     tag: tag.clone(),
                     attrs: attrs2,
@@ -2925,9 +3113,12 @@ fn keep_answerable_interpolation_keys(
 enum BindValue {
     /// `resolve("<key>")` — the authored expression is looked up verbatim.
     Lookup(String),
-    /// Object-syntax `:class="{ cls: cond, ... }"` — a block that joins the
-    /// classes whose condition is truthy.
-    ClassObject(String),
+    /// Object-syntax `:class="{ cls: cond, ... }"` — the statements that add a
+    /// class name to the element's class list when its condition is truthy, in
+    /// authored order. They are kept apart from the block that joins them so a
+    /// static `class` on the same element can be merged in; see
+    /// [`class_block_value`].
+    ClassObject { conditions: Vec<String> },
     /// A v-for loop variable or one of its fields, read directly.
     Direct(String),
 }
@@ -2936,13 +3127,31 @@ impl BindValue {
     /// The emitted Rust expression, ready to be interpolated into generated
     /// code (`resolve("key")`, a direct loop-variable read, or a block that
     /// joins class names).
-    fn expr(&self) -> &str {
+    fn expr(&self) -> String {
         match self {
-            BindValue::Lookup(expr) | BindValue::ClassObject(expr) | BindValue::Direct(expr) => {
-                expr
-            }
+            BindValue::Lookup(expr) | BindValue::Direct(expr) => expr.clone(),
+            BindValue::ClassObject { conditions } => class_block_value(conditions),
         }
     }
+}
+
+/// The `class` prop value: the class names the element ends up with, joined by a
+/// space. Each entry in `additions` adds a name — unconditionally for a static
+/// `class`, and behind its condition for an object-syntax `:class` — so a
+/// merged list is the same block with more entries, and the single-source form
+/// is this block with one.
+fn class_block_value(additions: &[String]) -> String {
+    format!(
+        "{{ let mut __classes: Vec<&str> = Vec::new(); {} __classes.join(\" \") }}",
+        additions.join(" ")
+    )
+}
+
+/// The class names a static `class="a  b"` attribute carries. A browser puts
+/// every whitespace-separated name in the list, and so does the cascade that
+/// reads it, so the split is here rather than in the stylesheet.
+fn class_tokens(value: &str) -> Vec<String> {
+    value.split_whitespace().map(str::to_string).collect()
 }
 
 /// One normalized bound attribute.
@@ -2964,6 +3173,45 @@ struct BindEmission {
 /// `resolve_loop` is the `v-for` body the element sits in, set only when the
 /// Resolve renderer is being generated. It is `None` for the State renderer,
 /// where the loop item is a real binding and is read directly.
+/// The Rust expression for one condition, and the resolver keys it looks up.
+///
+/// ONE function decides both, because the emitter and the key collector have to
+/// agree. A condition whose keys are never registered is permanently falsy —
+/// `resolve` answers an unregistered key with `""`, so `v-if` drops the element
+/// and `:class` drops the class — and that is exactly how a root `v-if` and a
+/// root `:class` parsed, compiled and then did nothing.
+///
+/// A condition rooted at the loop variable is a direct field read in the State
+/// renderer and the loop's indexed resolver read in the Resolve one, so it
+/// registers no key: the whole loop is reported as a family instead. Every other
+/// condition is rewritten by [`rewrite_if_expr`] — this is the no-loop-scope half
+/// of it, and the root `v-if`/`v-show`/`v-else` emit sites call that directly
+/// because they have no loop scope to consult — and its keys come from
+/// [`condition_resolver_keys`], which tokenises the same way.
+fn condition_expr(
+    expr: &str,
+    item_name: Option<&str>,
+    idx_name: Option<&str>,
+    resolve_loop: Option<&VForInfo>,
+) -> (String, Vec<String>) {
+    match rewrite_ctx_expr(expr, item_name, idx_name) {
+        Some(direct) => {
+            let read = match resolve_loop {
+                Some(info) => match resolve_loop_item_expr(&direct, info) {
+                    // The loop index is a number already. Any other loop read is a
+                    // resolver-backed `String` in the Resolve renderer, so it needs
+                    // the string truthiness to sit in an `if` position.
+                    Some(indexed) if indexed != info.index_name => resolver_truthiness(&indexed),
+                    _ => direct,
+                },
+                None => direct,
+            };
+            (read, Vec::new())
+        }
+        None => (rewrite_if_expr(expr), condition_resolver_keys(expr)),
+    }
+}
+
 fn emit_bind_attr(
     attr_name: &str,
     expr: &str,
@@ -2993,29 +3241,15 @@ fn emit_bind_attr(
                 }
 
                 // A loop-rooted condition is a direct field read in the State
-                // renderer. In the Resolve one the loop item is an indexed
-                // resolver read — a `String`, which needs the same truthiness
-                // test every resolver-backed condition gets to sit in an `if`.
-                // A bare loop index is left as the direct read, which is
-                // KNOWN-BROKEN in both renderers: a condition of `:class="{even:
-                // i}"` becomes `if i`, a `usize` in `if` position (E0308). It
-                // is left alone because no emitted form of it compiles without
+                // renderer, and a bare loop index is left as the direct read, which
+                // is KNOWN-BROKEN in both renderers: a condition of `:class="{even:
+                // i}"` becomes `if i`, a `usize` in `if` position (E0308). It is
+                // left alone because no emitted form of it compiles without
                 // inventing a `bool` the template never wrote.
-                let value = match rewrite_ctx_expr(&cond, item_name, idx_name) {
-                    Some(direct) => match resolve_loop {
-                        Some(info) => match resolve_loop_item_expr(&direct, info) {
-                            Some(read) if read != info.index_name => resolver_truthiness(&read),
-                            _ => direct,
-                        },
-                        None => direct,
-                    },
-                    None => {
-                        for key in condition_resolver_keys(&cond) {
-                            push_unique(&mut keys, key);
-                        }
-                        rewrite_if_expr(&cond)
-                    }
-                };
+                let (value, cond_keys) = condition_expr(&cond, item_name, idx_name, resolve_loop);
+                for key in cond_keys {
+                    push_unique(&mut keys, key);
+                }
                 conditions.push(format!(
                     "if {} {{ __classes.push({}); }}",
                     value,
@@ -3023,12 +3257,8 @@ fn emit_bind_attr(
                 ));
             }
             if !conditions.is_empty() {
-                let value = format!(
-                    "{{ let mut __classes: Vec<&str> = Vec::new(); {} __classes.join(\" \") }}",
-                    conditions.join(" ")
-                );
                 return BindEmission {
-                    value: BindValue::ClassObject(value),
+                    value: BindValue::ClassObject { conditions },
                     keys,
                     authored,
                 };
@@ -3096,7 +3326,9 @@ fn bind_prop_entry(
     let emission = emit_bind_attr(attr_name, expr, item_name, idx_name, resolve_loop);
     match &emission.value {
         BindValue::Direct(direct) => format!(r#".set("{}", &format!("{{}}", {direct}))"#, key),
-        BindValue::ClassObject(value) => format!(r#".set("class", {value})"#),
+        BindValue::ClassObject { conditions } => {
+            format!(r#".set("class", {})"#, class_block_value(conditions))
+        }
         BindValue::Lookup(value) => format!(r#".set("{}", &{value})"#, key),
     }
 }
@@ -3111,17 +3343,31 @@ fn class_object_pairs(expr: &str) -> Vec<(String, String)> {
     inner
         .split(',')
         .filter_map(|pair| pair.split_once(':'))
-        .map(|(cls, cond)| (cls.trim().to_string(), cond.trim().to_string()))
+        .map(|(cls, cond)| (strip_class_quotes(cls), cond.trim().to_string()))
         .filter(|(cls, cond)| !cls.is_empty() && !cond.is_empty())
         .collect()
 }
 
+/// The class name an object-syntax `:class` key names, without the quotes an
+/// author may write around it. `{'is-wide': cond}` names `is-wide`; keeping the
+/// quotes would look for a class literally called `'is-wide'`, which no
+/// stylesheet has.
+fn strip_class_quotes(cls: &str) -> String {
+    cls.trim()
+        .trim_matches(|c| c == '\'' || c == '"')
+        .trim()
+        .to_string()
+}
+
 /// The resolver keys a `v-if`/`:class` condition expression looks up.
 ///
-/// Mirrors the identifier runs `rewrite_if_expr` turns into `resolve("<key>")`
-/// lookups, so a condition's operands are registered as keys — `:class`
-/// conditions included — whether they are bare (`completed`), negated
-/// (`!completed`) or part of a comparison (`count > 0`).
+/// Mirrors the tokens `rewrite_if_expr` turns into `resolve("<key>")` lookups —
+/// through the same [`member_path_end`], so a member path is one key in both —
+/// so a condition's operands are registered as keys — `:class` conditions
+/// included — whether they are bare (`completed`), a member path
+/// (`user.active`), negated (`!completed`) or part of a comparison
+/// (`count > 0`). A key the loop emitter reads directly registers nothing, and
+/// the loop that declares it is reported as a whole instead.
 fn condition_resolver_keys(expr: &str) -> Vec<String> {
     let chars: Vec<char> = expr.chars().collect();
     let mut keys: Vec<String> = Vec::new();
@@ -3140,10 +3386,11 @@ fn condition_resolver_keys(expr: &str) -> Vec<String> {
             // this would spin forever. Every token is therefore at least one
             // character wide, which is what the old loop produced too, because
             // `is_ident_char` accepts every character the entry test accepts.
-            i += 1;
-            while i < chars.len() && is_ident_char(chars[i]) {
-                i += 1;
-            }
+            // `member_path_end` advances on the entry character and then
+            // extends over any `.segment` / `[index]` continuation, so the token
+            // is the whole path — the same token `rewrite_if_expr` emits a
+            // lookup for.
+            i = member_path_end(&chars, start);
             let token: String = chars[start..i].iter().collect();
             // Literals and emitted code are not lookups.
             if !matches!(token.as_str(), "true" | "false" | "resolve" | "state") {
@@ -3560,6 +3807,37 @@ fn collect_resolver_keys(
 
                     if matches!(mode, RenderMode::Resolve) {
                         warnings.push(vmodel_resolve_mode_warning(expr));
+                    }
+                    continue;
+                }
+                // A `v-if` / `v-show` condition is a resolver read like any other:
+                // `rewrite_if_expr` emits `resolve("<key>")` for each operand, and
+                // an unregistered key answers `""` — which is falsy — so the element
+                // never appears and a `v-show` element is hidden forever. The keys
+                // are collected here, through the same gate every other key goes
+                // through, which is what makes the condition live. `v-show` is on
+                // this path deliberately: it reads its condition the same way `v-if`
+                // does, so it is registered the same way or not at all.
+                if matches!(attr.kind, AttrKind::Directive)
+                    && (attr.name == "if" || attr.name == "show")
+                {
+                    let Some(expr) = attr.value.as_deref() else {
+                        continue;
+                    };
+                    // A condition rooted at the loop variable is a field read, not a
+                    // lookup, so it registers nothing; the loop that declares it is
+                    // reported as a whole by the family diagnostic below.
+                    if expr_reads_loop_root(expr, item_name.unwrap_or(""), idx_name.unwrap_or("")) {
+                        continue;
+                    }
+                    for key in condition_resolver_keys(expr) {
+                        if key_is_answerable(methods, &key) {
+                            push_unique(keys, &key);
+                        } else {
+                            warnings.push(condition_unresolvable_warning(
+                                &attr.name, expr, &key, methods, fields,
+                            ));
+                        }
                     }
                     continue;
                 }
@@ -5019,7 +5297,13 @@ impl State {
             ("a!b", vec!["a", "b"], false),
             ("9a!", vec!["a"], false),
             ("item!", vec!["item"], true),
-            ("item.name", vec!["item", "name"], true),
+            // A member path is ONE token, since the arm that answers it is the
+            // method chain `state.item().name()`. R-3 changed that tokenisation
+            // deliberately — it is what stops a `v-if="item.name"` from emitting
+            // a field access on a `String` — and the advance this test guards is
+            // still unconditional, inside `member_path_end`.
+            ("item.name", vec!["item.name"], true),
+            ("item[0].name", vec!["item[0].name"], true),
         ];
 
         for (expr, expected_keys, reads_item) in cases {
@@ -5421,6 +5705,297 @@ impl State {
                 dispatcher, expected_handlers,
                 "the dispatcher must carry an arm for every non-loop-rooted v-model, under \
                  the same name, and none for a loop-rooted one, in {tpl}"
+            );
+        }
+    }
+    // =========================================================================
+    // R-3. `v-if` / `v-show` conditions are resolver reads like any other, and a
+    // static `class` merges with a dynamic one.
+    // =========================================================================
+
+    const R3_SCRIPT: &str = r#"
+        pub struct User { name: String }
+        impl User {
+            pub fn name(&self) -> String { String::new() }
+        }
+        impl State {
+            pub fn items(&self) -> String { String::new() }
+            pub fn visible(&self) -> bool { false }
+            pub fn wide(&self) -> bool { false }
+            pub fn count(&self) -> i32 { 0 }
+            pub fn user(&self) -> User { User { name: String::new() } }
+        }"#;
+
+    /// The `class` props expression the template compiles to, with the surrounding
+    /// `Props::new()` noise left in so a second `.set` for the same attribute is
+    /// visible.
+    fn class_set_of(tpl: &str) -> String {
+        let rs = compile_template_to_rs_full_with_mode(
+            tpl,
+            "App",
+            None,
+            Some(R3_SCRIPT),
+            None,
+            RenderMode::State,
+        )
+        .expect("template compiles");
+        let start = rs
+            .find(r#".set("class""#)
+            .unwrap_or_else(|| panic!("no class is set for {tpl}: {rs}"));
+        let rest = &rs[start..];
+        // a `.set` value ends at the matching close paren of the call
+        let mut depth = 0i32;
+        for (i, c) in rest.char_indices() {
+            match c {
+                '(' => depth += 1,
+                ')' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return rest[..=i].to_string();
+                    }
+                }
+                _ => {}
+            }
+        }
+        panic!("unterminated class value for {tpl}: {rest}");
+    }
+
+    fn r3_keys_and_warnings(tpl: &str, mode: RenderMode) -> (Vec<String>, Vec<String>) {
+        let nodes = crate::template_parse::parse_template_to_ast(tpl).expect("template parses");
+        let collected = collect_resolver_keys(&nodes, &methods(R3_SCRIPT), &[], mode);
+        (collected.keys, collected.warnings)
+    }
+
+    /// The live read, and the reason the audit called the directive inert: the
+    /// condition became a `resolve("…")` call, and nothing ever registered the
+    /// key, so every condition was permanently falsy.
+    #[test]
+    fn a_v_if_condition_is_registered_as_a_resolver_key() {
+        for tpl in [
+            r#"<div v-if="visible"/>"#,
+            r#"<div><p v-if="visible">x</p></div>"#,
+            r#"<div v-show="wide"/>"#,
+            r#"<div v-if="user.name"/>"#,
+            r#"<div><p v-if="count > 0">x</p></div>"#,
+        ] {
+            for mode in [RenderMode::State, RenderMode::Resolve] {
+                let (keys, warnings) = r3_keys_and_warnings(tpl, mode);
+                assert!(
+                    warnings.is_empty(),
+                    "a condition on a `State` accessor needs no warning: {warnings:?} in \
+                     {mode:?} for {tpl}"
+                );
+                assert!(
+                    !keys.is_empty(),
+                    "a `v-if`/`v-show` condition is a resolver read and must be \
+                     registered, in {mode:?} for {tpl}"
+                );
+            }
+        }
+        // and the keys are the ones the emission actually looks up
+        assert_eq!(
+            r3_keys_and_warnings(r#"<div><p v-if="user.name">x</p></div>"#, RenderMode::State).0,
+            vec!["user.name".to_string()],
+            "a dotted condition is one key, not one per segment: the emission reads it \
+             as a single path"
+        );
+    }
+
+    /// The diagnostic is a DISTINCT condition from R-1's loop report, in the same
+    /// style: the requirement and the consequence, never a claim about a
+    /// capability the emitted code does not have.
+    #[test]
+    fn an_unanswerable_condition_is_reported_with_its_consequence() {
+        let nodes = crate::template_parse::parse_template_to_ast(
+            r#"<div><p v-if="missing">x</p><b v-show="gone"/></div>"#,
+        )
+        .expect("template parses");
+        let collected = collect_resolver_keys(&nodes, &methods(R3_SCRIPT), &[], RenderMode::State);
+        assert!(
+            collected.keys.is_empty(),
+            "nothing about the condition is answerable, so nothing is registered: {:?}",
+            collected.keys
+        );
+        assert_eq!(collected.warnings.len(), 2, "{:?}", collected.warnings);
+        assert!(
+            collected.warnings[0].contains("if=\"missing\"")
+                && collected.warnings[0]
+                    .contains("the element and everything inside it are not rendered"),
+            "a `v-if` names what a falsy condition costs: {:?}",
+            collected.warnings[0]
+        );
+        assert!(
+            collected.warnings[1].contains("show=\"gone\"")
+                && collected.warnings[1].contains("display: none"),
+            "a `v-show` names its own consequence, because it is a different one: {:?}",
+            collected.warnings[1]
+        );
+        assert!(
+            !collected
+                .warnings
+                .iter()
+                .any(|w| w.contains("The write still works")),
+            "no diagnostic may claim a capability the emitted code lacks: {:?}",
+            collected.warnings
+        );
+    }
+
+    /// R-1c's rule, applied to conditions: a read of a loop variable is answered
+    /// by the loop body, not by an arm over `State` fields, so it is not
+    /// registered — and the loop itself is already reported by R-1's family, so
+    /// adding a second report for the same loop would be noise.
+    #[test]
+    fn a_loop_rooted_condition_is_not_registered_and_is_not_reported_again() {
+        let nodes = crate::template_parse::parse_template_to_ast(
+            r#"<ul><li v-for="(todo, i) in todos" v-if="todo.keep">x</li></ul>"#,
+        )
+        .expect("template parses");
+        let script = r#"
+        impl State {
+            pub fn todos(&self) -> String { String::new() }
+        }"#;
+        for mode in [RenderMode::State, RenderMode::Resolve] {
+            let collected = collect_resolver_keys(&nodes, &methods(script), &[], mode);
+            assert!(
+                collected.keys.is_empty(),
+                "a read of a loop item is not a `State` field: {:?} in {mode:?}",
+                collected.keys
+            );
+            assert!(
+                !collected.warnings.iter().any(|w| w.contains("todo.keep")),
+                "the loop report already covers the read, so the condition must not \
+                 be reported as well: {:?}",
+                collected.warnings
+            );
+            assert_eq!(
+                collected.warnings.len(),
+                usize::from(matches!(mode, RenderMode::Resolve)),
+                "in State mode the loop renders, so nothing is reported at all; in \
+                 Resolve mode the loop's own report is the only one: {:?}",
+                collected.warnings
+            );
+        }
+    }
+
+    /// Vue semantics: a static `class` and a dynamic `:class` on the same
+    /// element MERGE, so the class list is `card active` when the condition holds
+    /// and `card` when it does not. `Props::set` replaces, so the merge has to be
+    /// built before it is set.
+    #[test]
+    fn a_static_class_and_an_object_syntax_class_are_emitted_as_one_set() {
+        let tpl = r#"<div class="card" :class="{ active: visible, 'is-wide': wide }"/>"#;
+        let set = class_set_of(tpl);
+        assert_eq!(
+            set.matches(r#".set("class""#).count(),
+            1,
+            "one `.set` for the class, or the second replaces the first: {set}"
+        );
+        assert!(
+            set.contains(r#"__classes.push("card");"#),
+            "the static class is the first entry whatever the authored order: {set}"
+        );
+        assert!(
+            set.contains(r#"__classes.push("active");"#)
+                && set.contains(r#"__classes.push("is-wide");"#),
+            "both conditions contribute their class: {set}"
+        );
+        assert!(
+            !set.contains('\''),
+            "an object key written in quotes is a class NAME; the quotes must not \
+             become part of it, or the cascade's whole-word match misses: {set}"
+        );
+        // order of the conditions is the authored order
+        let active = set.find("__classes.push(\"active\")").unwrap();
+        let wide = set.find("__classes.push(\"is-wide\")").unwrap();
+        assert!(active < wide, "the authored order is kept: {set}");
+    }
+
+    /// The merge only engages when both are present. An element with a static
+    /// class alone, or a `:class` alone, keeps the bytes it had before this task,
+    /// which is what keeps State-mode output identical where the task does not
+    /// target it.
+    #[test]
+    fn a_class_on_its_own_is_emitted_exactly_as_before() {
+        assert_eq!(
+            class_set_of(r#"<div class="card"/>"#),
+            r#".set("class", "card")"#,
+            "a static class alone is unchanged"
+        );
+        assert_eq!(
+            class_set_of(r#"<div :class="{ active: visible }"/>"#),
+            r#".set("class", { let mut __classes: Vec<&str> = Vec::new(); if { let __v = resolve("visible"); __v == "true" || (!__v.is_empty() && __v != "false") } { __classes.push("active"); } __classes.join(" ") })"#,
+            "a `:class` alone is the object block it was before this task, byte for \
+             byte: the same truthiness expression, the same `Vec<&str>`, the same join"
+        );
+        assert_eq!(
+            class_set_of(r#"<div :class="label"/>"#),
+            r#".set("class", &resolve("label"))"#,
+            "a non-object `:class` alone is unchanged too"
+        );
+    }
+
+    /// The string form appends its words, in both authored orders. Vue merges
+    /// whatever each binding contributes; it does not depend on which was written
+    /// first.
+    #[test]
+    fn a_string_syntax_class_is_merged_in_either_authored_order() {
+        for tpl in [
+            r#"<div class="card" :class="label"/>"#,
+            r#"<div :class="label" class="card"/>"#,
+        ] {
+            let set = class_set_of(tpl);
+            assert_eq!(
+                set.matches(r#".set("class""#).count(),
+                1,
+                "one `.set` for the class, whichever order they were written in: {set}"
+            );
+            assert!(
+                set.contains(r#"__classes.push("card");"#)
+                    && set.contains("__src.split_whitespace()"),
+                "the static class and the bound words both reach the list: {set}"
+            );
+        }
+    }
+
+    /// The one notion of truthiness, and the one notion of an identifier: a
+    /// condition is rewritten into the same `resolve` reads the collector
+    /// registers, so a key can never be missing for a reason the emission did not
+    /// have.
+    #[test]
+    fn the_condition_collector_and_the_condition_rewrite_agree_on_every_shape() {
+        for cond in [
+            "visible",
+            "!visible",
+            "count > 0",
+            "count > 0 && visible",
+            "user.name",
+            "!user.name",
+            "items[0].name",
+            "user.name == 'a'",
+            "is_empty()",
+        ] {
+            let keys = condition_resolver_keys(cond);
+            let emitted = rewrite_if_expr(cond);
+            for key in &keys {
+                assert!(
+                    emitted.contains(&format!(r#"resolve("{}")"#, key)),
+                    "`{cond}` is rewritten into a read of {key:?}, so {key:?} must be a \
+                     registered key: {emitted}"
+                );
+            }
+            let looked_up: Vec<String> = emitted
+                .match_indices(r#"resolve(""#)
+                .map(|(i, _)| {
+                    emitted[i + 9..]
+                        .find('"')
+                        .map(|e| emitted[i + 9..i + 9 + e].to_string())
+                        .unwrap_or_default()
+                })
+                .collect();
+            assert_eq!(
+                looked_up, keys,
+                "`{cond}` is rewritten into exactly the reads that are registered, so \
+                 there is no way for a key to be missing"
             );
         }
     }
