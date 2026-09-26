@@ -169,6 +169,69 @@ fn block_flow_keeps_preserved_whitespace_between_blocks() {
     assert_eq!(lt.children[1].source_index, Some(1));
 }
 
+/// Layout-level coverage for the elements whose default display is `inline`
+/// but which no example template uses, so nothing else in the suite exercises
+/// them. No stylesheet is involved: this is the layout engine's own fallback
+/// table, asserted through the whitespace rule it drives.
+///
+/// `img` is the interesting one. It used to sit in the inline-block table
+/// while `default_display_for_tag` returned "block" for it, so the framework
+/// contradicted itself; it is now in the inline table like every other tag the
+/// guard treats as an inline-level participant.
+#[test]
+fn unstyled_inline_level_tags_keep_their_collapsing_whitespace() {
+    for tag in ["span", "img", "output", "progress", "meter", "wbr"] {
+        let root = h(
+            "div",
+            Props::new(),
+            vec![
+                h(tag, Props::new(), vec![]),
+                text(" "),
+                h("span", Props::new(), vec![text("x")]),
+            ],
+        );
+
+        let lt = compute_layout(&root, 800, 600);
+
+        assert_eq!(
+            lt.children.len(),
+            3,
+            "an unstyled <{tag}> is inline-level, so the space beside it must \
+             survive; got {:?}",
+            lt.children.iter().map(|c| c.rect).collect::<Vec<_>>()
+        );
+        assert_eq!(lt.children[1].source_index, Some(1));
+    }
+}
+
+/// The complement of the test above: an element that no browser makes inline
+/// must still drop the space, so the previous test cannot pass by classifying
+/// everything as inline-level.
+#[test]
+fn unstyled_block_level_tags_still_collapse_their_surrounding_whitespace() {
+    for tag in ["div", "section", "p", "li", "blockquote", "h1"] {
+        let root = h(
+            "div",
+            Props::new(),
+            vec![
+                h(tag, Props::new(), vec![]),
+                text(" "),
+                h("div", Props::new().set("style", "height: 20px;"), vec![]),
+            ],
+        );
+
+        let lt = compute_layout(&root, 800, 600);
+
+        assert_eq!(
+            lt.children.len(),
+            2,
+            "an unstyled <{tag}> is block-level, so the phantom line box must be \
+             dropped; got {:?}",
+            lt.children.iter().map(|c| c.rect).collect::<Vec<_>>()
+        );
+    }
+}
+
 // ===== Flexbox Tests =====
 
 #[test]

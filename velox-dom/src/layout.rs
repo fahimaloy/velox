@@ -463,35 +463,57 @@ fn style_lookup_str(style: Option<&str>, key: &str) -> Option<String> {
     None
 }
 
-/// Elements whose browser default `display` is exactly `inline`.
+/// Elements whose Velox default `display` is `inline`, i.e. the elements that
+/// get a `display: inline` rule in the `velox-style/src/ua.css` UA sheet.
 ///
-/// The HTML rendering section gives none of these an explicit `display`, so
-/// they take CSS's initial value, `inline`; the ones it *does* declare
-/// (`div`, `p`, `section`, `h1`-`h6`, `li`, `pre`, `hr`, `fieldset`, the
-/// table family, `ruby`, ...) are block-level or otherwise special and are
-/// deliberately absent.
+/// Public so `velox-style`'s cascade test can assert that the UA sheet and
+/// this table carry the same set: `ua.css` is the cascade-side source of these
+/// defaults, but velox-dom cannot depend on velox-style, so the same list is
+/// kept here for the layout engine's own notion of an element's default
+/// display. `ua_inline_tag_list_matches_the_layout_fallback_table` in
+/// `velox-style/tests/cascade.rs` fails if the two drift apart.
 ///
-/// This mirrors the `display: inline` UA rules in `velox-style/src/ua.css`:
-/// that stylesheet is the cascade-side source of these defaults, but
-/// velox-dom cannot depend on velox-style, so the same list is kept here for
-/// the layout engine's own notion of an element's default display. Keep the
-/// two in sync.
-const INLINE_BY_DEFAULT_TAGS: &[&str] = &[
-    "a", "abbr", "b", "bdi", "bdo", "cite", "code", "data", "del", "dfn", "em", "i", "ins", "kbd",
-    "label", "mark", "q", "s", "samp", "small", "span", "strong", "sub", "sup", "time", "u", "var",
+/// In browsers almost all of these take CSS's initial value, `inline`,
+/// because the HTML rendering section declares no `display` for them. The
+/// documented deviations from a literal browser reading:
+///
+/// - `progress` and `meter` are `inline-block` in browsers, not `inline`.
+///   Velox has no `inline-block` layout, and `display: inline` is a far closer
+///   approximation than `block`, so they are claimed as `inline`. Do not
+///   "correct" them back to block; an `inline-block` UA rule is not available
+///   until inline-block layout exists.
+/// - The obsolete phrasing elements `big`, `tt`, `font`, `nobr` and `strike`
+///   are also `inline` in browsers, but are deliberately out of scope: nothing
+///   in the framework or the examples needs them, and every tag in this list
+///   is meant to be individually checkable against the spec.
+///
+/// `wbr` belongs here because its initial `display` is `inline`;
+/// `display-outside: break-opportunity` is a separate property Velox does not
+/// implement (same for `br`'s `display-outside: newline`).
+pub const INLINE_BY_DEFAULT_TAGS: &[&str] = &[
+    "a", "abbr", "b", "bdi", "bdo", "cite", "code", "data", "del", "dfn", "em", "i", "img", "ins",
+    "kbd", "label", "mark", "meter", "output", "progress", "q", "s", "samp", "small", "span",
+    "strong", "sub", "sup", "time", "u", "var", "wbr",
 ];
 
-/// Elements whose browser default is `inline-block` rather than `inline`
-/// (`input, button { display: inline-block; }` in the HTML rendering
-/// section; `img`, `select` and `textarea` in the browser UA sheets).
+/// Elements that are `inline-block` in browsers (`input, button { display:
+/// inline-block; }` in the HTML rendering section; `select` and `textarea` in
+/// the browser UA sheets) and so are *inline-level* for the whitespace rules
+/// below, but which Velox deliberately leaves defaulting to `block`.
 ///
-/// Velox has no `inline-block` layout, so these get no UA rule in
-/// `ua.css` (claiming `display: inline` for them would be a false parity
-/// claim). They are still *inline-level*, which is the only question the
-/// whitespace rules below ask: whitespace beside an `inline-block` box
-/// collapses exactly like whitespace beside an `inline` one, because both
-/// participate in the same inline formatting context.
-const INLINE_BLOCK_BY_DEFAULT_TAGS: &[&str] = &["button", "img", "input", "select", "textarea"];
+/// This table answers exactly one question — "would this neighbour share a line
+/// with a sibling in a browser?" — and nothing else. It is disjoint from
+/// [`INLINE_BY_DEFAULT_TAGS`] (a tag is never in both), and these elements get
+/// no UA `display` rule: claiming `display: inline` for them would be a false
+/// parity claim, and `inline-block` has no layout implementation yet.
+///
+/// The known cost, recorded so it is not mistaken for a bug in the table:
+/// until inline layout exists these elements lay out as block boxes in Velox,
+/// so a preserved space beside one produces a vertical gap a browser would not
+/// have. Dropping the space instead would be worse — it is the same trade-off
+/// the `inline` elements already make, and it is what the task's negative
+/// control forbids.
+const INLINE_BLOCK_BY_DEFAULT_TAGS: &[&str] = &["button", "input", "select", "textarea"];
 
 /// The `display` an element gets when neither the cascade nor an author rule
 /// specifies one.

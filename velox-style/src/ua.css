@@ -7,13 +7,18 @@ p  { display: block; margin: 1em 0; }
 ul, ol { display: block; margin: 1em 0; padding-inline-start: 40px; }
 button { padding: 6px 12px; border: 1px solid #888; }
 
-/* Phrasing-content elements default to `display: inline` in every browser, so
-   without this they lay out as block boxes in Velox. The HTML rendering
-   section gives none of these an explicit display, so they take CSS's initial
-   value, `inline`. Keep this list in sync with INLINE_BY_DEFAULT_TAGS in
-   velox-dom/src/layout.rs.
-   `inline-block` elements (button, img, input, select, textarea) are
-   deliberately absent: Velox has no inline-block layout, so claiming
+/* Elements whose Velox default is `display: inline`, so they do not lay out as
+   block boxes. In browsers almost all of these take CSS's initial value,
+   `inline`, because the HTML rendering section declares no `display` for them.
+   Keep this list in sync with INLINE_BY_DEFAULT_TAGS in velox-dom/src/layout.rs
+   — velox-style/tests/cascade.rs fails if the two diverge.
+   `progress` and `meter` are `inline-block` in browsers: Velox has no
+   inline-block layout, so `inline` is claimed as the closer approximation. Do
+   not "correct" them to block, and do not add an `inline-block` UA rule until
+   inline-block layout exists.
+   `button`, `input`, `select` and `textarea` are deliberately absent: they are
+   `inline-block` in browsers and stay block-by-default in Velox, so claiming
    `display: inline` for them would be a false parity claim. */
-a, abbr, b, bdi, bdo, cite, code, data, del, dfn, em, i, ins, kbd, label,
-mark, q, s, samp, small, span, strong, sub, sup, time, u, var { display: inline; }
+a, abbr, b, bdi, bdo, cite, code, data, del, dfn, em, i, img, ins, kbd, label,
+mark, meter, output, progress, q, s, samp, small, span, strong, sub, sup, time,
+u, var, wbr { display: inline; }
