@@ -1,0 +1,20 @@
+pub fn render_with<F>(mut resolve: F) -> velox_dom::VNode where F: FnMut(&str) -> String {
+    use velox_dom::*;
+    h("ul", Props::new(), { let mut __children: Vec<velox_dom::VNode> = Vec::new();
+let __for_expr = resolve("items");
+let __for_count = if let Ok(n) = __for_expr.parse::<usize>() {
+    n
+} else if __for_expr.is_empty() {
+    0
+} else {
+    __for_expr.split(',').count()
+};
+for __idx in 0..__for_count {
+    __children.push(h("li", Props::new(), vec![text(resolve(&format!("items[{}].name", __idx)))]));
+}
+__children
+})
+}
+
+#[allow(clippy::arc_with_non_send_sync)]
+#[allow(unused_variables)]

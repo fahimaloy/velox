@@ -487,12 +487,12 @@ impl State {
     );
 }
 
-/// `:key` generation is unchanged: the Resolve body still inserts the looked-up
-/// key and the State body still reads the loop field. Only the collector's
-/// understanding of it changed (it is reported for a Resolve-mode consumer, not
-/// registered). Both statements are pinned in full, not by fragment.
+/// `:key` generation: the State body reads the loop field and the Resolve body
+/// looks the expression up once. Both statements are pinned in full, not by
+/// fragment. (This test originally pinned the Resolve body's double-interpolating
+/// form as a known defect; that defect is fixed by the `:key` task.)
 #[test]
-fn v_for_key_generation_is_unchanged() {
+fn v_for_key_generation_is_single_interpolation_in_both_renderers() {
     let rs = compile_template_to_rs_full(
         r#"<div v-for="todo in todos" :key="todo.id">x</div>"#,
         "TodoApp",
@@ -510,14 +510,12 @@ fn v_for_key_generation_is_unchanged() {
         ),
         "State mode keeps inserting the loop field:\n{rs}"
     );
-    // Resolve mode: the whole insertion statement, double-interpolating form
-    // included. That generation defect is queued separately, so today's output
-    // is pinned on purpose.
+    // Resolve mode: the whole insertion statement, one literal resolver lookup.
     assert!(
         rs.contains(
-            r#"if let velox_dom::VNode::Element { ref mut props, .. } = __node { props.attrs.insert("key".to_string(), resolve({ let __v = resolve("todo"); __v == "true" || (!__v.is_empty() && __v != "false") }.{ let __v = resolve("id"); __v == "true" || (!__v.is_empty() && __v != "false") }).to_string()); } __node }"#,
+            r#"if let velox_dom::VNode::Element { ref mut props, .. } = __node { props.attrs.insert("key".to_string(), resolve("todo.id").to_string()); } __node }"#,
         ),
-        "Resolve mode `:key` generation must stay unchanged:\n{rs}"
+        "Resolve mode looks the key up exactly once:\n{rs}"
     );
 }
 
@@ -596,4 +594,170 @@ impl State {
         resolve.contains(r#""draft" => state.draft().to_string()"#),
         "a same-named getter must still register the key:\n{resolve}"
     );
+}
+
+// --- `:key` on a `v-for` (audit finding G-1) -----------------------------------
+//
+// Both renderers are always generated, so a `:key` defect in the Resolve-mode
+// `v-for` body breaks compilation of the whole generated module regardless of
+// the mode the component was compiled in. The goldens below were captured from
+// the pre-fix output (`git show e3a7ade:velox-sfc/src/template_codegen.rs`).
+
+/// A `v-for` element with `:key`, in the documented `{{ … }}` spelling.
+const V_FOR_KEY_MUSTACHE: &str =
+    r#"<ul><li v-for="item in items" :key="{{ item.id }}">{{ item.name }}</li></ul>"#;
+/// The same element with the bare-expression spelling.
+const V_FOR_KEY_PLAIN: &str =
+    r#"<ul><li v-for="item in items" :key="item.id">{{ item.name }}</li></ul>"#;
+/// A `v-for` element with no `:key` at all.
+const V_FOR_NO_KEY: &str = r#"<ul><li v-for="item in items">{{ item.name }}</li></ul>"#;
+/// A `v-for` element with a valueless `:key` — "present but no value".
+const V_FOR_KEY_VALUELESS: &str = r#"<ul><li v-for="item in items" :key>{{ item.name }}</li></ul>"#;
+
+/// The generated key statement(s) in a module, one per renderer.
+fn key_statements(rs: &str) -> Vec<&str> {
+    rs.lines()
+        .filter(|line| line.contains(r#"props.attrs.insert("key""#))
+        .collect()
+}
+
+/// The State-mode renderer body from a generated module.
+fn state_renderer(rs: &str) -> &str {
+    let start = rs
+        .find("pub fn render_with_state")
+        .expect("the State-mode renderer is always generated");
+    let rest = &rs[start..];
+    let end = rest
+        .find("pub fn make_resolve")
+        .expect("make_resolve is always generated");
+    &rest[..end]
+}
+
+/// The Resolve-mode renderer body from a generated module.
+fn resolve_renderer(rs: &str) -> &str {
+    let start = rs
+        .find("pub fn render_with<F>")
+        .expect("the Resolve-mode renderer is always generated");
+    let rest = &rs[start..];
+    let end = rest
+        .find("pub fn render_with_state")
+        .expect("the State-mode renderer is always generated");
+    &rest[..end]
+}
+
+fn compile_in_mode(tpl: &str, mode: RenderMode) -> String {
+    compile_template_to_rs_full_with_mode(tpl, "App", None, None, None, mode)
+        .expect("template compiles")
+}
+
+/// The key expression must be interpolated exactly once, through a single
+/// `resolve("…")` lookup of the literal expression — the same shape the sibling
+/// `v-for` branch uses for its collection (`let __for_expr = resolve("items");`).
+#[test]
+fn resolve_mode_v_for_key_interpolates_the_expression_exactly_once() {
+    let rs = compile_in_mode(V_FOR_KEY_MUSTACHE, RenderMode::Resolve);
+    println!("-- GENERATED RS --\n{}\n-- END RS --", rs);
+
+    assert!(
+        rs.contains(r#"props.attrs.insert("key".to_string(), resolve("item.id").to_string());"#),
+        "the key must be a single literal resolver lookup:\n{rs}"
+    );
+    // Each renderer interpolates the expression exactly once, and never rewrites
+    // it into a nested lookup or a field access on a block.
+    assert_eq!(
+        resolve_renderer(&rs).matches("item.id").count(),
+        1,
+        "the Resolve-mode renderer must interpolate the key exactly once:\n{rs}"
+    );
+    assert_eq!(
+        state_renderer(&rs).matches("item.id").count(),
+        1,
+        "the State-mode renderer must read the key exactly once:\n{rs}"
+    );
+    // The pre-fix defects: the mustache pair was carried through into the
+    // generated `resolve(…)`, and the dotted expression was rewritten into a
+    // field access on a block expression.
+    assert!(
+        !rs.contains("resolve({{"),
+        "`{{` must not reach the generated resolver call:\n{rs}"
+    );
+    assert!(
+        !rs.contains(r#"resolve({ let __v = resolve("#),
+        "a dotted key must not be rewritten into a block field access:\n{rs}"
+    );
+}
+
+/// Both spellings of the same key expression must generate the same code.
+#[test]
+fn resolve_mode_v_for_key_spellings_generate_the_same_lookup() {
+    let mustache = compile_in_mode(V_FOR_KEY_MUSTACHE, RenderMode::Resolve);
+    let plain = compile_in_mode(V_FOR_KEY_PLAIN, RenderMode::Resolve);
+
+    let of =
+        |rs: &str| -> Vec<String> { key_statements(rs).into_iter().map(str::to_string).collect() };
+    assert_eq!(
+        of(&mustache),
+        of(&plain),
+        "`:key=\"{{{{ item.id }}}}\"` and `:key=\"item.id\"` are the same expression:\n{mustache}\n---\n{plain}"
+    );
+}
+
+/// The State-mode renderer must be byte-for-byte what it was before the fix:
+/// it reads the loop field directly and must not change at all.
+#[test]
+fn state_mode_v_for_key_output_matches_the_pre_fix_golden() {
+    for (tpl, golden) in [
+        (
+            V_FOR_KEY_MUSTACHE,
+            include_str!("testdata/v_for_key_mustache.state_renderer.golden"),
+        ),
+        (
+            V_FOR_KEY_PLAIN,
+            include_str!("testdata/v_for_key_plain.state_renderer.golden"),
+        ),
+    ] {
+        let rs = compile_in_mode(tpl, RenderMode::State);
+        assert_eq!(
+            state_renderer(&rs),
+            golden,
+            "the State-mode renderer must be unchanged for {tpl}"
+        );
+    }
+}
+
+/// A `v-for` with no `:key` must generate exactly what it generated before the
+/// fix, in both renderers and in both modes.
+#[test]
+fn v_for_without_a_key_output_matches_the_pre_fix_golden() {
+    let module_golden = include_str!("testdata/v_for_without_key.module.golden");
+    for mode in [RenderMode::Resolve, RenderMode::State] {
+        let rs = compile_in_mode(V_FOR_NO_KEY, mode);
+        assert_eq!(
+            rs, module_golden,
+            "a keyless `v-for` module must be unchanged in {mode:?}"
+        );
+        assert_eq!(
+            resolve_renderer(&rs),
+            include_str!("testdata/v_for_without_key.resolve_renderer.golden"),
+            "the keyless Resolve-mode renderer must be unchanged in {mode:?}"
+        );
+    }
+}
+
+/// A valueless `:key` keeps its own path: nothing is inserted, and the module is
+/// identical to the keyless one (so it keeps compiling).
+#[test]
+fn v_for_with_a_valueless_key_generates_the_keyless_module() {
+    for mode in [RenderMode::Resolve, RenderMode::State] {
+        let rs = compile_in_mode(V_FOR_KEY_VALUELESS, mode);
+        assert!(
+            key_statements(&rs).is_empty(),
+            "a valueless `:key` must not insert a key in {mode:?}:\n{rs}"
+        );
+        assert_eq!(
+            rs,
+            include_str!("testdata/v_for_without_key.module.golden"),
+            "a valueless `:key` must generate the keyless module in {mode:?}"
+        );
+    }
 }

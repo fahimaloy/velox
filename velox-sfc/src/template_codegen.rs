@@ -65,6 +65,26 @@ fn parse_v_for(value: &str) -> Option<VForInfo> {
     })
 }
 
+/// The resolver key a `:key` attribute contributes in the Resolve-mode `v-for`
+/// body.
+///
+/// Nothing has rewritten the attribute value before it reaches the emit site, so
+/// it is normalized here exactly once: surrounding whitespace is dropped and the
+/// documented `{{ … }}` spelling is unwrapped to the bare expression it contains.
+/// The result is emitted as a single `resolve("…")` lookup — the same shape the
+/// sibling `v-for` branch uses for its collection (`let __for_expr =
+/// resolve("items");`) — so the expression is interpolated exactly once and the
+/// generated code compiles.
+fn resolve_key_expr(key_val: &str) -> String {
+    let trimmed = key_val.trim();
+    let unwrapped = trimmed
+        .strip_prefix("{{")
+        .and_then(|rest| rest.strip_suffix("}}"))
+        .map(str::trim)
+        .filter(|expr| !expr.is_empty());
+    unwrapped.unwrap_or(trimmed).to_string()
+}
+
 /// Validate the parsed template AST and collect structural errors.
 /// Returns a list of error/warning messages (empty if the template is valid).
 fn validate_template(nodes: &[Node]) -> Vec<String> {
@@ -1256,7 +1276,7 @@ fn emit_node_with_mode(
                                 format!(
                                     "{{ let mut __node = {}; if let velox_dom::VNode::Element {{ ref mut props, .. }} = __node {{ props.attrs.insert(\"key\".to_string(), resolve({}).to_string()); }} __node }}",
                                     inner,
-                                    rewrite_if_expr(key_val)
+                                    string_lit(&resolve_key_expr(key_val))
                                 )
                             } else {
                                 inner
@@ -1712,7 +1732,7 @@ fn emit_children_with_mode(
                                     format!(
                                         "{{ let mut __node = {}; if let velox_dom::VNode::Element {{ ref mut props, .. }} = __node {{ props.attrs.insert(\"key\".to_string(), resolve({}).to_string()); }} __node }}",
                                         inner,
-                                        rewrite_if_expr(key_val)
+                                        string_lit(&resolve_key_expr(key_val))
                                     )
                                 } else {
                                     inner.clone()
