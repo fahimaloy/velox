@@ -130,6 +130,32 @@ fn vnode_contains_text(node: &velox_dom::VNode, needle: &str) -> bool {
     }
 }
 
+/// The `key` attribute of every rendered todo row, in document order. A row
+/// without one is reported as `<missing>` so a failure names the gap instead of
+/// silently comparing an empty string.
+fn todo_row_keys(node: &velox_dom::VNode, out: &mut Vec<String>) {
+    if let velox_dom::VNode::Element {
+        tag,
+        props,
+        children,
+        ..
+    } = node
+    {
+        if props.attrs.get("class").map(String::as_str) == Some("todo-item") {
+            out.push(
+                props
+                    .attrs
+                    .get("key")
+                    .cloned()
+                    .unwrap_or_else(|| String::from("<missing>")),
+            );
+        }
+        for child in children {
+            todo_row_keys(child, out);
+        }
+    }
+}
+
 fn write_proof(name: &str, width: i32, height: i32, png: &[u8]) -> std::path::PathBuf {
     let path = proof_dir().join(format!("{name}-{width}x{height}.png"));
     std::fs::write(&path, png).expect("write proof png");
@@ -353,5 +379,58 @@ fn events_drive_the_visible_list() {
     assert!(
         pixels_near(&after_filter, ROW_BG, 8) < pixels_near(&after_remove, ROW_BG, 8),
         "completed filter should hide active cards"
+    );
+}
+
+/// Proof for the `:key` directive itself, which the pixel proofs above cannot
+/// see: the list `v-for` in `App.vx` carries `:key="todo.id"`, so every
+/// rendered row must carry that key in `props.attrs["key"]`.
+///
+/// This fails if key insertion is removed from codegen (every row would read
+/// `<missing>`), and because the keys are read back after the store changes,
+/// it fails if the key were positional rather than taken from the todo.
+#[test]
+fn every_todo_row_carries_its_key() {
+    let state = Arc::new(app::script_rs::State::new());
+
+    let mut keys = Vec::new();
+    todo_row_keys(&build(&state), &mut keys);
+    assert_eq!(
+        keys,
+        vec![String::from("0"), String::from("1")],
+        "each rendered row must carry the `key` of its todo"
+    );
+
+    let mut on_event = app::make_on_event(Arc::clone(&state));
+    on_event("on_input", Some("Ship the rewrite"));
+    on_event("add_todo", None);
+
+    let mut with_new = Vec::new();
+    todo_row_keys(&build(&state), &mut with_new);
+    assert_eq!(
+        with_new,
+        vec![String::from("0"), String::from("1"), String::from("2")],
+        "an appended todo must bring its own key"
+    );
+
+    // Remove the FIRST row. The survivors keep their own ids (1 and 2), so a
+    // positional key (0 and 1) would fail this assertion.
+    on_event("on_remove", Some("0"));
+    let mut after_remove = Vec::new();
+    todo_row_keys(&build(&state), &mut after_remove);
+    assert_eq!(
+        after_remove,
+        vec![String::from("1"), String::from("2")],
+        "keys must follow the todo, not its position in the list"
+    );
+
+    // Toggling changes `completed`, not the id, so the keys are unchanged.
+    on_event("on_toggle", Some("1"));
+    let mut after_toggle = Vec::new();
+    todo_row_keys(&build(&state), &mut after_toggle);
+    assert_eq!(
+        after_toggle,
+        vec![String::from("1"), String::from("2")],
+        "toggling a todo must not change its key"
     );
 }

@@ -2439,7 +2439,16 @@ fn emit_bind_attr(
     item_name: Option<&str>,
     idx_name: Option<&str>,
 ) -> BindEmission {
-    let authored = expr.trim().to_string();
+    let authored = if attr_name == "key" {
+        // A `:key` value is normalized by the same helper the `v-for` key emit
+        // sites use, so this path analyzes exactly the expression codegen emits
+        // instead of the raw `{{ … }}` spelling. The `v-for` branches strip `:key`
+        // out before emitting, so the only way a `:key` reaches here as a prop is
+        // a non-`v-for` element — which is normalized consistently too.
+        resolve_key_expr(expr)
+    } else {
+        expr.trim().to_string()
+    };
 
     if attr_name == "class" {
         let pairs = class_object_pairs(&authored);
@@ -2868,23 +2877,60 @@ mod tests {
     /// looks the loop field up, so a Resolve-mode consumer is warned.
     #[test]
     fn v_for_key_binding_is_reported_in_resolve_mode() {
-        let nodes = crate::template_parse::parse_template_to_ast(
+        // Both spellings of the same key expression: the collector must analyze
+        // the normalized expression codegen emits, not the raw `{{ … }}` text.
+        for tpl in [
             r#"<div v-for="todo in todos" :key="todo.id">x</div>"#,
+            r#"<div v-for="todo in todos" :key="{{ todo.id }}">x</div>"#,
+        ] {
+            let nodes = crate::template_parse::parse_template_to_ast(tpl).unwrap();
+
+            let resolve = collect_resolver_keys(&nodes, &methods(""), &[], RenderMode::Resolve);
+            assert!(resolve.keys.is_empty(), "{tpl} {:?}", resolve.keys);
+            assert_eq!(resolve.warnings.len(), 1, "{tpl} {:?}", resolve.warnings);
+            assert!(
+                resolve.warnings[0].contains(r#":key="todo.id""#),
+                "{tpl} {}",
+                resolve.warnings[0]
+            );
+
+            let state = collect_resolver_keys(&nodes, &methods(""), &[], RenderMode::State);
+            assert!(state.keys.is_empty(), "{tpl} {:?}", state.keys);
+            assert!(state.warnings.is_empty(), "{tpl} {:?}", state.warnings);
+        }
+    }
+
+    /// The `{{ … }}` spelling of a `v-for` `:key` is a loop-rooted binding whose
+    /// key codegen normalizes before emitting, and State mode reads the loop
+    /// field directly — so a State-mode consumer must not be told that the
+    /// binding cannot be resolved. The raw `{{ … }}` text is not an expression
+    /// codegen ever uses, and reporting it describes a defect that is not there.
+    #[test]
+    fn state_mode_mustache_key_is_not_reported() {
+        let nodes = crate::template_parse::parse_template_to_ast(
+            r#"<div v-for="todo in todos" :key="{{ todo.id }}">x</div>"#,
         )
         .unwrap();
 
-        let resolve = collect_resolver_keys(&nodes, &methods(""), &[], RenderMode::Resolve);
-        assert!(resolve.keys.is_empty(), "{:?}", resolve.keys);
-        assert_eq!(resolve.warnings.len(), 1, "{:?}", resolve.warnings);
-        assert!(
-            resolve.warnings[0].contains(":key=\"todo.id\""),
-            "{}",
-            resolve.warnings[0]
-        );
-
         let state = collect_resolver_keys(&nodes, &methods(""), &[], RenderMode::State);
         assert!(state.keys.is_empty(), "{:?}", state.keys);
-        assert!(state.warnings.is_empty(), "{:?}", state.warnings);
+        assert!(
+            state.warnings.is_empty(),
+            "State mode reads `todo.id` from the loop item, so the mustache \
+             spelling must not be reported: {:?}",
+            state.warnings
+        );
+
+        // The same template is still reported for a Resolve-mode consumer: that
+        // renderer has no loop value, so the lookup genuinely has no arm.
+        let resolve = collect_resolver_keys(&nodes, &methods(""), &[], RenderMode::Resolve);
+        assert_eq!(resolve.warnings.len(), 1, "{:?}", resolve.warnings);
+        assert!(
+            !resolve.warnings[0].contains("is an expression"),
+            "the diagnosis must name the loop-rooted binding, not the raw \
+             mustache text: {}",
+            resolve.warnings[0]
+        );
     }
 
     /// A zero-argument method that returns nothing is not a getter: the arm would
