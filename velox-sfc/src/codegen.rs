@@ -191,10 +191,18 @@ fn to_stub_rs_inner(
         {
             let vmodels = crate::template_codegen::collect_vmodel_expressions(&template_nodes);
             if !vmodels.is_empty() {
+                // The setters are `&self` methods, so they go in an `impl State`
+                // block — a second one is fine, the script's own `impl` has
+                // already been emitted above. They used to be appended after it,
+                // which made them free functions: `state.__vmodel_set_draft(p)`
+                // in the generated dispatcher then had no method to call (E0599)
+                // and no `v-model` could compile at all.
                 let setters = crate::template_codegen::generate_vmodel_setters(&vmodels);
+                out.push_str(&format!("{inner_indent}impl State {{\n"));
                 for line in setters.lines() {
-                    out.push_str(&format!("{inner_indent}{line}\n"));
+                    out.push_str(&format!("{inner_indent}    {line}\n"));
                 }
+                out.push_str(&format!("{inner_indent}}}\n"));
             }
         }
 

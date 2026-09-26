@@ -429,11 +429,21 @@ pub fn render_with_state<F>(state: std::sync::Arc<script_rs::State>, mut resolve
 
 fn collect_handlers(nodes: &[Node]) -> Vec<String> {
     let mut set: HashSet<String> = HashSet::new();
-    fn walk(n: &Node, set: &mut HashSet<String>) {
+    // The `v-for` loop variables in scope, outermost first. A `v-model` rooted
+    // at one of them has no setter to dispatch to — see
+    // `vmodel_is_loop_rooted` — and `extract_vmodel` emits no handler for it, so
+    // neither can the dispatcher.
+    fn walk(n: &Node, set: &mut HashSet<String>, loop_vars: &mut Vec<(String, String)>) {
         if let Node::Element {
             attrs, children, ..
         } = n
         {
+            if let Some(info) = v_for_scope(attrs) {
+                loop_vars.push((info.item_name.clone(), info.index_name.clone()));
+            }
+            let (item_name, idx_name) = loop_vars.last().map_or((None, None), |(item, idx)| {
+                (Some(item.as_str()), Some(idx.as_str()))
+            });
             for a in attrs {
                 if let AttrKind::On = a.kind
                     && let Some(v) = &a.value
@@ -451,17 +461,22 @@ fn collect_handlers(nodes: &[Node]) -> Vec<String> {
                 if matches!(a.kind, AttrKind::Directive)
                     && a.name == "model"
                     && let Some(ref expr) = a.value
+                    && !vmodel_is_loop_rooted(expr, item_name, idx_name)
                 {
-                    set.insert(format!("__vmodel_set_{}", expr));
+                    set.insert(vmodel_setter_name(expr));
                 }
             }
             for c in children {
-                walk(c, set);
+                walk(c, set, loop_vars);
+            }
+            if v_for_scope(attrs).is_some() {
+                loop_vars.pop();
             }
         }
     }
+    let mut loop_vars: Vec<(String, String)> = Vec::new();
     for n in nodes {
-        walk(n, &mut set);
+        walk(n, &mut set, &mut loop_vars);
     }
     let mut v: Vec<String> = set.into_iter().collect();
     v.sort();
@@ -761,6 +776,78 @@ pub fn make_resolve(state: std::sync::Arc<script_rs::State>) -> impl FnMut(&str)
     )
 }
 
+/// Why a key cannot be answered by a resolver arm, in the vocabulary the
+/// `v-for` loop diagnostic uses.
+///
+/// One predicate for every diagnostic that asks "can this key be looked up?",
+/// so the bound-attribute path and the `v-model` value path cannot drift into
+/// describing the same mistake differently.
+fn unresolvable_key_reason(key: &str, methods: &[StateMethod], fields: &[String]) -> String {
+    // A member path is answered by a chain rather than by a getter of that name,
+    // so what is wrong with it is whatever is wrong with its ROOT. Anything else —
+    // a call expression, an index into a collection — has no root to name.
+    if let Some((root, _)) = member_path(key) {
+        return unanswerable_root_reason(root, true, methods, fields);
+    }
+    let named = methods.iter().find(|m| &m.name == key);
+    match named {
+        Some(m) if m.takes_payload => {
+            format!("`{key}` is a payload-taking State method, not a getter")
+        }
+        Some(m) if m.return_type.is_none() => {
+            format!("`{key}` declares no return type, so there is no text to render")
+        }
+        Some(m) => format!(
+            "`{key}` returns `{}`, which cannot be rendered as text",
+            m.return_type.as_deref().unwrap_or_default()
+        ),
+        None if fields.iter().any(|f| f == key) => format!(
+            "`{key}` is a `State` field, not a getter — reading a field in a \
+             template needs a typed field resolver, which is not implemented yet"
+        ),
+        None if !is_bare_identifier(key) => {
+            format!("`{key}` is an expression, not a `State` getter name")
+        }
+        None => format!("`{key}` is not a zero-argument `State` getter"),
+    }
+}
+
+/// The `v-for` write a `v-model` on a loop item cannot make, reported in State
+/// mode.
+///
+/// The read is real — the input shows the loop item's own field — but the write
+/// has no route: `on:input` carries a handler *name*, and `make_on_event`
+/// resolves it against `State`, which has no handle on the loop item. So no
+/// setter is generated and no dispatcher arm is emitted; an arm naming one would
+/// be `state.__vmodel_set_todo_text(p)` against a method that cannot exist, and
+/// the setter body would be `vmodel_set(&self.todo.text, …)` on a field the
+/// `State` does not have. Both are E0609, not a working binding. The same
+/// family and the same remedy sentence as [`resolve_loop_warning`].
+fn vmodel_loop_write_warning(expr: &str) -> String {
+    format!(
+        "v-model=\"{expr}\" on a `v-for` item cannot be written — the event dispatcher resolves \
+         `on:input` handler names against `State`, which has no handle on a loop item, so the \
+         input renders the item's value but typing does not change it. Write the field from a \
+         real handler on the item, or bind `:value` plus an `@input` that reaches it."
+    )
+}
+
+/// The write half a `v-model` does not have in Resolve mode.
+///
+/// Resolve mode renders through `render_with(resolve)`, which has no `State` at
+/// all: the generated `make_on_event` takes one, so nothing dispatches the write
+/// there. R-1's ruling is that Resolve mode reports rather than grows a write
+/// path, and this is that report — the same family and remedy as
+/// [`resolve_loop_warning`], and deliberately a separate function from it,
+/// because a `v-model` is a different condition from a loop that cannot render.
+fn vmodel_resolve_mode_warning(expr: &str) -> String {
+    format!(
+        "v-model=\"{expr}\" cannot be written in Resolve mode — the resolver renders values but \
+         dispatches no events, so only the read side exists here. Render this component through \
+         `render_with_state`, which reads the value and writes it from the State directly."
+    )
+}
+
 /// Generate `render_with_props` — props take priority, interpolations fall back
 /// to State getters so a presentational child renders correctly even when the
 /// parent omits a prop.
@@ -1048,7 +1135,60 @@ pub(crate) fn rewrite_if_expr(expr: &str) -> String {
 /// Returns (remaining_attrs, optional_vmodel_handler_name).
 /// The handler name follows the convention `__vmodel_set_{field}` so that
 /// `make_on_event` can dispatch to it and the codegen can emit the setter.
-fn extract_vmodel(attrs: &[TemplateAttr], _tag: &str) -> (Vec<TemplateAttr>, Option<String>) {
+/// The `v-for` binding an element declares, or `None`.
+///
+/// The scope a `v-model` expression is resolved against: the two loop variables
+/// in scope when the element is inside a `v-for` body.
+fn v_for_scope<'a>(attrs: &'a [TemplateAttr]) -> Option<VForInfo> {
+    attrs
+        .iter()
+        .find(|a| matches!(a.kind, AttrKind::Directive) && a.name == "for")
+        .and_then(|a| a.value.as_deref())
+        .and_then(parse_v_for)
+}
+
+/// Whether a `v-model` expression is rooted at a `v-for` loop variable.
+///
+/// A loop-rooted `v-model` is a read the loop item can answer — `todo.text` is a
+/// real field read in State mode — but its write has nowhere to go: the event
+/// dispatcher resolves a handler name against `State`, which has no handle on a
+/// loop item. `extract_vmodel` therefore emits the read and no handler, and
+/// `collect_resolver_keys` reports the missing write instead of emitting an arm
+/// that cannot compile. The predicate is [`expr_reads_root`] over the loop
+/// variables in scope — the same test the read path uses to decide it can
+/// answer the expression.
+fn vmodel_is_loop_rooted(expr: &str, item_name: Option<&str>, idx_name: Option<&str>) -> bool {
+    let roots: Vec<&str> = [item_name, idx_name].into_iter().flatten().collect();
+    !roots.is_empty() && expr_reads_roots(expr, &roots)
+}
+
+/// The generated setter name for a `v-model` expression.
+///
+/// ONE spelling, produced by every side of the write path so the dispatcher arm
+/// and the `State` method it calls can never disagree: the template emitter
+/// (`extract_vmodel`) and the handler collector (`collect_handlers`) both build
+/// it here, and the setter generator is fed by [`collect_vmodel_expressions`],
+/// which uses the same rule. A `.` becomes `_` because the name has to be a Rust
+/// method name, so `v-model="form.name"` maps to `__vmodel_set_form_name` and the
+/// setter it pairs with writes `self.form.name`.
+fn vmodel_setter_name(expr: &str) -> String {
+    format!("__vmodel_set_{}", expr.replace('.', "_"))
+}
+
+/// Desugar `v-model="expr"` into a `:value` bind plus an `@input` handler, and
+/// report the expression.
+///
+/// `item_name`/`idx_name` are the `v-for` loop variables in scope. A loop-rooted
+/// expression gets the value bind only: its read is a direct field read of the
+/// loop item — the shape State mode already emits for a loop-rooted binding — and
+/// there is no handler to name, because a write to a loop item cannot be routed
+/// through the `State`-rooted dispatcher. `collect_resolver_keys` reports that
+/// case; see [`vmodel_is_loop_rooted`].
+fn extract_vmodel(
+    attrs: &[TemplateAttr],
+    item_name: Option<&str>,
+    idx_name: Option<&str>,
+) -> (Vec<TemplateAttr>, Option<String>) {
     let vmodel_pos = attrs
         .iter()
         .position(|a| matches!(a.kind, AttrKind::Directive) && a.name == "model");
@@ -1068,13 +1208,17 @@ fn extract_vmodel(attrs: &[TemplateAttr], _tag: &str) -> (Vec<TemplateAttr>, Opt
             kind: AttrKind::Bind,
         });
 
-        // Generate @input handler that calls state.__vmodel_set_{field}(payload)
-        let handler_name = format!("__vmodel_set_{}", model_expr.replace('.', "_"));
-        remaining.push(TemplateAttr {
-            name: "input".to_string(),
-            value: Some(handler_name.clone()),
-            kind: AttrKind::On,
-        });
+        // Generate @input handler that calls state.__vmodel_set_{field}(payload).
+        // A loop-rooted expression has no such setter: its write target is the
+        // loop item, which the dispatcher cannot reach, so the input is emitted
+        // as a read-only value and the missing write is reported instead.
+        if !vmodel_is_loop_rooted(&model_expr, item_name, idx_name) {
+            remaining.push(TemplateAttr {
+                name: "input".to_string(),
+                value: Some(vmodel_setter_name(&model_expr)),
+                kind: AttrKind::On,
+            });
+        }
 
         (remaining, Some(model_expr))
     } else {
@@ -1108,7 +1252,7 @@ fn emit_node_with_mode(
             }
 
             // Handle v-model directive: convert to :value + @input
-            let (attrs2, _v_model_handler) = extract_vmodel(attrs, tag);
+            let (attrs2, _v_model_handler) = extract_vmodel(attrs, None, None);
             let attrs = &attrs2;
 
             // handle directive `v-if`
@@ -1943,6 +2087,16 @@ fn emit_node_with_ctx_state(
             children,
             ..
         } => {
+            // Desugar `v-model` here, where the loop variables are in scope:
+            // this is the only loop-body emitter on the State-mode path, and
+            // `emit_props_with_ctx` drops every directive, so a `v-model` that
+            // reached it would lose both its value bind and its handler. The
+            // read is a direct field read of the loop item, the shape State mode
+            // already emits for a loop-rooted binding; a loop-rooted expression
+            // gets no handler, and `collect_resolver_keys` reports the write it
+            // cannot route.
+            let (attrs2, _v_model_handler) = extract_vmodel(attrs, item_name, idx_name);
+            let attrs = &attrs2;
             // Handle <slot> inside v-for context
             if tag == "slot" {
                 let slot_name = attrs
@@ -2299,26 +2453,44 @@ fn string_lit(s: &str) -> String {
 /// For `v-model="counter"`, returns `("counter", "__vmodel_set_counter")`.
 pub fn collect_vmodel_expressions(nodes: &[Node]) -> Vec<(String, String)> {
     let mut results = Vec::new();
-    fn walk(nodes: &[Node], out: &mut Vec<(String, String)>) {
+    // The `v-for` loop variables in scope, outermost first: a loop-rooted
+    // `v-model` gets no setter, because the dispatcher cannot reach a loop item
+    // (see `vmodel_is_loop_rooted`).
+    fn walk(
+        nodes: &[Node],
+        out: &mut Vec<(String, String)>,
+        loop_vars: &mut Vec<(String, String)>,
+    ) {
         for node in nodes {
             if let Node::Element {
                 attrs, children, ..
             } = node
             {
+                if let Some(info) = v_for_scope(attrs) {
+                    loop_vars.push((info.item_name.clone(), info.index_name.clone()));
+                }
+                let (item_name, idx_name) = loop_vars.last().map_or((None, None), |(item, idx)| {
+                    (Some(item.as_str()), Some(idx.as_str()))
+                });
                 for attr in attrs {
                     if matches!(attr.kind, AttrKind::Directive)
                         && attr.name == "model"
                         && let Some(expr) = &attr.value
+                        && !vmodel_is_loop_rooted(expr, item_name, idx_name)
                     {
-                        let handler = format!("__vmodel_set_{}", expr.replace('.', "_"));
+                        let handler = vmodel_setter_name(expr);
                         out.push((expr.clone(), handler));
                     }
                 }
-                walk(children, out);
+                walk(children, out, loop_vars);
+                if v_for_scope(attrs).is_some() {
+                    loop_vars.pop();
+                }
             }
         }
     }
-    walk(nodes, &mut results);
+    let mut loop_vars: Vec<(String, String)> = Vec::new();
+    walk(nodes, &mut results, &mut loop_vars);
     results
 }
 
@@ -2654,6 +2826,60 @@ fn is_ident_char(ch: char) -> bool {
 /// a member path and the whole key otherwise. The decision reads
 /// [`StateMethod`]s only — never the loop families, and never the `v-for`
 /// collection — so it cannot silence a loop report.
+/// Whether `key` has a resolver arm. This is the one question a key's origin must
+/// not change: a bare name needs a getter of that name, and a member path needs
+/// an accessor for its root plus a method for every segment after it. A key that
+/// is neither — a call expression, say — is left alone, exactly as
+/// `keep_answerable_interpolation_keys` leaves it, because an arm for it is the
+/// fallback's business.
+///
+/// `keep_answerable_interpolation_keys` asks this for interpolated text and the
+/// `v-model` path asks it for a two-way binding, so `{{ form.name }}` and
+/// `v-model="form.name"` are answered or dropped together instead of one of them
+/// quietly rendering empty.
+fn key_is_answerable(methods: &[StateMethod], key: &str) -> bool {
+    if is_bare_identifier(key) {
+        getter_method_name(methods, key).is_some()
+    } else if member_path(key).is_some() {
+        member_path_call(methods, key).is_some()
+    } else {
+        true
+    }
+}
+
+/// Why a binding cannot be read: what is wrong with `root`, the first segment of
+/// whatever shape the key has. `keep_answerable_interpolation_keys` and
+/// `unresolvable_key_reason` both call it, so the interpolation gate and the
+/// `v-model` gate name the same cause in the same words — `v-model="form.name"`
+/// and `{{ form.name }}` fail or succeed together, and they say so identically.
+fn unanswerable_root_reason(
+    root: &str,
+    is_path: bool,
+    methods: &[StateMethod],
+    fields: &[String],
+) -> String {
+    let declared = methods.iter().find(|m| &m.name == root);
+    match declared {
+        Some(m) if m.takes_payload => {
+            format!("`{root}` is a payload-taking State method, not an accessor")
+        }
+        Some(m) if !returns_a_value(m.return_type.as_deref()) => {
+            format!("`{root}` returns nothing, so there is no value to read from")
+        }
+        Some(_) if is_path => {
+            format!("`{root}` is a State method, but a member path needs an accessor")
+        }
+        Some(_) => {
+            format!("`{root}` is a `State` method, but its return type cannot be rendered as text")
+        }
+        None if fields.iter().any(|f| f == root) => format!(
+            "`{root}` is a `State` field, not an accessor — reading a field in a \
+             template needs a typed field resolver, which is not implemented yet"
+        ),
+        None => format!("`{root}` is not a zero-argument `State` method"),
+    }
+}
+
 fn keep_answerable_interpolation_keys(
     methods: &[StateMethod],
     fields: &[String],
@@ -2672,34 +2898,12 @@ fn keep_answerable_interpolation_keys(
             answerable.push(key);
             continue;
         };
-        let answered = match &path {
-            Some(_) => member_path_call(methods, &key).is_some(),
-            None => getter_method_name(methods, &key).is_some(),
-        };
+        let answered = key_is_answerable(methods, &key);
         if answered {
             answerable.push(key);
             continue;
         }
-        let declared = methods.iter().find(|m| &m.name == root);
-        let reason = match declared {
-            Some(m) if m.takes_payload => {
-                format!("`{root}` is a payload-taking State method, not an accessor")
-            }
-            Some(m) if !returns_a_value(m.return_type.as_deref()) => {
-                format!("`{root}` returns nothing, so there is no value to read from")
-            }
-            Some(_) if path.is_some() => {
-                format!("`{root}` is a State method, but a member path needs an accessor")
-            }
-            Some(_) => format!(
-                "`{root}` is a `State` method, but its return type cannot be rendered as text"
-            ),
-            None if fields.iter().any(|f| f == root) => format!(
-                "`{root}` is a `State` field, not an accessor — reading a field in a \
-                 template needs a typed field resolver, which is not implemented yet"
-            ),
-            None => format!("`{root}` is not a zero-argument `State` method"),
-        };
+        let reason = unanswerable_root_reason(root, path.is_some(), methods, fields);
         let remedy = if path.is_some() {
             format!(
                 "Declare `pub fn {root}(&self) -> YourType` on `State` and a method for each \
@@ -3309,6 +3513,44 @@ fn collect_resolver_keys(
                 });
             }
             for attr in attrs {
+                // A `v-model` desugars to a `:value` bind at emit time, so its
+                // key is not in the AST this walks. It is collected here
+                // instead, through the same gate every other key goes through,
+                // so a `v-model` value reads a real getter or reports why it
+                // cannot. The write half is reported on its own below.
+                if matches!(attr.kind, AttrKind::Directive) && attr.name == "model" {
+                    let Some(expr) = attr.value.as_deref() else {
+                        continue;
+                    };
+                    if vmodel_is_loop_rooted(expr, item_name, idx_name) {
+                        // The read is a direct field read of the loop item in
+                        // State mode and an indexed resolver lookup in Resolve
+                        // mode, so it registers no key. The write is the part
+                        // that cannot be routed, and in Resolve mode the write
+                        // half does not exist at all.
+                        if matches!(mode, RenderMode::State) {
+                            warnings.push(vmodel_loop_write_warning(expr));
+                        }
+                        continue;
+                    }
+                    // The same question the interpolation gate asks, so a dotted
+                    // `v-model` is answered by the same method chain `{{ form.name }}`
+                    // reads, and an unanswerable one is reported in the same terms.
+                    if key_is_answerable(methods, expr) {
+                        push_unique(keys, expr);
+                    } else {
+                        warnings.push(format!(
+                            "v-model=\"{expr}\" cannot render its value — {}; the input renders \
+                             empty. The write still works. Bind a zero-argument `State` getter, or \
+                             a method for each segment of a dotted expression.",
+                            unresolvable_key_reason(expr, methods, fields)
+                        ));
+                    }
+                    if matches!(mode, RenderMode::Resolve) {
+                        warnings.push(vmodel_resolve_mode_warning(expr));
+                    }
+                    continue;
+                }
                 if !matches!(attr.kind, AttrKind::Bind) {
                     continue;
                 }
@@ -3353,27 +3595,7 @@ fn collect_resolver_keys(
                     // return type can be looked up. Everything else is a mistake
                     // worth saying out loud rather than rendering as an empty
                     // string.
-                    let named = methods.iter().find(|m| &m.name == key);
-                    let reason = match named {
-                        Some(m) if m.takes_payload => {
-                            format!("`{key}` is a payload-taking State method, not a getter")
-                        }
-                        Some(m) if m.return_type.is_none() => format!(
-                            "`{key}` declares no return type, so there is no text to render"
-                        ),
-                        Some(m) => format!(
-                            "`{key}` returns `{}`, which cannot be rendered as text",
-                            m.return_type.as_deref().unwrap_or_default()
-                        ),
-                        None if fields.iter().any(|f| f == key) => format!(
-                            "`{key}` is a `State` field, not a getter — reading a field in a \
-                             template needs a typed field resolver, which is not implemented yet"
-                        ),
-                        None if !is_bare_identifier(key) => {
-                            format!("`{key}` is an expression, not a `State` getter name")
-                        }
-                        None => format!("`{key}` is not a zero-argument `State` getter"),
-                    };
+                    let reason = unresolvable_key_reason(key, methods, fields);
                     warnings.push(format!(
                         "bound attribute :{}=\"{}\" cannot be resolved — {reason}; \
                          the binding renders empty. Bind a zero-argument State getter instead.",
@@ -4991,6 +5213,207 @@ impl State {
             "but nothing loop-rooted is: {:?}",
             resolve.keys
         );
+    }
+    // =========================================================================
+    // R-2. `v-model`: the read side is a resolver key like any other, and the two
+    // conditions codegen cannot honour are reported in R-1's family.
+    // =========================================================================
+
+    const R2_SCRIPT: &str = r#"
+        pub struct User { name: String }
+        impl User {
+            pub fn name(&self) -> String { String::new() }
+        }
+        impl State {
+            pub fn items(&self) -> String { String::new() }
+            pub fn draft(&self) -> String { String::new() }
+            pub fn user(&self) -> User { User { name: String::new() } }
+        }"#;
+
+    fn r2_keys_and_warnings(
+        tpl: &str,
+        script: &str,
+        fields: &[&str],
+        mode: RenderMode,
+    ) -> (Vec<String>, Vec<String>) {
+        let nodes = crate::template_parse::parse_template_to_ast(tpl).expect("template parses");
+        let fields: Vec<String> = fields.iter().map(|f| f.to_string()).collect();
+        let collected = collect_resolver_keys(&nodes, &methods(script), &fields, mode);
+        (collected.keys, collected.warnings)
+    }
+
+    /// The live read. The synthetic `:value` bind is created at emit time, so before
+    /// this it was invisible to key collection and every `v-model` read resolved to
+    /// the empty string.
+    #[test]
+    fn a_v_model_on_an_accessor_is_registered_as_a_resolver_key() {
+        for mode in [RenderMode::State, RenderMode::Resolve] {
+            let (keys, warnings) =
+                r2_keys_and_warnings(r#"<input v-model="draft"/>"#, R2_SCRIPT, &[], mode);
+            assert_eq!(
+                keys,
+                vec!["draft".to_string()],
+                "a v-model on a `State` accessor must get a resolver arm, in {mode:?}"
+            );
+            if matches!(mode, RenderMode::State) {
+                assert!(warnings.is_empty(), "{:?}", warnings);
+            }
+        }
+    }
+
+    /// A dotted `v-model` is answered by the same chain an interpolation of the same
+    /// path reads, and dropped under the same conditions.
+    #[test]
+    fn a_dotted_v_model_is_answered_by_the_same_chain_as_an_interpolation() {
+        let (keys, warnings) = r2_keys_and_warnings(
+            r#"<input v-model="user.name"/>"#,
+            R2_SCRIPT,
+            &[],
+            RenderMode::State,
+        );
+        assert_eq!(keys, vec!["user.name".to_string()], "{:?}", keys);
+        assert!(warnings.is_empty(), "{:?}", warnings);
+
+        // Without the accessor the read cannot be answered, so it is reported rather
+        // than left to the empty-string fallback.
+        let (keys, warnings) = r2_keys_and_warnings(
+            r#"<input v-model="form.name"/>"#,
+            R2_SCRIPT,
+            &["form"],
+            RenderMode::State,
+        );
+        assert_eq!(keys, Vec::<String>::new(), "{:?}", keys);
+        assert_eq!(warnings.len(), 1, "{:?}", warnings);
+        assert!(
+            warnings[0].contains(r#"v-model="form.name""#),
+            "{}",
+            warnings[0]
+        );
+        assert!(
+            warnings[0].contains("is a `State` field"),
+            "{}",
+            warnings[0]
+        );
+        assert!(warnings[0].contains("renders empty"), "{}", warnings[0]);
+    }
+
+    /// E-1. A `v-model` on a loop item reads the item's value and writes nothing,
+    /// because the dispatcher resolves `on:input` against `State` and `State` has no
+    /// handle on the loop item.
+    #[test]
+    fn a_v_model_on_a_loop_item_reads_it_and_writes_nothing() {
+        for mode in [RenderMode::State, RenderMode::Resolve] {
+            let (keys, warnings) = r2_keys_and_warnings(
+                r#"<ul><li v-for="item in items"><input v-model="item.name"/></li></ul>"#,
+                R2_SCRIPT,
+                &[],
+                mode,
+            );
+            assert_eq!(
+                keys,
+                Vec::<String>::new(),
+                "a loop-rooted v-model must not register a resolver key, in {mode:?}"
+            );
+            // State reports the write, because the loop renders there and the write
+            // is the part that cannot happen. Resolve mode reports the loop instead,
+            // which is the stronger fact: nothing in the body renders at all, so a
+            // second warning about its write would only repeat it.
+            if matches!(mode, RenderMode::State) {
+                assert_eq!(warnings.len(), 1, "{:?}", warnings);
+                assert!(
+                    warnings[0].contains(r#"v-model="item.name""#)
+                        && warnings[0].contains("cannot be written"),
+                    "{}",
+                    warnings[0]
+                );
+            } else {
+                assert_eq!(warnings.len(), 1, "{:?}", warnings);
+                assert!(
+                    warnings[0].contains("`v-for` over `items` cannot render"),
+                    "{}",
+                    warnings[0]
+                );
+            }
+        }
+    }
+
+    /// Ruling 1: Resolve mode grows no write path, so it reports instead. The
+    /// diagnostic is in R-1's family and says which renderer does support it.
+    #[test]
+    fn a_v_model_in_resolve_mode_is_reported() {
+        let (keys, warnings) = r2_keys_and_warnings(
+            r#"<input v-model="draft"/>"#,
+            R2_SCRIPT,
+            &[],
+            RenderMode::Resolve,
+        );
+        assert_eq!(keys, vec!["draft".to_string()], "the read still resolves");
+        assert_eq!(warnings.len(), 1, "{:?}", warnings);
+        assert!(
+            warnings[0].contains(r#"v-model="draft""#),
+            "{}",
+            warnings[0]
+        );
+        assert!(
+            warnings[0].contains("cannot be written in Resolve mode"),
+            "{}",
+            warnings[0]
+        );
+        assert!(
+            warnings[0].contains("render_with_state"),
+            "the report names the renderer that does support it: {}",
+            warnings[0]
+        );
+    }
+
+    /// One name, from one place. The loop-rooted case is skipped by both collectors,
+    /// and the rooted cases agree on the same spelling, dotted or not.
+    #[test]
+    fn the_v_model_collectors_agree_on_the_setter_name() {
+        for (tpl, expected) in [
+            (r#"<input v-model="draft"/>"#, vec!["draft"]),
+            (r#"<input v-model="user.name"/>"#, vec!["user.name"]),
+            (
+                r#"<ul><li v-for="item in items"><input v-model="item.name"/></li></ul>"#,
+                vec![],
+            ),
+        ] {
+            let nodes = crate::template_parse::parse_template_to_ast(tpl).expect("template parses");
+            let collected = collect_vmodel_expressions(&nodes);
+            let expressions: Vec<String> = collected.iter().map(|(expr, _)| expr.clone()).collect();
+            assert_eq!(expressions, expected, "expressions for {tpl}");
+
+            // The handler the setter is generated under is the one the dispatcher
+            // carries, and the dotted translation lives in one place.
+            let handlers: Vec<String> = collected
+                .iter()
+                .map(|(_, handler)| handler.clone())
+                .collect();
+            let expected_handlers: Vec<String> = expected
+                .iter()
+                .map(|expr| vmodel_setter_name(expr))
+                .collect();
+            assert_eq!(handlers, expected_handlers, "handlers for {tpl}");
+
+            let dispatcher: Vec<String> = collect_handlers(&nodes)
+                .into_iter()
+                .filter(|h| h.starts_with("__vmodel_set_"))
+                .collect();
+            assert_eq!(
+                dispatcher, expected_handlers,
+                "the dispatcher must carry an arm for every non-loop-rooted v-model, under \
+                 the same name, and none for a loop-rooted one, in {tpl}"
+            );
+        }
+    }
+
+    /// The expression a single `v-model` template binds, for the test above.
+    fn tpl_expr(tpl: &str) -> String {
+        tpl.rsplit("v-model=\"")
+            .next()
+            .unwrap()
+            .trim_end_matches("\"/>")
+            .to_string()
     }
 }
 
