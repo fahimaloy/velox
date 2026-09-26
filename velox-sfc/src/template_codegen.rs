@@ -2752,6 +2752,24 @@ enum AttrSite {
 /// `emit_props_in_loop`, not the directive's name. `rewrite_if_expr` rewrites
 /// every bare identifier into `resolve("<ident>")`, so a condition never emits
 /// the direct binding read — `v-if="i"` is `resolve("i")`, an empty answer.
+///
+/// The two fallback arms are deliberately set at opposite defaults, and the
+/// asymmetry is the point:
+///
+/// - Inside the body, an unrecognised directive is `Direct`. Every directive
+///   there is dropped by `emit_props_in_loop` (`:1600-1602`), so it emits no
+///   read at all and there is nothing to be wrong about; `Resolver` there
+///   would report loops that render perfectly.
+/// - On the loop element, an unrecognised directive is `Resolver`. Today the
+///   emitter handles only `v-for`, `v-if`/`v-else-if`/`v-else`, `v-show` and
+///   `v-model`, and `v-model` is listed explicitly below, so nothing reaches
+///   this arm in the current tree. A directive added later is the case this
+///   rule has to be right about, and if it is routed through
+///   `rewrite_if_expr` like every other condition then `Resolver` is the
+///   answer — while `Direct` would silently exempt it. A read wrongly
+///   exempted is the silent failure this rule exists to prevent (N3, N6), so
+///   the unknown case is reported rather than dismissed; an extra sentence in
+///   a diagnostic is the cheap direction to be wrong in.
 fn directive_emission(name: &str, site: AttrSite) -> IndexEmission {
     match (name, site) {
         // `v-for` is not classified here: its value is `(item, i) in expr`, not
@@ -2772,9 +2790,13 @@ fn directive_emission(name: &str, site: AttrSite) -> IndexEmission {
         (_, AttrSite::InLoopBody) => IndexEmission::Direct,
         // `v-model` becomes a `:value` bind plus an `@input` handler in
         // `extract_vmodel` before the loop branch, so its value read is a
-        // bind's — the same path as `:value`. Any other directive the emitter
-        // does not handle emits no read, so `Direct` is the honest answer.
-        _ => IndexEmission::Direct,
+        // bind's — the same path as `:value`, which renders. This is the only
+        // loop-element directive that is not a condition, and naming it keeps
+        // the fallback below free to fail loud.
+        ("model", AttrSite::LoopElement) => IndexEmission::Direct,
+        // Any directive the emitter does not handle today. Treated as a
+        // resolver read: see the note on the two fallbacks above.
+        (_, AttrSite::LoopElement) => IndexEmission::Resolver,
     }
 }
 
@@ -2888,16 +2910,23 @@ fn expr_reads_roots(expr: &str, roots: &[&str]) -> bool {
 /// in the template is emitted as `"<key>" => state.<key>().to_string()` against a
 /// struct that has no such field, so it does not answer the collection either.
 /// With no arm the loop counts zero items and never runs its body at all; with an
-/// arm the loop item is still read as `items[0].name`, which no arm answers. Either
-/// way nothing in the loop renders, and one message says so for the whole body
-/// rather than one contradictory message per binding.
+/// arm the loop item is still read as `items[0].name`, which no arm answers, so
+/// every read of the ITEM is empty while a direct read of the index still renders.
+/// One message says so for the whole body rather than one contradictory message
+/// per binding, and it also names the case it cannot check — a read the emitter
+/// drops — rather than asserting that every value in the body is empty.
 fn resolve_loop_warning(family: &ResolveLoopFamily, methods: &[StateMethod]) -> String {
     let collection = &family.collection;
     let has_arm = has_state_getter(methods, collection);
     let cause = if has_arm {
         format!(
             "the loop's values are read as indexed resolver keys (`{collection}[0]…`), which \
-             no resolver arm answers, so every value in the body renders empty"
+             no resolver arm answers, so every read of the loop ITEM renders empty — only a \
+             direct read of the loop index, such as `{{{{ index }}}}`, survives. This is also \
+             reported for a read that the emitter DROPS rather than makes, such as a condition \
+             on an element inside the body: that read renders nothing to be wrong, but it \
+             cannot be checked from here, and a loop reported for the wrong reason is better \
+             than one that is broken for the wrong reason without saying so"
         )
     } else {
         format!(
@@ -3556,6 +3585,119 @@ mod tests {
 
         let resolve = collect_resolver_keys(&nodes, &methods(script), &[], RenderMode::Resolve);
         assert_loop_reported_for_unanswerable_reads(&resolve.warnings);
+    }
+
+    /// F1: the two fallback arms are set at opposite defaults, and each is
+    /// pinned here with its reason.
+    ///
+    /// On the loop element an unrecognised directive is `Resolver`: it is the
+    /// one classification with no emit path to read off, it is the case a future
+    /// condition directive arrives as, and `Direct` there would silently exempt
+    /// a read the resolver cannot answer — the N3/N6 failure. Inside the body it
+    /// is `Direct`, because every directive there is dropped by
+    /// `emit_props_in_loop` and emits no read at all, so `Resolver` would report
+    /// loops that render perfectly. `v-model` is the one loop-element directive
+    /// that is not a condition; `extract_vmodel` re-emits it as a `:value` bind,
+    /// so it must stay exempt.
+    #[test]
+    fn unrecognised_directives_fail_loud_on_the_loop_element_and_stay_quiet_in_the_body() {
+        assert!(
+            directive_emission("if", AttrSite::LoopElement) == IndexEmission::Resolver,
+            "a condition on the loop element is rewritten by `rewrite_if_expr`"
+        );
+        assert!(
+            directive_emission("show", AttrSite::LoopElement) == IndexEmission::Resolver,
+            "so is `v-show`, through the same handler"
+        );
+        assert!(
+            directive_emission("text", AttrSite::LoopElement) == IndexEmission::Resolver,
+            "a directive the emitter does not handle has no direct read to claim, \
+             so it must not be exempted from the loop diagnostic"
+        );
+        assert!(
+            directive_emission("text", AttrSite::InLoopBody) == IndexEmission::Direct,
+            "inside the body every directive is dropped, so it emits no read to \
+             be wrong about and reporting it would flag a loop that renders"
+        );
+        assert!(
+            directive_emission("model", AttrSite::LoopElement) == IndexEmission::Direct,
+            "`v-model` becomes a `:value` bind, which renders"
+        );
+    }
+
+    /// F1, at the decision: an unrecognised directive naming the index on the
+    /// loop element must not be exempt, so the loop is reported.
+    #[test]
+    fn an_unrecognised_directive_naming_the_index_is_reported() {
+        let script = r#"
+        impl State {
+            pub fn items(&self) -> String { String::new() }
+        }"#;
+        let nodes = crate::template_parse::parse_template_to_ast(
+            r#"<ul><li v-for="(item, i) in items" v-when="i">x</li></ul>"#,
+        )
+        .unwrap();
+
+        let resolve = collect_resolver_keys(&nodes, &methods(script), &[], RenderMode::Resolve);
+        assert_loop_reported_for_unanswerable_reads(&resolve.warnings);
+    }
+
+    /// F2: the cause for a collection WITH an arm must not claim that every
+    /// value in the body renders empty — a direct index read renders. It names
+    /// the loop item instead.
+    #[test]
+    fn the_loop_message_blames_the_item_read_not_every_value() {
+        let script = r#"
+        impl State {
+            pub fn items(&self) -> String { String::new() }
+        }"#;
+        let nodes = crate::template_parse::parse_template_to_ast(
+            r#"<ul><li v-for="(item, i) in items">{{ item.name }}</li></ul>"#,
+        )
+        .unwrap();
+
+        let resolve = collect_resolver_keys(&nodes, &methods(script), &[], RenderMode::Resolve);
+        assert_loop_reported_for_unanswerable_reads(&resolve.warnings);
+        let warning = &resolve.warnings[0];
+        assert!(
+            warning.contains("every read of the loop ITEM renders empty"),
+            "the unanswerable read is the loop item's: {warning}"
+        );
+        assert!(
+            !warning.contains("every value in the body renders empty"),
+            "a direct index read renders, so that claim would be false: {warning}"
+        );
+    }
+
+    /// F2: when the only read that triggered the report is one the emitter
+    /// DROPS, the message must say so instead of claiming the body renders
+    /// empty. A diagnostic that fires for a right reason with a wrong
+    /// explanation teaches its reader to ignore the explanation.
+    ///
+    /// The `v-show` here is on a loop element nested in a parent, and
+    /// `emit_children_with_mode`'s `v-for` branch has no `v-show` branch (only
+    /// `emit_node_with_mode`'s does), so the read is dropped — see the
+    /// `resolves_index: false` case in `index_classification_agrees_with_the_
+    /// emitted_read`. The loop is reported anyway, which is the safe direction.
+    #[test]
+    fn the_loop_message_says_a_dropped_read_is_not_checkable() {
+        let script = r#"
+        impl State {
+            pub fn items(&self) -> String { String::new() }
+        }"#;
+        let nodes = crate::template_parse::parse_template_to_ast(
+            r#"<ul><li v-for="(item, i) in items" v-show="i">x</li></ul>"#,
+        )
+        .unwrap();
+
+        let resolve = collect_resolver_keys(&nodes, &methods(script), &[], RenderMode::Resolve);
+        // Reported on purpose — the direction that is safe to be wrong in.
+        assert_loop_reported_for_unanswerable_reads(&resolve.warnings);
+        let warning = &resolve.warnings[0];
+        assert!(
+            warning.contains("the emitter DROPS rather than makes"),
+            "the read that triggered this is dropped, so the message must say so: {warning}"
+        );
     }
 
     /// The boundary across attribute KINDS: one element carrying both a
