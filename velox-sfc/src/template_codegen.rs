@@ -85,6 +85,69 @@ fn resolve_key_expr(key_val: &str) -> String {
     unwrapped.unwrap_or(trimmed).to_string()
 }
 
+/// The Resolve-mode read of an expression rooted at a `v-for` loop variable.
+///
+/// The Resolve-mode loop body iterates an index over the collection string, so
+/// the loop item is *not* a Rust binding there: it is read the same way the same
+/// body already reads an interpolated `{ todo.text }` — an indexed resolver
+/// lookup. The loop index is a real binding and is read directly.
+///
+/// Returns `None` for anything this cannot read (a compound expression such as
+/// `todo.a + todo.b`), so the caller keeps the plain resolver lookup and the
+/// diagnostic still reports the binding rather than leaving it silently empty.
+fn resolve_loop_item_expr(expr: &str, for_info: &VForInfo) -> Option<String> {
+    let expr = expr.trim();
+    if expr == for_info.index_name {
+        // The loop index *is* a real binding in this body.
+        return Some(for_info.index_name.clone());
+    }
+    if expr == for_info.item_name {
+        return Some(format!(
+            r#"resolve(&format!("{}[{{}}]", {idx}))"#,
+            for_info.expr,
+            idx = for_info.index_name
+        ));
+    }
+    if let Some(path) = expr.strip_prefix(&for_info.item_name) {
+        if let Some(path) = path.strip_prefix('.') {
+            if is_field_path(path) {
+                return Some(format!(
+                    r#"resolve(&format!("{}[{{}}].{path}", {idx}))"#,
+                    for_info.expr,
+                    idx = for_info.index_name
+                ));
+            }
+        }
+    }
+    None
+}
+
+/// Whether `s` is a plain field path — dot-separated Rust identifiers, and
+/// nothing else. It keeps a compound expression such as `todo.a + todo.b` out of
+/// the indexed-resolver rewrite, where only the field path is rewritable.
+fn is_field_path(s: &str) -> bool {
+    !s.is_empty()
+        && s.split('.').all(|seg| {
+            let mut chars = seg.chars();
+            matches!(chars.next(), Some(c) if c.is_ascii_alphabetic() || c == '_')
+                && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+        })
+}
+
+/// The `String` value a Resolve-mode `v-for` element's `:key` is set from.
+///
+/// `make_resolve` is built once, outside every loop, so a key rooted at the loop
+/// variable has no arm to answer it there. It is read the way the same loop body
+/// reads an interpolated loop value instead; a key the loop cannot read that way
+/// keeps the resolver lookup, which the diagnostic reports.
+fn resolve_mode_key_value(key_val: &str, for_info: &VForInfo) -> String {
+    let authored = resolve_key_expr(key_val);
+    match resolve_loop_item_expr(&authored, for_info) {
+        Some(indexed) => format!("{indexed}.to_string()"),
+        None => format!("resolve({}).to_string()", string_lit(&authored)),
+    }
+}
+
 /// Validate the parsed template AST and collect structural errors.
 /// Returns a list of error/warning messages (empty if the template is valid).
 fn validate_template(nodes: &[Node]) -> Vec<String> {
@@ -1274,14 +1337,13 @@ fn emit_node_with_mode(
 
                             let inner_with_key = if let Some(Some(key_val)) = &key_expr {
                                 format!(
-                                    "{{ let mut __node = {}; if let velox_dom::VNode::Element {{ ref mut props, .. }} = __node {{ props.attrs.insert(\"key\".to_string(), resolve({}).to_string()); }} __node }}",
+                                    "{{ let mut __node = {}; if let velox_dom::VNode::Element {{ ref mut props, .. }} = __node {{ props.attrs.insert(\"key\".to_string(), {}); }} __node }}",
                                     inner,
-                                    string_lit(&resolve_key_expr(key_val))
+                                    resolve_mode_key_value(key_val, &for_info)
                                 )
                             } else {
                                 inner
                             };
-
                             if let Some(if_pos) = v_if_pos {
                                 let dir_if = &attrs[if_pos];
                                 let expr_if =
@@ -1478,6 +1540,27 @@ fn emit_props_with_ctx(
     item_name: Option<&str>,
     idx_name: Option<&str>,
 ) -> String {
+    emit_props_in_loop(attrs, item_name, idx_name, None)
+}
+
+/// The props chain for an element that is not inside a `v-for` body.
+fn emit_props_with(attrs: &[TemplateAttr]) -> String {
+    emit_props_in_loop(attrs, None, None, None)
+}
+
+/// Build the props chain for an element.
+///
+/// `resolve_loop` is the `v-for` body the element sits in, and is set only when
+/// the Resolve renderer is being generated: there the loop item is an indexed
+/// resolver lookup, not a field read, so a loop-rooted `:bind` is normalized
+/// accordingly. It is `None` for the State renderer, where the loop item is a
+/// real binding and is read directly.
+fn emit_props_in_loop(
+    attrs: &[TemplateAttr],
+    item_name: Option<&str>,
+    idx_name: Option<&str>,
+    resolve_loop: Option<&VForInfo>,
+) -> String {
     if attrs.is_empty() {
         return "Props::new()".to_string();
     }
@@ -1495,7 +1578,14 @@ fn emit_props_with_ctx(
                 } else {
                     &a.name
                 };
-                parts.push(bind_prop_entry(key, &a.name, &expr, item_name, idx_name));
+                parts.push(bind_prop_entry(
+                    key,
+                    &a.name,
+                    &expr,
+                    item_name,
+                    idx_name,
+                    resolve_loop,
+                ));
             }
             AttrKind::Directive => {
                 // directives are not emitted as props
@@ -1522,42 +1612,6 @@ fn append_scope_attr(props: &str, scope_id: Option<&str>) -> String {
     } else {
         props.to_string()
     }
-}
-
-fn emit_props_with(attrs: &[TemplateAttr]) -> String {
-    if attrs.is_empty() {
-        return "Props::new()".to_string();
-    }
-    let mut parts = vec!["Props::new()".to_string()];
-    for a in attrs {
-        match a.kind {
-            AttrKind::Static => {
-                let v = a.value.clone().unwrap_or_default();
-                parts.push(format!(r#".set("{}", {})"#, a.name, string_lit(&v)));
-            }
-            AttrKind::Bind => {
-                let expr = a.value.clone().unwrap_or_else(|| a.name.clone());
-                let key_attr = if a.name == "click-payload" || a.name == "payload" {
-                    "on:click-payload"
-                } else {
-                    &a.name
-                };
-                parts.push(bind_prop_entry(key_attr, &a.name, &expr, None, None));
-            }
-            AttrKind::Directive => {
-                // do not emit directives as props
-            }
-            AttrKind::On => {
-                let handler = a.value.clone().unwrap_or_default();
-                parts.push(format!(
-                    r#".set("on:{}", {})"#,
-                    a.name,
-                    string_lit(&handler)
-                ));
-            }
-        }
-    }
-    parts.join("")
 }
 
 fn emit_children_with_mode(
@@ -1730,9 +1784,9 @@ fn emit_children_with_mode(
 
                                 let inner_with_key = if let Some(Some(key_val)) = &key_expr {
                                     format!(
-                                        "{{ let mut __node = {}; if let velox_dom::VNode::Element {{ ref mut props, .. }} = __node {{ props.attrs.insert(\"key\".to_string(), resolve({}).to_string()); }} __node }}",
+                                        "{{ let mut __node = {}; if let velox_dom::VNode::Element {{ ref mut props, .. }} = __node {{ props.attrs.insert(\"key\".to_string(), {}); }} __node }}",
                                         inner,
-                                        string_lit(&resolve_key_expr(key_val))
+                                        resolve_mode_key_value(key_val, &for_info)
                                     )
                                 } else {
                                     inner.clone()
@@ -2157,7 +2211,14 @@ fn emit_node_with_ctx_for_loop(n: &Node, for_info: &VForInfo, scope_id: Option<&
             children,
             ..
         } => {
-            let props = emit_props_with(attrs);
+            // Inside a Resolve-mode loop body the loop item is an indexed
+            // resolver read, so a loop-rooted binding is normalized as such.
+            let props = emit_props_in_loop(
+                attrs,
+                Some(&for_info.item_name),
+                Some(&for_info.index_name),
+                Some(for_info),
+            );
             let kids = {
                 let mut k_items: Vec<String> = Vec::new();
                 for c in children {
@@ -2433,11 +2494,16 @@ struct BindEmission {
 /// this function, and [`collect_resolver_keys`] reads the `keys` it reports, so
 /// the lookups codegen emits and the keys the resolver registers cannot drift
 /// apart.
+///
+/// `resolve_loop` is the `v-for` body the element sits in, set only when the
+/// Resolve renderer is being generated. It is `None` for the State renderer,
+/// where the loop item is a real binding and is read directly.
 fn emit_bind_attr(
     attr_name: &str,
     expr: &str,
     item_name: Option<&str>,
     idx_name: Option<&str>,
+    resolve_loop: Option<&VForInfo>,
 ) -> BindEmission {
     let authored = if attr_name == "key" {
         // A `:key` value is normalized by the same helper the `v-for` key emit
@@ -2459,7 +2525,17 @@ fn emit_bind_attr(
                 if cls.is_empty() || cond.is_empty() {
                     continue;
                 }
-                let value = match rewrite_ctx_expr(&cond, item_name, idx_name) {
+
+                // A loop-rooted condition is a direct field read in the State
+                // renderer and an indexed resolver read in the Resolve one; a
+                // condition that is neither falls through to the resolver path
+                // below, which reports it.
+                let value = match rewrite_ctx_expr(&cond, item_name, idx_name).and_then(|direct| {
+                    match resolve_loop {
+                        Some(info) => resolve_loop_item_expr(&direct, info),
+                        None => Some(direct),
+                    }
+                }) {
                     // A loop variable is read directly; nothing to resolve.
                     Some(direct) => direct,
                     None => {
@@ -2490,6 +2566,25 @@ fn emit_bind_attr(
     }
 
     if let Some(direct) = rewrite_ctx_expr(&authored, item_name, idx_name) {
+        // In the Resolve renderer the loop item is not a Rust binding, so a
+        // loop-rooted binding is normalized to the indexed resolver read the
+        // same loop body already uses for an interpolated `{ todo.text }`.
+        // A root the loop cannot read that way (a compound expression such as
+        // `todo.a + todo.b`) keeps the resolver lookup, so the diagnostic
+        // reports it rather than leaving it silently empty.
+        let direct = match resolve_loop {
+            Some(info) => match resolve_loop_item_expr(&direct, info) {
+                Some(indexed) => indexed,
+                None => {
+                    return BindEmission {
+                        value: BindValue::Lookup(format!("resolve({})", string_lit(&authored))),
+                        keys: vec![authored.clone()],
+                        authored,
+                    };
+                }
+            },
+            None => direct,
+        };
         return BindEmission {
             value: BindValue::Direct(direct),
             keys: Vec::new(),
@@ -2511,7 +2606,7 @@ fn bind_attr_value(
     item_name: Option<&str>,
     idx_name: Option<&str>,
 ) -> String {
-    let emission = emit_bind_attr(attr_name, expr, item_name, idx_name);
+    let emission = emit_bind_attr(attr_name, expr, item_name, idx_name, None);
     match &emission.value {
         BindValue::Direct(direct) => format!("format!(\"{{}}\", {direct})"),
         _ => format!("{}.clone()", emission.value.expr()),
@@ -2525,8 +2620,9 @@ fn bind_prop_entry(
     expr: &str,
     item_name: Option<&str>,
     idx_name: Option<&str>,
+    resolve_loop: Option<&VForInfo>,
 ) -> String {
-    let emission = emit_bind_attr(attr_name, expr, item_name, idx_name);
+    let emission = emit_bind_attr(attr_name, expr, item_name, idx_name, resolve_loop);
     match &emission.value {
         BindValue::Direct(direct) => format!(r#".set("{}", &format!("{{}}", {direct}))"#, key),
         BindValue::ClassObject(value) => format!(r#".set("class", {value})"#),
@@ -2596,12 +2692,12 @@ struct ResolverKeys {
 /// The generated module carries two renderers: `render_with` (Resolve mode,
 /// which only has the resolver's strings) and `render_with_state` (State mode,
 /// which reads loop items and fields directly). A binding rooted at a loop
-/// variable is therefore a direct read in State mode and a resolver lookup in
-/// Resolve mode, and `mode` — the renderer the consumer calls — decides which
-/// one it is: reported for [`RenderMode::Resolve`], silent for
-/// [`RenderMode::State`], which still registers no key for it. Every other
-/// diagnostic is mode-independent: it describes a key the resolver cannot
-/// satisfy in either renderer.
+/// variable is a real read in both: a field read in State mode, an indexed
+/// resolver lookup in Resolve mode. Neither registers a key, so `mode` does not
+/// change which bound expressions are reportable. Every diagnostic is therefore
+/// mode-independent: it describes a key the resolver cannot satisfy in either
+/// renderer — a loop-rooted expression the loop cannot read, such as
+/// `todo.a + todo.b`, among them.
 fn collect_resolver_keys(
     nodes: &[Node],
     methods: &[StateMethod],
@@ -2618,6 +2714,7 @@ fn collect_resolver_keys(
         mode: RenderMode,
         item_name: Option<&str>,
         idx_name: Option<&str>,
+        loop_info: Option<&VForInfo>,
         keys: &mut Vec<String>,
         warnings: &mut Vec<String>,
     ) {
@@ -2635,12 +2732,13 @@ fn collect_resolver_keys(
                 .find(|a| matches!(a.kind, AttrKind::Directive) && a.name == "for")
                 .and_then(|a| a.value.as_deref())
                 .and_then(parse_v_for);
-            let (item_name, idx_name) = match &loop_scope {
+            let (item_name, idx_name, loop_info) = match &loop_scope {
                 Some(info) => (
                     Some(info.item_name.as_str()),
                     Some(info.index_name.as_str()),
+                    Some(info),
                 ),
-                None => (item_name, idx_name),
+                None => (item_name, idx_name, loop_info),
             };
             for attr in attrs {
                 if !matches!(attr.kind, AttrKind::Bind) {
@@ -2649,24 +2747,16 @@ fn collect_resolver_keys(
                 let Some(expr) = attr.value.as_deref() else {
                     continue;
                 };
-                let emission = emit_bind_attr(&attr.name, expr, item_name, idx_name);
-
-                // A loop-rooted binding registers no key. In State mode that is
-                // all it needs: the binding is a direct read of the loop item. In
-                // Resolve mode the same binding is a resolver lookup with no loop
-                // value behind it, so report it rather than leaving that lookup
-                // silently unresolved.
+                // The Resolve renderer reads a loop-rooted binding through the
+                // indexed resolver the loop body itself uses; the State renderer
+                // reads the loop item directly. Either way it is a real read, so
+                // it registers no key and there is nothing to report.
+                let resolve_loop = match mode {
+                    RenderMode::Resolve => loop_info,
+                    RenderMode::State => None,
+                };
+                let emission = emit_bind_attr(&attr.name, expr, item_name, idx_name, resolve_loop);
                 if matches!(emission.value, BindValue::Direct(_)) {
-                    if mode == RenderMode::Resolve {
-                        warnings.push(format!(
-                            "bound attribute :{}=\"{}\" is rooted at a `v-for` loop variable and \
-                             this component is rendered in Resolve mode, which has no loop value \
-                             — the binding renders empty. Render the component through \
-                             `render_with_state` to read the loop item directly, or move the value \
-                             into a zero-argument State getter.",
-                            attr.name, emission.authored
-                        ));
-                    }
                     continue;
                 }
 
@@ -2708,7 +2798,7 @@ fn collect_resolver_keys(
                 }
             }
             walk(
-                children, methods, fields, mode, item_name, idx_name, keys, warnings,
+                children, methods, fields, mode, item_name, idx_name, loop_info, keys, warnings,
             );
         }
     }
@@ -2718,6 +2808,7 @@ fn collect_resolver_keys(
         methods,
         fields,
         mode,
+        None,
         None,
         None,
         &mut keys,
@@ -2802,47 +2893,55 @@ mod tests {
         assert!(warning.contains("renders empty"), "{warning}");
     }
 
-    /// A loop-rooted binding is read directly by the State renderer, but the
-    /// Resolve renderer looks the expression up, so only a Resolve-mode consumer
-    /// hears about it.
+    /// A loop-rooted binding is a real read in both renderers — a field read in
+    /// State mode, an indexed resolver read in Resolve mode — so neither renderer
+    /// has a key to register and neither has anything to report.
     #[test]
-    fn loop_rooted_binding_is_reported_in_resolve_mode() {
+    fn loop_rooted_binding_is_not_reported_in_either_mode() {
         let nodes = crate::template_parse::parse_template_to_ast(
             r#"<div v-for="(todo, idx) in todos"><p :value="todo.text">x</p></div>"#,
         )
         .unwrap();
-        let collected = collect_resolver_keys(&nodes, &methods(""), &[], RenderMode::Resolve);
 
-        assert!(collected.keys.is_empty(), "{:?}", collected.keys);
-        assert_eq!(collected.warnings.len(), 1, "{:?}", collected.warnings);
-        let warning = &collected.warnings[0];
-        assert!(warning.contains(":value=\"todo.text\""), "{warning}");
-        assert!(
-            warning.contains("v-for") && warning.contains("Resolve"),
-            "the warning must name the mode split: {warning}"
-        );
-        assert!(
-            warning.contains("render_with_state"),
-            "the warning must point at the renderer that reads the loop item: {warning}"
-        );
+        for mode in [RenderMode::State, RenderMode::Resolve] {
+            let collected = collect_resolver_keys(&nodes, &methods(""), &[], mode);
+            assert!(collected.keys.is_empty(), "{mode:?}: {:?}", collected.keys);
+            assert!(
+                collected.warnings.is_empty(),
+                "{mode:?}: the loop body reads the loop item, so there is no \
+                 unresolved lookup to report: {:?}",
+                collected.warnings
+            );
+        }
     }
 
-    /// The same binding in a State-mode component is a correct direct read, so it
-    /// is neither registered nor reported — that is what keeps the shipped
-    /// `examples/todo` build and a generated project warning-free.
+    /// The one loop-rooted expression a Resolve-mode loop cannot read is a
+    /// compound one such as `todo.a + todo.b`: it stays a resolver lookup, and
+    /// reporting it is the whole point — a key that cannot be evaluated must not
+    /// go silently empty. State mode reads the same expression straight off the
+    /// loop item, so there is nothing to report there.
     #[test]
-    fn loop_rooted_binding_is_silent_in_state_mode() {
+    fn unreadable_loop_rooted_binding_is_still_reported_in_resolve_mode() {
         let nodes = crate::template_parse::parse_template_to_ast(
-            r#"<div v-for="(todo, idx) in todos"><p :value="todo.text">x</p></div>"#,
+            r#"<div v-for="todo in todos"><p :value="todo.a + todo.b">x</p></div>"#,
         )
         .unwrap();
-        let collected = collect_resolver_keys(&nodes, &methods(""), &[], RenderMode::State);
 
-        assert!(collected.keys.is_empty(), "{:?}", collected.keys);
+        let resolve = collect_resolver_keys(&nodes, &methods(""), &[], RenderMode::Resolve);
+        assert!(resolve.keys.is_empty(), "{:?}", resolve.keys);
+        assert_eq!(resolve.warnings.len(), 1, "{:?}", resolve.warnings);
+        let warning = &resolve.warnings[0];
+        assert!(warning.contains(":value=\"todo.a + todo.b\""), "{warning}");
         assert!(
-            collected.warnings.is_empty(),
-            "a State-mode component reads the loop item directly: {:?}",
-            collected.warnings
+            warning.contains("renders empty"),
+            "the diagnosis must say the binding renders empty: {warning}"
+        );
+
+        let state = collect_resolver_keys(&nodes, &methods(""), &[], RenderMode::State);
+        assert!(
+            state.warnings.is_empty(),
+            "State mode reads the field off the loop item, so it resolves: {:?}",
+            state.warnings
         );
     }
 
@@ -2873,10 +2972,10 @@ mod tests {
         }
     }
 
-    /// `:key` on a `v-for` element is the same case: the Resolve renderer still
-    /// looks the loop field up, so a Resolve-mode consumer is warned.
+    /// `:key` on a `v-for` element is the same case, and both spellings of the
+    /// key expression normalize to the same read, so neither mode reports one.
     #[test]
-    fn v_for_key_binding_is_reported_in_resolve_mode() {
+    fn v_for_key_binding_is_not_reported_in_either_mode() {
         // Both spellings of the same key expression: the collector must analyze
         // the normalized expression codegen emits, not the raw `{{ … }}` text.
         for tpl in [
@@ -2885,52 +2984,45 @@ mod tests {
         ] {
             let nodes = crate::template_parse::parse_template_to_ast(tpl).unwrap();
 
-            let resolve = collect_resolver_keys(&nodes, &methods(""), &[], RenderMode::Resolve);
-            assert!(resolve.keys.is_empty(), "{tpl} {:?}", resolve.keys);
-            assert_eq!(resolve.warnings.len(), 1, "{tpl} {:?}", resolve.warnings);
-            assert!(
-                resolve.warnings[0].contains(r#":key="todo.id""#),
-                "{tpl} {}",
-                resolve.warnings[0]
-            );
-
-            let state = collect_resolver_keys(&nodes, &methods(""), &[], RenderMode::State);
-            assert!(state.keys.is_empty(), "{tpl} {:?}", state.keys);
-            assert!(state.warnings.is_empty(), "{tpl} {:?}", state.warnings);
+            for mode in [RenderMode::Resolve, RenderMode::State] {
+                let collected = collect_resolver_keys(&nodes, &methods(""), &[], mode);
+                assert!(
+                    collected.keys.is_empty(),
+                    "{tpl} {mode:?} {:?}",
+                    collected.keys
+                );
+                assert!(
+                    collected.warnings.is_empty(),
+                    "{tpl} {mode:?}: the loop body reads the loop item, so the key \
+                     is resolved: {:?}",
+                    collected.warnings
+                );
+            }
         }
     }
 
     /// The `{{ … }}` spelling of a `v-for` `:key` is a loop-rooted binding whose
-    /// key codegen normalizes before emitting, and State mode reads the loop
-    /// field directly — so a State-mode consumer must not be told that the
-    /// binding cannot be resolved. The raw `{{ … }}` text is not an expression
-    /// codegen ever uses, and reporting it describes a defect that is not there.
+    /// key codegen normalizes before emitting, and both renderers read the loop
+    /// field — so no consumer may be told the binding cannot be resolved. The
+    /// raw `{{ … }}` text is not an expression codegen ever uses, and reporting
+    /// it describes a defect that is not there.
     #[test]
-    fn state_mode_mustache_key_is_not_reported() {
+    fn mustache_key_is_not_reported_in_either_mode() {
         let nodes = crate::template_parse::parse_template_to_ast(
             r#"<div v-for="todo in todos" :key="{{ todo.id }}">x</div>"#,
         )
         .unwrap();
 
-        let state = collect_resolver_keys(&nodes, &methods(""), &[], RenderMode::State);
-        assert!(state.keys.is_empty(), "{:?}", state.keys);
-        assert!(
-            state.warnings.is_empty(),
-            "State mode reads `todo.id` from the loop item, so the mustache \
-             spelling must not be reported: {:?}",
-            state.warnings
-        );
-
-        // The same template is still reported for a Resolve-mode consumer: that
-        // renderer has no loop value, so the lookup genuinely has no arm.
-        let resolve = collect_resolver_keys(&nodes, &methods(""), &[], RenderMode::Resolve);
-        assert_eq!(resolve.warnings.len(), 1, "{:?}", resolve.warnings);
-        assert!(
-            !resolve.warnings[0].contains("is an expression"),
-            "the diagnosis must name the loop-rooted binding, not the raw \
-             mustache text: {}",
-            resolve.warnings[0]
-        );
+        for mode in [RenderMode::Resolve, RenderMode::State] {
+            let collected = collect_resolver_keys(&nodes, &methods(""), &[], mode);
+            assert!(collected.keys.is_empty(), "{mode:?} {:?}", collected.keys);
+            assert!(
+                collected.warnings.is_empty(),
+                "{mode:?}: both renderers read `todo.id` from the loop item, so \
+                 the mustache spelling must not be reported: {:?}",
+                collected.warnings
+            );
+        }
     }
 
     /// A zero-argument method that returns nothing is not a getter: the arm would

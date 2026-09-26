@@ -437,13 +437,12 @@ fn zero_argument_method_with_unrenderable_return_type_is_not_registered_as_a_get
     );
 }
 
-/// A binding rooted at a `v-for` loop variable is read directly by the State
-/// renderer but goes through `resolve(...)` in the Resolve renderer, which has
-/// no loop value to read. The mode split is pinned here: the State body keeps
-/// the direct read, the Resolve body still looks the expression up, and no
-/// resolver arm is invented for it.
+/// A binding rooted at a `v-for` loop variable is a real read in both renderers:
+/// the State body reads the loop item, the Resolve body reads the same field
+/// through the indexed resolver the loop body already uses for an interpolated
+/// loop value, and no resolver arm is invented for it either way.
 #[test]
-fn loop_rooted_binding_reads_the_loop_item_in_state_mode_only() {
+fn loop_rooted_binding_reads_the_loop_item_in_both_renderers() {
     let script = r#"
 pub struct State {
     pub todos: std::rc::Rc<velox_core::signal::Signal<Vec<String>>>,
@@ -465,10 +464,21 @@ impl State {
     .unwrap();
     println!("-- GENERATED RS --\n{}\n-- END RS --", rs);
 
-    // Resolve mode: no loop context, so the expression is looked up verbatim.
+    // Resolve mode: the loop item is read as the indexed resolver lookup the
+    // same loop body uses for an interpolated `todo.text`.
     assert!(
-        rs.contains(r#"resolve("todo.text")"#),
-        "Resolve mode must still look the loop expression up:\n{rs}"
+        rs.contains(r#"resolve(&format!("todos[{}].text", idx))"#),
+        "Resolve mode must read the loop field through the indexed resolver:\n{rs}"
+    );
+    assert!(
+        !rs.contains(r#"resolve("todo.text")"#),
+        "Resolve mode must not look a loop-rooted expression up verbatim:\n{rs}"
+    );
+    // The loop index is a real binding in the Resolve body too, so it is read
+    // directly rather than through the resolver.
+    assert!(
+        rs.contains(r#".set("index", &format!("{}", idx))"#),
+        "the loop index is a binding the Resolve body already has:\n{rs}"
     );
     // State mode: the loop item is read directly.
     assert!(
@@ -488,9 +498,10 @@ impl State {
 }
 
 /// `:key` generation: the State body reads the loop field and the Resolve body
-/// looks the expression up once. Both statements are pinned in full, not by
-/// fragment. (This test originally pinned the Resolve body's double-interpolating
-/// form as a known defect; that defect is fixed by the `:key` task.)
+/// reads the same field through the indexed resolver, exactly once. Both
+/// statements are pinned in full, not by fragment. (This test originally pinned
+/// the Resolve body's double-interpolating form as a known defect, and then
+/// pinned its single-lookup form; the loop-rooted key is now read directly.)
 #[test]
 fn v_for_key_generation_is_single_interpolation_in_both_renderers() {
     let rs = compile_template_to_rs_full(
@@ -510,12 +521,12 @@ fn v_for_key_generation_is_single_interpolation_in_both_renderers() {
         ),
         "State mode keeps inserting the loop field:\n{rs}"
     );
-    // Resolve mode: the whole insertion statement, one literal resolver lookup.
+    // Resolve mode: the whole insertion statement, one indexed resolver read.
     assert!(
         rs.contains(
-            r#"if let velox_dom::VNode::Element { ref mut props, .. } = __node { props.attrs.insert("key".to_string(), resolve("todo.id").to_string()); } __node }"#,
+            r#"if let velox_dom::VNode::Element { ref mut props, .. } = __node { props.attrs.insert("key".to_string(), resolve(&format!("todos[{}].id", __idx)).to_string()); } __node }"#,
         ),
-        "Resolve mode looks the key up exactly once:\n{rs}"
+        "Resolve mode reads the loop-rooted key exactly once, through the loop:\n{rs}"
     );
 }
 
@@ -651,21 +662,24 @@ fn compile_in_mode(tpl: &str, mode: RenderMode) -> String {
 }
 
 /// The key expression must be interpolated exactly once, through a single
-/// `resolve("…")` lookup of the literal expression — the same shape the sibling
-/// `v-for` branch uses for its collection (`let __for_expr = resolve("items");`).
+/// resolver read of the loop item — the same shape the sibling `v-for` branch
+/// uses for an interpolated loop value (`text(resolve(&format!("items[{}].name",
+/// __idx)))`) and for its collection (`let __for_expr = resolve("items");`).
 #[test]
 fn resolve_mode_v_for_key_interpolates_the_expression_exactly_once() {
     let rs = compile_in_mode(V_FOR_KEY_MUSTACHE, RenderMode::Resolve);
     println!("-- GENERATED RS --\n{}\n-- END RS --", rs);
 
     assert!(
-        rs.contains(r#"props.attrs.insert("key".to_string(), resolve("item.id").to_string());"#),
-        "the key must be a single literal resolver lookup:\n{rs}"
+        rs.contains(
+            r#"props.attrs.insert("key".to_string(), resolve(&format!("items[{}].id", __idx)).to_string());"#
+        ),
+        "the key must be read once, through the loop it is rooted in:\n{rs}"
     );
     // Each renderer interpolates the expression exactly once, and never rewrites
     // it into a nested lookup or a field access on a block.
     assert_eq!(
-        resolve_renderer(&rs).matches("item.id").count(),
+        resolve_renderer(&rs).matches("items[{}].id").count(),
         1,
         "the Resolve-mode renderer must interpolate the key exactly once:\n{rs}"
     );
@@ -760,4 +774,158 @@ fn v_for_with_a_valueless_key_generates_the_keyless_module() {
             "a valueless `:key` must generate the keyless module in {mode:?}"
         );
     }
+}
+
+/// A `v-for` element with loop-rooted bindings on the element itself: a `:key`,
+/// a plain element binding, and (on a component) the index binding.
+const LOOP_ROOTED_BINDS: &str =
+    r#"<li v-for="todo in todos" :key="todo.id" :data-id="todo.id">{{ todo.text }}</li>"#;
+const LOOP_ROOTED_COMPONENT_BINDS: &str = r#"<TodoItem v-for="(todo, index) in todos" :key="todo.id" :todo="todo.text" :index="index" />"#;
+
+/// Inside a `v-for` body a loop-rooted binding must be read from the loop, not
+/// looked up in the resolver: `make_resolve` is built once, outside every loop,
+/// so a `resolve("todo.id")` call there can never succeed because the loop value
+/// never reaches the resolver. The Resolve body iterates an index over the
+/// collection string, so the loop item is read the way the same body already
+/// reads an interpolated one — `resolve(&format!("todos[{}].id", __idx))` — while
+/// the loop index is a real binding and is read directly.
+#[test]
+fn resolve_mode_loop_rooted_binding_is_read_from_the_loop_item() {
+    let rs = compile_in_mode(LOOP_ROOTED_BINDS, RenderMode::Resolve);
+    let resolve_r = resolve_renderer(&rs);
+
+    assert!(
+        resolve_r.contains(r#"for __idx in 0..__for_count {"#),
+        "the Resolve loop body binds the index:\n{resolve_r}"
+    );
+    assert!(
+        resolve_r.contains(
+            r#".set("data-id", &format!("{}", resolve(&format!("todos[{}].id", __idx))))"#
+        ),
+        "an element binding rooted at the loop item must read the loop item:\n{resolve_r}"
+    );
+    assert!(
+        resolve_r.contains(
+            r#"props.attrs.insert("key".to_string(), resolve(&format!("todos[{}].id", __idx)).to_string());"#
+        ),
+        "the `:key` must be read from the loop item:\n{resolve_r}"
+    );
+    assert!(
+        !resolve_r.contains(r#"resolve("todo.id")"#),
+        "a loop-rooted binding must not be looked up in the resolver:\n{resolve_r}"
+    );
+    assert!(
+        !make_resolve_body(&rs).contains(r#""todo.id" =>"#),
+        "a loop-rooted binding must not be registered as a resolver key either:\n{rs}"
+    );
+
+    let rs = compile_in_mode(LOOP_ROOTED_COMPONENT_BINDS, RenderMode::Resolve);
+    let resolve_r = resolve_renderer(&rs);
+    assert!(
+        resolve_r.contains(
+            r#".set("todo", &format!("{}", resolve(&format!("todos[{}].text", index))))"#
+        ),
+        "a component prop rooted at the loop item must read the loop item:\n{resolve_r}"
+    );
+    assert!(
+        resolve_r.contains(r#".set("index", &format!("{}", index))"#),
+        "a component prop rooted at the loop index must read the index:\n{resolve_r}"
+    );
+    assert!(
+        !resolve_r.contains(r#"resolve("todo.text")"#)
+            && !resolve_r.contains(r#"resolve("index")"#),
+        "neither the item nor the index is a resolver key:\n{resolve_r}"
+    );
+
+    // Boundary: this task does not touch the loop's collection expression, which
+    // is still a resolver lookup (the queued collection-key work owns it).
+    assert!(
+        resolve_r.contains(r#"let __for_expr = resolve("todos");"#),
+        "the collection lookup must stay as it is:\n{resolve_r}"
+    );
+}
+
+/// A loop-rooted expression the loop cannot read as a field path is not silently
+/// left empty: it keeps the resolver lookup the diagnostic can report.
+#[test]
+fn resolve_mode_unreadable_loop_rooted_binding_keeps_a_reported_lookup() {
+    let rs = compile_in_mode(
+        r#"<li v-for="todo in todos" :data-id="todo.a + todo.b">x</li>"#,
+        RenderMode::Resolve,
+    );
+    let resolve_r = resolve_renderer(&rs);
+
+    assert!(
+        resolve_r.contains(r#".set("data-id", &resolve("todo.a + todo.b"))"#),
+        "an expression that is not a field path must stay a plain lookup:\n{resolve_r}"
+    );
+    assert!(
+        !resolve_r.contains("todos[{}].a + todo.b"),
+        "only a field path may be rewritten into an indexed read:\n{resolve_r}"
+    );
+}
+
+/// The negative control. This test is deliberately loop-free: it must pass both
+/// with and without the loop-rooted read, because it exists to show that reading
+/// a loop item through its loop did not divert an ordinary binding away from the
+/// registered resolver arm. It is a guard, not evidence for the fix.
+#[test]
+fn resolve_mode_non_loop_binding_still_resolves_through_the_resolver() {
+    let rs = compile_template_to_rs_full_with_mode(
+        r#"<div><input :value="draft" :placeholder="input_placeholder" /><p :data-active="active">x</p></div>"#,
+        "App",
+        None,
+        Some(SCRIPT_WITH_GETTERS_AND_HANDLER),
+        None,
+        RenderMode::Resolve,
+    )
+    .expect("template compiles");
+
+    let resolve = make_resolve_body(&rs);
+    assert!(
+        resolve.contains(r#""draft" =>"#)
+            && resolve.contains(r#""input_placeholder" =>"#)
+            && resolve.contains(r#""active" =>"#),
+        "non-loop bindings must still be registered as resolver keys:\n{resolve}"
+    );
+
+    let resolve_r = resolve_renderer(&rs);
+    assert!(
+        resolve_r.contains(r#"resolve("draft")"#)
+            && resolve_r.contains(r#"resolve("input_placeholder")"#)
+            && resolve_r.contains(r#"resolve("active")"#),
+        "non-loop bindings must still be read through the resolver:\n{resolve_r}"
+    );
+    assert!(
+        !resolve_r.contains("todos[{}]"),
+        "a loop-free template must gain no loop-rooted read:\n{resolve_r}"
+    );
+}
+
+/// State mode already read loop-rooted bindings from the loop item. Its output
+/// must be byte-for-byte what it was: `.set("data-id", &format!("{}", todo.id))`
+/// and `props.attrs.insert("key".to_string(), todo.id.to_string());`.
+#[test]
+fn state_mode_loop_rooted_binding_output_is_unchanged() {
+    let rs = compile_in_mode(LOOP_ROOTED_BINDS, RenderMode::State);
+    let state_r = state_renderer(&rs);
+    assert!(
+        state_r.contains(
+            r#"h("li", Props::new().set("data-id", &format!("{}", todo.id)), vec![text({ let __obj = &todo; __obj.text.to_string() })]); if let velox_dom::VNode::Element { ref mut props, .. } = __node { props.attrs.insert("key".to_string(), todo.id.to_string()); } __node"#
+        ),
+        "State-mode output must not change:\n{state_r}"
+    );
+    assert!(
+        !state_r.contains(r#"resolve("todo.id")"#),
+        "State mode must keep reading the loop item:\n{state_r}"
+    );
+
+    let rs = compile_in_mode(LOOP_ROOTED_COMPONENT_BINDS, RenderMode::State);
+    let state_r = state_renderer(&rs);
+    assert!(
+        state_r.contains(
+            r#"h("TodoItem", Props::new().set("todo", &format!("{}", todo.text)).set("index", &format!("{}", index)), vec![]); if let velox_dom::VNode::Element { ref mut props, .. } = __node { props.attrs.insert("key".to_string(), todo.id.to_string()); } __node"#
+        ),
+        "State-mode component output must not change:\n{state_r}"
+    );
 }
