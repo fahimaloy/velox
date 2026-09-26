@@ -2611,6 +2611,21 @@ fn member_path(key: &str) -> Option<(&str, Vec<&str>)> {
     Some((root, segments))
 }
 
+/// The shared identifier predicate: one definition for every site that asks
+/// "is this character part of an identifier?".
+///
+/// ITS CONTRACT, for a caller: a scanner that enters on a *first-character* test
+/// and then extends with this predicate must advance the cursor on the entry
+/// character before extending. Otherwise the two predicates are coupled by an
+/// invariant nobody wrote down — this one being wider than the entry test — and
+/// narrowing it to exclude a character the entry test accepts leaves the cursor
+/// where it is and the scanner spins forever. `condition_resolver_keys` and
+/// `expr_reads_roots` both advance unconditionally for exactly that reason, and
+/// `a_scanner_that_enters_on_a_first_char_test_advances_even_when_this_is_narrow`
+/// pins it.
+///
+/// Narrowing it is otherwise a behaviour change at every call site, including the
+/// two scanners' tokenisation, and must be measured rather than assumed.
 fn is_ident_char(ch: char) -> bool {
     ch.is_ascii_alphanumeric() || ch == '_'
 }
@@ -2907,10 +2922,21 @@ fn condition_resolver_keys(expr: &str) -> Vec<String> {
     let chars: Vec<char> = expr.chars().collect();
     let mut keys: Vec<String> = Vec::new();
     let mut i = 0;
+
     while i < chars.len() {
         let c = chars[i];
         if c.is_ascii_alphabetic() || c == '_' {
             let start = i;
+            // The advance past the entry character is UNCONDITIONAL. This scanner
+            // enters on `[A-Za-z_]` and extends on `is_ident_char`, and a
+            // scanner that enters on one predicate while extending on another
+            // must advance on the entry character: if `is_ident_char` is ever
+            // narrowed to exclude a character this test accepts, the old
+            // `while is_ident_char(chars[i])` loop would not move the cursor and
+            // this would spin forever. Every token is therefore at least one
+            // character wide, which is what the old loop produced too, because
+            // `is_ident_char` accepts every character the entry test accepts.
+            i += 1;
             while i < chars.len() && is_ident_char(chars[i]) {
                 i += 1;
             }
@@ -3122,9 +3148,18 @@ fn expr_reads_loop_root(expr: &str, item: &str, index: &str) -> bool {
 fn expr_reads_roots(expr: &str, roots: &[&str]) -> bool {
     let chars: Vec<char> = expr.chars().collect();
     let mut i = 0;
+
     while i < chars.len() {
         if chars[i].is_ascii_alphabetic() || chars[i] == '_' {
             let start = i;
+            // The advance past the entry character is UNCONDITIONAL, for the same
+            // reason as in `condition_resolver_keys`: entering on `[A-Za-z_]` and
+            // extending on `is_ident_char` means the cursor must move on the entry
+            // character, or a narrowing of `is_ident_char` that excludes a
+            // character this test accepts leaves the cursor where it is and this
+            // loop never terminates. Every token stays at least one character wide,
+            // which is what the old `while is_ident_char` produced too.
+            i += 1;
             while i < chars.len() && is_ident_char(chars[i]) {
                 i += 1;
             }
@@ -4712,6 +4747,69 @@ impl State {
                     .collect::<Vec<String>>(),
                 "condition `{cond}` emits {emitted:?} but collects {collected:?}"
             );
+        }
+    }
+
+    /// Both identifier scanners must RETURN on input whose continuation stops at
+    /// once, and they must do it observably.
+    ///
+    /// Each scanner enters on `[A-Za-z_]` and extends with the shared
+    /// `is_ident_char`, then advances. That is two predicates, so the cursor is
+    /// moved on the entry character unconditionally — see the comment at each
+    /// scanner. If `is_ident_char` is ever narrowed to exclude a character the
+    /// entry test accepts, a scanner that only advanced inside the `while` would
+    /// leave the cursor where it is and spin forever.
+    ///
+    /// WHY A THREAD AND A TIMEOUT: with today's `is_ident_char` the two forms are
+    /// extensionally identical, so no input can tell them apart and **this test
+    /// passes with or without the unconditional advance — it is a GUARD, not
+    /// evidence for the advance.** What it buys is that the landmine is
+    /// observable: without the thread a narrowed predicate would hang the whole
+    /// suite with no output at all, and here the spin arrives as a failed
+    /// assertion on this test instead. The evidence for the advance itself is the
+    /// narrowing experiment in the report, not this test.
+    ///
+    /// The inputs are the ones a continuation-only `while` stops on: a letter or
+    /// underscore followed by a non-identifier character, and the digit-leading
+    /// form that the entry test declines (so it must be skipped, not consumed).
+    #[test]
+    fn a_scanner_that_enters_on_a_first_char_test_advances_even_when_this_is_narrow() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        // (expression, keys the condition scanner must collect, whether the
+        // root scanner must report a read of `item`)
+        let cases = [
+            ("a!", vec!["a"], false),
+            ("_x!", vec!["_x"], false),
+            ("a!b", vec!["a", "b"], false),
+            ("9a!", vec!["a"], false),
+            ("item!", vec!["item"], true),
+            ("item.name", vec!["item", "name"], true),
+        ];
+
+        for (expr, expected_keys, reads_item) in cases {
+            let (tx, rx) = mpsc::channel();
+            let expr_owned = expr.to_string();
+            let probe = tx.clone();
+            std::thread::spawn(move || {
+                let _ = probe.send(condition_resolver_keys(&expr_owned));
+            });
+            let (tx2, rx2) = mpsc::channel();
+            let expr_owned = expr.to_string();
+            std::thread::spawn(move || {
+                let _ = tx2.send(expr_reads_roots(&expr_owned, &["item", "i"]));
+            });
+
+            let collected = rx.recv_timeout(Duration::from_secs(10)).unwrap_or_else(|_| {
+                panic!("condition_resolver_keys did not return on `{expr}` — the scanner is not making progress")
+            });
+            let reads = rx2.recv_timeout(Duration::from_secs(10)).unwrap_or_else(|_| {
+                panic!("expr_reads_roots did not return on `{expr}` — the scanner is not making progress")
+            });
+
+            assert_eq!(collected, expected_keys, "keys collected from `{expr}`");
+            assert_eq!(reads, reads_item, "root read reported for `{expr}`");
         }
     }
 
