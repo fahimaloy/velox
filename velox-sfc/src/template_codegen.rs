@@ -2540,7 +2540,11 @@ fn emit_bind_attr(
                 // renderer. In the Resolve one the loop item is an indexed
                 // resolver read — a `String`, which needs the same truthiness
                 // test every resolver-backed condition gets to sit in an `if`.
-                // The bare loop index is a number, so it keeps the direct read.
+                // A bare loop index is left as the direct read, which is
+                // KNOWN-BROKEN in both renderers: a condition of `:class="{even:
+                // i}"` becomes `if i`, a `usize` in `if` position (E0308). It
+                // is left alone because no emitted form of it compiles without
+                // inventing a `bool` the template never wrote.
                 let value = match rewrite_ctx_expr(&cond, item_name, idx_name) {
                     Some(direct) => match resolve_loop {
                         Some(info) => match resolve_loop_item_expr(&direct, info) {
@@ -2686,17 +2690,22 @@ fn condition_resolver_keys(expr: &str) -> Vec<String> {
 }
 
 /// A `v-for` in the Resolve renderer, and whether anything in its body reads the
-/// loop variables.
+/// loop item.
 struct ResolveLoopFamily {
     /// The collection expression, the one the renderer hands to `resolve(...)`.
     collection: String,
     /// Whether a binding, condition, `:key` or interpolation in the body reads
-    /// the loop item or index.
-    body_reads_loop: bool,
+    /// the loop ITEM.
+    ///
+    /// The loop index is deliberately not a root: it is a real binding in the
+    /// loop body — an interpolated index is emitted as `text(i.to_string())` and
+    /// a bare-index bind as `format!("{}", index)` — so a body that reads only
+    /// the index still renders.
+    body_reads_item: bool,
 }
 
-/// Whether `node`'s own attributes read the loop variables `item` or `index`.
-fn attrs_read_loop_root(attrs: &[TemplateAttr], item: &str, index: &str) -> bool {
+/// Whether `attrs` read any of the loop roots in `roots`.
+fn attrs_read_loop_root(attrs: &[TemplateAttr], roots: &[&str]) -> bool {
     attrs.iter().any(|a| match a.kind {
         AttrKind::Bind | AttrKind::Directive => a
             .value
@@ -2704,23 +2713,25 @@ fn attrs_read_loop_root(attrs: &[TemplateAttr], item: &str, index: &str) -> bool
             // A `v-for` introduces its loop variables rather than reading them,
             // so only its collection expression can read an enclosing loop.
             .map(|value| match parse_v_for(value) {
-                Some(info) => expr_reads_loop_root(&info.expr, item, index),
-                None => expr_reads_loop_root(value, item, index),
+                Some(info) => expr_reads_roots(&info.expr, roots),
+                None => expr_reads_roots(value, roots),
             })
             .unwrap_or(false),
         AttrKind::Static | AttrKind::On => false,
     })
 }
 
-/// Whether anything in `node`'s subtree reads the loop variables `item`/`index`.
+/// Whether anything in `node`'s subtree reads the loop roots in `roots`.
 ///
-/// A nested `v-for` that rebinds the same names shadows them for its own
+/// A nested `v-for` rebinding those same names shadows them for its own
 /// attributes, but not for its children: a nested loop body can still read the
-/// item of the loop around it.
-fn reads_loop_root(node: &Node, item: &str, index: &str) -> bool {
+/// item of the loop around it. Shadowing therefore requires the nested loop to
+/// rebind every root, so a nested loop that rebinds only the index still exposes
+/// the item of the loop around it.
+fn reads_loop_root(node: &Node, roots: &[&str]) -> bool {
     match node {
         Node::Text(_) => false,
-        Node::Interpolation(expr) => expr_reads_loop_root(expr, item, index),
+        Node::Interpolation(expr) => expr_reads_roots(expr, roots),
         Node::Element {
             attrs, children, ..
         } => {
@@ -2729,9 +2740,14 @@ fn reads_loop_root(node: &Node, item: &str, index: &str) -> bool {
                 .find(|a| matches!(a.kind, AttrKind::Directive) && a.name == "for")
                 .and_then(|a| a.value.as_deref())
                 .and_then(parse_v_for)
-                .is_some_and(|info| info.item_name == item && info.index_name == index);
-            (!shadowed && attrs_read_loop_root(attrs, item, index))
-                || children.iter().any(|c| reads_loop_root(c, item, index))
+                .is_some_and(|info| {
+                    !roots.is_empty()
+                        && roots
+                            .iter()
+                            .all(|root| *root == info.item_name || *root == info.index_name)
+                });
+            (!shadowed && attrs_read_loop_root(attrs, roots))
+                || children.iter().any(|c| reads_loop_root(c, roots))
         }
     }
 }
@@ -2740,6 +2756,11 @@ fn reads_loop_root(node: &Node, item: &str, index: &str) -> bool {
 /// itself, as a field path rooted at it, or anywhere inside a compound expression
 /// such as `todo.a == todo.b`.
 fn expr_reads_loop_root(expr: &str, item: &str, index: &str) -> bool {
+    expr_reads_roots(expr, &[item, index])
+}
+
+/// Whether an authored expression names `root` as an identifier token.
+fn expr_reads_roots(expr: &str, roots: &[&str]) -> bool {
     let chars: Vec<char> = expr.chars().collect();
     let mut i = 0;
     while i < chars.len() {
@@ -2749,7 +2770,7 @@ fn expr_reads_loop_root(expr: &str, item: &str, index: &str) -> bool {
                 i += 1;
             }
             let token: String = chars[start..i].iter().collect();
-            if token == item || token == index {
+            if roots.contains(&token.as_str()) {
                 return true;
             }
         } else {
@@ -2762,19 +2783,17 @@ fn expr_reads_loop_root(expr: &str, item: &str, index: &str) -> bool {
 /// The diagnostic for one `v-for` in the Resolve renderer.
 ///
 /// That renderer's resolver is a flat `&str -> String` table built once, outside
-/// every loop, and it holds no arm for the collection and none for an indexed
-/// read of the loop item. So when the collection has no arm the loop counts zero
-/// items and never runs its body at all, and when it does have one the loop item
-/// is still read as `items[0].name`, which no arm answers. Either way nothing in
-/// the loop renders, and one message says so for the whole body rather than one
-/// contradictory message per binding.
-fn resolve_loop_warning(
-    family: &ResolveLoopFamily,
-    methods: &[StateMethod],
-    keys: &[String],
-) -> String {
+/// every loop. An arm is only useful to a loop when it is backed by a real
+/// zero-argument `State` getter: a key collected from an interpolation elsewhere
+/// in the template is emitted as `"<key>" => state.<key>().to_string()` against a
+/// struct that has no such field, so it does not answer the collection either.
+/// With no arm the loop counts zero items and never runs its body at all; with an
+/// arm the loop item is still read as `items[0].name`, which no arm answers. Either
+/// way nothing in the loop renders, and one message says so for the whole body
+/// rather than one contradictory message per binding.
+fn resolve_loop_warning(family: &ResolveLoopFamily, methods: &[StateMethod]) -> String {
     let collection = &family.collection;
-    let has_arm = has_state_getter(methods, collection) || keys.iter().any(|k| k == collection);
+    let has_arm = has_state_getter(methods, collection);
     let cause = if has_arm {
         format!(
             "the loop's values are read as indexed resolver keys (`{collection}[0]…`), which \
@@ -2869,10 +2888,10 @@ fn collect_resolver_keys(
             if let (RenderMode::Resolve, Some(info)) = (mode, &loop_scope) {
                 resolve_loops.push(ResolveLoopFamily {
                     collection: info.expr.clone(),
-                    body_reads_loop: attrs_read_loop_root(attrs, &info.item_name, &info.index_name)
+                    body_reads_item: attrs_read_loop_root(attrs, &[&info.item_name])
                         || children
                             .iter()
-                            .any(|c| reads_loop_root(c, &info.item_name, &info.index_name)),
+                            .any(|c| reads_loop_root(c, &[&info.item_name])),
                 });
             }
             for attr in attrs {
@@ -2976,10 +2995,13 @@ fn collect_resolver_keys(
         &mut resolve_loops,
     );
     for family in &resolve_loops {
-        let has_arm = has_state_getter(methods, &family.collection)
-            || keys.iter().any(|k| k == &family.collection);
-        if !has_arm || family.body_reads_loop {
-            warnings.push(resolve_loop_warning(family, methods, &keys));
+        // Only a real `State` getter backs an arm that can answer the
+        // collection; a key that merely appears as an interpolation elsewhere in
+        // the template does not, and treating it as one would leave this loop
+        // silent and unrenderable.
+        let has_arm = has_state_getter(methods, &family.collection);
+        if !has_arm || family.body_reads_item {
+            warnings.push(resolve_loop_warning(family, methods));
         }
     }
     ResolverKeys { keys, warnings }
@@ -3338,6 +3360,98 @@ mod tests {
              variable, so the loop renders: {:?}",
             resolve.warnings
         );
+    }
+
+    /// The loop index is a real binding in the loop body — an interpolated
+    /// index becomes `text(i.to_string())` and a bare-index bind becomes
+    /// `format!("{}", index)` — so a loop whose body reads ONLY the index
+    /// renders, and reporting it would be a false positive.
+    #[test]
+    fn resolve_loop_reading_only_the_index_is_not_reported() {
+        let script = r#"
+        impl State {
+            pub fn items(&self) -> String { String::new() }
+        }"#;
+        let nodes = crate::template_parse::parse_template_to_ast(
+            r#"<ul><li v-for="(item, i) in items">{{ i }}<b :value="i">x</b></li></ul>"#,
+        )
+        .unwrap();
+
+        let resolve = collect_resolver_keys(&nodes, &methods(script), &[], RenderMode::Resolve);
+        assert!(
+            resolve.warnings.is_empty(),
+            "the collection is a registered getter and the body reads only the loop \
+             index, which is a real binding: {:?}",
+            resolve.warnings
+        );
+    }
+
+    /// The converse of the index-only case: reading the ITEM as well still
+    /// cannot be answered by any resolver arm, so it stays reported. Without
+    /// this the N1 fix would be a blanket suppression.
+    #[test]
+    fn resolve_loop_reading_the_index_and_the_item_is_still_reported() {
+        let script = r#"
+        impl State {
+            pub fn items(&self) -> String { String::new() }
+        }"#;
+        let nodes = crate::template_parse::parse_template_to_ast(
+            r#"<ul><li v-for="(item, i) in items">{{ i }}{{ item.name }}</li></ul>"#,
+        )
+        .unwrap();
+
+        let resolve = collect_resolver_keys(&nodes, &methods(script), &[], RenderMode::Resolve);
+        assert_eq!(resolve.warnings.len(), 1, "{:?}", resolve.warnings);
+        let warning = &resolve.warnings[0];
+        assert!(
+            warning.contains("`v-for` over `items` cannot render in Resolve mode"),
+            "{warning}"
+        );
+        assert!(
+            warning.contains("indexed resolver keys"),
+            "the collection has a getter, so the cause must be the unreadable \
+             indexed read: {warning}"
+        );
+    }
+
+    /// A collection name that merely APPEARS as an interpolation elsewhere is
+    /// not an arm that can answer the loop: `generate_make_resolve` emits
+    /// `"items" => state.items().to_string()` for it, against a `State` struct
+    /// that has no `items` field, so the resolver answers `""` and the loop
+    /// counts zero items. Such a loop must still be reported.
+    #[test]
+    fn resolve_loop_over_a_collection_named_only_by_an_interpolation_is_reported() {
+        let script = r#"
+        impl State {
+            pub fn draft(&self) -> String { String::new() }
+        }"#;
+        let nodes = crate::template_parse::parse_template_to_ast(
+            r#"<p>{{ items }}</p><ul><li v-for="(item, i) in items">{{ i }}</li></ul>"#,
+        )
+        .unwrap();
+
+        let resolve = collect_resolver_keys(&nodes, &methods(script), &[], RenderMode::Resolve);
+        assert!(
+            resolve.keys.iter().any(|k| k == "items"),
+            "the interpolation does collect `items` as a key, which is exactly why \
+             the key set cannot stand in for a real getter here: {:?}",
+            resolve.keys
+        );
+        assert_eq!(resolve.warnings.len(), 1, "{:?}", resolve.warnings);
+        let warning = &resolve.warnings[0];
+        assert!(
+            warning.contains("`v-for` over `items` cannot render in Resolve mode"),
+            "{warning}"
+        );
+        assert!(
+            warning.contains("not a registered `State` getter"),
+            "no getter backs the key, so the cause must be the empty answer: {warning}"
+        );
+
+        // The State renderer reads the collection and the item directly, so the
+        // same template is silent there.
+        let state = collect_resolver_keys(&nodes, &methods(script), &[], RenderMode::State);
+        assert!(state.warnings.is_empty(), "{:?}", state.warnings);
     }
 
     /// A zero-argument method that returns nothing is not a getter: the arm would
