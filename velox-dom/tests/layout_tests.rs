@@ -75,6 +75,100 @@ fn block_boundary_preserves_whitespace_between_inline_participants() {
     assert_eq!(lt.children[1].source_index, Some(1));
 }
 
+/// A whitespace-only text node sitting on a block boundary must not produce
+/// a line box, exactly as in HTML/CSS. A `\n`-indented template is the real
+/// shape of this bug: the text node collapses to a single space, and the
+/// space is dropped because no line box can form on either side of it.
+#[test]
+fn block_flow_ignores_whitespace_only_text_between_blocks() {
+    let root = h(
+        "div",
+        Props::new(),
+        vec![
+            h("div", Props::new().set("style", "height: 20px;"), vec![]),
+            text(" "),
+            h("div", Props::new().set("style", "height: 20px;"), vec![]),
+        ],
+    );
+
+    let lt = compute_layout(&root, 800, 600);
+
+    assert_eq!(
+        lt.children.len(),
+        2,
+        "whitespace between two blocks must not create a third box, got {:?}",
+        lt.children.iter().map(|c| c.rect).collect::<Vec<_>>()
+    );
+    assert_eq!(lt.children[0].rect.y, 0);
+    assert_eq!(
+        lt.children[1].rect.y, 20,
+        "second block must not be pushed down"
+    );
+    assert_eq!(
+        lt.children.iter().map(|c| c.rect.y + c.rect.h).max(),
+        Some(40),
+        "the phantom line box must not contribute to the block's content height"
+    );
+}
+
+/// Negative control for the rule above: a whitespace-only text node between
+/// two inline-level siblings is *collapsed*, not removed — browsers render
+/// "a b", so a blanket "skip all whitespace-only text" rule would be wrong.
+/// The whitespace must survive as a real line box here.
+#[test]
+fn inline_siblings_keep_their_collapsing_whitespace() {
+    let root = h(
+        "div",
+        Props::new(),
+        vec![
+            h("span", Props::new(), vec![text("a")]),
+            text(" "),
+            h("span", Props::new(), vec![text("b")]),
+        ],
+    );
+
+    let lt = compute_layout(&root, 800, 600);
+
+    assert_eq!(
+        lt.children.len(),
+        3,
+        "whitespace between inline siblings must collapse, not disappear; \
+         got {:?}",
+        lt.children.iter().map(|c| c.rect).collect::<Vec<_>>()
+    );
+    assert_eq!(lt.children[1].source_index, Some(1));
+    assert!(
+        lt.children[1].rect.h > 0,
+        "the preserved whitespace must occupy a line box, got height {}",
+        lt.children[1].rect.h
+    );
+}
+
+/// `white-space: pre` makes whitespace non-collapsible, so the block-boundary
+/// rule must not touch it even though both neighbours are block-level.
+#[test]
+fn block_flow_keeps_preserved_whitespace_between_blocks() {
+    let root = h(
+        "div",
+        Props::new().set("style", "white-space: pre;"),
+        vec![
+            h("div", Props::new().set("style", "height: 20px;"), vec![]),
+            text(" "),
+            h("div", Props::new().set("style", "height: 20px;"), vec![]),
+        ],
+    );
+
+    let lt = compute_layout(&root, 800, 600);
+
+    assert_eq!(
+        lt.children.len(),
+        3,
+        "white-space: pre whitespace is significant and must be preserved, got {:?}",
+        lt.children.iter().map(|c| c.rect).collect::<Vec<_>>()
+    );
+    assert_eq!(lt.children[1].source_index, Some(1));
+}
+
 // ===== Flexbox Tests =====
 
 #[test]

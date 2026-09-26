@@ -6,3 +6,14 @@ h2 { font-size: 1.5em; margin: 0.83em 0; font-weight: bold; }
 p  { display: block; margin: 1em 0; }
 ul, ol { display: block; margin: 1em 0; padding-inline-start: 40px; }
 button { padding: 6px 12px; border: 1px solid #888; }
+
+/* Phrasing-content elements default to `display: inline` in every browser, so
+   without this they lay out as block boxes in Velox. The HTML rendering
+   section gives none of these an explicit display, so they take CSS's initial
+   value, `inline`. Keep this list in sync with INLINE_BY_DEFAULT_TAGS in
+   velox-dom/src/layout.rs.
+   `inline-block` elements (button, img, input, select, textarea) are
+   deliberately absent: Velox has no inline-block layout, so claiming
+   `display: inline` for them would be a false parity claim. */
+a, abbr, b, bdi, bdo, cite, code, data, del, dfn, em, i, ins, kbd, label,
+mark, q, s, samp, small, span, strong, sub, sup, time, u, var { display: inline; }

@@ -463,6 +463,54 @@ fn style_lookup_str(style: Option<&str>, key: &str) -> Option<String> {
     None
 }
 
+/// Elements whose browser default `display` is exactly `inline`.
+///
+/// The HTML rendering section gives none of these an explicit `display`, so
+/// they take CSS's initial value, `inline`; the ones it *does* declare
+/// (`div`, `p`, `section`, `h1`-`h6`, `li`, `pre`, `hr`, `fieldset`, the
+/// table family, `ruby`, ...) are block-level or otherwise special and are
+/// deliberately absent.
+///
+/// This mirrors the `display: inline` UA rules in `velox-style/src/ua.css`:
+/// that stylesheet is the cascade-side source of these defaults, but
+/// velox-dom cannot depend on velox-style, so the same list is kept here for
+/// the layout engine's own notion of an element's default display. Keep the
+/// two in sync.
+const INLINE_BY_DEFAULT_TAGS: &[&str] = &[
+    "a", "abbr", "b", "bdi", "bdo", "cite", "code", "data", "del", "dfn", "em", "i", "ins", "kbd",
+    "label", "mark", "q", "s", "samp", "small", "span", "strong", "sub", "sup", "time", "u", "var",
+];
+
+/// Elements whose browser default is `inline-block` rather than `inline`
+/// (`input, button { display: inline-block; }` in the HTML rendering
+/// section; `img`, `select` and `textarea` in the browser UA sheets).
+///
+/// Velox has no `inline-block` layout, so these get no UA rule in
+/// `ua.css` (claiming `display: inline` for them would be a false parity
+/// claim). They are still *inline-level*, which is the only question the
+/// whitespace rules below ask: whitespace beside an `inline-block` box
+/// collapses exactly like whitespace beside an `inline` one, because both
+/// participate in the same inline formatting context.
+const INLINE_BLOCK_BY_DEFAULT_TAGS: &[&str] = &["button", "img", "input", "select", "textarea"];
+
+/// The `display` an element gets when neither the cascade nor an author rule
+/// specifies one.
+fn default_display_for_tag(tag: &str) -> &'static str {
+    if INLINE_BY_DEFAULT_TAGS.contains(&tag.to_ascii_lowercase().as_str()) {
+        "inline"
+    } else {
+        "block"
+    }
+}
+
+/// Whether an element with no explicit `display` is inline-level, i.e. it
+/// would sit in an inline formatting context next to its siblings.
+fn is_inline_level_by_default(tag: &str) -> bool {
+    let tag = tag.to_ascii_lowercase();
+    INLINE_BY_DEFAULT_TAGS.contains(&tag.as_str())
+        || INLINE_BLOCK_BY_DEFAULT_TAGS.contains(&tag.as_str())
+}
+
 fn is_inline_formatting_participant(node: &VNode) -> bool {
     match node {
         VNode::Text(text) => !text.chars().all(|c| c.is_whitespace()),
@@ -480,33 +528,7 @@ fn is_inline_formatting_participant(node: &VNode) -> bool {
                 Some("inline") | Some("inline-block") | Some("inline-flex")
                 | Some("inline-grid") => true,
                 Some(_) => false,
-                None => matches!(
-                    tag.to_ascii_lowercase().as_str(),
-                    "a" | "abbr"
-                        | "b"
-                        | "button"
-                        | "cite"
-                        | "code"
-                        | "data"
-                        | "del"
-                        | "em"
-                        | "i"
-                        | "input"
-                        | "kbd"
-                        | "label"
-                        | "mark"
-                        | "q"
-                        | "s"
-                        | "samp"
-                        | "small"
-                        | "span"
-                        | "strong"
-                        | "sub"
-                        | "sup"
-                        | "time"
-                        | "u"
-                        | "var"
-                ),
+                None => is_inline_level_by_default(tag),
             }
         }
     }
@@ -1467,9 +1489,13 @@ pub fn compute_layout(node: &VNode, viewport_w: i32, viewport_h: i32) -> LayoutN
                 let content_x_scrolled = content_x - scroll_x;
                 let content_y_scrolled = content_y_start - scroll_y;
 
-                // Layout strategy: block (default) or flex
-                let display =
-                    style_lookup_str(style, "display").unwrap_or_else(|| "block".to_string());
+                // Layout strategy: block (default) or flex. An element's
+                // default `display` comes from `default_display_for_tag`, which
+                // agrees with the UA sheet in velox-style; both routes below
+                // only test for "none" and "flex", so an `inline` default keeps
+                // using the block flow (there is no inline layout yet).
+                let display = style_lookup_str(style, "display")
+                    .unwrap_or_else(|| default_display_for_tag(tag).to_string());
                 let position =
                     style_lookup_str(style, "position").unwrap_or_else(|| "static".to_string());
                 let z_index = if position != "static" {
