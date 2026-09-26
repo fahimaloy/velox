@@ -3536,16 +3536,28 @@ fn collect_resolver_keys(
                     // The same question the interpolation gate asks, so a dotted
                     // `v-model` is answered by the same method chain `{{ form.name }}`
                     // reads, and an unanswerable one is reported in the same terms.
+
                     if key_is_answerable(methods, expr) {
                         push_unique(keys, expr);
                     } else {
+                        // The write is named, not claimed: the generated setter is
+                        // `VModel::vmodel_set(&self.{expr}, payload)`, so it
+                        // compiles only when every segment of `{expr}` is a field
+                        // of `State` and the last one is a type `VModel` is
+                        // implemented for. Saying the write works when the
+                        // expression names no such field would promise a
+                        // capability the emitted code does not have.
                         warnings.push(format!(
                             "v-model=\"{expr}\" cannot render its value — {}; the input renders \
-                             empty. The write still works. Bind a zero-argument `State` getter, or \
-                             a method for each segment of a dotted expression.",
+             empty. The write needs every segment of `{expr}` to be a `State` \
+             field and the last one to be a type `VModel` is implemented for \
+             (`Signal<T>`, `RefCell<String>` or `Cell<T>`); otherwise the \
+             generated setter does not compile. Bind a zero-argument `State` \
+             getter, or a method for each segment of a dotted expression.",
                             unresolvable_key_reason(expr, methods, fields)
                         ));
                     }
+
                     if matches!(mode, RenderMode::Resolve) {
                         warnings.push(vmodel_resolve_mode_warning(expr));
                     }
@@ -5366,32 +5378,38 @@ impl State {
         );
     }
 
-    /// One name, from one place. The loop-rooted case is skipped by both collectors,
-    /// and the rooted cases agree on the same spelling, dotted or not.
+    /// One name, from one place: the dotted translation is a hardcoded literal here,
+    /// not a call into the function under test, and the loop-rooted case is skipped by
+    /// both collectors.
     #[test]
-    fn the_v_model_collectors_agree_on_the_setter_name() {
-        for (tpl, expected) in [
-            (r#"<input v-model="draft"/>"#, vec!["draft"]),
-            (r#"<input v-model="user.name"/>"#, vec!["user.name"]),
+    fn the_v_model_collectors_agree_on_one_hardcoded_setter_name() {
+        for (tpl, expected_expressions, expected_handlers) in [
+            (
+                r#"<input v-model="draft"/>"#,
+                vec!["draft"],
+                vec!["__vmodel_set_draft"],
+            ),
+            (
+                r#"<input v-model="user.name"/>"#,
+                vec!["user.name"],
+                vec!["__vmodel_set_user_name"],
+            ),
             (
                 r#"<ul><li v-for="item in items"><input v-model="item.name"/></li></ul>"#,
+                vec![],
                 vec![],
             ),
         ] {
             let nodes = crate::template_parse::parse_template_to_ast(tpl).expect("template parses");
             let collected = collect_vmodel_expressions(&nodes);
             let expressions: Vec<String> = collected.iter().map(|(expr, _)| expr.clone()).collect();
-            assert_eq!(expressions, expected, "expressions for {tpl}");
+            assert_eq!(expressions, expected_expressions, "expressions for {tpl}");
 
             // The handler the setter is generated under is the one the dispatcher
             // carries, and the dotted translation lives in one place.
             let handlers: Vec<String> = collected
                 .iter()
                 .map(|(_, handler)| handler.clone())
-                .collect();
-            let expected_handlers: Vec<String> = expected
-                .iter()
-                .map(|expr| vmodel_setter_name(expr))
                 .collect();
             assert_eq!(handlers, expected_handlers, "handlers for {tpl}");
 
@@ -5405,15 +5423,6 @@ impl State {
                  the same name, and none for a loop-rooted one, in {tpl}"
             );
         }
-    }
-
-    /// The expression a single `v-model` template binds, for the test above.
-    fn tpl_expr(tpl: &str) -> String {
-        tpl.rsplit("v-model=\"")
-            .next()
-            .unwrap()
-            .trim_end_matches("\"/>")
-            .to_string()
     }
 }
 

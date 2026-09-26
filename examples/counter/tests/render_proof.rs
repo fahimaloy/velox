@@ -78,6 +78,35 @@ fn find_layout_rect(
     None
 }
 
+/// The `value` and `on:input` props of the first `<input>` carrying `class`,
+/// read out of a real build of the generated module.
+fn input_props(vnode: &velox_dom::VNode, class: &str) -> Option<(String, String)> {
+    if let velox_dom::VNode::Element { tag, props, .. } = vnode
+        && tag == "input"
+        && props.attrs.get("class").map(String::as_str) == Some(class)
+    {
+        let value = props
+            .attrs
+            .get("value")
+            .cloned()
+            .expect("the input carries a value prop");
+        let handler = props
+            .attrs
+            .get("on:input")
+            .cloned()
+            .expect("the input carries an on:input handler name");
+        return Some((value, handler));
+    }
+    if let velox_dom::VNode::Element { children, .. } = vnode {
+        for child in children {
+            if let Some(found) = input_props(child, class) {
+                return Some(found);
+            }
+        }
+    }
+    None
+}
+
 fn pixels_near_in_rect(
     rgba: &[u8],
     rect: Rect,
@@ -257,5 +286,94 @@ fn small_viewport_keeps_count_status_and_all_buttons_visible() {
     assert!(
         last_reset_row + 4 < height,
         "reset button clipped at the bottom of 480x360 (row {last_reset_row})"
+    );
+}
+
+/// The `v-model` round trip, end to end, on the OBSERVED values.
+///
+/// Nothing here reads generated text. The handler name comes out of the
+/// `on:input` prop, exactly as `dispatch_input_to_focused` resolves it; the
+/// payload is built the way the renderer builds it (the displayed value plus
+/// the typed character), because that is what the real input path sends; the
+/// dispatch is the module's own `make_on_event`; and the two things asserted
+/// afterwards are the value the `State` holds and the pixels the input paints.
+/// So this test fails if the generated setter is missing, misnamed, or if the
+/// read renders empty.
+#[test]
+fn v_model_input_round_trips_through_the_real_dispatcher() {
+    let state = Arc::new(app::script_rs::State::new());
+    let build = |s: &Arc<app::script_rs::State>| {
+        app::render_with_state(Arc::clone(s), app::make_resolve(Arc::clone(s)))
+    };
+
+    // READ, before anything is typed: the `value` prop is what the input
+    // shows, and it is the signal's value, not the empty-string fallback.
+    let (value, handler) =
+        input_props(&build(&state), "label-input").expect("the label input rendered");
+    assert_eq!(
+        value,
+        state.label(),
+        "the input must display the value the state holds"
+    );
+    assert!(
+        !value.is_empty(),
+        "the example's initial value is not empty"
+    );
+
+    // The layout rect, so the pixel assertions below look only at this input.
+    let tree = styled_tree(&state);
+    let layout = compute_layout(&tree, LARGE.0, LARGE.1);
+    let rect = find_layout_rect(&layout, &tree, "input", "label-input")
+        .expect("the label input has a layout rect");
+    assert!(
+        rect.w > 40 && rect.h > 10,
+        "the input is too small: {rect:?}"
+    );
+
+    let width = LARGE.0 as usize;
+    let height = LARGE.1 as usize;
+    // The renderer paints an input's value as black text on white, so the
+    // count of near-black pixels inside its rect is the text it shows.
+    const TEXT: [u8; 3] = [0, 0, 0];
+    let text_pixels = |s: &Arc<app::script_rs::State>| {
+        let (_, rgba) = render(s, LARGE.0, LARGE.1);
+        pixels_near_in_rect(&rgba, rect, width, height, TEXT, 40)
+    };
+
+    let before_pixels = text_pixels(&state);
+    assert!(
+        before_pixels > 0,
+        "the input's own text is not painted, so the pixel proof below would be vacuous"
+    );
+
+    // WRITE, twice, the way the renderer sends it: the displayed value plus the
+    // typed character, to the handler name the input carries. The second
+    // keystroke re-reads the name from a fresh build, so a rebuild that dropped
+    // or renamed the handler would show up here too.
+    let (shown, _) = input_props(&build(&state), "label-input").expect("the label input rendered");
+    app::make_on_event(Arc::clone(&state))(&handler, Some(&format!("{shown}R")));
+    assert_eq!(
+        state.label(),
+        "counterR",
+        "the generated setter must land 'R' in the state"
+    );
+    let (shown, name) =
+        input_props(&build(&state), "label-input").expect("the label input rendered");
+    app::make_on_event(Arc::clone(&state))(&name, Some(&format!("{shown}2")));
+    assert_eq!(
+        state.label(),
+        "counterR2",
+        "the generated setter must land '2' in the state"
+    );
+
+    // READ BACK, through a real re-render: the new build shows the new value.
+    let (after, _) = input_props(&build(&state), "label-input").expect("the label input rendered");
+    assert_eq!(after, "counterR2", "a new build shows the written value");
+
+    // And the input really repaints the longer value: more black text pixels.
+    let after_pixels = text_pixels(&state);
+    assert!(
+        after_pixels > before_pixels,
+        "typing did not repaint the input: {before_pixels} -> {after_pixels} black pixels"
     );
 }

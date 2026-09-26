@@ -4,6 +4,10 @@
     <div class="card">
       <p class="count">{{ count }}</p>
       <p class="status">{{ status }}</p>
+      <div class="label-row">
+        <span class="label-text">Label</span>
+        <input class="label-input" v-model="label"/>
+      </div>
       <div class="actions">
         <button class="btn inc" @click="increment">+1</button>
         <button class="btn dec" @click="decrement">-1</button>
@@ -15,18 +19,26 @@
 
 <script setup>
 use velox_core::ergonomics::Ref;
+use velox_core::signal::Signal;
 
 pub struct State {
     // A single reactive integer. `r#ref!` expands to
     // `Ref::new(value)`, which is the ergonomic wrapper around
     // `Rc<Signal<T>>` for scalar state.
     counter: Ref<i32>,
+    // The text field's value, bound with `v-model="label"`. It is a `Signal`
+    // rather than a `Ref` because the generated setter calls
+    // `VModel::vmodel_set` on the field, and `VModel` is implemented for
+    // `Signal<T>`, `RefCell<String>` and `Cell<T>` — not for the ergonomics
+    // `Ref<T>` wrapper, which is not a type the setter can name.
+    label: Signal<String>,
 }
 
 impl State {
     pub fn new() -> Self {
         Self {
             counter: velox_core::r#ref!(0),
+            label: Signal::new(String::from("counter")),
         }
     }
 
@@ -36,6 +48,12 @@ impl State {
 
     pub fn count(&self) -> i32 {
         self.counter.get()
+    }
+
+    // The `v-model` read side: the generated `make_resolve` calls this on
+    // every build, so the input shows whatever the signal holds.
+    pub fn label(&self) -> String {
+        self.label.get()
     }
 
     // Derived label rendered under the number. It reads the same signal, so
@@ -103,6 +121,31 @@ impl State {
     margin: 0 0 6px 0;
     font-size: 13px;
     color: #94a3b8;
+}
+.label-row {
+    display: flex;
+    flex-direction: row;
+    align-items: center;
+    gap: 8px;
+    margin: 0 0 8px 0;
+}
+.label-text {
+    display: block;
+    /* `flex: 0 0 auto`, or the layout engine hands this label the whole row
+       and the input beside it collapses to zero width. */
+    flex: 0 0 auto;
+    font-size: 13px;
+    color: #94a3b8;
+}
+.label-input {
+    display: block;
+    /* The same shape the todo example's input uses: grow into the space the
+       label leaves, never narrower than the row can afford. */
+    flex: 1 1 auto;
+    min-width: 0;
+    width: 220px;
+    height: 26px;
+    font-size: 14px;
 }
 .actions {
     display: flex;
