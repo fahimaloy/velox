@@ -661,6 +661,13 @@ fn compile_in_mode(tpl: &str, mode: RenderMode) -> String {
         .expect("template compiles")
 }
 
+/// [`compile_in_mode`] with a `<script setup>` block, so the generated arms are
+/// resolved against the `State` methods the script declares.
+fn compile_with_script(tpl: &str, script: &str, mode: RenderMode) -> String {
+    compile_template_to_rs_full_with_mode(tpl, "App", None, Some(script), None, mode)
+        .expect("template compiles")
+}
+
 /// The key expression must be interpolated exactly once, through a single
 /// resolver read of the loop item — the same shape the sibling `v-for` branch
 /// uses for an interpolated loop value (`text(resolve(&format!("items[{}].name",
@@ -856,33 +863,120 @@ fn a_loop_rooted_interpolation_still_renders_through_the_loop_index() {
     );
 }
 
-/// The fix is scoped to keys rooted at a loop variable. A dotted interpolation
-/// at the top level of a component is a lookup of a state field path, and it is
-/// collected and emitted exactly as it was before.
-///
-/// Note what "exactly as before" means here: the arm it generates is
-/// `state.user.name()`, which does not compile for a `State` that has no `user`
-/// field. That is a pre-existing defect of the same family — a dotted key has
-/// no field path to resolve against, and R-1's ruling rejected a reflection
-/// layer as the fix — and it is out of this task's scope. This test pins the
-/// shape so the scope boundary is visible in the test suite rather than only in
-/// a report.
+/// R-1c pinned this shape to make the scope boundary visible: a dotted
+/// interpolation at the top level of a component was collected and emitted
+/// exactly as it was, arm included, even though the arm it produced
+/// (`state.user.name()`) cannot compile for a hand-written `State` — that shape
+/// needed a `user` *field* holding something with a `name` method, and no
+/// template can produce that. R-1d is the task that fixes it, so the pin is now
+/// the corrected shape: the root is a call on the accessor, and every later
+/// segment is a call on what came before.
+const SCRIPT_WITH_A_USER_ACCESSOR: &str = r#"
+pub struct User { name: String }
+impl User { pub fn name(&self) -> String { self.name.clone() } }
+
+pub struct State { user: User }
+impl State {
+    pub fn new() -> Self { Self { user: User { name: String::new() } } }
+    pub fn user(&self) -> User { self.user.clone() }
+    pub fn title(&self) -> String { String::new() }
+}
+"#;
+
+/// A root-level member path is a chain of calls on the root accessor. The old
+/// shape — `state.user.name()` — was a field access on `State` and could not
+/// compile; this one compiles for a `State` that declares the accessor the
+/// framework's convention already looks up, and it is the same text in both
+/// modes.
 #[test]
-fn a_root_level_dotted_interpolation_emits_the_arm_it_always_did() {
-    let tpl = r#"<p>{{ user.name }} {{ items[0].name }} {{ title }}</p>"#;
+fn a_root_level_member_path_emits_a_chain_on_the_root_accessor() {
     for mode in [RenderMode::State, RenderMode::Resolve] {
-        let rs = compile_in_mode(tpl, mode);
-        for arm in [
-            r#""user.name" => state.user.name().to_string(),"#,
-            r#""items[0].name" => state.items[0].name().to_string(),"#,
-            r#""title" => state.title().to_string(),"#,
-        ] {
-            assert!(
-                make_resolve_fn(&rs).contains(arm),
-                "a root-level interpolation is not loop-rooted, so it keeps its \
-                 arm in {mode:?} ({arm}):\n{rs}"
-            );
-        }
+        let rs = compile_with_script(
+            r#"<p>{{ user.name }}</p>"#,
+            SCRIPT_WITH_A_USER_ACCESSOR,
+            mode,
+        );
+        assert!(
+            make_resolve_fn(&rs).contains(r#""user.name" => state.user().name().to_string(),"#),
+            "the root is called, and so is every segment after it, in {mode:?}:\n{rs}"
+        );
+    }
+}
+
+/// The chain is rewritten uniformly, including an index segment: `items()[0]`
+/// indexes what the accessor returned rather than calling it, and the segments
+/// after the index are still calls. Codegen cannot know what a user's element
+/// type looks like, so it does not guess — it emits the shape the accessor
+/// convention implies and lets the compiler name a missing inner method.
+#[test]
+fn a_root_level_indexed_member_path_indexes_the_root_accessor() {
+    let script = r#"
+pub struct Item { name: String }
+impl Item { pub fn name(&self) -> String { self.name.clone() } }
+
+pub struct State { items: Vec<Item> }
+impl State {
+    pub fn new() -> Self { Self { items: Vec::new() } }
+    pub fn items(&self) -> Vec<Item> { self.items.clone() }
+}
+"#;
+    for mode in [RenderMode::State, RenderMode::Resolve] {
+        let rs = compile_with_script(r#"<p>{{ items[0].name }}</p>"#, script, mode);
+        assert!(
+            make_resolve_fn(&rs)
+                .contains(r#""items[0].name" => state.items()[0].name().to_string(),"#),
+            "an index is a place, not a method, and the segments around it are calls, in {mode:?}:\n{rs}"
+        );
+    }
+}
+
+/// Without an accessor for the root there is nothing to call, so the key is not
+/// registered and no arm is emitted — the arm that cannot compile is gone from
+/// the generated module. The diagnostic that says so is asserted in the unit
+/// test of the same name, which is where the warnings are observable.
+#[test]
+fn a_root_level_member_path_without_an_accessor_emits_no_arm() {
+    for mode in [RenderMode::State, RenderMode::Resolve] {
+        // No script at all: there is no `user` accessor, let alone a `user` field.
+        let rs = compile_in_mode(r#"<p>{{ user.name }}</p>"#, mode);
+        assert!(
+            !make_resolve_fn(&rs).contains("user.name"),
+            "an unanswerable member path must not be registered, so it cannot emit the \
+             arm `state.user.name()` that does not compile, in {mode:?}:\n{rs}"
+        );
+    }
+}
+
+/// A call expression is not a member path and this task does not touch it. The
+/// arm it generates is `state.user.name()()`, which is still a compile break —
+/// codegen cannot know that a user writing `user.name()` means "pass `name()`'s
+/// value to `user()`", and inventing that is the wrong-render trade R-1d's
+/// ruling rejected. So the shape is pinned exactly as it was, and the report
+/// records the discrepancy: the dispatch described this path as emitting
+/// `state.user(state.name())`, and nothing in this workspace emits that for an
+/// interpolation.
+#[test]
+fn a_call_interpolation_key_is_left_exactly_as_it_was() {
+    for mode in [RenderMode::State, RenderMode::Resolve] {
+        let rs = compile_in_mode(r#"<p>{{ user.name() }}</p>"#, mode);
+        assert!(
+            make_resolve_fn(&rs).contains(r#""user.name()" => state.user.name()().to_string(),"#),
+            "a call key keeps the fallback arm it always had, in {mode:?}:\n{rs}"
+        );
+    }
+}
+
+/// A bare name is registered the way it always was, whether or not a getter
+/// exists: scripts-less component codegen depends on the fallback, so gating it
+/// would be a regression dressed as a fix.
+#[test]
+fn a_bare_interpolation_is_still_registered_without_a_getter() {
+    for mode in [RenderMode::State, RenderMode::Resolve] {
+        let rs = compile_in_mode(r#"<p>{{ title }}</p>"#, mode);
+        assert!(
+            make_resolve_fn(&rs).contains(r#""title" => state.title().to_string(),"#),
+            "the bare-name fallback is long-standing behavior, in {mode:?}:\n{rs}"
+        );
     }
 }
 

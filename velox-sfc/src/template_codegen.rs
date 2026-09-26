@@ -746,7 +746,7 @@ fn generate_make_resolve(interp_keys: &[String], methods: &[StateMethod]) -> Str
     for key in interp_keys {
         let method = resolve_getter_call(methods, key);
         arms.push_str(&format!(
-            "        \"{}\" => state.{}().to_string(),\n",
+            "        \"{}\" => state.{}.to_string(),\n",
             key, method
         ));
     }
@@ -778,7 +778,7 @@ fn generate_render_with_props(interp_keys: &[String], methods: &[StateMethod]) -
     for key in interp_keys {
         let method = resolve_getter_call(methods, key);
         match_arms.push_str(&format!(
-            "            \"{}\" => state.{}().to_string(),\n",
+            "            \"{}\" => state.{}.to_string(),\n",
             key, method
         ));
     }
@@ -2398,16 +2398,55 @@ fn is_bare_identifier(expr: &str) -> bool {
 /// Neither can a method that returns nothing (`state.reset()` has no `Display`
 /// form), so the return type is checked as well.
 fn getter_method_name<'a>(methods: &'a [StateMethod], key: &'a str) -> Option<&'a str> {
-    let is_getter =
-        |m: &&StateMethod| !m.takes_payload && return_type_is_renderable(m.return_type.as_deref());
-    if let Some(m) = methods.iter().find(|m| m.name == key && is_getter(m)) {
+    find_state_method(methods, key, |m| {
+        !m.takes_payload && return_type_is_renderable(m.return_type.as_deref())
+    })
+}
+
+/// A zero-argument `State` method that yields a value, whatever its type.
+///
+/// [`getter_method_name`] additionally requires that value to be renderable as
+/// text, which is right when the arm renders the value itself
+/// (`"title" => state.title().to_string()`) and wrong for the ROOT of a member
+/// path: `{{ user.name }}` needs `state.user()` to return the user's own type,
+/// and the `String` that renders is the last segment's. This is the same lookup
+/// with the renderability test lifted, not a second notion of "answerable" —
+/// both call sites go through [`find_state_method`], so the `get_`/`is_`/`has_`
+/// convention and the payload test cannot drift between them.
+fn accessor_method_name<'a>(methods: &'a [StateMethod], key: &'a str) -> Option<&'a str> {
+    find_state_method(methods, key, |m| {
+        !m.takes_payload && returns_a_value(m.return_type.as_deref())
+    })
+}
+
+/// Does the method yield something a template can go on to read?
+///
+/// Deliberately permissive: a user struct is a perfectly good start of a member
+/// path even though it has no `Display` form of its own, and the inner segments
+/// decide what the chain ends up producing. A unit return is the one case that
+/// cannot start anything.
+fn returns_a_value(ty: Option<&str>) -> bool {
+    match ty.map(str::trim) {
+        Some(ty) => !matches!(strip_borrow(ty), "()" | "Self" | ""),
+        None => false,
+    }
+}
+
+/// The `State` method `key` names: the exact name first, then the `get_`/`is_`/
+/// `has_` variants, keeping the first that satisfies `usable`.
+fn find_state_method<'a>(
+    methods: &'a [StateMethod],
+    key: &str,
+    usable: impl Fn(&StateMethod) -> bool,
+) -> Option<&'a str> {
+    if let Some(m) = methods.iter().find(|m| m.name == key && usable(m)) {
         return Some(m.name.as_str());
     }
     ["get_", "is_", "has_"].iter().find_map(|prefix| {
         let candidate = format!("{prefix}{key}");
         methods
             .iter()
-            .find(|m| m.name == candidate && is_getter(m))
+            .find(|m| m.name == candidate && usable(m))
             .map(|m| m.name.as_str())
     })
 }
@@ -2485,17 +2524,145 @@ fn has_state_getter(methods: &[StateMethod], key: &str) -> bool {
     getter_method_name(methods, key).is_some()
 }
 
-/// The getter call a resolver arm should make for `key`.
+/// The call expression a resolver arm should make on `state` for `key`,
+/// parentheses included: `title()`, `is_open()`, `user().name`.
 ///
 /// Bound-attribute keys are already gated by [`has_state_getter`]. Interpolation
 /// keys are not (that is long-standing behavior, and scripts-less component
 /// codegen still has to emit arms), so those fall back to name-only resolution:
 /// the getter may be spelled `title`, `get_title`, `is_title` or `has_title`.
+///
+/// A member path is the exception: it is emitted as a chain of calls on the
+/// root accessor (see [`member_path_call`]), because `state.user.name()` is not
+/// a legal expression for a hand-written `State` — it needs a `user` *field*
+/// holding something with a `name` method, and a template cannot produce that.
 fn resolve_getter_call(methods: &[StateMethod], key: &str) -> String {
-    match getter_method_name(methods, key) {
-        Some(method) => method.to_string(),
-        None => resolve_method_name(&method_names(methods), key),
+    if let Some(chain) = member_path_call(methods, key) {
+        return chain;
     }
+    match getter_method_name(methods, key) {
+        Some(method) => format!("{method}()"),
+        None => format!("{}()", resolve_method_name(&method_names(methods), key)),
+    }
+}
+
+/// The call chain a member path resolves to, or `None` when `key` is not one.
+///
+/// `user.name` → `user().name`, `a.b.c` → `a().b().c`, `items[0].name` →
+/// `items()[0].name`: the root is the zero-argument accessor the arm already
+/// looks up, and every later segment is a method call on what came before. An
+/// index segment is a place rather than a method, so it is emitted as written
+/// and the segments after it stay calls.
+///
+/// The whole chain is rewritten uniformly. Rewriting only the segments codegen
+/// can vouch for would leave code whose legality depends on types it cannot
+/// see, which is the silent-wrongness this exists to remove.
+fn member_path_call(methods: &[StateMethod], key: &str) -> Option<String> {
+    let (root, segments) = member_path(key)?;
+    let mut chain = format!("{}()", accessor_method_name(methods, root)?);
+    for segment in segments {
+        if segment.starts_with('[') {
+            chain.push_str(segment);
+        } else {
+            chain.push('.');
+            chain.push_str(segment);
+            chain.push_str("()");
+        }
+    }
+    Some(chain)
+}
+
+/// Split a member path into its root and the segments after it: `user.name` →
+/// `("user", ["name"])`, `items[0].name` → `("items", ["[0]", "name"])`.
+///
+/// `None` for anything that is not a member path, so every caller keeps its
+/// existing behaviour: a bare name has nothing to chain, an expression with a
+/// call in it (`user.name()`) is the parameterised path the emitters already
+/// handle, and a segment that is neither a name nor an index is not a path this
+/// can speak about.
+fn member_path(key: &str) -> Option<(&str, Vec<&str>)> {
+    if key.contains('(') || key.contains(')') {
+        return None;
+    }
+    let split = key
+        .find(['.', '['])
+        .filter(|&i| i > 0 && key[..i].chars().all(is_ident_char))?;
+    let root = &key[..split];
+    let mut segments = Vec::new();
+    // The separator that ended the root is not itself a segment: `user.name`
+    // continues with `name`, and `items[0]` continues with the index.
+    let rest = key[split..].strip_prefix('.').unwrap_or(&key[split..]);
+    for segment in rest.split('.') {
+        let is_index = segment.starts_with('[') && segment.ends_with(']');
+        let is_name = !segment.is_empty() && segment.chars().all(is_ident_char);
+        if !is_index && !is_name {
+            return None;
+        }
+        segments.push(segment);
+    }
+    if segments.is_empty() {
+        return None;
+    }
+    Some((root, segments))
+}
+
+fn is_ident_char(ch: char) -> bool {
+    ch.is_ascii_alphanumeric() || ch == '_'
+}
+
+/// The interpolation keys that can be answered by an arm, with a warning for
+/// each one that cannot.
+///
+/// A bare name keeps the long-standing behaviour — it is registered and the
+/// emitters fall back to name-only resolution, which is what scripts-less
+/// component codegen depends on. A **member path** is gated, because the arm it
+/// generates is only legal when the root has a zero-argument accessor:
+/// `{{ user.name }}` is compiled as `state.user().name().to_string()`, and
+/// without a `user()` there is nothing to call, so the key is not registered
+/// and no arm is emitted.
+///
+/// This is the same family diagnostic the bound-attribute path reports, on the
+/// one predicate that is specific here: the ROOT of the path, not the key. The
+/// decision reads [`StateMethod`]s only — never the loop families, and never the
+/// `v-for` collection — so it cannot silence a loop report.
+fn keep_answerable_interpolation_keys(
+    methods: &[StateMethod],
+    fields: &[String],
+    keys: Vec<String>,
+    warnings: &mut Vec<String>,
+) -> Vec<String> {
+    let mut answerable = Vec::with_capacity(keys.len());
+    for key in keys {
+        let Some((root, _)) = member_path(&key) else {
+            answerable.push(key);
+            continue;
+        };
+        if member_path_call(methods, &key).is_some() {
+            answerable.push(key);
+            continue;
+        }
+        let declared = methods.iter().find(|m| &m.name == root);
+        let reason = match declared {
+            Some(m) if m.takes_payload => {
+                format!("`{root}` is a payload-taking State method, not an accessor")
+            }
+            Some(m) if !returns_a_value(m.return_type.as_deref()) => {
+                format!("`{root}` returns nothing, so there is no value to read from")
+            }
+            Some(_) => format!("`{root}` is a State method, but a member path needs an accessor"),
+            None if fields.iter().any(|f| f == root) => format!(
+                "`{root}` is a `State` field, not an accessor — reading a field in a \
+                 template needs a typed field resolver, which is not implemented yet"
+            ),
+            None => format!("`{root}` is not a zero-argument `State` method"),
+        };
+        warnings.push(format!(
+            "interpolation {{{{ {key} }}}} cannot be resolved — {reason}; the interpolation \
+             renders empty. Declare `pub fn {root}(&self) -> YourType` on `State` and a \
+             method for each segment after it."
+        ));
+    }
+    answerable
 }
 
 /// The Rust value one `:attr="expr"` binding emits, together with the resolver
@@ -3005,8 +3172,15 @@ fn collect_resolver_keys(
     fields: &[String],
     mode: RenderMode,
 ) -> ResolverKeys {
-    let mut keys = collect_interpolation_keys(nodes);
     let mut warnings: Vec<String> = Vec::new();
+    // An interpolation key is registered only when the arm for it can be
+    // answered; a member path whose root has no accessor is reported instead.
+    let mut keys = keep_answerable_interpolation_keys(
+        methods,
+        fields,
+        collect_interpolation_keys(nodes),
+        &mut warnings,
+    );
     // Resolve-mode `v-for` bodies, reported once the key set is final: whether a
     // collection has a resolver arm depends on every key collected in the tree.
     let mut resolve_loops: Vec<ResolveLoopFamily> = Vec::new();
@@ -4189,6 +4363,167 @@ impl State {
         assert!(!has_state_getter(&methods, "input"));
     }
 
+    /// The two lookups differ in exactly one test, and both go through the same
+    /// search — a user struct is a fine start of a member path even though it
+    /// has no `Display` form, while the same type as the value itself is not
+    /// renderable. Proving both call sites here is what keeps them one notion.
+    #[test]
+    fn accessor_and_getter_share_one_lookup_and_differ_only_on_renderability() {
+        let script = r#"
+impl State {
+    pub fn user(&self) -> User { User }
+    pub fn get_count(&self) -> i32 { 0 }
+    pub fn title(&self) -> String { String::new() }
+    pub fn on_input(&self, payload: &str) { let _ = payload; }
+    pub fn reset(&self) {}
+}
+"#;
+        let methods = methods(script);
+
+        // A user struct: an accessor (it starts a chain), not a getter (it does
+        // not render).
+        assert_eq!(accessor_method_name(&methods, "user"), Some("user"));
+        assert_eq!(getter_method_name(&methods, "user"), None);
+        // The `get_`/`is_`/`has_` convention is shared, not re-invented.
+        assert_eq!(accessor_method_name(&methods, "count"), Some("get_count"));
+        assert_eq!(getter_method_name(&methods, "count"), Some("get_count"));
+        assert_eq!(accessor_method_name(&methods, "title"), Some("title"));
+        // A payload-taking method and a unit-returning one are neither.
+        assert_eq!(accessor_method_name(&methods, "on_input"), None);
+        assert_eq!(accessor_method_name(&methods, "reset"), None);
+    }
+
+    /// A member path is split into a root and the segments after it, and
+    /// anything that is not one is refused so every caller keeps its own
+    /// behaviour.
+    #[test]
+    fn member_path_splits_a_path_and_refuses_everything_else() {
+        assert_eq!(member_path("user.name"), Some(("user", vec!["name"])));
+        assert_eq!(member_path("a.b.c"), Some(("a", vec!["b", "c"])));
+        assert_eq!(
+            member_path("items[0].name"),
+            Some(("items", vec!["[0]", "name"]))
+        );
+        for not_a_path in [
+            "title",       // a bare name has nothing to chain
+            "user.name()", // a call is the parameterised path, untouched
+            "user.",       // a trailing separator names no segment
+            ".name",       // no root
+            "user..name",  // an empty segment
+            "user name",   // not an identifier
+            "items[0",     // an unterminated index
+            "",            // nothing at all
+        ] {
+            assert_eq!(member_path(not_a_path), None, "{not_a_path:?}");
+        }
+    }
+
+    /// The invariant, on the key set itself: a member path is registered only
+    /// when its root has an accessor, and dropped with a diagnostic otherwise.
+    #[test]
+    fn a_member_path_key_is_registered_only_when_its_root_has_an_accessor() {
+        let script = r#"
+impl State {
+    pub fn user(&self) -> User { User }
+    pub fn title(&self) -> String { String::new() }
+}
+"#;
+        let with_accessor =
+            crate::template_parse::parse_template_to_ast(r#"<p>{{ user.name }} {{ title }}</p>"#)
+                .unwrap();
+        let answerable =
+            collect_resolver_keys(&with_accessor, &methods(script), &[], RenderMode::State);
+        assert_eq!(
+            answerable.keys,
+            vec!["user.name".to_string(), "title".to_string()],
+            "an answerable member path keeps its key, in order"
+        );
+        assert!(answerable.warnings.is_empty(), "{:?}", answerable.warnings);
+
+        let without =
+            crate::template_parse::parse_template_to_ast(r#"<p>{{ user.name }} {{ title }}</p>"#)
+                .unwrap();
+        for mode in [RenderMode::State, RenderMode::Resolve] {
+            let dropped = collect_resolver_keys(&without, &methods(""), &[], mode);
+            assert_eq!(
+                dropped.keys,
+                vec!["title".to_string()],
+                "an unanswerable member path is not registered, so it cannot emit an arm, \
+                 in {mode:?}"
+            );
+            assert_eq!(dropped.warnings.len(), 1, "{:?}", dropped.warnings);
+            let warning = &dropped.warnings[0];
+            assert!(warning.contains("{{ user.name }}"), "{warning}");
+            assert!(
+                warning.contains("`user` is not a zero-argument `State` method"),
+                "{warning}"
+            );
+            assert!(warning.contains("renders empty"), "{warning}");
+        }
+    }
+
+    /// The diagnostic says which part of the path is the problem and why, using
+    /// the same reasons the bound-attribute path reports.
+    #[test]
+    fn the_member_path_diagnostic_names_the_root_and_why() {
+        let tpl = r#"<p>{{ user.name }}</p>"#;
+        let nodes = crate::template_parse::parse_template_to_ast(tpl).unwrap();
+
+        let payload = r#"
+impl State { pub fn user(&self, payload: &str) -> String { payload.to_string() } }
+"#;
+        let unit = r#"
+impl State { pub fn user(&self) {} }
+"#;
+        let script = r#"
+pub struct State { user: String }
+impl State { pub fn new() -> Self { Self { user: String::new() } } }
+"#;
+        for (script_text, fields, expected) in [
+            (
+                payload,
+                Vec::new(),
+                "`user` is a payload-taking State method",
+            ),
+            (unit, Vec::new(), "`user` returns nothing"),
+            (
+                script,
+                vec!["user".to_string()],
+                "`user` is a `State` field",
+            ),
+        ] {
+            let collected =
+                collect_resolver_keys(&nodes, &methods(script_text), &fields, RenderMode::State);
+            assert_eq!(collected.keys, Vec::<String>::new(), "{expected}");
+            assert_eq!(collected.warnings.len(), 1, "{:?}", collected.warnings);
+            assert!(
+                collected.warnings[0].contains(expected),
+                "expected {expected:?} in {:?}",
+                collected.warnings
+            );
+        }
+    }
+
+    /// A bare name is never gated: scripts-less component codegen depends on the
+    /// name-only fallback, and gating it would be a regression dressed as a fix.
+    #[test]
+    fn a_bare_interpolation_key_is_never_gated() {
+        let nodes = crate::template_parse::parse_template_to_ast(
+            r#"<p>{{ title }} {{ user.name() }} {{ count }}</p>"#,
+        )
+        .unwrap();
+        let collected = collect_resolver_keys(&nodes, &methods(""), &[], RenderMode::State);
+        assert_eq!(
+            collected.keys,
+            vec![
+                "title".to_string(),
+                "user.name()".to_string(),
+                "count".to_string()
+            ]
+        );
+        assert!(collected.warnings.is_empty(), "{:?}", collected.warnings);
+    }
+
     /// The renderability gate accepts what `.to_string()` accepts for the scalar
     /// and string types a template can show, and nothing else.
     #[test]
@@ -4264,10 +4599,16 @@ impl State {
     // The key set is asserted WHOLE, not by absence of one name, so a key
     // reappearing under another name fails here too.
 
+    /// R-1c's script, plus the accessor a member path needs: R-1d gates a
+    /// member-path key on its ROOT having a zero-argument accessor, so a script
+    /// without one would make these tests fail for a reason that has nothing to
+    /// do with what they are about (loop-rooted keys, and document order).
     const R1C_SCRIPT: &str = r#"
+        pub struct User { name: String }
         impl State {
             pub fn items(&self) -> String { String::new() }
             pub fn title(&self) -> String { String::new() }
+            pub fn user(&self) -> User { User { name: String::new() } }
         }"#;
 
     fn keys_of(tpl: &str, mode: RenderMode) -> Vec<String> {
