@@ -2702,42 +2702,99 @@ struct ResolveLoopFamily {
     /// * A read of the loop ITEM always counts. Every item form is emitted as
     ///   the indexed resolver read `items[0]…`, which no flat arm answers.
     /// * A read of the loop INDEX counts UNLESS the site emits the direct
-    ///   binding read. The two index forms that render are a bare-index bind,
-    ///   directive or `:class` (`format!("{}", index)`) and a bare-index
-    ///   interpolation (`text(index.to_string())`) — in each case exactly the
+    ///   binding read. The two index forms that render are a bare-index binding
+    ///   — a `:bind`, including `:class` and `:style`, and the `:key` the loop
+    ///   branch reads itself (`format!("{}", index)`) — and a bare-index
+    ///   interpolation (`text(index.to_string())`): in each case exactly the
     ///   expression that is the index name and nothing else. Any other
     ///   expression naming the index, such as `i + 1` or `{a: i > 2}`, is
-    ///   emitted as the flat `resolve("…")` lookup, which answers `""`.
-    ///   The exemption is therefore per expression, never per loop: a direct
-    ///   index read does not launder a compound sibling on the same element.
+    ///   emitted as the flat `resolve("…")` lookup, which answers `"""`, and so
+    ///   is a condition: `rewrite_if_expr` rewrites every bare identifier it is
+    ///   given into `resolve("<ident>")`, which is why `v-if="i"` is not a
+    ///   direct read however bare it is. The exemption is therefore per
+    ///   expression, never per loop: a direct index read does not launder a
+    ///   compound sibling on the same element.
     body_reads_loop: bool,
 }
 
 /// How a site emits a read of the loop index.
 #[derive(Clone, Copy, PartialEq)]
 enum IndexEmission {
-    /// The site emits the index itself — a bind, a directive or an
-    /// interpolation — so a bare index name is the direct binding read.
+    /// The site emits the index itself — a binding or an interpolation — so a
+    /// bare index name is the direct binding read.
     Direct,
     /// The site hands the expression to the flat resolver, so even a bare index
-    /// name is an empty answer. A nested `v-for`'s collection is the only such
-    /// site: `v-for="x in i"` emits `let __for_expr = resolve("i")`.
+    /// name is an empty answer. A `v-for` collection emits
+    /// `let __for_expr = resolve("<expr>")`, and a condition on a loop element
+    /// is rewritten by `rewrite_if_expr` into `resolve("<ident>")`; see
+    /// [`directive_emission`].
     Resolver,
+}
+
+/// Where an attribute sits relative to the `v-for` it belongs to.
+///
+/// The two positions are emitted by different paths, and that difference — not
+/// the attribute's name — decides how a read of the loop index is emitted. A
+/// directive on the loop element is handled by `emit_node_with_mode` before the
+/// loop branch, and its value goes through `rewrite_if_expr`; a directive on any
+/// element inside the body is dropped by `emit_props_in_loop` and emits nothing.
+#[derive(Clone, Copy, PartialEq)]
+enum AttrSite {
+    /// The element that carries the `v-for`.
+    LoopElement,
+    /// An element inside that loop's body, emitted by `emit_props_in_loop`.
+    InLoopBody,
+}
+
+/// How a directive emits a read of the loop index.
+///
+/// The classification follows the EMIT PATH, read off `emit_node_with_mode` and
+/// `emit_props_in_loop`, not the directive's name. `rewrite_if_expr` rewrites
+/// every bare identifier into `resolve("<ident>")`, so a condition never emits
+/// the direct binding read — `v-if="i"` is `resolve("i")`, an empty answer.
+fn directive_emission(name: &str, site: AttrSite) -> IndexEmission {
+    match (name, site) {
+        // `v-for` is not classified here: its value is `(item, i) in expr`, not
+        // a read, so the caller has already parsed out the collection and passes
+        // that to `expr_reads_loop_var` itself — see `attrs_read_loop_root`.
+        //
+        // Conditions on the loop element: `v-if` (which owns the whole
+        // `v-if`/`v-else-if`/`v-else` chain) and `v-show` are both rewritten by
+        // `rewrite_if_expr` in `emit_node_with_mode`, before the loop branch,
+        // so the read is a resolver lookup. `v-else-if` on the same element as
+        // the `v-for` is rejected by the parser, but it is listed with its
+        // chain rather than left to the fallback.
+        ("if" | "show" | "else-if" | "elseif" | "else", AttrSite::LoopElement) => {
+            IndexEmission::Resolver
+        }
+        // Every directive inside the body is dropped by `emit_props_in_loop`,
+        // so it emits no read at all and the direct index exemption is right.
+        (_, AttrSite::InLoopBody) => IndexEmission::Direct,
+        // `v-model` becomes a `:value` bind plus an `@input` handler in
+        // `extract_vmodel` before the loop branch, so its value read is a
+        // bind's — the same path as `:value`. Any other directive the emitter
+        // does not handle emits no read, so `Direct` is the honest answer.
+        _ => IndexEmission::Direct,
+    }
 }
 
 /// Whether `attrs` read either loop variable in a form the Resolve renderer
 /// cannot answer.
-fn attrs_read_loop_root(attrs: &[TemplateAttr], item: &str, index: &str) -> bool {
+fn attrs_read_loop_root(attrs: &[TemplateAttr], item: &str, index: &str, site: AttrSite) -> bool {
     attrs.iter().any(|a| match a.kind {
-        AttrKind::Bind | AttrKind::Directive => a
+        AttrKind::Bind => a
+            .value
+            .as_deref()
+            .map(|value| expr_reads_loop_var(value, item, index, IndexEmission::Direct))
+            .unwrap_or(false),
+        AttrKind::Directive => a
             .value
             .as_deref()
             // A `v-for` introduces its loop variables rather than reading them,
-            // so only its collection expression can read an enclosing loop — and
-            // that collection goes through the resolver either way.
+            // so only its collection expression can read an enclosing loop.
             .map(|value| match parse_v_for(value) {
                 Some(info) => expr_reads_loop_var(&info.expr, item, index, IndexEmission::Resolver),
-                None => expr_reads_loop_var(value, item, index, IndexEmission::Direct),
+                None => expr_reads_loop_var(value, item, index, directive_emission(&a.name, site)),
             })
             .unwrap_or(false),
         AttrKind::Static | AttrKind::On => false,
@@ -2773,7 +2830,7 @@ fn reads_loop_root(node: &Node, item: &str, index: &str) -> bool {
                             .iter()
                             .all(|root| *root == info.item_name || *root == info.index_name)
                 });
-            (!shadowed && attrs_read_loop_root(attrs, item, index))
+            (!shadowed && attrs_read_loop_root(attrs, item, index, AttrSite::InLoopBody))
                 || children.iter().any(|c| reads_loop_root(c, item, index))
         }
     }
@@ -2933,10 +2990,14 @@ fn collect_resolver_keys(
             if let (RenderMode::Resolve, Some(info)) = (mode, &loop_scope) {
                 resolve_loops.push(ResolveLoopFamily {
                     collection: info.expr.clone(),
-                    body_reads_loop: attrs_read_loop_root(attrs, &info.item_name, &info.index_name)
-                        || children
-                            .iter()
-                            .any(|c| reads_loop_root(c, &info.item_name, &info.index_name)),
+                    body_reads_loop: attrs_read_loop_root(
+                        attrs,
+                        &info.item_name,
+                        &info.index_name,
+                        AttrSite::LoopElement,
+                    ) || children
+                        .iter()
+                        .any(|c| reads_loop_root(c, &info.item_name, &info.index_name)),
                 });
             }
             for attr in attrs {
@@ -3431,6 +3492,234 @@ mod tests {
              index, directly, which is a real binding: {:?}",
             resolve.warnings
         );
+    }
+
+    /// A CONDITION on the loop element is not a direct read, however bare the
+    /// expression is. `emit_node_with_mode` routes `v-if` through
+    /// `rewrite_if_expr`, which rewrites every bare identifier into
+    /// `resolve("<ident>")`, so `v-if="i"` is emitted as
+    /// `{ let __v = resolve("i"); … }` around the whole loop: the flat resolver
+    /// answers `""`, the condition is falsy and the loop renders nothing.
+    #[test]
+    fn resolve_loop_with_a_condition_reading_only_the_index_is_reported() {
+        let script = r#"
+        impl State {
+            pub fn items(&self) -> String { String::new() }
+        }"#;
+        let nodes = crate::template_parse::parse_template_to_ast(
+            r#"<ul><li v-for="(item, i) in items" v-if="i">x</li></ul>"#,
+        )
+        .unwrap();
+
+        let resolve = collect_resolver_keys(&nodes, &methods(script), &[], RenderMode::Resolve);
+        assert_loop_reported_for_unanswerable_reads(&resolve.warnings);
+    }
+
+    /// The same through `v-show` on the template's ROOT loop element, the other
+    /// directive the emitter rewrites with `rewrite_if_expr`:
+    /// `if !({ let __v = resolve("i"); … })`, so the element is hidden whatever
+    /// the loop renders.
+    #[test]
+    fn resolve_loop_with_a_show_condition_reading_only_the_index_is_reported() {
+        let script = r#"
+        impl State {
+            pub fn items(&self) -> String { String::new() }
+        }"#;
+        let nodes = crate::template_parse::parse_template_to_ast(
+            r#"<li v-for="(item, i) in items" v-show="i">x</li>"#,
+        )
+        .unwrap();
+
+        let resolve = collect_resolver_keys(&nodes, &methods(script), &[], RenderMode::Resolve);
+        assert_loop_reported_for_unanswerable_reads(&resolve.warnings);
+    }
+
+    /// A `v-show` on a loop element that is NOT the template root is dropped
+    /// outright: only `v-if` is honoured by the children emitter's `v-for`
+    /// branch, so no read is emitted and the condition is silently ignored.
+    ///
+    /// It is reported anyway, deliberately. Erring toward reporting is this
+    /// diagnostic's standing direction — a false positive is one extra sentence,
+    /// a false negative is silence — and the classification also stays correct
+    /// if the dropped directive is ever fixed, whereas exempting it now would
+    /// become a fresh silence the day that happens.
+    #[test]
+    fn resolve_loop_reports_a_dropped_show_condition_on_a_nested_loop_element() {
+        let script = r#"
+        impl State {
+            pub fn items(&self) -> String { String::new() }
+        }"#;
+        let nodes = crate::template_parse::parse_template_to_ast(
+            r#"<ul><li v-for="(item, i) in items" v-show="i">x</li></ul>"#,
+        )
+        .unwrap();
+
+        let resolve = collect_resolver_keys(&nodes, &methods(script), &[], RenderMode::Resolve);
+        assert_loop_reported_for_unanswerable_reads(&resolve.warnings);
+    }
+
+    /// The boundary across attribute KINDS: one element carrying both a
+    /// genuinely-rendering direct index bind and a condition the resolver
+    /// answers `""` for is still reported. Without this, reclassifying
+    /// conditions could have been done by suppressing the loop instead.
+    #[test]
+    fn resolve_loop_reports_a_condition_beside_a_direct_index_read() {
+        let script = r#"
+        impl State {
+            pub fn items(&self) -> String { String::new() }
+        }"#;
+        let nodes = crate::template_parse::parse_template_to_ast(
+            r#"<ul><li v-for="(item, i) in items" :value="i" v-if="i">x</li></ul>"#,
+        )
+        .unwrap();
+
+        let resolve = collect_resolver_keys(&nodes, &methods(script), &[], RenderMode::Resolve);
+        assert_loop_reported_for_unanswerable_reads(&resolve.warnings);
+    }
+
+    /// A directive on an element INSIDE the body is dropped by
+    /// `emit_props_in_loop`, so it emits no read and cannot leave the body
+    /// empty; the loop is not reported for it. (That the condition is silently
+    /// ignored is a separate pre-existing defect, not this rule.)
+    #[test]
+    fn resolve_loop_condition_on_a_child_in_the_body_is_not_reported() {
+        let script = r#"
+        impl State {
+            pub fn items(&self) -> String { String::new() }
+        }"#;
+        let nodes = crate::template_parse::parse_template_to_ast(
+            r#"<ul><li v-for="(item, i) in items"><b v-if="i">x</b></li></ul>"#,
+        )
+        .unwrap();
+
+        let resolve = collect_resolver_keys(&nodes, &methods(script), &[], RenderMode::Resolve);
+        assert!(
+            resolve.warnings.is_empty(),
+            "a dropped directive emits no read, so nothing in the body renders \
+             empty: {:?}",
+            resolve.warnings
+        );
+    }
+
+    /// The classification table, checked against BOTH facts at once: what the
+    /// Resolve renderer emits for that read of the index, and what the family
+    /// diagnostic then says about the loop. Neither column is computed from the
+    /// other — the emitted form comes from codegen and the decision from the
+    /// collector — so a classification that drifts from the emit path fails here
+    /// instead of silently exempting an unanswerable read.
+    ///
+    /// Every expectation below was read off the emitted module, not assumed from
+    /// the attribute's name. Only the first `pub fn render_with_state` onwards is
+    /// examined: the module also carries the State renderer, whose loop body
+    /// reads the loop variables differently.
+    #[test]
+    fn index_classification_agrees_with_the_emitted_read() {
+        // (label, template, emits a resolver read of the index, reported, why)
+        let cases: [(&str, &str, bool, bool, &str); 10] = [
+            (
+                "v-if on a nested loop element",
+                r#"<ul><li v-for="(item, i) in items" v-if="i">x</li></ul>"#,
+                true,
+                true,
+                "the children emitter's v-for branch rewrites it to resolve(\"i\")",
+            ),
+            (
+                "v-if on the root loop element",
+                r#"<li v-for="(item, i) in items" v-if="i">x</li>"#,
+                true,
+                true,
+                "emit_node_with_mode rewrites it before the loop branch",
+            ),
+            (
+                "v-show on the root loop element",
+                r#"<li v-for="(item, i) in items" v-show="i">x</li>"#,
+                true,
+                true,
+                "the same handler, negated",
+            ),
+            (
+                "v-show on a nested loop element",
+                r#"<ul><li v-for="(item, i) in items" v-show="i">x</li></ul>"#,
+                false,
+                true,
+                "dropped by that branch, and still reported on purpose",
+            ),
+            (
+                "a call condition naming the index",
+                r#"<ul><li v-for="(item, i) in items" v-if="i()">x</li></ul>"#,
+                true,
+                true,
+                "the expression is not the index name, so no exemption",
+            ),
+            (
+                "a compound binding",
+                r#"<ul><li v-for="(item, i) in items" :value="i + 1">x</li></ul>"#,
+                true,
+                true,
+                "emitted as resolve(\"i + 1\")",
+            ),
+            (
+                "a direct index bind",
+                r#"<ul><li v-for="(item, i) in items" :value="i">x</li></ul>"#,
+                false,
+                false,
+                "emitted as format!(\"{}\", i)",
+            ),
+            (
+                "a bare index interpolation",
+                r#"<ul><li v-for="(item, i) in items">{{ i }}</li></ul>"#,
+                false,
+                false,
+                "emitted as i.to_string()",
+            ),
+            (
+                "a condition on a child in the body",
+                r#"<ul><li v-for="(item, i) in items"><b v-if="i">x</b></li></ul>"#,
+                false,
+                false,
+                "emit_props_in_loop drops the directive, so it reads nothing",
+            ),
+            (
+                "v-model on the loop element",
+                r#"<ul><li v-for="(item, i) in items" v-model="i">x</li></ul>"#,
+                false,
+                false,
+                "no index read is emitted for it",
+            ),
+        ];
+        let script = r#"
+        impl State {
+            pub fn items(&self) -> String { String::new() }
+        }"#;
+        for (label, tpl, resolves_index, reported, why) in cases {
+            let rs = crate::compile_template_to_rs_full_with_mode(
+                tpl,
+                script,
+                None,
+                None,
+                None,
+                RenderMode::Resolve,
+            )
+            .expect("template compiles");
+            let resolve_renderer = rs
+                .split("pub fn render_with_state")
+                .next()
+                .expect("the module has a Resolve renderer");
+            let emitted_resolver_read = resolve_renderer.contains("resolve(\"i\")")
+                || resolve_renderer.contains("resolve(\"i + 1\")");
+            let nodes = crate::template_parse::parse_template_to_ast(tpl).expect("template parses");
+            let resolve = collect_resolver_keys(&nodes, &methods(script), &[], RenderMode::Resolve);
+            assert_eq!(
+                emitted_resolver_read, resolves_index,
+                "{label}: the emitted read changed ({why})\n{resolve_renderer}"
+            );
+            assert_eq!(
+                !resolve.warnings.is_empty(),
+                reported,
+                "{label}: the decision disagrees with the emitted read ({why}): {:?}",
+                resolve.warnings
+            );
+        }
     }
 
     /// A COMPOUND expression rooted at the index is not the direct binding read.
