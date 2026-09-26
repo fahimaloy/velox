@@ -19,26 +19,26 @@
 
 <script setup>
 use velox_core::ergonomics::Ref;
-use velox_core::signal::Signal;
 
 pub struct State {
     // A single reactive integer. `r#ref!` expands to
     // `Ref::new(value)`, which is the ergonomic wrapper around
     // `Rc<Signal<T>>` for scalar state.
     counter: Ref<i32>,
-    // The text field's value, bound with `v-model="label"`. It is a `Signal`
-    // rather than a `Ref` because the generated setter calls
-    // `VModel::vmodel_set` on the field, and `VModel` is implemented for
-    // `Signal<T>`, `RefCell<String>` and `Cell<T>` — not for the ergonomics
-    // `Ref<T>` wrapper, which is not a type the setter can name.
-    label: Signal<String>,
+    // The text field's value, bound with `v-model="label"`. It is the same
+    // wrapper as `counter` because `VModel` is implemented for `Ref<T>`: the
+    // generated setter is a fully-qualified `VModel::vmodel_set(&self.label,
+    // payload)` call, and fully-qualified calls do not auto-deref, so the
+    // wrapper needs the impl rather than inheriting `Signal`'s through
+    // `Deref`.
+    label: Ref<String>,
 }
 
 impl State {
     pub fn new() -> Self {
         Self {
             counter: velox_core::r#ref!(0),
-            label: Signal::new(String::from("counter")),
+            label: velox_core::r#ref!(String::from("counter")),
         }
     }
 
@@ -51,7 +51,7 @@ impl State {
     }
 
     // The `v-model` read side: the generated `make_resolve` calls this on
-    // every build, so the input shows whatever the signal holds.
+    // every build, so the input shows whatever the ref holds.
     pub fn label(&self) -> String {
         self.label.get()
     }
