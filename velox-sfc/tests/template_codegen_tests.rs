@@ -929,3 +929,59 @@ fn state_mode_loop_rooted_binding_output_is_unchanged() {
         "State-mode component output must not change:\n{state_r}"
     );
 }
+
+/// An object `:class` condition reads a `String` from the resolver, and a `String`
+/// is not a condition. In a Resolve-mode loop the condition is rewritten to the
+/// same indexed read the sibling `:key` binding uses, so it must be given the
+/// truthiness test the rest of codegen already uses for such a read — otherwise
+/// the condition sits in `if` position and does not compile (E0308).
+#[test]
+fn resolve_mode_class_condition_on_a_loop_item_is_a_truthiness_test() {
+    for condition in [r#"todo.done"#, r#"todo.is_done"#] {
+        let tpl = format!(r#"<li v-for="todo in todos" :class="{{ active: {condition} }}">x</li>"#);
+        let rs = compile_in_mode(&tpl, RenderMode::Resolve);
+        let resolve_r = resolve_renderer(&rs);
+
+        assert!(
+            resolve_r.contains(&format!(
+                r#"if {{ let __v = resolve(&format!("todos[{{}}].{field}", __idx)); __v == "true" || (!__v.is_empty() && __v != "false") }} {{ __classes.push("active"); }}"#,
+                field = condition.trim_start_matches("todo.")
+            )),
+            "a `String` condition must be tested for truthiness, not used as one \
+             ({condition}):\n{resolve_r}"
+        );
+        assert!(
+            !resolve_r.contains(&format!("if {condition} {{")),
+            "the raw `String` read must not sit in `if` position ({condition}):\n{resolve_r}"
+        );
+    }
+}
+
+/// The object `:class` condition that is NOT a field read — `todo.a == todo.b` —
+/// is still broken in a Resolve-mode loop, and this pins the fact instead of
+/// hiding it: the generated condition names `todo`, which the Resolve renderer
+/// never binds, so the module does not compile (E0425). This is unchanged from
+/// before the task and identical in both modes; the loop diagnostic now reports
+/// the loop it sits in, so the case is neither silent nor fixed.
+#[test]
+fn compound_class_condition_in_a_resolve_loop_is_still_broken() {
+    let tpl = r#"<li v-for="todo in todos" :class="{ active: todo.a == todo.b }">x</li>"#;
+    let rs = compile_in_mode(tpl, RenderMode::Resolve);
+    let resolve_r = resolve_renderer(&rs);
+
+    assert!(
+        resolve_r.contains(r#"if todo.a == todo.b { __classes.push("active"); }"#),
+        "the compound condition is still emitted raw, and it cannot compile in \
+         this renderer:\n{resolve_r}"
+    );
+    assert!(
+        resolve_r.contains("for __idx in 0..__for_count {"),
+        "the body binds an index, not the item the condition names:\n{resolve_r}"
+    );
+    assert!(
+        state_renderer(&rs).contains(r#"if todo.a == todo.b { __classes.push("active"); }"#),
+        "State mode reads the same expression off the loop item, and is \
+         unchanged:\n{}",
+        state_renderer(&rs)
+    );
+}

@@ -148,6 +148,16 @@ fn resolve_mode_key_value(key_val: &str, for_info: &VForInfo) -> String {
     }
 }
 
+/// The bool a resolver-backed condition evaluates to, using the same string
+/// truthiness a non-loop condition gets from `rewrite_if_expr`.
+///
+/// A loop item read in the Resolve renderer is a `String` from the resolver, not
+/// a `bool`, so it needs this test in an `if` position exactly as a resolver-backed
+/// condition does.
+fn resolver_truthiness(read: &str) -> String {
+    format!(r#"{{ let __v = {read}; __v == "true" || (!__v.is_empty() && __v != "false") }}"#)
+}
+
 /// Validate the parsed template AST and collect structural errors.
 /// Returns a list of error/warning messages (empty if the template is valid).
 fn validate_template(nodes: &[Node]) -> Vec<String> {
@@ -2527,17 +2537,18 @@ fn emit_bind_attr(
                 }
 
                 // A loop-rooted condition is a direct field read in the State
-                // renderer and an indexed resolver read in the Resolve one; a
-                // condition that is neither falls through to the resolver path
-                // below, which reports it.
-                let value = match rewrite_ctx_expr(&cond, item_name, idx_name).and_then(|direct| {
-                    match resolve_loop {
-                        Some(info) => resolve_loop_item_expr(&direct, info),
-                        None => Some(direct),
-                    }
-                }) {
-                    // A loop variable is read directly; nothing to resolve.
-                    Some(direct) => direct,
+                // renderer. In the Resolve one the loop item is an indexed
+                // resolver read — a `String`, which needs the same truthiness
+                // test every resolver-backed condition gets to sit in an `if`.
+                // The bare loop index is a number, so it keeps the direct read.
+                let value = match rewrite_ctx_expr(&cond, item_name, idx_name) {
+                    Some(direct) => match resolve_loop {
+                        Some(info) => match resolve_loop_item_expr(&direct, info) {
+                            Some(read) if read != info.index_name => resolver_truthiness(&read),
+                            _ => direct,
+                        },
+                        None => direct,
+                    },
                     None => {
                         for key in condition_resolver_keys(&cond) {
                             push_unique(&mut keys, key);
@@ -2674,6 +2685,114 @@ fn condition_resolver_keys(expr: &str) -> Vec<String> {
     keys
 }
 
+/// A `v-for` in the Resolve renderer, and whether anything in its body reads the
+/// loop variables.
+struct ResolveLoopFamily {
+    /// The collection expression, the one the renderer hands to `resolve(...)`.
+    collection: String,
+    /// Whether a binding, condition, `:key` or interpolation in the body reads
+    /// the loop item or index.
+    body_reads_loop: bool,
+}
+
+/// Whether `node`'s own attributes read the loop variables `item` or `index`.
+fn attrs_read_loop_root(attrs: &[TemplateAttr], item: &str, index: &str) -> bool {
+    attrs.iter().any(|a| match a.kind {
+        AttrKind::Bind | AttrKind::Directive => a
+            .value
+            .as_deref()
+            // A `v-for` introduces its loop variables rather than reading them,
+            // so only its collection expression can read an enclosing loop.
+            .map(|value| match parse_v_for(value) {
+                Some(info) => expr_reads_loop_root(&info.expr, item, index),
+                None => expr_reads_loop_root(value, item, index),
+            })
+            .unwrap_or(false),
+        AttrKind::Static | AttrKind::On => false,
+    })
+}
+
+/// Whether anything in `node`'s subtree reads the loop variables `item`/`index`.
+///
+/// A nested `v-for` that rebinds the same names shadows them for its own
+/// attributes, but not for its children: a nested loop body can still read the
+/// item of the loop around it.
+fn reads_loop_root(node: &Node, item: &str, index: &str) -> bool {
+    match node {
+        Node::Text(_) => false,
+        Node::Interpolation(expr) => expr_reads_loop_root(expr, item, index),
+        Node::Element {
+            attrs, children, ..
+        } => {
+            let shadowed = attrs
+                .iter()
+                .find(|a| matches!(a.kind, AttrKind::Directive) && a.name == "for")
+                .and_then(|a| a.value.as_deref())
+                .and_then(parse_v_for)
+                .is_some_and(|info| info.item_name == item && info.index_name == index);
+            (!shadowed && attrs_read_loop_root(attrs, item, index))
+                || children.iter().any(|c| reads_loop_root(c, item, index))
+        }
+    }
+}
+
+/// Whether an authored expression reads either loop variable — as the variable
+/// itself, as a field path rooted at it, or anywhere inside a compound expression
+/// such as `todo.a == todo.b`.
+fn expr_reads_loop_root(expr: &str, item: &str, index: &str) -> bool {
+    let chars: Vec<char> = expr.chars().collect();
+    let mut i = 0;
+    while i < chars.len() {
+        if chars[i].is_ascii_alphabetic() || chars[i] == '_' {
+            let start = i;
+            while i < chars.len() && (chars[i].is_ascii_alphanumeric() || chars[i] == '_') {
+                i += 1;
+            }
+            let token: String = chars[start..i].iter().collect();
+            if token == item || token == index {
+                return true;
+            }
+        } else {
+            i += 1;
+        }
+    }
+    false
+}
+
+/// The diagnostic for one `v-for` in the Resolve renderer.
+///
+/// That renderer's resolver is a flat `&str -> String` table built once, outside
+/// every loop, and it holds no arm for the collection and none for an indexed
+/// read of the loop item. So when the collection has no arm the loop counts zero
+/// items and never runs its body at all, and when it does have one the loop item
+/// is still read as `items[0].name`, which no arm answers. Either way nothing in
+/// the loop renders, and one message says so for the whole body rather than one
+/// contradictory message per binding.
+fn resolve_loop_warning(
+    family: &ResolveLoopFamily,
+    methods: &[StateMethod],
+    keys: &[String],
+) -> String {
+    let collection = &family.collection;
+    let has_arm = has_state_getter(methods, collection) || keys.iter().any(|k| k == collection);
+    let cause = if has_arm {
+        format!(
+            "the loop's values are read as indexed resolver keys (`{collection}[0]…`), which \
+             no resolver arm answers, so every value in the body renders empty"
+        )
+    } else {
+        format!(
+            "`{collection}` is not a registered `State` getter, so the resolver returns an empty \
+             string for it, the loop counts zero items and its body never runs at all"
+        )
+    };
+    format!(
+        "`v-for` over `{collection}` cannot render in Resolve mode — {cause}. Render this \
+         component through `render_with_state`, which reads the collection and the loop item \
+         directly."
+    )
+}
+
 /// The resolver keys to register, plus diagnostics for bound expressions that
 /// cannot be resolved.
 struct ResolverKeys {
@@ -2706,6 +2825,9 @@ fn collect_resolver_keys(
 ) -> ResolverKeys {
     let mut keys = collect_interpolation_keys(nodes);
     let mut warnings: Vec<String> = Vec::new();
+    // Resolve-mode `v-for` bodies, reported once the key set is final: whether a
+    // collection has a resolver arm depends on every key collected in the tree.
+    let mut resolve_loops: Vec<ResolveLoopFamily> = Vec::new();
 
     fn walk(
         nodes: &[Node],
@@ -2717,6 +2839,7 @@ fn collect_resolver_keys(
         loop_info: Option<&VForInfo>,
         keys: &mut Vec<String>,
         warnings: &mut Vec<String>,
+        resolve_loops: &mut Vec<ResolveLoopFamily>,
     ) {
         for node in nodes {
             let Node::Element {
@@ -2740,6 +2863,18 @@ fn collect_resolver_keys(
                 ),
                 None => (item_name, idx_name, loop_info),
             };
+            // A `v-for` the Resolve renderer will emit is one whole family: the
+            // collection it counts and every value its body reads. It is reported
+            // once, below, from the final key set.
+            if let (RenderMode::Resolve, Some(info)) = (mode, &loop_scope) {
+                resolve_loops.push(ResolveLoopFamily {
+                    collection: info.expr.clone(),
+                    body_reads_loop: attrs_read_loop_root(attrs, &info.item_name, &info.index_name)
+                        || children
+                            .iter()
+                            .any(|c| reads_loop_root(c, &info.item_name, &info.index_name)),
+                });
+            }
             for attr in attrs {
                 if !matches!(attr.kind, AttrKind::Bind) {
                     continue;
@@ -2749,8 +2884,8 @@ fn collect_resolver_keys(
                 };
                 // The Resolve renderer reads a loop-rooted binding through the
                 // indexed resolver the loop body itself uses; the State renderer
-                // reads the loop item directly. Either way it is a real read, so
-                // it registers no key and there is nothing to report.
+                // reads the loop item directly. Either way it registers no key,
+                // and the whole loop is reported once, below.
                 let resolve_loop = match mode {
                     RenderMode::Resolve => loop_info,
                     RenderMode::State => None,
@@ -2763,6 +2898,22 @@ fn collect_resolver_keys(
                 for key in &emission.keys {
                     if has_state_getter(methods, key) {
                         push_unique(keys, key);
+                        continue;
+                    }
+                    // A loop-rooted binding inside a Resolve-mode `v-for` is
+                    // already covered, as a whole, by the loop's own diagnostic
+                    // below: that one says the loop cannot render and why. A
+                    // second message about the same binding would only restate
+                    // it. A binding that is not rooted at the loop is an ordinary
+                    // one and is still reported.
+                    if matches!(mode, RenderMode::Resolve)
+                        && loop_info.is_some()
+                        && expr_reads_loop_root(
+                            expr,
+                            item_name.unwrap_or(""),
+                            idx_name.unwrap_or(""),
+                        )
+                    {
                         continue;
                     }
                     // Only bare, zero-argument State getters with a renderable
@@ -2798,7 +2949,16 @@ fn collect_resolver_keys(
                 }
             }
             walk(
-                children, methods, fields, mode, item_name, idx_name, loop_info, keys, warnings,
+                children,
+                methods,
+                fields,
+                mode,
+                item_name,
+                idx_name,
+                loop_info,
+                keys,
+                warnings,
+                resolve_loops,
             );
         }
     }
@@ -2813,7 +2973,15 @@ fn collect_resolver_keys(
         None,
         &mut keys,
         &mut warnings,
+        &mut resolve_loops,
     );
+    for family in &resolve_loops {
+        let has_arm = has_state_getter(methods, &family.collection)
+            || keys.iter().any(|k| k == &family.collection);
+        if !has_arm || family.body_reads_loop {
+            warnings.push(resolve_loop_warning(family, methods, &keys));
+        }
+    }
     ResolverKeys { keys, warnings }
 }
 
@@ -2893,35 +3061,50 @@ mod tests {
         assert!(warning.contains("renders empty"), "{warning}");
     }
 
-    /// A loop-rooted binding is a real read in both renderers — a field read in
-    /// State mode, an indexed resolver read in Resolve mode — so neither renderer
-    /// has a key to register and neither has anything to report.
+    /// A loop-rooted binding is a real read in State mode — a field read off the
+    /// loop item — so State mode has no key to register and nothing to report.
+    ///
+    /// In Resolve mode the loop as a whole cannot render, so it is reported once,
+    /// for the loop, and not once per binding inside it: the loop message already
+    /// says every one of those reads comes back empty.
     #[test]
-    fn loop_rooted_binding_is_not_reported_in_either_mode() {
+    fn loop_rooted_binding_is_covered_by_the_loop_diagnostic_in_resolve_mode() {
         let nodes = crate::template_parse::parse_template_to_ast(
             r#"<div v-for="(todo, idx) in todos"><p :value="todo.text">x</p></div>"#,
         )
         .unwrap();
 
-        for mode in [RenderMode::State, RenderMode::Resolve] {
-            let collected = collect_resolver_keys(&nodes, &methods(""), &[], mode);
-            assert!(collected.keys.is_empty(), "{mode:?}: {:?}", collected.keys);
-            assert!(
-                collected.warnings.is_empty(),
-                "{mode:?}: the loop body reads the loop item, so there is no \
-                 unresolved lookup to report: {:?}",
-                collected.warnings
-            );
-        }
+        let state = collect_resolver_keys(&nodes, &methods(""), &[], RenderMode::State);
+        assert!(state.keys.is_empty(), "{:?}", state.keys);
+        assert!(
+            state.warnings.is_empty(),
+            "State mode reads the field off the loop item: {:?}",
+            state.warnings
+        );
+
+        let resolve = collect_resolver_keys(&nodes, &methods(""), &[], RenderMode::Resolve);
+        assert!(resolve.keys.is_empty(), "{:?}", resolve.keys);
+        assert_eq!(
+            resolve.warnings.len(),
+            1,
+            "one message for the loop, not one for the loop and one for the \
+             binding inside it: {:?}",
+            resolve.warnings
+        );
+        let warning = &resolve.warnings[0];
+        assert!(warning.contains("`todos`"), "{warning}");
+        assert!(
+            !warning.contains(":value=\"todo.text\""),
+            "the loop message must not restate the binding: {warning}"
+        );
     }
 
-    /// The one loop-rooted expression a Resolve-mode loop cannot read is a
-    /// compound one such as `todo.a + todo.b`: it stays a resolver lookup, and
-    /// reporting it is the whole point — a key that cannot be evaluated must not
-    /// go silently empty. State mode reads the same expression straight off the
-    /// loop item, so there is nothing to report there.
+    /// A loop body is reported as a whole, so an expression the loop itself
+    /// cannot reduce is not reported a second time on its own. State mode reads
+    /// the same expression straight off the loop item, so it resolves there and
+    /// is not reported.
     #[test]
-    fn unreadable_loop_rooted_binding_is_still_reported_in_resolve_mode() {
+    fn compound_loop_rooted_binding_is_covered_by_the_loop_diagnostic() {
         let nodes = crate::template_parse::parse_template_to_ast(
             r#"<div v-for="todo in todos"><p :value="todo.a + todo.b">x</p></div>"#,
         )
@@ -2931,18 +3114,38 @@ mod tests {
         assert!(resolve.keys.is_empty(), "{:?}", resolve.keys);
         assert_eq!(resolve.warnings.len(), 1, "{:?}", resolve.warnings);
         let warning = &resolve.warnings[0];
-        assert!(warning.contains(":value=\"todo.a + todo.b\""), "{warning}");
+        assert!(warning.contains("`todos`"), "{warning}");
         assert!(
-            warning.contains("renders empty"),
-            "the diagnosis must say the binding renders empty: {warning}"
+            !warning.contains("renders empty"),
+            "the loop message already covers every read in the body, so this \
+             binding must not add a second one: {warning}"
         );
 
         let state = collect_resolver_keys(&nodes, &methods(""), &[], RenderMode::State);
         assert!(
             state.warnings.is_empty(),
-            "State mode reads the field off the loop item, so it resolves: {:?}",
+            "State mode reads the fields off the loop item, so it resolves: {:?}",
             state.warnings
         );
+    }
+
+    /// A binding inside a Resolve-mode loop that is *not* rooted at the loop is
+    /// an ordinary one, and the loop diagnostic must not swallow its own.
+    #[test]
+    fn non_loop_rooted_binding_inside_a_resolve_loop_is_still_reported() {
+        let nodes = crate::template_parse::parse_template_to_ast(
+            r#"<div v-for="todo in todos"><input :value="draft.trim()" /></div>"#,
+        )
+        .unwrap();
+
+        let resolve = collect_resolver_keys(&nodes, &methods(""), &[], RenderMode::Resolve);
+        assert_eq!(resolve.warnings.len(), 2, "{:?}", resolve.warnings);
+        let binding = resolve
+            .warnings
+            .iter()
+            .find(|w| w.contains(":value=\"draft.trim()\""))
+            .unwrap_or_else(|| panic!("{:?}", resolve.warnings));
+        assert!(binding.contains("renders empty"), "{binding}");
     }
 
     /// A `State` field resolves through no renderer, so its diagnostic is
@@ -2973,9 +3176,11 @@ mod tests {
     }
 
     /// `:key` on a `v-for` element is the same case, and both spellings of the
-    /// key expression normalize to the same read, so neither mode reports one.
+    /// key expression normalize to the same read. State mode reads the loop item
+    /// directly and reports nothing; Resolve mode reports the loop, once, because
+    /// the loop cannot render — never the key on its own.
     #[test]
-    fn v_for_key_binding_is_not_reported_in_either_mode() {
+    fn v_for_key_binding_is_covered_by_the_loop_diagnostic_in_resolve_mode() {
         // Both spellings of the same key expression: the collector must analyze
         // the normalized expression codegen emits, not the raw `{{ … }}` text.
         for tpl in [
@@ -2984,30 +3189,31 @@ mod tests {
         ] {
             let nodes = crate::template_parse::parse_template_to_ast(tpl).unwrap();
 
-            for mode in [RenderMode::Resolve, RenderMode::State] {
-                let collected = collect_resolver_keys(&nodes, &methods(""), &[], mode);
-                assert!(
-                    collected.keys.is_empty(),
-                    "{tpl} {mode:?} {:?}",
-                    collected.keys
-                );
-                assert!(
-                    collected.warnings.is_empty(),
-                    "{tpl} {mode:?}: the loop body reads the loop item, so the key \
-                     is resolved: {:?}",
-                    collected.warnings
-                );
-            }
+            let state = collect_resolver_keys(&nodes, &methods(""), &[], RenderMode::State);
+            assert!(state.keys.is_empty(), "{tpl} {:?}", state.keys);
+            assert!(
+                state.warnings.is_empty(),
+                "{tpl}: State mode reads the key off the loop item: {:?}",
+                state.warnings
+            );
+
+            let resolve = collect_resolver_keys(&nodes, &methods(""), &[], RenderMode::Resolve);
+            assert!(resolve.keys.is_empty(), "{tpl} {:?}", resolve.keys);
+            assert_eq!(resolve.warnings.len(), 1, "{tpl} {:?}", resolve.warnings);
+            assert!(
+                !resolve.warnings[0].contains(":key="),
+                "{tpl}: the key must not be reported separately from its loop: {}",
+                resolve.warnings[0]
+            );
         }
     }
 
     /// The `{{ … }}` spelling of a `v-for` `:key` is a loop-rooted binding whose
-    /// key codegen normalizes before emitting, and both renderers read the loop
-    /// field — so no consumer may be told the binding cannot be resolved. The
-    /// raw `{{ … }}` text is not an expression codegen ever uses, and reporting
-    /// it describes a defect that is not there.
+    /// key codegen normalizes before emitting, so the raw `{{ … }}` text is never
+    /// an expression codegen produces. No diagnostic may quote it: it would
+    /// describe a defect that is not there.
     #[test]
-    fn mustache_key_is_not_reported_in_either_mode() {
+    fn mustache_key_is_never_quoted_by_a_diagnostic() {
         let nodes = crate::template_parse::parse_template_to_ast(
             r#"<div v-for="todo in todos" :key="{{ todo.id }}">x</div>"#,
         )
@@ -3015,14 +3221,123 @@ mod tests {
 
         for mode in [RenderMode::Resolve, RenderMode::State] {
             let collected = collect_resolver_keys(&nodes, &methods(""), &[], mode);
-            assert!(collected.keys.is_empty(), "{mode:?} {:?}", collected.keys);
-            assert!(
-                collected.warnings.is_empty(),
-                "{mode:?}: both renderers read `todo.id` from the loop item, so \
-                 the mustache spelling must not be reported: {:?}",
-                collected.warnings
-            );
+            for warning in &collected.warnings {
+                assert!(
+                    !warning.contains("{{"),
+                    "{mode:?}: a diagnostic quoting the raw mustache text: {warning}"
+                );
+            }
         }
+    }
+
+    /// What R-1 delivers, stated as an outcome rather than as a shape: a
+    /// Resolve-mode `v-for` over a collection the resolver cannot answer runs
+    /// its body zero times, so every read inside it is worth nothing — and the
+    /// case is reported instead of passing silently.
+    ///
+    /// Nothing in this workspace compiles a generated module and runs it, so a
+    /// runtime value assertion is not available here. The chain asserted below is
+    /// the strongest honest form of one, and each link is the generated text a
+    /// reader can check: the loop bound is a count, the count is computed from
+    /// one resolver answer, the resolver has no arm for that answer, and the
+    /// catch-all is the empty string.
+    #[test]
+    fn resolve_mode_v_for_over_an_unregistered_collection_is_diagnosed_as_empty() {
+        const TPL: &str =
+            r#"<ul><li v-for="item in items" :key="item.id">{{ item.name }}</li></ul>"#;
+        let rs = compile_template_to_rs_full_with_mode(
+            TPL,
+            "App",
+            None,
+            None,
+            None,
+            RenderMode::Resolve,
+        )
+        .expect("template compiles");
+
+        // The bound of the loop is a count, and the count is one resolver answer.
+        assert!(rs.contains("for __idx in 0..__for_count {"), "{rs}");
+        assert!(
+            rs.contains("let __for_count = if let Ok(n) = __for_expr.parse::<usize>()"),
+            "the loop bound must be derived from the collection read: {rs}"
+        );
+        assert!(
+            rs.contains(r#"let __for_expr = resolve("items");"#),
+            "the collection is read through the resolver: {rs}"
+        );
+        // That answer is the empty string: no arm, and the catch-all.
+        assert!(
+            !rs.contains(r#""items" =>"#),
+            "the collection must have no resolver arm: {rs}"
+        );
+        assert!(rs.contains("_ => String::new()"), "{rs}");
+        // An empty answer takes the `is_empty()` branch, so the count is zero and
+        // the body never runs. Reported, not silent.
+        let nodes = crate::template_parse::parse_template_to_ast(TPL).unwrap();
+        let resolve = collect_resolver_keys(&nodes, &methods(""), &[], RenderMode::Resolve);
+        assert_eq!(resolve.warnings.len(), 1, "{:?}", resolve.warnings);
+        let warning = &resolve.warnings[0];
+        assert!(warning.contains("`items`"), "{warning}");
+        assert!(
+            warning.contains("never runs"),
+            "the diagnosis must say the body never runs: {warning}"
+        );
+
+        // State mode reads the collection and the item straight off the state, so
+        // the same template renders and is not reported there.
+        let state = collect_resolver_keys(&nodes, &methods(""), &[], RenderMode::State);
+        assert!(state.warnings.is_empty(), "{:?}", state.warnings);
+    }
+
+    /// An object `:class` condition the loop cannot reduce is covered by the
+    /// loop's own diagnostic, like any other binding in the body. The generated
+    /// condition is still wrong in Resolve mode — it names the loop item, which
+    /// that renderer does not bind — and that is left for the collection work;
+    /// what this pins is that it is not left *silent*, and not reported twice.
+    #[test]
+    fn compound_class_condition_in_a_resolve_loop_adds_no_second_warning() {
+        let nodes = crate::template_parse::parse_template_to_ast(
+            r#"<li v-for="todo in todos" :class="{ active: todo.a == todo.b }">x</li>"#,
+        )
+        .unwrap();
+
+        let resolve = collect_resolver_keys(&nodes, &methods(""), &[], RenderMode::Resolve);
+        assert_eq!(resolve.warnings.len(), 1, "{:?}", resolve.warnings);
+        assert!(
+            resolve.warnings[0].contains("`todos`"),
+            "{}",
+            resolve.warnings[0]
+        );
+    }
+
+    /// The loop diagnostic must name the loop only when the loop really cannot
+    /// render. A collection the resolver can answer, over a body that reads no
+    /// loop variable, renders: reporting it would train the reader to ignore it.
+    #[test]
+    fn resolve_loop_over_a_registered_collection_is_not_reported() {
+        let script = r#"
+        impl State {
+            pub fn items(&self) -> String { String::new() }
+            pub fn draft(&self) -> String { String::new() }
+        }"#;
+        let nodes = crate::template_parse::parse_template_to_ast(
+            r#"<div v-for="item in items"><p :value="draft">x</p></div>"#,
+        )
+        .unwrap();
+
+        let resolve = collect_resolver_keys(&nodes, &methods(script), &[], RenderMode::Resolve);
+        assert_eq!(
+            resolve.keys,
+            vec!["draft".to_string()],
+            "{:?}",
+            resolve.keys
+        );
+        assert!(
+            resolve.warnings.is_empty(),
+            "the collection is a registered getter and the body reads no loop \
+             variable, so the loop renders: {:?}",
+            resolve.warnings
+        );
     }
 
     /// A zero-argument method that returns nothing is not a getter: the arm would
