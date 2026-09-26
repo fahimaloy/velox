@@ -2690,51 +2690,78 @@ fn condition_resolver_keys(expr: &str) -> Vec<String> {
 }
 
 /// A `v-for` in the Resolve renderer, and whether anything in its body reads the
-/// loop item.
+/// loop in a way the renderer cannot answer.
 struct ResolveLoopFamily {
     /// The collection expression, the one the renderer hands to `resolve(...)`.
     collection: String,
     /// Whether a binding, condition, `:key` or interpolation in the body reads
-    /// the loop ITEM.
+    /// the loop in a form the Resolve renderer cannot answer.
     ///
-    /// The loop index is deliberately not a root: it is a real binding in the
-    /// loop body — an interpolated index is emitted as `text(i.to_string())` and
-    /// a bare-index bind as `format!("{}", index)` — so a body that reads only
-    /// the index still renders.
-    body_reads_item: bool,
+    /// THE DECISION RULE, in full:
+    ///
+    /// * A read of the loop ITEM always counts. Every item form is emitted as
+    ///   the indexed resolver read `items[0]…`, which no flat arm answers.
+    /// * A read of the loop INDEX counts UNLESS the site emits the direct
+    ///   binding read. The two index forms that render are a bare-index bind,
+    ///   directive or `:class` (`format!("{}", index)`) and a bare-index
+    ///   interpolation (`text(index.to_string())`) — in each case exactly the
+    ///   expression that is the index name and nothing else. Any other
+    ///   expression naming the index, such as `i + 1` or `{a: i > 2}`, is
+    ///   emitted as the flat `resolve("…")` lookup, which answers `""`.
+    ///   The exemption is therefore per expression, never per loop: a direct
+    ///   index read does not launder a compound sibling on the same element.
+    body_reads_loop: bool,
 }
 
-/// Whether `attrs` read any of the loop roots in `roots`.
-fn attrs_read_loop_root(attrs: &[TemplateAttr], roots: &[&str]) -> bool {
+/// How a site emits a read of the loop index.
+#[derive(Clone, Copy, PartialEq)]
+enum IndexEmission {
+    /// The site emits the index itself — a bind, a directive or an
+    /// interpolation — so a bare index name is the direct binding read.
+    Direct,
+    /// The site hands the expression to the flat resolver, so even a bare index
+    /// name is an empty answer. A nested `v-for`'s collection is the only such
+    /// site: `v-for="x in i"` emits `let __for_expr = resolve("i")`.
+    Resolver,
+}
+
+/// Whether `attrs` read either loop variable in a form the Resolve renderer
+/// cannot answer.
+fn attrs_read_loop_root(attrs: &[TemplateAttr], item: &str, index: &str) -> bool {
     attrs.iter().any(|a| match a.kind {
         AttrKind::Bind | AttrKind::Directive => a
             .value
             .as_deref()
             // A `v-for` introduces its loop variables rather than reading them,
-            // so only its collection expression can read an enclosing loop.
+            // so only its collection expression can read an enclosing loop — and
+            // that collection goes through the resolver either way.
             .map(|value| match parse_v_for(value) {
-                Some(info) => expr_reads_roots(&info.expr, roots),
-                None => expr_reads_roots(value, roots),
+                Some(info) => expr_reads_loop_var(&info.expr, item, index, IndexEmission::Resolver),
+                None => expr_reads_loop_var(value, item, index, IndexEmission::Direct),
             })
             .unwrap_or(false),
         AttrKind::Static | AttrKind::On => false,
     })
 }
 
-/// Whether anything in `node`'s subtree reads the loop roots in `roots`.
+/// Whether anything in `node`'s subtree reads either loop variable in a form
+/// the Resolve renderer cannot answer.
 ///
 /// A nested `v-for` rebinding those same names shadows them for its own
-/// attributes, but not for its children: a nested loop body can still read the
-/// item of the loop around it. Shadowing therefore requires the nested loop to
-/// rebind every root, so a nested loop that rebinds only the index still exposes
-/// the item of the loop around it.
-fn reads_loop_root(node: &Node, roots: &[&str]) -> bool {
+/// attributes. It does NOT shadow them for its children: those children see the
+/// NESTED binding, not the outer one, so a read there is attributed to the
+/// outer loop as well. That over-attributes — a nested loop body cannot really
+/// be reading the outer item — and the rule deliberately errs that way, because
+/// a false positive here is one extra sentence in a diagnostic while a false
+/// negative is a loop that renders empty with nothing said about it.
+fn reads_loop_root(node: &Node, item: &str, index: &str) -> bool {
     match node {
         Node::Text(_) => false,
-        Node::Interpolation(expr) => expr_reads_roots(expr, roots),
+        Node::Interpolation(expr) => expr_reads_loop_var(expr, item, index, IndexEmission::Direct),
         Node::Element {
             attrs, children, ..
         } => {
+            let roots = [item, index];
             let shadowed = attrs
                 .iter()
                 .find(|a| matches!(a.kind, AttrKind::Directive) && a.name == "for")
@@ -2746,15 +2773,31 @@ fn reads_loop_root(node: &Node, roots: &[&str]) -> bool {
                             .iter()
                             .all(|root| *root == info.item_name || *root == info.index_name)
                 });
-            (!shadowed && attrs_read_loop_root(attrs, roots))
-                || children.iter().any(|c| reads_loop_root(c, roots))
+            (!shadowed && attrs_read_loop_root(attrs, item, index))
+                || children.iter().any(|c| reads_loop_root(c, item, index))
         }
     }
 }
 
 /// Whether an authored expression reads either loop variable — as the variable
-/// itself, as a field path rooted at it, or anywhere inside a compound expression
-/// such as `todo.a == todo.b`.
+/// itself, as a field path rooted at it, or anywhere inside a compound
+/// expression such as `todo.a == todo.b` — in a form the resolver cannot
+/// answer, per the rule on [`ResolveLoopFamily::body_reads_loop`].
+fn expr_reads_loop_var(expr: &str, item: &str, index: &str, emission: IndexEmission) -> bool {
+    if expr_reads_roots(expr, &[item]) {
+        return true;
+    }
+    expr_reads_roots(expr, &[index])
+        && (emission == IndexEmission::Resolver || expr.trim() != index)
+}
+
+/// Whether an authored expression reads either loop variable at all, with no
+/// exemption for the direct index read.
+///
+/// This is the per-BINDING skip's test, not the family's: a binding rooted at
+/// the loop — including a compound one — is left to the loop's own message,
+/// which says the whole body cannot render. Whether that body is a false
+/// positive is decided by the family, above, not here.
 fn expr_reads_loop_root(expr: &str, item: &str, index: &str) -> bool {
     expr_reads_roots(expr, &[item, index])
 }
@@ -2883,15 +2926,17 @@ fn collect_resolver_keys(
                 None => (item_name, idx_name, loop_info),
             };
             // A `v-for` the Resolve renderer will emit is one whole family: the
-            // collection it counts and every value its body reads. It is reported
-            // once, below, from the final key set.
+            // collection it counts and every value its body reads. It is
+            // reported once, below, from that collection's getter alone — not
+            // from the collected key set, which counts interpolation keys too
+            // and would silence a loop whose collection has no arm.
             if let (RenderMode::Resolve, Some(info)) = (mode, &loop_scope) {
                 resolve_loops.push(ResolveLoopFamily {
                     collection: info.expr.clone(),
-                    body_reads_item: attrs_read_loop_root(attrs, &[&info.item_name])
+                    body_reads_loop: attrs_read_loop_root(attrs, &info.item_name, &info.index_name)
                         || children
                             .iter()
-                            .any(|c| reads_loop_root(c, &[&info.item_name])),
+                            .any(|c| reads_loop_root(c, &info.item_name, &info.index_name)),
                 });
             }
             for attr in attrs {
@@ -3000,7 +3045,7 @@ fn collect_resolver_keys(
         // the template does not, and treating it as one would leave this loop
         // silent and unrenderable.
         let has_arm = has_state_getter(methods, &family.collection);
-        if !has_arm || family.body_reads_item {
+        if !has_arm || family.body_reads_loop {
             warnings.push(resolve_loop_warning(family, methods));
         }
     }
@@ -3363,9 +3408,11 @@ mod tests {
     }
 
     /// The loop index is a real binding in the loop body — an interpolated
-    /// index becomes `text(i.to_string())` and a bare-index bind becomes
-    /// `format!("{}", index)` — so a loop whose body reads ONLY the index
-    /// renders, and reporting it would be a false positive.
+    /// index becomes `text(i.to_string())` and a bare-index bind, directive or
+    /// `:class` becomes `format!("{}", index)` — so a loop whose body reads
+    /// ONLY the index, directly, renders, and reporting it would be a false
+    /// positive. Every index form here is the direct read: the value is the
+    /// index name and nothing else.
     #[test]
     fn resolve_loop_reading_only_the_index_is_not_reported() {
         let script = r#"
@@ -3373,7 +3420,7 @@ mod tests {
             pub fn items(&self) -> String { String::new() }
         }"#;
         let nodes = crate::template_parse::parse_template_to_ast(
-            r#"<ul><li v-for="(item, i) in items">{{ i }}<b :value="i">x</b></li></ul>"#,
+            r#"<ul><li v-for="(item, i) in items">{{ i }}<b :value="i" :class="i" :style="i">x</b></li></ul>"#,
         )
         .unwrap();
 
@@ -3381,9 +3428,161 @@ mod tests {
         assert!(
             resolve.warnings.is_empty(),
             "the collection is a registered getter and the body reads only the loop \
-             index, which is a real binding: {:?}",
+             index, directly, which is a real binding: {:?}",
             resolve.warnings
         );
+    }
+
+    /// A COMPOUND expression rooted at the index is not the direct binding read.
+    /// `rewrite_ctx_expr` reduces only a bare index or an `item.`-prefixed path,
+    /// so `i + 1` falls through to the flat resolver and is emitted as
+    /// `resolve("i + 1")`, which the one-arm-per-key table answers `""`. The
+    /// loop renders an empty attribute, so it must be reported.
+    #[test]
+    fn resolve_loop_reading_a_compound_index_binding_is_reported() {
+        let script = r#"
+        impl State {
+            pub fn items(&self) -> String { String::new() }
+        }"#;
+        let nodes = crate::template_parse::parse_template_to_ast(
+            r#"<ul><li v-for="(item, i) in items" :value="i + 1">x</li></ul>"#,
+        )
+        .unwrap();
+
+        let resolve = collect_resolver_keys(&nodes, &methods(script), &[], RenderMode::Resolve);
+        assert_loop_reported_for_unanswerable_reads(&resolve.warnings);
+    }
+
+    /// The same compound-index hole through a `:class` condition, which also
+    /// happens to emit a non-compiling comparison in both renderers — the
+    /// closed compound-`:class` limitation, reached here through the index.
+    #[test]
+    fn resolve_loop_reading_a_compound_index_condition_is_reported() {
+        let script = r#"
+        impl State {
+            pub fn items(&self) -> String { String::new() }
+        }"#;
+        let nodes = crate::template_parse::parse_template_to_ast(
+            r#"<ul><li v-for="(item, i) in items" :class="{a: i > 2}">x</li></ul>"#,
+        )
+        .unwrap();
+
+        let resolve = collect_resolver_keys(&nodes, &methods(script), &[], RenderMode::Resolve);
+        assert_loop_reported_for_unanswerable_reads(&resolve.warnings);
+    }
+
+    /// The same compound-index hole through an interpolation, which is emitted
+    /// as `text(resolve("i + 1"))` and answers `""`.
+    #[test]
+    fn resolve_loop_reading_a_compound_index_interpolation_is_reported() {
+        let script = r#"
+        impl State {
+            pub fn items(&self) -> String { String::new() }
+        }"#;
+        let nodes = crate::template_parse::parse_template_to_ast(
+            r#"<ul><li v-for="(item, i) in items">{{ i + 1 }}</li></ul>"#,
+        )
+        .unwrap();
+
+        let resolve = collect_resolver_keys(&nodes, &methods(script), &[], RenderMode::Resolve);
+        assert_loop_reported_for_unanswerable_reads(&resolve.warnings);
+    }
+
+    /// The exemption is per EXPRESSION, not per loop: one element carrying both
+    /// a direct index read and a compound one is still reported, so the direct
+    /// forms cannot launder a compound sibling.
+    #[test]
+    fn resolve_loop_reports_a_compound_index_read_beside_direct_ones() {
+        let script = r#"
+        impl State {
+            pub fn items(&self) -> String { String::new() }
+        }"#;
+        let nodes = crate::template_parse::parse_template_to_ast(
+            r#"<ul><li v-for="(item, i) in items" :value="i" :title="i + 1">{{ i }} {{ i * 2 }}</li></ul>"#,
+        )
+        .unwrap();
+
+        let resolve = collect_resolver_keys(&nodes, &methods(script), &[], RenderMode::Resolve);
+        assert_loop_reported_for_unanswerable_reads(&resolve.warnings);
+    }
+
+    /// A nested `v-for` whose COLLECTION is the outer index is not a direct
+    /// read: the collection is emitted as `let __for_expr = resolve("i")`, which
+    /// answers `""`, so the nested loop counts zero items and its body never
+    /// runs. The direct-index exemption must not reach that site, and the outer
+    /// loop — whose body contains that unreadable read — must not be masked by
+    /// it either.
+    #[test]
+    fn resolve_loop_reading_the_index_as_a_nested_collection_is_reported() {
+        let script = r#"
+        impl State {
+            pub fn items(&self) -> String { String::new() }
+        }"#;
+        let nodes = crate::template_parse::parse_template_to_ast(
+            r#"<ul><li v-for="(item, i) in items"><p v-for="row in i">{{ row }}</p></li></ul>"#,
+        )
+        .unwrap();
+
+        let resolve = collect_resolver_keys(&nodes, &methods(script), &[], RenderMode::Resolve);
+        assert_eq!(resolve.warnings.len(), 2, "{:?}", resolve.warnings);
+        let nested = resolve
+            .warnings
+            .iter()
+            .find(|w| w.contains("`v-for` over `i` cannot render in Resolve mode"))
+            .unwrap_or_else(|| {
+                panic!(
+                    "the nested loop over the index must be reported: {:?}",
+                    resolve.warnings
+                )
+            });
+        assert!(
+            nested.contains("is not a registered `State` getter"),
+            "`resolve(\"i\")` answers an empty string, so the count is zero: {nested}"
+        );
+        assert!(
+            resolve
+                .warnings
+                .iter()
+                .any(|w| w.contains("`v-for` over `items` cannot render in Resolve mode")),
+            "the outer loop reads the index, so it reports too: {:?}",
+            resolve.warnings
+        );
+    }
+
+    /// Exactly one message for the loop, naming the loop and blaming the
+    /// unreadable indexed read — the collection here IS a registered getter, so
+    /// "not a registered `State` getter" would be the wrong cause.
+    fn assert_loop_reported_for_unanswerable_reads(warnings: &[String]) {
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        let warning = &warnings[0];
+        assert!(
+            warning.contains("`v-for` over `items` cannot render in Resolve mode"),
+            "{warning}"
+        );
+        assert!(
+            warning.contains("indexed resolver keys"),
+            "the collection has a getter, so the cause must be the unreadable \
+             indexed read: {warning}"
+        );
+    }
+
+    /// A body that reads the ITEM and nothing else still reports: the direct
+    /// index exemption is about the index, never a blanket suppression of the
+    /// loop. Every item form — an indexed resolver read, a bound field, a
+    /// `{{ … }}` — is unanswerable.
+    #[test]
+    fn resolve_loop_reading_only_the_item_is_reported() {
+        let script = r#"
+        impl State {
+            pub fn items(&self) -> String { String::new() }
+        }"#;
+        let nodes = crate::template_parse::parse_template_to_ast(
+            r#"<ul><li v-for="(item, i) in items"><b>{{ item.name }}</b></li></ul>"#,
+        )
+        .unwrap();
+
+        let resolve = collect_resolver_keys(&nodes, &methods(script), &[], RenderMode::Resolve);
+        assert_loop_reported_for_unanswerable_reads(&resolve.warnings);
     }
 
     /// The converse of the index-only case: reading the ITEM as well still
