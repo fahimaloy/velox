@@ -130,7 +130,7 @@ fn is_field_path(s: &str) -> bool {
         && s.split('.').all(|seg| {
             let mut chars = seg.chars();
             matches!(chars.next(), Some(c) if c.is_ascii_alphabetic() || c == '_')
-                && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+                && chars.all(is_ident_char)
         })
 }
 
@@ -982,7 +982,7 @@ pub(crate) fn rewrite_if_expr(expr: &str) -> String {
         if ch.is_ascii_alphabetic() || ch == '_' {
             ident.push(ch);
             while let Some(&next) = chars.peek() {
-                if next.is_ascii_alphanumeric() || next == '_' {
+                if is_ident_char(next) {
                     ident.push(next);
                     chars.next();
                 } else {
@@ -1015,7 +1015,7 @@ pub(crate) fn rewrite_if_expr(expr: &str) -> String {
             // Instead, let's handle ! more carefully: consume the ident after !
             let mut neg_ident = String::new();
             while let Some(&next) = chars.peek() {
-                if next.is_ascii_alphanumeric() || next == '_' {
+                if is_ident_char(next) {
                     neg_ident.push(next);
                     chars.next();
                 } else {
@@ -2389,7 +2389,7 @@ fn is_bare_identifier(expr: &str) -> bool {
         Some(c) if c.is_ascii_alphabetic() || c == '_' => {}
         _ => return false,
     }
-    chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+    chars.all(is_ident_char)
 }
 /// The `State` method that provides the value for `key`, when that method is a
 /// genuine zero-argument getter whose return type can be rendered as text.
@@ -2506,9 +2506,7 @@ fn strip_borrow(ty: &str) -> &str {
         ty = match rest.strip_prefix("_,") {
             Some(after) => after.trim_start(),
             None => {
-                let end = rest
-                    .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
-                    .unwrap_or(rest.len());
+                let end = rest.find(|c: char| !is_ident_char(c)).unwrap_or(rest.len());
                 rest[end..].trim_start()
             }
         };
@@ -2527,10 +2525,13 @@ fn has_state_getter(methods: &[StateMethod], key: &str) -> bool {
 /// The call expression a resolver arm should make on `state` for `key`,
 /// parentheses included: `title()`, `is_open()`, `user().name`.
 ///
-/// Bound-attribute keys are already gated by [`has_state_getter`]. Interpolation
-/// keys are not (that is long-standing behavior, and scripts-less component
-/// codegen still has to emit arms), so those fall back to name-only resolution:
-/// the getter may be spelled `title`, `get_title`, `is_title` or `has_title`.
+/// Both key sources are gated before they get here — bound-attribute keys by
+/// [`has_state_getter`], interpolation keys by
+/// [`keep_answerable_interpolation_keys`] — so a key that reaches an arm always
+/// has a getter to call, spelled `title`, `get_title`, `is_title` or `has_title`
+/// by the same [`find_state_method`] convention. The fallbacks below are what a
+/// key the gates let through but this call cannot chain would use; they are not
+/// a route to an arm for a name `State` does not expose.
 ///
 /// A member path is the exception: it is emitted as a chain of calls on the
 /// root accessor (see [`member_path_call`]), because `state.user.name()` is not
@@ -2576,10 +2577,14 @@ fn member_path_call(methods: &[StateMethod], key: &str) -> Option<String> {
 /// `("user", ["name"])`, `items[0].name` → `("items", ["[0]", "name"])`.
 ///
 /// `None` for anything that is not a member path, so every caller keeps its
-/// existing behaviour: a bare name has nothing to chain, an expression with a
-/// call in it (`user.name()`) is the parameterised path the emitters already
-/// handle, and a segment that is neither a name nor an index is not a path this
-/// can speak about.
+/// existing behaviour: a bare name has nothing to chain, and a segment that is
+/// neither a name nor an index is not a path this can speak about.
+///
+/// A key with a call in it (`user.name()`) is `None` too, and **nothing in this
+/// crate emits `state.user(state.name())`** — such a key falls through to the
+/// name-only fallback, which is [`keep_answerable_interpolation_keys`]'s caller
+/// and is deliberately not gated. That is pre-existing behaviour and out of
+/// scope here; see the report.
 fn member_path(key: &str) -> Option<(&str, Vec<&str>)> {
     if key.contains('(') || key.contains(')') {
         return None;
@@ -2610,21 +2615,30 @@ fn is_ident_char(ch: char) -> bool {
     ch.is_ascii_alphanumeric() || ch == '_'
 }
 
-/// The interpolation keys that can be answered by an arm, with a warning for
-/// each one that cannot.
+/// The interpolation keys that have a getter, or a root accessor, to answer
+/// them — with a warning for each one that has not.
 ///
-/// A bare name keeps the long-standing behaviour — it is registered and the
-/// emitters fall back to name-only resolution, which is what scripts-less
-/// component codegen depends on. A **member path** is gated, because the arm it
-/// generates is only legal when the root has a zero-argument accessor:
-/// `{{ user.name }}` is compiled as `state.user().name().to_string()`, and
-/// without a `user()` there is nothing to call, so the key is not registered
-/// and no arm is emitted.
+/// A **bare name** (`{{ title }}`) is registered only when a zero-argument,
+/// renderable `State` method answers it, because the arm is
+/// `"title" => state.title().to_string()` and a `State` without `title` cannot
+/// compile that. A **member path** (`{{ user.name }}`) is registered only when
+/// its ROOT has a zero-argument accessor, because the arm is
+/// `state.user().name().to_string()` and without a `user()` there is nothing to
+/// call. Both decisions ask the same lookup the emitter asks, so a key that is
+/// kept is a key whose arm has something to call.
 ///
-/// This is the same family diagnostic the bound-attribute path reports, on the
-/// one predicate that is specific here: the ROOT of the path, not the key. The
-/// decision reads [`StateMethod`]s only — never the loop families, and never the
-/// `v-for` collection — so it cannot silence a loop report.
+/// A key that is neither a bare name nor a member path — `user.name()`, `a.b[0`
+/// — is **not gated** and keeps the long-standing fallback. Those keys are
+/// refused by [`member_path`] and are not a name a `State` method can have, so
+/// the two rules above have nothing to say about them; gating them is a
+/// separate task, and the report discloses them rather than claiming this
+/// function closes them.
+///
+/// This is the same family diagnostic the bound-attribute path already reports,
+/// asked of one predicate: the name the emitter will call, which is the ROOT of
+/// a member path and the whole key otherwise. The decision reads
+/// [`StateMethod`]s only — never the loop families, and never the `v-for`
+/// collection — so it cannot silence a loop report.
 fn keep_answerable_interpolation_keys(
     methods: &[StateMethod],
     fields: &[String],
@@ -2633,11 +2647,21 @@ fn keep_answerable_interpolation_keys(
 ) -> Vec<String> {
     let mut answerable = Vec::with_capacity(keys.len());
     for key in keys {
-        let Some((root, _)) = member_path(&key) else {
+        let path = member_path(&key);
+        let root = if is_bare_identifier(&key) {
+            Some(key.as_str())
+        } else {
+            path.as_ref().map(|(root, _)| *root)
+        };
+        let Some(root) = root else {
             answerable.push(key);
             continue;
         };
-        if member_path_call(methods, &key).is_some() {
+        let answered = match &path {
+            Some(_) => member_path_call(methods, &key).is_some(),
+            None => getter_method_name(methods, &key).is_some(),
+        };
+        if answered {
             answerable.push(key);
             continue;
         }
@@ -2649,17 +2673,29 @@ fn keep_answerable_interpolation_keys(
             Some(m) if !returns_a_value(m.return_type.as_deref()) => {
                 format!("`{root}` returns nothing, so there is no value to read from")
             }
-            Some(_) => format!("`{root}` is a State method, but a member path needs an accessor"),
+            Some(_) if path.is_some() => {
+                format!("`{root}` is a State method, but a member path needs an accessor")
+            }
+            Some(_) => format!(
+                "`{root}` is a `State` method, but its return type cannot be rendered as text"
+            ),
             None if fields.iter().any(|f| f == root) => format!(
                 "`{root}` is a `State` field, not an accessor — reading a field in a \
                  template needs a typed field resolver, which is not implemented yet"
             ),
             None => format!("`{root}` is not a zero-argument `State` method"),
         };
+        let remedy = if path.is_some() {
+            format!(
+                "Declare `pub fn {root}(&self) -> YourType` on `State` and a method for each \
+                 segment after it."
+            )
+        } else {
+            format!("Declare `pub fn {root}(&self) -> impl std::fmt::Display` on `State`.")
+        };
         warnings.push(format!(
             "interpolation {{{{ {key} }}}} cannot be resolved — {reason}; the interpolation \
-             renders empty. Declare `pub fn {root}(&self) -> YourType` on `State` and a \
-             method for each segment after it."
+             renders empty. {remedy}"
         ));
     }
     answerable
@@ -2875,7 +2911,7 @@ fn condition_resolver_keys(expr: &str) -> Vec<String> {
         let c = chars[i];
         if c.is_ascii_alphabetic() || c == '_' {
             let start = i;
-            while i < chars.len() && (chars[i].is_ascii_alphanumeric() || chars[i] == '_') {
+            while i < chars.len() && is_ident_char(chars[i]) {
                 i += 1;
             }
             let token: String = chars[start..i].iter().collect();
@@ -3089,7 +3125,7 @@ fn expr_reads_roots(expr: &str, roots: &[&str]) -> bool {
     while i < chars.len() {
         if chars[i].is_ascii_alphabetic() || chars[i] == '_' {
             let start = i;
-            while i < chars.len() && (chars[i].is_ascii_alphanumeric() || chars[i] == '_') {
+            while i < chars.len() && is_ident_char(chars[i]) {
                 i += 1;
             }
             let token: String = chars[start..i].iter().collect();
@@ -4252,31 +4288,48 @@ mod tests {
         );
     }
 
-    /// A collection name that merely APPEARS as an interpolation elsewhere is
-    /// not an arm that can answer the loop: `generate_make_resolve` emits
-    /// `"items" => state.items().to_string()` for it, against a `State` struct
-    /// that has no `items` field, so the resolver answers `""` and the loop
-    /// counts zero items. Such a loop must still be reported.
+    /// A collection `State` has no getter for cannot be answered by an arm, so a
+    /// loop over it counts zero items and must be reported.
+    ///
+    /// R-1 found this while a collection name could still reach the key set
+    /// without a getter, which is why `has_arm` consults the getter alone: a key
+    /// is not an arm. R-1d's gate closes that route for interpolation keys, and
+    /// the binding route was already gated by `has_state_getter`, so the hazard
+    /// is now unreachable from the template — asserted below rather than
+    /// assumed, because a test that no longer holds its premise is how a
+    /// narrowing like this hides.
     #[test]
-    fn resolve_loop_over_a_collection_named_only_by_an_interpolation_is_reported() {
+    fn resolve_loop_over_a_collection_with_no_accessor_is_reported() {
         let script = r#"
         impl State {
             pub fn draft(&self) -> String { String::new() }
         }"#;
         let nodes = crate::template_parse::parse_template_to_ast(
-            r#"<p>{{ items }}</p><ul><li v-for="(item, i) in items">{{ i }}</li></ul>"#,
+            r#"<p :x="items">{{ items }}</p><ul><li v-for="(item, i) in items">{{ i }}</li></ul>"#,
         )
         .unwrap();
 
         let resolve = collect_resolver_keys(&nodes, &methods(script), &[], RenderMode::Resolve);
         assert!(
-            resolve.keys.iter().any(|k| k == "items"),
-            "the interpolation does collect `items` as a key, which is exactly why \
-             the key set cannot stand in for a real getter here: {:?}",
+            !resolve.keys.iter().any(|k| k == "items"),
+            "neither route can register a key `State` has no getter for — the \
+             binding is gated by `has_state_getter` and the interpolation by \
+             R-1d's gate — so no key can stand in for the getter: {:?}",
             resolve.keys
         );
-        assert_eq!(resolve.warnings.len(), 1, "{:?}", resolve.warnings);
-        let warning = &resolve.warnings[0];
+        assert!(
+            resolve
+                .warnings
+                .iter()
+                .any(|w| w.contains("interpolation {{ items }} cannot be resolved")),
+            "the interpolation reports why it was dropped: {:?}",
+            resolve.warnings
+        );
+        // Three warnings, all of them about `items`, in this order: the dropped
+        // interpolation (this round's gate), the dropped binding (the bind path's
+        // own gate) and the loop itself.
+        assert_eq!(resolve.warnings.len(), 3, "{:?}", resolve.warnings);
+        let warning = &resolve.warnings[2];
         assert!(
             warning.contains("`v-for` over `items` cannot render in Resolve mode"),
             "{warning}"
@@ -4287,9 +4340,20 @@ mod tests {
         );
 
         // The State renderer reads the collection and the item directly, so the
-        // same template is silent there.
+        // loop is not reported there — the family is pushed only under
+        // `if let (RenderMode::Resolve, Some(info))`, and this is the pin: the two
+        // key-gate warnings are mode-independent, the loop report is not.
         let state = collect_resolver_keys(&nodes, &methods(script), &[], RenderMode::State);
-        assert!(state.warnings.is_empty(), "{:?}", state.warnings);
+        assert_eq!(state.keys, resolve.keys, "the key set is mode-independent");
+        assert_eq!(state.warnings.len(), 2, "{:?}", state.warnings);
+        assert!(
+            !state
+                .warnings
+                .iter()
+                .any(|w| w.contains("`v-for` over `items` cannot render")),
+            "a loop report is Resolve-mode only: {:?}",
+            state.warnings
+        );
     }
 
     /// A zero-argument method that returns nothing is not a getter: the arm would
@@ -4406,7 +4470,7 @@ impl State {
         );
         for not_a_path in [
             "title",       // a bare name has nothing to chain
-            "user.name()", // a call is the parameterised path, untouched
+            "user.name()", // a call is not a path; it keeps the fallback, ungated
             "user.",       // a trailing separator names no segment
             ".name",       // no root
             "user..name",  // an empty segment
@@ -4447,11 +4511,11 @@ impl State {
             let dropped = collect_resolver_keys(&without, &methods(""), &[], mode);
             assert_eq!(
                 dropped.keys,
-                vec!["title".to_string()],
-                "an unanswerable member path is not registered, so it cannot emit an arm, \
-                 in {mode:?}"
+                Vec::<String>::new(),
+                "an unanswerable member path is not registered, so it cannot emit an arm, and \
+                 neither is the bare name beside it, in {mode:?}"
             );
-            assert_eq!(dropped.warnings.len(), 1, "{:?}", dropped.warnings);
+            assert_eq!(dropped.warnings.len(), 2, "{:?}", dropped.warnings);
             let warning = &dropped.warnings[0];
             assert!(warning.contains("{{ user.name }}"), "{warning}");
             assert!(
@@ -4504,24 +4568,84 @@ impl State { pub fn new() -> Self { Self { user: String::new() } } }
         }
     }
 
-    /// A bare name is never gated: scripts-less component codegen depends on the
-    /// name-only fallback, and gating it would be a regression dressed as a fix.
+    /// A bare name IS gated, and only on a getter — the arm it produces is
+    /// `state.title().to_string()`, which a `State` without `title` cannot
+    /// compile. With a getter it is registered unchanged, which is the case the
+    /// examples and the goldens rest on.
+    ///
+    /// `{{ user.name() }}` is NOT gated: a key with a call in it is not a name a
+    /// `State` method can have and not a member path, so it keeps the
+    /// long-standing fallback. That is pre-existing and disclosed, not claimed
+    /// closed.
     #[test]
-    fn a_bare_interpolation_key_is_never_gated() {
-        let nodes = crate::template_parse::parse_template_to_ast(
-            r#"<p>{{ title }} {{ user.name() }} {{ count }}</p>"#,
-        )
-        .unwrap();
+    fn a_bare_interpolation_key_is_gated_on_a_getter_and_otherwise_untouched() {
+        let template = r#"<p>{{ title }} {{ user.name() }} {{ count }}</p>"#;
+        let nodes = crate::template_parse::parse_template_to_ast(template).unwrap();
+
+        // No getters at all: every bare name is dropped, and the paren key — which
+        // no rule here can speak about — is the only one that survives.
         let collected = collect_resolver_keys(&nodes, &methods(""), &[], RenderMode::State);
         assert_eq!(
             collected.keys,
+            vec!["user.name()".to_string()],
+            "a bare name with no getter is not registered, so it cannot emit an \
+             unanswerable arm; a call key is not gated"
+        );
+        assert_eq!(collected.warnings.len(), 2, "{:?}", collected.warnings);
+        for (key, warning) in [
+            ("title", &collected.warnings[0]),
+            ("count", &collected.warnings[1]),
+        ] {
+            assert!(warning.contains(&format!("{{{{ {key} }}}}")), "{warning}");
+            assert!(
+                warning.contains(&format!("`{key}` is not a zero-argument `State` method")),
+                "{warning}"
+            );
+            assert!(warning.contains("Declare `pub fn"), "{warning}");
+        }
+
+        // A getter answers the bare name, and the key keeps its place in the set.
+        let with_getters = r#"
+impl State {
+    pub fn title(&self) -> String { String::new() }
+    pub fn count(&self) -> i32 { 0 }
+}
+"#;
+        let answered =
+            collect_resolver_keys(&nodes, &methods(with_getters), &[], RenderMode::State);
+        assert_eq!(
+            answered.keys,
             vec![
                 "title".to_string(),
                 "user.name()".to_string(),
                 "count".to_string()
-            ]
+            ],
+            "a getter-backed bare name is registered exactly as before, in order"
         );
-        assert!(collected.warnings.is_empty(), "{:?}", collected.warnings);
+        assert!(answered.warnings.is_empty(), "{:?}", answered.warnings);
+    }
+
+    /// A bare name whose accessor returns something with no `Display` form is
+    /// dropped too: `state.items().to_string()` on a `Vec<Item>` is the same
+    /// compile break as a missing method.
+    #[test]
+    fn a_bare_name_with_an_unrenderable_return_type_is_not_registered() {
+        let script = r#"
+impl State {
+    pub fn items(&self) -> Vec<Item> { Vec::new() }
+}
+"#;
+        let nodes = crate::template_parse::parse_template_to_ast(r#"<p>{{ items }}</p>"#).unwrap();
+        let collected = collect_resolver_keys(&nodes, &methods(script), &[], RenderMode::State);
+        assert_eq!(collected.keys, Vec::<String>::new(), "{:?}", collected.keys);
+        assert_eq!(collected.warnings.len(), 1, "{:?}", collected.warnings);
+        assert!(
+            collected.warnings[0].contains(
+                "`items` is a `State` method, but its return type cannot be rendered as text"
+            ),
+            "{}",
+            collected.warnings[0]
+        );
     }
 
     /// The renderability gate accepts what `.to_string()` accepts for the scalar
@@ -4736,14 +4860,14 @@ impl State { pub fn new() -> Self { Self { user: String::new() } } }
         );
     }
 
-    /// A `v-for` collection that is also interpolated at the top level keeps
-    /// its key, and the loop is still reported: the key set and the
-    /// diagnostic are separate (R-1's N2 finding, re-pinned here because this
-    /// task edits the key set the test's premise is about).
+    /// The same closed state, asserted from the key-set side: a `v-for`
+    /// collection with no accessor contributes no key from either route, and the
+    /// loop is still reported (R-1's N2 finding, re-pinned because this task
+    /// edits the key set its premise was about).
     #[test]
-    fn a_collection_named_only_by_a_root_interpolation_keeps_its_key_and_is_reported() {
+    fn a_collection_with_no_accessor_registers_no_key_and_is_still_reported() {
         let nodes = crate::template_parse::parse_template_to_ast(
-            r#"<p>{{ items }}</p><ul><li v-for="(item, i) in items">{{ i }}</li></ul>"#,
+            r#"<p :x="items">{{ items }}</p><ul><li v-for="(item, i) in items">{{ i }}</li></ul>"#,
         )
         .expect("template parses");
         let script = r#"
@@ -4753,16 +4877,22 @@ impl State { pub fn new() -> Self { Self { user: String::new() } } }
 
         let resolve = collect_resolver_keys(&nodes, &methods(script), &[], RenderMode::Resolve);
         assert!(
-            resolve.keys.iter().any(|k| k == "items"),
-            "a root-level interpolation of the collection is still collected: {:?}",
+            !resolve.keys.iter().any(|k| k == "items"),
+            "a collection with no accessor is registered from neither route: {:?}",
             resolve.keys
+        );
+        assert_eq!(
+            resolve.warnings.len(),
+            3,
+            "the loop report, the dropped interpolation and the dropped binding, and \
+             nothing else: {:?}",
+            resolve.warnings
         );
         assert!(
             !resolve.keys.iter().any(|k| k == "item" || k == "i"),
             "but nothing loop-rooted is: {:?}",
             resolve.keys
         );
-        assert_eq!(resolve.warnings.len(), 1, "{:?}", resolve.warnings);
     }
 }
 

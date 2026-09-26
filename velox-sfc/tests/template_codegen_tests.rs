@@ -966,16 +966,36 @@ fn a_call_interpolation_key_is_left_exactly_as_it_was() {
     }
 }
 
-/// A bare name is registered the way it always was, whether or not a getter
-/// exists: scripts-less component codegen depends on the fallback, so gating it
-/// would be a regression dressed as a fix.
+/// A bare name is gated on a getter, and a getter-backed one is emitted exactly
+/// as it always was. The first half is the byte-identity the goldens and the
+/// examples rest on: `{{ title }}` with a `title()` still registers and still
+/// emits `"title" => state.title().to_string(),`. The second is the F-1 fix:
+/// without a `title()`, that arm is `state.title()` against a `State` that has no
+/// such method, so the key is not registered and no arm is emitted at all.
 #[test]
-fn a_bare_interpolation_is_still_registered_without_a_getter() {
+fn a_bare_interpolation_is_registered_with_a_getter_and_dropped_without_one() {
+    const GETTER: &str = r#"
+impl State {
+    pub fn title(&self) -> String { String::new() }
+}
+"#;
     for mode in [RenderMode::State, RenderMode::Resolve] {
-        let rs = compile_in_mode(r#"<p>{{ title }}</p>"#, mode);
-        assert!(
-            make_resolve_fn(&rs).contains(r#""title" => state.title().to_string(),"#),
-            "the bare-name fallback is long-standing behavior, in {mode:?}:\n{rs}"
+        let with = compile_with_script(r#"<p>{{ title }}</p>"#, GETTER, mode);
+        assert_eq!(
+            make_resolve_arms(&with),
+            vec![
+                r#""title" => state.title().to_string(),"#.to_string(),
+                "_ => String::new(),".to_string(),
+            ],
+            "a getter-backed bare name is emitted byte-identically, in {mode:?}:\n{with}"
+        );
+
+        let without = compile_in_mode(r#"<p>{{ title }}</p>"#, mode);
+        assert_eq!(
+            make_resolve_arms(&without),
+            vec!["_ => String::new(),".to_string()],
+            "with no getter the arm would not compile, so the key is not \
+             registered, in {mode:?}:\n{without}"
         );
     }
 }
