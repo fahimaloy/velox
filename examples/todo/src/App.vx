@@ -13,6 +13,7 @@
     <div class="list">
       <TodoItem
         v-for="(todo, idx) in visible"
+        :key="todo.id"
         :todo="todo.text"
         :completed="todo.completed"
         :index="idx"
