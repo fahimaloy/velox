@@ -288,6 +288,10 @@ const CHAIN_TEMPLATE: &str = r#"<template>
     <p class="first-box" v-if="first">FIRST</p>
     <p class="alt-box" v-else-if="alt">ALT</p>
     <p class="both-box" v-if="count > 0 && both">BOTH</p>
+    <p class="zero-box" v-if="count > 0 && zero">ZERO</p>
+    <p class="zerop-box" v-if="count > 0 && zerop">ZEROP</p>
+    <p class="word-box" v-if="count > 0 && word">WORD</p>
+    <p class="blank-box" v-if="count > 0 && blank">BLANK</p>
   </div>
 </template>"#;
 
@@ -296,6 +300,10 @@ const CHAIN_STYLE: &str = r#"
 .first-box { background: #ff0000; width: 140px; height: 20px; }
 .alt-box { background: #0000ff; width: 140px; height: 20px; }
 .both-box { background: #00ff00; width: 140px; height: 20px; }
+.zero-box { background: #ffa500; width: 140px; height: 20px; }
+.zerop-box { background: #8b4513; width: 140px; height: 20px; }
+.word-box { background: #ff69b4; width: 140px; height: 20px; }
+.blank-box { background: #808080; width: 140px; height: 20px; }
 "#;
 
 const CHAIN_SCRIPT: &str = r#"
@@ -306,6 +314,10 @@ pub struct State {
     alt: Ref<bool>,
     both: Ref<bool>,
     count: Ref<i32>,
+    zero: Ref<String>,
+    zerop: Ref<String>,
+    word: Ref<String>,
+    blank: Ref<String>,
 }
 
 impl State {
@@ -315,6 +327,10 @@ impl State {
             alt: velox_core::r#ref!(false),
             both: velox_core::r#ref!(false),
             count: velox_core::r#ref!(0),
+            zero: velox_core::r#ref!("0".to_string()),
+            zerop: velox_core::r#ref!("0.0".to_string()),
+            word: velox_core::r#ref!("abc".to_string()),
+            blank: velox_core::r#ref!(String::new()),
         }
     }
     pub fn first(&self) -> bool {
@@ -340,6 +356,30 @@ impl State {
     }
     pub fn set_count(&self, v: i32) {
         self.count.set(v);
+    }
+    pub fn zero(&self) -> String {
+        self.zero.get()
+    }
+    pub fn set_zero(&self, v: &str) {
+        self.zero.set(v.to_string());
+    }
+    pub fn zerop(&self) -> String {
+        self.zerop.get()
+    }
+    pub fn set_zerop(&self, v: &str) {
+        self.zerop.set(v.to_string());
+    }
+    pub fn word(&self) -> String {
+        self.word.get()
+    }
+    pub fn set_word(&self, v: &str) {
+        self.word.set(v.to_string());
+    }
+    pub fn blank(&self) -> String {
+        self.blank.get()
+    }
+    pub fn set_blank(&self, v: &str) {
+        self.blank.set(v.to_string());
     }
 }
 "#;
@@ -462,6 +502,10 @@ fn main() {
     const YELLOW: [u8; 3] = [255, 255, 0];
     const CYAN: [u8; 3] = [0, 255, 255];
     const MAGENTA: [u8; 3] = [255, 0, 255];
+    const ORANGE: [u8; 3] = [255, 165, 0];
+    const BROWN: [u8; 3] = [139, 69, 25];
+    const PINK: [u8; 3] = [255, 105, 180];
+    const GREY: [u8; 3] = [128, 128, 128];
 
     // ---- v-if, v-show, and a v-if inside a v-for body ----
     let state = std::sync::Arc::new(if_case::app::script_rs::State::new());
@@ -557,6 +601,17 @@ fn main() {
         count(&render_chain(&chstate), GREEN)
     );
 
+    // The same condition shape over a STRING operand, one element per value the
+    // truthiness test has to judge. `count` is 2, so the first operand holds and
+    // the string operand decides on its own: a resolver formats a number as its
+    // digits, so "0" and "0.0" are the values a test on emptiness alone would
+    // read as truthy.
+    let px = render_chain(&chstate);
+    println!("chain.count2.zero.orange={}", count(&px, ORANGE));
+    println!("chain.count2.zerop.brown={}", count(&px, BROWN));
+    println!("chain.count2.word.pink={}", count(&px, PINK));
+    println!("chain.count2.blank.grey={}", count(&px, GREY));
+
     // ---- a static class and a dynamic one on the same element ----
     let cstate = std::sync::Arc::new(class_case::app::script_rs::State::new());
     let (px, card, card2) = render_class(&cstate);
@@ -571,6 +626,16 @@ fn main() {
     println!("class.active.card={card}");
     println!("class.active.green={}", count(&px, GREEN));
     println!("class.active.blue={}", count(&px, BLUE));
+
+    // The class list is built from scratch on every render, so toggling the same
+    // class back and forth must not accumulate: the second toggle must produce
+    // the same list as the first, not the first list twice.
+    cstate.set_visible(false);
+    let (_, card, _) = render_class(&cstate);
+    println!("class.back.card={card}");
+    cstate.set_visible(true);
+    let (_, card, _) = render_class(&cstate);
+    println!("class.again.card={card}");
 
     cstate.set_visible(false);
     cstate.set_wide(true);
@@ -994,5 +1059,70 @@ fn a_compound_condition_re_evaluates_both_of_its_operands() {
          read as a number and not carried by the comparison's operand: {} green \
          pixels",
         pixels("chain.count2.bothfalse.green")
+    );
+}
+
+/// Every string a resolver answer can be is judged by the same test, and a
+/// NUMBER is judged as a number. `zero` is `"0"` and `zerop` is `"0.0"`: a test
+/// on emptiness alone would call both truthy, because neither is empty and
+/// neither is `"false"`. `word` is `"abc"` and `blank` is `""`, which are the two
+/// ends the numeric branch must not disturb: text that is not a number stays
+/// truthy, and an empty string stays falsy.
+#[test]
+#[ignore = "slow: compiles a generated crate with the Skia backend"]
+fn a_numeric_operand_in_a_logic_position_is_falsy_when_it_is_zero() {
+    assert_eq!(
+        pixels("chain.count2.zero.orange"),
+        0,
+        "`zero` is the string \"0\": a number is compared as a number, so zero is \
+         falsy and the element must not be painted: {} orange pixels",
+        pixels("chain.count2.zero.orange")
+    );
+    assert_eq!(
+        pixels("chain.count2.zerop.brown"),
+        0,
+        "`zerop` is the string \"0.0\": the same number in another spelling is the \
+         same falsy value: {} brown pixels",
+        pixels("chain.count2.zerop.brown")
+    );
+    assert!(
+        pixels("chain.count2.word.pink") > PAINTED,
+        "`word` is the string \"abc\": a value that is not a number is not the zero \
+         number, so it stays truthy: {} pink pixels",
+        pixels("chain.count2.word.pink")
+    );
+    assert_eq!(
+        pixels("chain.count2.blank.grey"),
+        0,
+        "`blank` is the empty string: the numeric branch must not turn an empty \
+         string into the zero number, which would be truthy: {} grey pixels",
+        pixels("chain.count2.blank.grey")
+    );
+}
+
+/// The class list a render produces does not accumulate into the next one. The
+/// same class is toggled on and off twice, and the string is read back after each
+/// render, because the list is built inside the render and a list that survived
+/// one would grow.
+#[test]
+#[ignore = "slow: compiles a generated crate with the Skia backend"]
+fn the_class_list_does_not_accumulate_across_re_renders() {
+    assert_eq!(
+        measurement("class.back.card"),
+        "card",
+        "with the dynamic class off again the list must be the static class alone: \
+         nothing of the renders before it may survive in it"
+    );
+    assert_eq!(
+        measurement("class.again.card"),
+        "card active",
+        "the second toggle on must produce the same list as the first, not the first \
+         list twice"
+    );
+    assert_eq!(
+        measurement("class.wide.card"),
+        "card is-wide",
+        "and a render that adds a different dynamic class must not carry the previous \
+         one either"
     );
 }

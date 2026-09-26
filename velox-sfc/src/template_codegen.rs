@@ -148,14 +148,25 @@ fn resolve_mode_key_value(key_val: &str, for_info: &VForInfo) -> String {
     }
 }
 
-/// The bool a resolver-backed condition evaluates to, using the same string
-/// truthiness a non-loop condition gets from `rewrite_if_expr`.
+/// The bool a resolver-backed condition evaluates to, using the same truthiness
+/// a non-loop condition gets from `rewrite_if_expr`. The ONE notion of it, for
+/// both call sites.
 ///
 /// A loop item read in the Resolve renderer is a `String` from the resolver, not
 /// a `bool`, so it needs this test in an `if` position exactly as a resolver-backed
 /// condition does.
+///
+/// A resolver answer is a formatted value, so an operand that is a NUMBER arrives
+/// as its digits: `0` and `0.0` are not empty and are not `"false"`, so a test on
+/// emptiness alone would read them as TRUTHY — silently, and in the same way an
+/// empty string would have been silently falsy before an operand was registered at
+/// all. A value that parses as a number is therefore compared numerically, and only
+/// a value that is not a number is judged as text: `"true"`, and anything else that
+/// is not empty and not `"false"`. So `"abc"` is truthy, and so is a name.
 fn resolver_truthiness(read: &str) -> String {
-    format!(r#"{{ let __v = {read}; __v == "true" || (!__v.is_empty() && __v != "false") }}"#)
+    format!(
+        r#"{{ let __v = {read}; __v == "true" || match __v.trim().parse::<f64>() {{ Ok(__n) => __n != 0.0, Err(_) => !__v.is_empty() && __v != "false" }} }}"#
+    )
 }
 
 /// Validate the parsed template AST and collect structural errors.
@@ -5974,6 +5985,155 @@ impl State {
         );
     }
 
+    /// The six answers a resolver can give, judged by the ONE truthiness test, by
+    /// COMPILING AND RUNNING the condition the emitter produces.
+    ///
+    /// A string-shape assertion cannot decide whether `"0"` is truthy — that is
+    /// the whole defect — so this compiles the emitted condition with a stub
+    /// `resolve`, runs it once per answer, and reads the `bool` back. Nothing
+    /// here re-derives the rule: the expression under test is the codegen output.
+    #[test]
+    fn each_resolver_answer_is_judged_by_the_one_truthiness_test() {
+        let rs = compile_template_to_rs_full_with_mode(
+            r#"<div v-if="visible"/>"#,
+            "App",
+            None,
+            Some(R3_SCRIPT),
+            None,
+            RenderMode::State,
+        )
+        .expect("template compiles");
+        let start = rs
+            .find("if { let __v = resolve(")
+            .expect("a v-if condition is emitted")
+            + 3;
+        let condition = &rs[start..];
+        let mut depth = 0i32;
+        let mut closed = None;
+        for (i, c) in condition.char_indices() {
+            match c {
+                '{' => depth += 1,
+                '}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        closed = Some(i + 1);
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        let end = closed.unwrap_or_else(|| panic!("the condition is not closed in {rs}"));
+
+        let dir = std::env::temp_dir().join("velox-r3-truthiness");
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let src = dir.join("verdict.rs");
+        std::fs::write(
+            &src,
+            format!(
+                "fn resolve(_key: &str) -> String {{ std::env::args().nth(1).unwrap() }}\n\
+                 fn main() {{ println!(\"{{}}\", {}\n); }}\n",
+                &condition[..end]
+            ),
+        )
+        .expect("write the probe");
+        let bin = dir.join("verdict");
+        let rustc = std::env::var("RUSTC").unwrap_or_else(|_| "rustc".to_string());
+        let build = std::process::Command::new(&rustc)
+            .args(["--edition", "2024", "-o"])
+            .arg(&bin)
+            .arg(&src)
+            .output()
+            .unwrap_or_else(|e| panic!("`{rustc}` must be runnable: {e}"));
+        assert!(
+            build.status.success(),
+            "the emitted condition must compile on its own:\n{}\n{}",
+            std::fs::read_to_string(&src).expect("read back the probe"),
+            String::from_utf8_lossy(&build.stderr)
+        );
+
+        for (answer, want) in [
+            ("", "false"),
+            ("false", "false"),
+            ("0", "false"),
+            ("0.0", "false"),
+            ("-0.0", "false"),
+            ("0.00", "false"),
+            ("true", "true"),
+            ("false ", "true"),
+            ("1", "true"),
+            ("-3.5", "true"),
+            ("abc", "true"),
+            ("a b c", "true"),
+        ] {
+            let run = std::process::Command::new(&bin)
+                .arg(answer)
+                .output()
+                .expect("run");
+            assert_eq!(
+                String::from_utf8_lossy(&run.stdout).trim(),
+                want,
+                "the resolver answered {:?} and the condition must read that as {want}",
+                answer
+            );
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The ONE truthiness test reaches every path a condition can take. This is
+    /// the shape of the expression, not its verdicts — the verdicts are
+    /// `each_resolver_answer_is_judged_by_the_one_truthiness_test`, which runs the
+    /// emitted code. What this pins is that no path grew a second test of its own.
+    #[test]
+    fn every_condition_path_gets_the_one_truthiness_test() {
+        let read = format!("resolve({})", string_lit("visible"));
+        let want = resolver_truthiness(&read);
+        for (label, tpl) in [
+            ("a v-if", r#"<div v-if="visible"/>"#),
+            ("a v-show", r#"<div v-show="visible"/>"#),
+            (
+                "a v-else-if",
+                r#"<div><p v-if="count > 0"/><p v-else-if="visible"/></div>"#,
+            ),
+            (
+                "an object :class condition",
+                r#"<div :class="{ active: visible }"/>"#,
+            ),
+        ] {
+            let rs = compile_template_to_rs_full_with_mode(
+                tpl,
+                "App",
+                None,
+                Some(R3_SCRIPT),
+                None,
+                RenderMode::State,
+            )
+            .expect("template compiles");
+            assert!(
+                rs.contains(&want),
+                "{label} must be judged by the one truthiness test, {want:?}: {rs}"
+            );
+        }
+        // The second call site: a `:class` condition on an element inside a v-for
+        // body is read through the resolver in the Resolve renderer, where it is
+        // a `String` in an `if` position, and it is indexed by the loop counter.
+        let rs = compile_template_to_rs_full_with_mode(
+            r#"<div v-for="item in items"><span :class="{ active: item.keep }"/></div>"#,
+            "App",
+            None,
+            Some(R3_SCRIPT),
+            None,
+            RenderMode::Resolve,
+        )
+        .expect("template compiles");
+        let indexed = r#"resolve(&format!("items[{}].keep", __idx))"#;
+        assert!(
+            rs.contains(&resolver_truthiness(indexed)),
+            "a loop-rooted condition in the Resolve renderer must get the one truthiness \
+             test as well: {rs}"
+        );
+    }
+
     /// Vue semantics: a static `class` and a dynamic `:class` on the same
     /// element MERGE, so the class list is `card active` when the condition holds
     /// and `card` when it does not. `Props::set` replaces, so the merge has to be
@@ -6020,9 +6180,13 @@ impl State {
         );
         assert_eq!(
             class_set_of(r#"<div :class="{ active: visible }"/>"#),
-            r#".set("class", { let mut __classes: Vec<&str> = Vec::new(); if { let __v = resolve("visible"); __v == "true" || (!__v.is_empty() && __v != "false") } { __classes.push("active"); } __classes.join(" ") })"#,
+            format!(
+                r#".set("class", {{ let mut __classes: Vec<&str> = Vec::new(); if {truthy} {{ __classes.push("active"); }} __classes.join(" ") }})"#,
+                truthy = resolver_truthiness(&format!("resolve({})", string_lit("visible")))
+            ),
             "a `:class` alone is the object block it was before this task, byte for \
-             byte: the same truthiness expression, the same `Vec<&str>`, the same join"
+             byte: the same `Vec<&str>`, the same single push, the same join, and the ONE \
+             truthiness test rather than a second one of its own"
         );
         assert_eq!(
             class_set_of(r#"<div :class="label"/>"#),

@@ -1168,7 +1168,7 @@ fn resolve_mode_class_condition_on_a_loop_item_is_a_truthiness_test() {
 
         assert!(
             resolve_r.contains(&format!(
-                r#"if {{ let __v = resolve(&format!("todos[{{}}].{field}", __idx)); __v == "true" || (!__v.is_empty() && __v != "false") }} {{ __classes.push("active"); }}"#,
+                r#"if {{ let __v = resolve(&format!("todos[{{}}].{field}", __idx)); __v == "true" || match __v.trim().parse::<f64>() {{ Ok(__n) => __n != 0.0, Err(_) => !__v.is_empty() && __v != "false" }} }} {{ __classes.push("active"); }}"#,
                 field = condition.trim_start_matches("todo.")
             )),
             "a `String` condition must be tested for truthiness, not used as one \
