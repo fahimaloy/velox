@@ -38,7 +38,6 @@ __children
 #[allow(clippy::arc_with_non_send_sync)]
 pub fn make_resolve(state: std::sync::Arc<script_rs::State>) -> impl FnMut(&str) -> String {
     move |name: &str| match name {
-        "item.name" => state.item.name().to_string(),
         _ => String::new(),
     }
 }
@@ -53,16 +52,8 @@ pub fn make_on_event(state: std::sync::Arc<script_rs::State>) -> impl FnMut(&str
 }
 
 pub fn render_with_props(props: std::collections::HashMap<&str, String>) -> velox_dom::VNode {
-    let state = script_rs::State::new();
     let resolve_props = |key: &str| -> String {
-        if let Some(v) = props.get(key) {
-            v.clone()
-        } else {
-            match key {
-            "item.name" => state.item.name().to_string(),
-                _ => String::new(),
-            }
-        }
+        props.get(key).cloned().unwrap_or_default()
     };
     render_with(resolve_props)
 }

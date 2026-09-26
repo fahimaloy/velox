@@ -2326,25 +2326,59 @@ pub fn collect_vmodel_expressions(nodes: &[Node]) -> Vec<(String, String)> {
 /// Returns unique keys like `["text", "completed", "counter"]` that are used
 /// in `{{ key }}` expressions. These correspond to method names on the
 /// component's State struct.
+///
+/// An interpolation inside a `v-for` body that names a loop variable is NOT a
+/// key: both renderers read the loop item and index directly, from the binding
+/// the loop itself introduces, so it is a real read rather than a
+/// `resolve(...)` lookup. Registering one would emit an arm against the
+/// `State` — `"item.name" => state.item.name().to_string()` — and the loop
+/// item is not a `State` field, so that arm does not compile (E0609). This is
+/// the same rule the bind path applies, reached there through `emit_bind_attr`.
 pub fn collect_interpolation_keys(nodes: &[Node]) -> Vec<String> {
     let mut keys = Vec::new();
-    fn walk(nodes: &[Node], out: &mut Vec<String>) {
+    // Every loop variable in scope, outermost first. A nested `v-for` that
+    // rebinds the same names shadows them, but either way an expression naming
+    // one of them is read by the loop, so every enclosing scope is consulted.
+    let mut loop_vars: Vec<(String, String)> = Vec::new();
+    fn walk(nodes: &[Node], out: &mut Vec<String>, loop_vars: &mut Vec<(String, String)>) {
         for node in nodes {
             match node {
                 Node::Interpolation(expr) => {
                     let key = expr.trim().to_string();
-                    if !key.is_empty() && !out.contains(&key) {
-                        out.push(key);
+                    if key.is_empty() || out.contains(&key) {
+                        continue;
                     }
+                    let roots: Vec<&str> = loop_vars
+                        .iter()
+                        .flat_map(|(item, index)| [item.as_str(), index.as_str()])
+                        .collect();
+                    if expr_reads_roots(&key, &roots) {
+                        continue;
+                    }
+                    out.push(key);
                 }
-                Node::Element { children, .. } => {
-                    walk(children, out);
+                Node::Element {
+                    attrs, children, ..
+                } => {
+                    let scope = attrs
+                        .iter()
+                        .find(|a| matches!(a.kind, AttrKind::Directive) && a.name == "for")
+                        .and_then(|a| a.value.as_deref())
+                        .and_then(parse_v_for)
+                        .map(|info| (info.item_name, info.index_name));
+                    if let Some(pair) = &scope {
+                        loop_vars.push(pair.clone());
+                    }
+                    walk(children, out, loop_vars);
+                    if scope.is_some() {
+                        loop_vars.pop();
+                    }
                 }
                 _ => {}
             }
         }
     }
-    walk(nodes, &mut keys);
+    walk(nodes, &mut keys, &mut loop_vars);
     keys
 }
 
@@ -4220,6 +4254,174 @@ impl State {
                 "condition `{cond}` emits {emitted:?} but collects {collected:?}"
             );
         }
+    }
+
+    // ---- R-1c: a loop item is not a `State` field, so an interpolation that
+    // reads one must not become a resolver key. Before this, `{{ item.name }}`
+    // inside `v-for="item in items"` collected the top-level key `item.name`
+    // and `generate_make_resolve` emitted `"item.name" => state.item.name()`,
+    // which is E0609: the field is `items` and there is no `item()` getter.
+    // The key set is asserted WHOLE, not by absence of one name, so a key
+    // reappearing under another name fails here too.
+
+    const R1C_SCRIPT: &str = r#"
+        impl State {
+            pub fn items(&self) -> String { String::new() }
+            pub fn title(&self) -> String { String::new() }
+        }"#;
+
+    fn keys_of(tpl: &str, mode: RenderMode) -> Vec<String> {
+        let nodes = crate::template_parse::parse_template_to_ast(tpl).expect("template parses");
+        collect_resolver_keys(&nodes, &methods(R1C_SCRIPT), &[], mode).keys
+    }
+
+    #[test]
+    fn a_loop_rooted_interpolation_is_not_a_resolver_key() {
+        for tpl in [
+            // the canonical idiom, the one the golden used to encode as E0609
+            r#"<ul><li v-for="item in items">{{ item.name }}</li></ul>"#,
+            // an explicitly indexed loop, so the item name is `__idx` by default
+            r#"<ul><li v-for="item in items">{{ item.name }} {{ item.id }}</li></ul>"#,
+            // the index, and the collection itself
+            r#"<ul><li v-for="(item, i) in items">{{ i }}</li></ul>"#,
+            // an interpolation nested deeper in the body
+            r#"<ul><li v-for="item in items"><span><b>{{ item.name }}</b></span></li></ul>"#,
+            // the outer item read inside a nested loop, which the inner `v-for`
+            // does not shadow
+            r#"<ul><li v-for="(item, i) in items"><ul><li v-for="c in rows">{{ item.name }} {{ c }}</li></ul></li></ul>"#,
+        ] {
+            for mode in [RenderMode::State, RenderMode::Resolve] {
+                assert_eq!(
+                    keys_of(tpl, mode),
+                    Vec::<String>::new(),
+                    "{mode:?}: a read of a loop variable cannot be answered by a \
+                     flat arm over `State` fields: {tpl}"
+                );
+            }
+        }
+    }
+
+    /// The fix is scoped to loop-rooted keys. A dotted interpolation that
+    /// appears at the top level of the component is a lookup of a state field
+    /// path and is collected exactly as before — the whole set, in order.
+    #[test]
+    fn a_root_level_dotted_interpolation_is_still_a_key() {
+        for mode in [RenderMode::State, RenderMode::Resolve] {
+            assert_eq!(
+                keys_of(
+                    r#"<p>{{ user.name }} {{ items[0].name }} {{ title }}</p>"#,
+                    mode
+                ),
+                vec!["user.name", "items[0].name", "title"],
+                "{mode:?}: nothing here is inside a loop, so nothing is dropped"
+            );
+        }
+    }
+
+    /// Dropping a loop-rooted key must not disturb the ones that stay: the
+    /// surrounding keys keep their document order, and a key read inside a
+    /// loop body does not leak out to the top level either.
+    #[test]
+    fn loop_rooted_interpolations_are_dropped_and_the_rest_keep_document_order() {
+        for mode in [RenderMode::State, RenderMode::Resolve] {
+            assert_eq!(
+                keys_of(
+                    r#"<header>{{ title }}</header><ul><li v-for="(item, i) in items">{{ item.name }} {{ i }} {{ i + 1 }}</li></ul><footer>{{ user.name }}</footer>"#,
+                    mode
+                ),
+                vec!["title", "user.name"],
+                "{mode:?}: the two loop-rooted keys go, the two that surround \
+                 them keep their order"
+            );
+        }
+    }
+
+    /// The open question R-1 left behind, pinned from both sides at once.
+    ///
+    /// R-1 treats a bare-index interpolation (`{{ i }}`) as one of only two
+    /// forms that emit a DIRECT read of the loop variable and therefore
+    /// render, so its diagnostic does not report a loop whose body reads
+    /// nothing but the index. That is a decision about whether to REPORT a
+    /// loop; this task removes `{{ i }}` from the KEY set, which is a decision
+    /// about whether to EMIT an arm. The two are independent, and this test
+    /// asserts both facts on the same two templates: `{{ i }}` is not a key
+    /// and is not reported, while `{{ i + 1 }}` is also not a key but IS
+    /// reported (it is emitted as the flat `resolve("i + 1")`, which the arm
+    /// table cannot answer). Neither decision can move without this test
+    /// showing the other.
+    #[test]
+    fn the_bare_index_interpolation_is_direct_and_is_still_not_a_key() {
+        let direct = r#"<ul><li v-for="(item, i) in items">{{ i }}</li></ul>"#;
+        let compound = r#"<ul><li v-for="(item, i) in items">{{ i + 1 }}</li></ul>"#;
+        let nodes =
+            |tpl: &str| crate::template_parse::parse_template_to_ast(tpl).expect("template parses");
+        let direct_resolve = collect_resolver_keys(
+            &nodes(direct),
+            &methods(R1C_SCRIPT),
+            &[],
+            RenderMode::Resolve,
+        );
+        let compound_resolve = collect_resolver_keys(
+            &nodes(compound),
+            &methods(R1C_SCRIPT),
+            &[],
+            RenderMode::Resolve,
+        );
+
+        assert_eq!(
+            direct_resolve.keys,
+            Vec::<String>::new(),
+            "`{{ i }}` is loop-rooted, so it is not a top-level key: {:?}",
+            direct_resolve.keys
+        );
+        assert!(
+            direct_resolve.warnings.is_empty(),
+            "R-1's exemption: a bare-index interpolation emits `text(i.to_string())`, \
+             a direct read, so the loop is not reported: {:?}",
+            direct_resolve.warnings
+        );
+        assert_eq!(
+            compound_resolve.keys,
+            Vec::<String>::new(),
+            "the same key-set rule applies to a compound index read: {:?}",
+            compound_resolve.keys
+        );
+        assert_eq!(
+            compound_resolve.warnings.len(),
+            1,
+            "and R-1's N3 rule is untouched: the body emits `text(resolve(\"i + 1\"))`, \
+             which no arm answers, so the loop IS reported: {:?}",
+            compound_resolve.warnings
+        );
+    }
+
+    /// A `v-for` collection that is also interpolated at the top level keeps
+    /// its key, and the loop is still reported: the key set and the
+    /// diagnostic are separate (R-1's N2 finding, re-pinned here because this
+    /// task edits the key set the test's premise is about).
+    #[test]
+    fn a_collection_named_only_by_a_root_interpolation_keeps_its_key_and_is_reported() {
+        let nodes = crate::template_parse::parse_template_to_ast(
+            r#"<p>{{ items }}</p><ul><li v-for="(item, i) in items">{{ i }}</li></ul>"#,
+        )
+        .expect("template parses");
+        let script = r#"
+        impl State {
+            pub fn draft(&self) -> String { String::new() }
+        }"#;
+
+        let resolve = collect_resolver_keys(&nodes, &methods(script), &[], RenderMode::Resolve);
+        assert!(
+            resolve.keys.iter().any(|k| k == "items"),
+            "a root-level interpolation of the collection is still collected: {:?}",
+            resolve.keys
+        );
+        assert!(
+            !resolve.keys.iter().any(|k| k == "item" || k == "i"),
+            "but nothing loop-rooted is: {:?}",
+            resolve.keys
+        );
+        assert_eq!(resolve.warnings.len(), 1, "{:?}", resolve.warnings);
     }
 }
 

@@ -776,6 +776,116 @@ fn v_for_with_a_valueless_key_generates_the_keyless_module() {
     }
 }
 
+/// R-1c. `make_resolve` for this module, as generated text.
+fn make_resolve_fn(rs: &str) -> &str {
+    let start = rs
+        .find("pub fn make_resolve")
+        .expect("make_resolve is always generated");
+    let rest = &rs[start..];
+    let end = rest
+        .find("pub fn make_on_event")
+        .expect("make_on_event is always generated");
+    &rest[..end]
+}
+
+/// Every arm `make_resolve` matches on, trimmed — the whole set, so an arm
+/// reappearing under any name fails the assertion.
+fn make_resolve_arms(rs: &str) -> Vec<&str> {
+    let body = make_resolve_fn(rs);
+    let start = body
+        .find("match name {")
+        .expect("make_resolve matches on a name");
+    let rest = &body[start..];
+    let end = rest
+        .find(
+            "
+    }",
+        )
+        .expect("the match closes");
+    rest[..end]
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with("match name"))
+        .collect()
+}
+
+/// A `{{ item.name }}` inside `v-for="item in items"` must not produce a
+/// resolver arm. The loop item is not a `State` field: the arm would read
+/// `state.item.name()` while the field is `items` and there is no `item()`
+/// getter, which is E0609 — the generated module does not compile. The whole
+/// `make_resolve` is pinned here, not just the absence of one string, so an arm
+/// reappearing under another name fails the test.
+#[test]
+fn a_loop_rooted_interpolation_produces_no_resolver_arm() {
+    for mode in [RenderMode::State, RenderMode::Resolve] {
+        let rs = compile_in_mode(V_FOR_NO_KEY, mode);
+        assert_eq!(
+            make_resolve_arms(&rs),
+            vec!["_ => String::new(),"],
+            "a loop-rooted interpolation is not a `State` field, so it cannot \
+             be an arm in {mode:?}"
+        );
+        assert!(
+            !rs.contains("state.item."),
+            "nothing may read the loop item as a state field path in {mode:?} \
+             (`state.items.get()` is the collection, and is expected):\n{rs}"
+        );
+    }
+}
+
+/// The Resolve-mode body is untouched by that: it reads the loop item through
+/// the index the loop binds, which is the only way that body can read a loop
+/// value, and it did so before this change.
+#[test]
+fn a_loop_rooted_interpolation_still_renders_through_the_loop_index() {
+    for mode in [RenderMode::State, RenderMode::Resolve] {
+        let module = compile_in_mode(V_FOR_NO_KEY, mode);
+        let resolve_r = resolve_renderer(&module);
+        assert!(
+            resolve_r.contains(r#"text(resolve(&format!("items[{}].name", __idx)))"#),
+            "the Resolve body reads the loop item through the index in {mode:?}:\n{resolve_r}"
+        );
+    }
+    // The State renderer reads the same value off the loop binding, so it never
+    // needed an arm for it.
+    let state_module = compile_in_mode(V_FOR_NO_KEY, RenderMode::State);
+    let state_r = state_renderer(&state_module);
+    assert!(
+        state_r.contains("__obj.name.to_string()"),
+        "the State body reads the loop binding directly:\n{state_r}"
+    );
+}
+
+/// The fix is scoped to keys rooted at a loop variable. A dotted interpolation
+/// at the top level of a component is a lookup of a state field path, and it is
+/// collected and emitted exactly as it was before.
+///
+/// Note what "exactly as before" means here: the arm it generates is
+/// `state.user.name()`, which does not compile for a `State` that has no `user`
+/// field. That is a pre-existing defect of the same family — a dotted key has
+/// no field path to resolve against, and R-1's ruling rejected a reflection
+/// layer as the fix — and it is out of this task's scope. This test pins the
+/// shape so the scope boundary is visible in the test suite rather than only in
+/// a report.
+#[test]
+fn a_root_level_dotted_interpolation_emits_the_arm_it_always_did() {
+    let tpl = r#"<p>{{ user.name }} {{ items[0].name }} {{ title }}</p>"#;
+    for mode in [RenderMode::State, RenderMode::Resolve] {
+        let rs = compile_in_mode(tpl, mode);
+        for arm in [
+            r#""user.name" => state.user.name().to_string(),"#,
+            r#""items[0].name" => state.items[0].name().to_string(),"#,
+            r#""title" => state.title().to_string(),"#,
+        ] {
+            assert!(
+                make_resolve_fn(&rs).contains(arm),
+                "a root-level interpolation is not loop-rooted, so it keeps its \
+                 arm in {mode:?} ({arm}):\n{rs}"
+            );
+        }
+    }
+}
+
 /// A `v-for` element with loop-rooted bindings on the element itself: a `:key`,
 /// a plain element binding, and (on a component) the index binding.
 const LOOP_ROOTED_BINDS: &str =
