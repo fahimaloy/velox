@@ -270,7 +270,82 @@ impl State {
 }
 "#;
 
+/// A `v-if` / `v-else-if` chain, and a compound condition whose second operand is
+/// a boolean.
+///
+/// Both are here for the same reason: each was measured as a place a condition
+/// is read as something it is not. `v-else-if` goes through the same
+/// `rewrite_if_expr` path a `v-if` does, so its operand is a resolver read like
+/// any other and an unregistered one answers `""` — always falsy, so the
+/// `v-else-if` element never renders. The compound condition puts a comparison
+/// and a boolean in the same expression: only the comparison's operand may be
+/// read as a number, and the boolean has to decide the render on its own. If it
+/// were read as a number the expression would not compile (`f64 && f64`), and if
+/// it were read as a truthiness the element would appear whenever the first
+/// operand alone holds — so the pixels distinguish the three cases.
+const CHAIN_TEMPLATE: &str = r#"<template>
+  <div class="chain-wrap">
+    <p class="first-box" v-if="first">FIRST</p>
+    <p class="alt-box" v-else-if="alt">ALT</p>
+    <p class="both-box" v-if="count > 0 && both">BOTH</p>
+  </div>
+</template>"#;
+
+const CHAIN_STYLE: &str = r#"
+.chain-wrap { display: flex; flex-direction: column; }
+.first-box { background: #ff0000; width: 140px; height: 20px; }
+.alt-box { background: #0000ff; width: 140px; height: 20px; }
+.both-box { background: #00ff00; width: 140px; height: 20px; }
+"#;
+
+const CHAIN_SCRIPT: &str = r#"
+use velox_core::ergonomics::Ref;
+
+pub struct State {
+    first: Ref<bool>,
+    alt: Ref<bool>,
+    both: Ref<bool>,
+    count: Ref<i32>,
+}
+
+impl State {
+    pub fn new() -> Self {
+        Self {
+            first: velox_core::r#ref!(false),
+            alt: velox_core::r#ref!(false),
+            both: velox_core::r#ref!(false),
+            count: velox_core::r#ref!(0),
+        }
+    }
+    pub fn first(&self) -> bool {
+        self.first.get()
+    }
+    pub fn set_first(&self, v: bool) {
+        self.first.set(v);
+    }
+    pub fn alt(&self) -> bool {
+        self.alt.get()
+    }
+    pub fn set_alt(&self, v: bool) {
+        self.alt.set(v);
+    }
+    pub fn both(&self) -> bool {
+        self.both.get()
+    }
+    pub fn set_both(&self, v: bool) {
+        self.both.set(v);
+    }
+    pub fn count(&self) -> i32 {
+        self.count.get()
+    }
+    pub fn set_count(&self, v: i32) {
+        self.count.set(v);
+    }
+}
+"#;
+
 const PROBE_MAIN: &str = r#"
+mod chain_case;
 mod class_case;
 mod if_case;
 mod root_if_case;
@@ -366,6 +441,20 @@ fn render_class(state: &std::sync::Arc<class_case::app::script_rs::State>) -> (V
     )
 }
 
+fn render_chain(state: &std::sync::Arc<chain_case::app::script_rs::State>) -> Vec<u8> {
+    let vnode = chain_case::app::render_with_state(
+        std::sync::Arc::clone(state),
+        chain_case::app::make_resolve(std::sync::Arc::clone(state)),
+    );
+    velox_renderer::render_vnode_to_rgba(
+        &vnode,
+        &velox_style::Stylesheet::parse(chain_case::app::STYLE),
+        400,
+        300,
+    )
+    .expect("raster the chain_case tree")
+}
+
 fn main() {
     const RED: [u8; 3] = [255, 0, 0];
     const GREEN: [u8; 3] = [0, 255, 0];
@@ -423,6 +512,49 @@ fn main() {
     println!(
         "rootshow.on.cyan={}",
         count(&render_root_show(&showstate), CYAN)
+    );
+
+    // ---- a v-if / v-else-if chain, and a compound condition ----
+    let chstate = std::sync::Arc::new(chain_case::app::script_rs::State::new());
+    // first=false, alt=false: neither branch of the chain is painted.
+    let px = render_chain(&chstate);
+    println!("chain.off.first.red={}", count(&px, RED));
+    println!("chain.off.alt.blue={}", count(&px, BLUE));
+
+    // alt=true with first=false: the v-else-if element is the one that appears.
+    chstate.set_alt(true);
+    let px = render_chain(&chstate);
+    println!("chain.alt.alt.blue={}", count(&px, BLUE));
+    println!("chain.alt.first.red={}", count(&px, RED));
+
+    // first=true: the v-if branch wins and the v-else-if element is not painted,
+    // which is the chain's semantics and also says it is really a chain.
+    chstate.set_first(true);
+    let px = render_chain(&chstate);
+    println!("chain.firstfirst.alt.blue={}", count(&px, BLUE));
+    println!("chain.firstfirst.first.red={}", count(&px, RED));
+
+    // The compound condition, one operand at a time. `both` is a boolean in a
+    // logic position with a comparison elsewhere in the expression: the green box
+    // appears only when BOTH operands hold, so the boolean operand decides the
+    // render itself rather than riding on the comparison's operand.
+    chstate.set_first(false);
+    chstate.set_alt(false);
+    chstate.set_both(true);
+    chstate.set_count(0);
+    println!(
+        "chain.count0.bothtrue.green={}",
+        count(&render_chain(&chstate), GREEN)
+    );
+    chstate.set_count(2);
+    println!(
+        "chain.count2.bothtrue.green={}",
+        count(&render_chain(&chstate), GREEN)
+    );
+    chstate.set_both(false);
+    println!(
+        "chain.count2.bothfalse.green={}",
+        count(&render_chain(&chstate), GREEN)
     );
 
     // ---- a static class and a dynamic one on the same element ----
@@ -563,6 +695,13 @@ fn probe() -> &'static str {
             CLASS_TEMPLATE,
             CLASS_STYLE,
             CLASS_SCRIPT,
+        );
+        write_case(
+            &root,
+            "chain_case",
+            CHAIN_TEMPLATE,
+            CHAIN_STYLE,
+            CHAIN_SCRIPT,
         );
         let out = Command::new(std::env::var("CARGO").unwrap_or_else(|_| "cargo".into()))
             .current_dir(&root)
@@ -780,5 +919,80 @@ fn a_string_syntax_class_joins_the_static_one() {
         pixels("class.string.magenta") > PAINTED,
         "a name from a string `:class` must reach the cascade: {} magenta pixels",
         pixels("class.string.magenta")
+    );
+}
+
+/// A `v-else-if` element appears when its own condition holds and the `v-if`
+/// branch does not, and it is not painted when the `v-if` branch does. The
+/// operand is a resolver read on the same path a `v-if`'s is, so registering it
+/// is what makes the element render at all.
+#[test]
+#[ignore = "slow: compiles a generated crate with the Skia backend"]
+fn a_v_else_if_element_paints_only_while_the_chain_reaches_it() {
+    assert_eq!(
+        pixels("chain.off.first.red"),
+        0,
+        "with `first` false the `v-if` element must not be painted"
+    );
+    assert_eq!(
+        pixels("chain.off.alt.blue"),
+        0,
+        "with `alt` false too, no branch of the chain may be painted: {} blue \
+         pixels",
+        pixels("chain.off.alt.blue")
+    );
+    assert!(
+        pixels("chain.alt.alt.blue") > PAINTED,
+        "`alt` alone must reach the `v-else-if` element: {} blue pixels",
+        pixels("chain.alt.alt.blue")
+    );
+    assert_eq!(
+        pixels("chain.alt.first.red"),
+        0,
+        "the `v-else-if` element must not appear while the `v-if` branch is the \
+         one that holds"
+    );
+    assert_eq!(
+        pixels("chain.firstfirst.alt.blue"),
+        0,
+        "a `v-if` that holds takes the chain, so the `v-else-if` element must not \
+         also be painted: {} blue pixels",
+        pixels("chain.firstfirst.alt.blue")
+    );
+    assert!(
+        pixels("chain.firstfirst.first.red") > PAINTED,
+        "the `v-if` element must be painted when its own condition holds: {} red \
+         pixels",
+        pixels("chain.firstfirst.first.red")
+    );
+}
+
+/// `count > 0 && both` puts a comparison and a boolean in one expression, and
+/// `both` decides the render on its own. A boolean that were read as a number
+/// would either not compile (`f64 && f64`) or ride on the comparison's operand,
+/// so these three measurements are what distinguishes the two.
+#[test]
+#[ignore = "slow: compiles a generated crate with the Skia backend"]
+fn a_compound_condition_re_evaluates_both_of_its_operands() {
+    assert_eq!(
+        pixels("chain.count0.bothtrue.green"),
+        0,
+        "the comparison's operand is false, so the compound condition must be \
+         false however `both` is set: {} green pixels",
+        pixels("chain.count0.bothtrue.green")
+    );
+    assert!(
+        pixels("chain.count2.bothtrue.green") > PAINTED,
+        "with both operands true the compound condition must paint its element: \
+         {} green pixels",
+        pixels("chain.count2.bothtrue.green")
+    );
+    assert_eq!(
+        pixels("chain.count2.bothfalse.green"),
+        0,
+        "the boolean operand decides the compound condition itself — it is not \
+         read as a number and not carried by the comparison's operand: {} green \
+         pixels",
+        pixels("chain.count2.bothfalse.green")
     );
 }

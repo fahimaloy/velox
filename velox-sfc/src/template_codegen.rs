@@ -3817,9 +3817,15 @@ fn collect_resolver_keys(
                 // are collected here, through the same gate every other key goes
                 // through, which is what makes the condition live. `v-show` is on
                 // this path deliberately: it reads its condition the same way `v-if`
-                // does, so it is registered the same way or not at all.
+                // does, so it is registered the same way or not at all. `v-else-if`
+                // and its `v-elseif` spelling are on it too, for the same reason and
+                // with the same consequence: the emitter rewrites the chain's
+                // condition through `rewrite_if_expr` exactly as it does a `v-if`'s,
+                // so an unregistered operand there leaves a `resolve("")` that is
+                // always falsy and the `v-else-if` element never renders. A `v-else`
+                // is absent because it has no condition of its own.
                 if matches!(attr.kind, AttrKind::Directive)
-                    && (attr.name == "if" || attr.name == "show")
+                    && matches!(attr.name.as_str(), "if" | "show" | "else-if" | "elseif")
                 {
                     let Some(expr) = attr.value.as_deref() else {
                         continue;
@@ -5875,6 +5881,97 @@ impl State {
                 collected.warnings
             );
         }
+    }
+
+    /// `v-else-if` is on the `v-if` rewrite path — the chain's condition goes
+    /// through `rewrite_if_expr` exactly as a `v-if`'s does — so its operands are
+    /// resolver reads too, and an unregistered one answers `""` and is always
+    /// falsy: the `v-else-if` element then never renders, and nothing says so.
+    /// Both spellings the validator accepts are here.
+    #[test]
+    fn a_v_else_if_condition_is_registered_like_a_v_if() {
+        for tpl in [
+            r#"<div><p v-if="count > 0">a</p><p v-else-if="visible">b</p></div>"#,
+            r#"<div><p v-if="count > 0">a</p><p v-elseif="visible">b</p></div>"#,
+            r#"<div><p v-if="count > 0">a</p><p v-else-if="user.name">b</p></div>"#,
+            r#"<div><p v-if="count > 0">a</p><p v-else-if="count > 1">b</p></div>"#,
+        ] {
+            for mode in [RenderMode::State, RenderMode::Resolve] {
+                let (keys, warnings) = r3_keys_and_warnings(tpl, mode);
+                assert!(
+                    !keys.is_empty(),
+                    "a `v-else-if` condition is a resolver read and must be \
+                     registered, in {mode:?} for {tpl}"
+                );
+                assert!(
+                    warnings.is_empty(),
+                    "a `v-else-if` condition on a `State` accessor needs no \
+                     warning: {warnings:?} in {mode:?} for {tpl}"
+                );
+                let rs = compile_template_to_rs_full_with_mode(
+                    tpl,
+                    "App",
+                    None,
+                    Some(R3_SCRIPT),
+                    None,
+                    mode,
+                )
+                .expect("template compiles");
+                for key in &keys {
+                    let looked_up = format!("resolve({})", string_lit(key));
+                    assert!(
+                        rs.contains(&looked_up),
+                        "`{key}` is registered, so the emission must look it up: {rs}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// The R-1c round-2 review's companion finding, pinned on the shape it must
+    /// keep: in a compound condition only the operands of a comparison are read
+    /// as numbers. `count > 0 && visible` makes `count` numeric because it sits
+    /// next to `>`, and `visible` a truthiness test because it does not — which
+    /// is what makes the expression compile. Reading BOTH as numbers is an
+    /// `f64 && f64`, and rustc reports that as
+    /// `error[E0308]: mismatched types … expected bool, found f64`, so the
+    /// earlier whole-expression `has_cmp` decision was a compile error, not a
+    /// silent wrong render.
+    ///
+    /// This pins EMISSION SHAPE, so it is a guard, not behavioural evidence: the
+    /// pixels are in
+    /// `root_vif_class_behaviour::a_compound_condition_re_evaluates_both_of_its_operands`.
+    #[test]
+    fn a_compound_condition_reads_only_its_comparison_operands_as_numbers() {
+        let rs = compile_template_to_rs_full_with_mode(
+            r#"<div v-if="count > 0 && visible">x</div>"#,
+            "App",
+            None,
+            Some(R3_SCRIPT),
+            None,
+            RenderMode::State,
+        )
+        .expect("template compiles");
+        assert!(
+            rs.contains(&format!("resolve({}).parse::<f64>()", string_lit("count"))),
+            "`count` is an operand of `>`, so it is read as a number: {rs}"
+        );
+        assert!(
+            !rs.contains(&format!(
+                "resolve({}).parse::<f64>()",
+                string_lit("visible")
+            )),
+            "`visible` is not an operand of any comparison, so it must be a \
+             truthiness test and not a number — a number here makes the `&&` an \
+             `f64`, which does not compile: {rs}"
+        );
+        assert!(
+            rs.contains(&resolver_truthiness(&format!(
+                "resolve({})",
+                string_lit("visible")
+            ))),
+            "the one notion of truthiness is what a non-comparison operand gets: {rs}"
+        );
     }
 
     /// Vue semantics: a static `class` and a dynamic `:class` on the same
