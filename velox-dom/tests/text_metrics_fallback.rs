@@ -24,11 +24,12 @@ fn heuristic_vertical_is_the_documented_approximation() {
 fn font_metrics_carries_the_font_own_strut_and_not_the_labelled_ink_guess() {
     // RENAMED AGAIN IN R-5b FIX ROUND 1. The name claimed to pin
     // `heuristic_vertical`, which is the LABELLED INK GUESS and is pinned by
-    // `heuristic_vertical_is_the_documented_approximation` above. These are the
-    // STRUT and are a different pair of numbers.: these two fields used to
-    // carry `heuristic_vertical`, the labelled guess at a RUN'S INK. They are the
-    // STRUT now -- the font's own typographic metrics -- because a line box is
-    // floored by the container's font, not by the characters on it.
+    // `heuristic_vertical_is_the_documented_approximation` above.
+    //
+    // These two fields used to carry `heuristic_vertical`, the labelled guess at a
+    // RUN'S INK. They are the STRUT now -- the font's own typographic metrics --
+    // and they are a different pair of numbers -- because a line box is floored by
+    // the container's font, not by the characters on it.
     //
     // 1.069em and 0.293em are NotoSans-Regular.ttf's typoAscender and
     // typoDescender at unitsPerEm 1000, read out of the font file. `fsSelection =
@@ -96,9 +97,14 @@ fn a_fallback_run_never_measures_zero_vertical() {
 #[test]
 fn the_labelled_ink_guess_still_totals_one_point_two_em_on_the_fallback_path() {
     // The split of 0.8em/0.4em is a guess, but its total is not: 1.2em is the
-    // `line_height` the wrap path has always used. So no line box moves when the
-    // seam is introduced. This is checked over a wide range of sizes, and at the
-    // half-integer sizes where a float sum is most likely to round the other way.
+    // `line_height` the wrap path has always used. So `line_extent()` itself did
+    // not move when the seam was introduced, which is what this pins -- and it is
+    // NOT the statement that no line box moved. No line box is measured here at
+    // all, and a line box stopped being 19 as soon as R-5b's strut floored it at
+    // 22; `a_wrapped_line_on_the_fallback_path_is_the_strut_and_its_width_is_
+    // unchanged` below is the one that measures the line. This is checked over a
+    // wide range of sizes, and at the half-integer sizes where a float sum is most
+    // likely to round the other way.
     for i in 1..=400 {
         let size = i as f32 * 0.05;
         let m = measure_text_metrics("Hg", size, FAMILY, 1.0);

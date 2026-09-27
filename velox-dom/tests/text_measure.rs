@@ -215,11 +215,15 @@ fn ellipsis_truncates_single_line_overflow() {
         "an ellipsis is reserved space, so a truncated fragment can never be wider \
          than its 60px line; got {w}"
     );
+    // 352 was hardcoded here for a string that measures 336, so the bound was
+    // stale rather than wrong. It is the same interpolated value the contrast
+    // below pins exactly, and it is redundant with that assertion -- kept as a
+    // plain `strictly less than untruncated` statement, not as the evidence.
+    let untruncated = (8 * "This is a very long line that will not fit".chars().count()) as i32;
     assert!(
-        w > 0 && w < 352,
-        "the untruncated text measures {} at 0.5em per character, so a layout tree \
-         that never truncated would report that; got {w}",
-        8 * "This is a very long line that will not fit".chars().count()
+        w > 0 && w < untruncated,
+        "the untruncated text measures {untruncated} at 0.5em per character, so a \
+         layout tree that never truncated would report that; got {w}"
     );
     // A root is laid out at the viewport's size, so the box that matters is the
     // inner one; the contrast case proves the property is what did it.
@@ -232,8 +236,7 @@ fn ellipsis_truncates_single_line_overflow() {
     );
     let plain = compute_layout(&h("div", vec![], vec![plain_v]), 600, 600);
     assert_eq!(
-        plain.children[0].children[0].rect.w,
-        (8 * "This is a very long line that will not fit".chars().count()) as i32,
+        plain.children[0].children[0].rect.w, untruncated,
         "the same text without `text-overflow: ellipsis` keeps its full width and \
          overflows, which is what makes the truncated case evidence of truncation"
     );

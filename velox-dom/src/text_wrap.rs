@@ -196,8 +196,13 @@ pub(crate) struct MeasurableFragment {
 /// formatting context's line fill makes, which is why they can share the
 /// decision.
 ///
-/// This is the ONE implementation of "where does the ellipsis go". The inline
-/// formatting context in `layout.rs` fills lines from a flattened run of
+/// This is the ONE implementation of "where does the ellipsis go" IN THIS
+/// CRATE, and the workspace is not down to one: a second independent copy lives
+/// in `velox-renderer/src/skia_render.rs` as `truncate_with_ellipsis`, with its
+/// own `ELLIPSIS` and its own fit loop. Sharing it needs a cross-crate API change
+/// and is tracked separately.
+///
+/// The inline formatting context in `layout.rs` fills lines from a flattened run of
 /// fragments belonging to different elements; this module wraps a single string.
 /// They used to decide independently, and when R-5b replaced the block path's
 /// only caller of [`wrap_text_with_style`] with that context,

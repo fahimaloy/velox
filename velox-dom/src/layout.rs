@@ -769,12 +769,6 @@ fn inline_slots_to_nodes(slots: &[InlineSlot], merged: &[MergedRun]) -> Vec<Layo
     out
 }
 
-/// Lay out one inline run and append its line boxes to `laid_children`.
-///
-/// `cur_y` is where the run starts. The returned `cur_x` is the right edge of
-/// the last line's ink, which the block loop needs so a following block child
-/// knows a line was used.
-#[allow(clippy::too_many_arguments)]
 /// Truncate one filled line's TEXT pieces to the line limit, appending an
 /// ellipsis to the piece the text ran out in, and returning the line's new
 /// width. `None` when the line does not truncate.
@@ -863,6 +857,11 @@ fn truncate_line_with_ellipsis(
     Some(line.iter().map(|&pi| pieces[pi].width).sum())
 }
 
+/// Lay out one inline run and append its line boxes to `laid_children`.
+///
+/// `cur_y` is where the run starts. The returned `cur_x` is the right edge of
+/// the last line's ink, which the block loop needs so a following block child
+/// knows a line was used.
 fn flush_inline_run(
     run: &mut Vec<InlineRunItem<'_>>,
     ctx: &InlineContext<'_>,

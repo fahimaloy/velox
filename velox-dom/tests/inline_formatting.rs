@@ -874,17 +874,16 @@ fn the_ellipsis_lands_in_the_piece_where_the_text_ran_out_not_the_first_one() {
 }
 
 /// A fixed-width atomic truncates its own content, which is the case a label in a
-/// sized box is.
+/// sized box is. A DECLARED `width`, though, is the case that says nothing about
+/// `max_content_width`: `at()` takes the declared width as the available width and
+/// `target` is never computed, so nothing here is a measurement being clamped.
+/// The `available` path below is the one that exercises `max_content_width`.
 ///
-/// It was first written to pin C-1.3 -- that `max_content_width` reads the laid-out
-/// subtree, so an ellipsised label shrink-fits the UNTRUNCATED width. **That is
-/// not reachable in this implementation, and the test as first written passed for
-/// the wrong reason:** giving the atomic a declared width means `at()` uses that
-/// width and `target` is never consulted, so the test said nothing about
-/// `max_content_width` at all. The reviewer's mechanism needs the truncation to
-/// feed back into the width measurement, and the order here forbids it -- the
-/// subtree is measured at the probe, where nothing truncates, and the second
-/// layout's truncation is never re-measured. See the report.
+/// What is checked here: a declared 40px box clips 80px of text to 40. What is
+/// NOT checked here: anything about the preferred width, because a declared width
+/// short-circuits it. The false premise this doc used to carry -- that the
+/// shrink-to-fit case is unreachable in this implementation -- is retired by the
+/// next test, which exercises it. See the report.
 #[test]
 fn an_atomic_inline_box_with_a_declared_width_truncates_its_content_to_it() {
     register_synthetic();
@@ -906,6 +905,78 @@ fn an_atomic_inline_box_with_a_declared_width_truncates_its_content_to_it() {
         atomic.children[0].rect.w, 40,
         "and its own content truncates to it, so 80px of text becomes four \
          characters plus an ellipsis and the box does not overflow"
+    );
+}
+
+/// C-1.3, the case the declared-width test above cannot reach. The atomic has NO
+/// declared width, so `at()` is handed a `target` -- `min(max_content_width,
+/// available)` -- and the content is 80px of unbreakable text on a 40px line, so
+/// `max_content` (80) exceeds `available` (40) and the `min` is the LINE. The
+/// second pass therefore lays the subtree out at 40, the line's own limit, and the
+/// ellipsis applies to that layout. That is the whole mechanism, and it needs no
+/// second measurement: the width the label ends up with IS the target, and the
+/// content inside it is the truncation of the subtree laid out AT that target.
+///
+/// The contrast is the evidence and it is a second test below, not a bound here:
+/// 40 on its own is a bare number that a wrong implementation also produces.
+#[test]
+fn an_atomic_with_no_declared_width_shrink_fits_to_the_LINE_and_truncates_its_label() {
+    register_synthetic();
+    let d = inner_of(&h(
+        "div",
+        vec![("style", "width:40px")],
+        vec![h(
+            "span",
+            vec![(
+                "style",
+                "display:inline-block;white-space:nowrap;text-overflow:ellipsis",
+            )],
+            vec![text("aaaaaaaaaa")],
+        )],
+    ));
+    let atomic = &d.children[0];
+    assert_eq!(
+        atomic.rect.w, 40,
+        "the preferred width is 80, the line is 40, and `min` is the line -- this is \
+         the clamp, and `available`, not a declared width, is what put it here"
+    );
+    assert_eq!(
+        atomic.children[0].rect.w, 40,
+        "and the label inside it is truncated to that clamp, four characters plus the \
+         ellipsis, which is the case the declared-width test cannot reach: nothing \
+         here short-circuits the shrink-to-fit"
+    );
+}
+
+/// The falsification half of the C-1.3 test, and the reason the assertion above is
+/// evidence. The ONLY difference from it is the presence of `text-overflow`, so
+/// with the property gone the atomic is still clamped to 40 and its label is still
+/// 80 -- the clamp did not move, the truncation did. If the clamp and the
+/// truncation ever shared a cause, or the truncation were ignored on this path,
+/// these two numbers would come out the same.
+#[test]
+fn without_the_property_the_shrink_fitted_label_overflows_the_clamp_that_did_not_move() {
+    register_synthetic();
+    let d = inner_of(&h(
+        "div",
+        vec![("style", "width:40px")],
+        vec![h(
+            "span",
+            vec![("style", "display:inline-block;white-space:nowrap")],
+            vec![text("aaaaaaaaaa")],
+        )],
+    ));
+    let atomic = &d.children[0];
+    assert_eq!(
+        atomic.rect.w, 40,
+        "the clamp is the line either way -- this number is NOT what the property \
+         controls, and the test above's identical 40 is not evidence of anything"
+    );
+    assert_eq!(
+        atomic.children[0].rect.w, 80,
+        "without `text-overflow` the label keeps its full 80 and overflows the 40 it \
+         was clamped into, which is the whole difference between these two cases and \
+         what makes the test above a measurement rather than a coincidence"
     );
 }
 
