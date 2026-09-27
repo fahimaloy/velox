@@ -165,7 +165,93 @@ fn measure_heuristic_old(text: &str, font_size_px: f32) -> f32 {
     font_size_px * 0.6 * text.chars().count() as f32
 }
 
+/// The glyph a truncated run ends in. CSS calls it a "text-overflow ellipsis",
+/// which U+2026 HORIZONTAL ELLIPSIS is.
+pub(crate) const ELLIPSIS: &str = "\u{2026}";
+
+/// One measured fragment offered for truncation.
+///
+/// The font is per fragment, not per call: an inline run can mix sizes, and each
+/// piece has to be measured in its own. The ellipsis is measured in the font of
+/// the fragment it joins, which is where a browser puts it.
+pub(crate) struct MeasurableFragment {
+    pub text: String,
+    /// The width `text` measures, from the caller's own measurement.
+    pub width: f32,
+    pub font_size: f32,
+    pub font_family: String,
+}
+
+/// Truncate an already-measured sequence of text fragments to `max_width`,
+/// returning how many characters of each survive, or `None` when they all fit.
+///
+/// The ellipsis is reserved space: a character is kept only if it AND the
+/// ellipsis fit, so a truncated run never overflows the box it is clipped in.
+/// CSS 2.1 §11.1.1.
+///
+/// Characters are measured cumulatively within a fragment, so a split never
+/// lands mid-cluster, and fragment widths are SUMMED across fragments: the seam
+/// measures a string and this crate has no shaping cache, so there is nothing to
+/// measure the joined string with. This is the same approximation the inline
+/// formatting context's line fill makes, which is why they can share the
+/// decision.
+///
+/// This is the ONE implementation of "where does the ellipsis go". The inline
+/// formatting context in `layout.rs` fills lines from a flattened run of
+/// fragments belonging to different elements; this module wraps a single string.
+/// They used to decide independently, and when R-5b replaced the block path's
+/// only caller of [`wrap_text_with_style`] with that context,
+/// `text-overflow: ellipsis` stopped reaching the layout tree while the pixels
+/// stayed right, because the renderer truncates again at paint time. Two
+/// implementations of a decision the layout tree depends on is how that
+/// happened, and it survived review because a green test on this function said
+/// nothing about the live path.
+pub(crate) fn truncate_fragments_with_ellipsis(
+    fragments: &[MeasurableFragment],
+    max_width: f32,
+    scale: f32,
+) -> Option<Vec<usize>> {
+    if fragments.is_empty() {
+        return None;
+    }
+    if max_width <= 0.0 {
+        return Some(vec![0; fragments.len()]);
+    }
+    if fragments.iter().map(|f| f.width).sum::<f32>() <= max_width {
+        return None;
+    }
+    // `done` is the width of the fragments ALREADY FINISHED. `prefix` below is a
+    // fragment's own cumulative width, so `done + prefix` is the total -- the two
+    // must not be conflated, and `done` moves once per fragment, not per
+    // character. Conflating them truncated a fragment short of where it fitted.
+    let mut kept = vec![0usize; fragments.len()];
+    let mut done = 0.0f32;
+    for (fi, fragment) in fragments.iter().enumerate() {
+        let snapped = snapped_size(fragment.font_size, scale);
+        let ellipsis_w = measure_text_internal(ELLIPSIS, snapped, &fragment.font_family, scale);
+        let mut cur = String::new();
+        let mut width = 0.0f32;
+        for ch in fragment.text.chars() {
+            cur.push(ch);
+            let next = measure_text_internal(&cur, snapped, &fragment.font_family, scale);
+            if done + next + ellipsis_w > max_width {
+                break;
+            }
+            kept[fi] += 1;
+            width = next;
+        }
+        done += width;
+        if kept[fi] < fragment.text.chars().count() {
+            break;
+        }
+    }
+    Some(kept)
+}
+
 /// Truncate `text` to fit `max_width` px, appending "…" when overflow.
+///
+/// One fragment, delegated to [`truncate_fragments_with_ellipsis`], which is
+/// where the rule lives. See that function for why there is only one.
 fn truncate_with_ellipsis(
     text: &str,
     max_width: f32,
@@ -173,30 +259,28 @@ fn truncate_with_ellipsis(
     font_family: &str,
     scale: f32,
 ) -> String {
-    const ELLIPSIS: &str = "\u{2026}";
     if max_width <= 0.0 || text.is_empty() {
         return String::new();
     }
     let snapped = snapped_size(font_size_px, scale);
-    // measure with internal (Skia or fallback)
-    if measure_text_internal(text, snapped, font_family, scale) <= max_width {
+    let fragment = MeasurableFragment {
+        text: text.to_string(),
+        width: measure_text_internal(text, snapped, font_family, scale),
+        font_size: font_size_px,
+        font_family: font_family.to_string(),
+    };
+    let Some(kept) =
+        truncate_fragments_with_ellipsis(std::slice::from_ref(&fragment), max_width, scale)
+    else {
         return text.to_string();
-    }
-    let ellipsis_w = measure_text_internal(ELLIPSIS, snapped, font_family, scale);
-    let avail = (max_width - ellipsis_w).max(0.0);
-    let mut cur = String::new();
-    for ch in text.chars() {
-        let candidate = format!("{cur}{ch}");
-        if measure_text_internal(&candidate, snapped, font_family, scale) <= avail {
-            cur = candidate;
-        } else {
-            break;
-        }
-    }
-    format!("{cur}{ELLIPSIS}")
+    };
+    let kept: String = text.chars().take(kept[0]).collect();
+    format!("{kept}{ELLIPSIS}")
 }
 
-/// Core Skia-backed wrap: white-space + ellipsis aware.
+/// Measured wrap of ONE string with no elements in it, always in collapsing mode
+/// with clipping overflow. See [`wrap_text_with_style`] for why this family is
+/// still here and what would retire it.
 /// Returns Vec<(line_text, measured_width)>
 pub fn wrap_text_measured(
     text: &str,
@@ -216,6 +300,47 @@ pub fn wrap_text_measured(
     )
 }
 
+/// The single-string greedy wrap: white-space and ellipsis aware, for ONE
+/// string with no elements in it. Returns `(line text, measured width)`.
+///
+/// ## Why this is still here, and what would retire it
+///
+/// R-5b replaced the block path's only caller of the `wrap_text*` family with
+/// the inline formatting context in `layout.rs`, because a line must be able to
+/// break at the edge of an inline element and a single-string wrapper cannot see
+/// an element boundary. That left this path with no production caller and a
+/// second greedy-fill implementation beside the real one, which is the same blind
+/// spot that hid `text-overflow: ellipsis` regressing silently: the renderer
+/// truncates again at paint time, so the pixels stayed right while the layout
+/// tree stopped truncating.
+///
+/// The inline formatting context does NOT call through here and cannot.
+/// This returns `Vec<(String, f32)>` — whole lines with no positions, no
+/// per-fragment attribution and no `vertical-align` — and the context needs all
+/// three, because a fragment's box hangs from the baseline and an element
+/// fragmented across two lines has to appear on both. Routing the context
+/// through this signature would trade requirement 2 away for tidiness.
+///
+/// So ONE decision is shared — [`truncate_fragments_with_ellipsis`], where the
+/// ellipsis goes, which is the decision C-1 showed must not be made twice — and
+/// the rest deliberately is not shared, because it cannot be. What would retire
+/// the rest, in the order it should happen:
+///
+/// 1. The renderer stops re-wrapping text itself and consumes layout's line
+///    boxes. [`wrap_text_measured`], [`wrap_text`], [`wrap_text_with_options`]
+///    and this all fall out of production in the same change.
+/// 2. Something outside this crate wants to lay out a single string, in which
+///    case this is public API rather than dead code and this comment is the
+///    wrong comment.
+/// 3. Neither. Then the whole family should be DELETED rather than documented a
+///    fourth time. It is [`TextLine`] and [`create_text_nodes`] that make
+///    deleting it a breaking change, and they are the parts with no argument for
+///    existing.
+///
+/// The dead code this crate's briefs forbid is code that is unreachable AND has
+/// no argument for existing. This has an argument. The argument is written down
+/// here so that "delete it" is a decision somebody makes on the evidence, rather
+/// than an omission somebody notices a year later.
 pub fn wrap_text_with_style(
     text: &str,
     max_width: f32,
@@ -370,8 +495,8 @@ pub fn wrap_text_with_style(
     }
 }
 
-/// Legacy wrapper kept for layout.rs: `wrap_text(text, max_width:i32, font_size_px:f32) -> Vec<TextLine>`
-/// Delegates to Skia-backed measured version with default family "system-ui" and current viewport scale.
+/// Three-argument legacy wrapper: one string, an `i32` limit, a font size, no
+/// style. See [`wrap_text_with_style`] for why this family is still here.
 pub fn wrap_text(text: &str, max_width: i32, font_size_px: f32) -> Vec<TextLine> {
     let max_w = max_width as f32;
     let scale = current_scale();
@@ -403,8 +528,10 @@ pub fn wrap_text(text: &str, max_width: i32, font_size_px: f32) -> Vec<TextLine>
         .collect()
 }
 
-/// Extended wrap for layout that respects style white-space/ellipsis extracted elsewhere.
-/// Used by layout.rs when it parses style string for those props.
+/// As [`wrap_text_with_style`], with an `i32` limit, a `WhiteSpace`, a
+/// `TextOverflow` and a [`TextLine`] out. The last production caller of this was
+/// the block child loop, and the inline formatting context is what replaced it.
+/// See [`wrap_text_with_style`] for why this family is still here.
 pub fn wrap_text_with_options(
     text: &str,
     max_width: i32,
@@ -446,7 +573,15 @@ pub fn wrap_text_with_options(
         .collect()
 }
 
-/// Create layout nodes for wrapped text lines
+/// One [`LayoutNode`] per wrapped line, for a single string with no elements in
+/// it. It wraps with [`wrap_text`], so it has NO `vertical-align`, no baseline
+/// alignment and no `text-overflow` post-pass: this is pre-IFC behaviour.
+///
+/// This is the part of the family with the weakest claim to existing. A caller
+/// wanting inline formatting has to use `compute_layout`; a caller wanting what
+/// this gives should first ask whether it is what they want. `source_index` is a
+/// parameter here, so a caller CAN produce a tree the renderer will resolve, and
+/// nothing in this crate does. See [`wrap_text_with_style`] for the record.
 pub fn create_text_nodes(
     text: &str,
     x: i32,

@@ -557,9 +557,11 @@ impl TextAlign {
 /// in the line box. `Sub` and `Super` are NOT here: they are defined as a shift
 /// the font's own metrics supply (`sub` may shift by "the font's own subscript
 /// offset"), and the seam reports a run's INK, not the font's subscript offset, so
-/// any value here would be a made-up number. An unparseable value falls back to
-/// `Baseline` rather than being dropped, because the layout path reads this
-/// straight off a style string with no cascade to fall back to.
+/// any value here would be a made-up number. An unparseable value returns `None`
+/// and the INHERITED value stands -- `Baseline` is the initial value and comes
+/// from the property's absence, which is what CSS 2.1 §10.8.1 specifies -- and
+/// that is also what keeps a `sub` declaration from silently becoming a
+/// `baseline` one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum VerticalAlign {
     #[default]

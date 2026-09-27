@@ -21,8 +21,11 @@ fn heuristic_vertical_is_the_documented_approximation() {
 }
 
 #[test]
-fn font_metrics_carries_the_approximation_on_both_its_new_fields() {
-    // RENAMED IN R-5b, and the rename is the point: these two fields used to
+fn font_metrics_carries_the_font_own_strut_and_not_the_labelled_ink_guess() {
+    // RENAMED AGAIN IN R-5b FIX ROUND 1. The name claimed to pin
+    // `heuristic_vertical`, which is the LABELLED INK GUESS and is pinned by
+    // `heuristic_vertical_is_the_documented_approximation` above. These are the
+    // STRUT and are a different pair of numbers.: these two fields used to
     // carry `heuristic_vertical`, the labelled guess at a RUN'S INK. They are the
     // STRUT now -- the font's own typographic metrics -- because a line box is
     // floored by the container's font, not by the characters on it.
@@ -91,7 +94,7 @@ fn a_fallback_run_never_measures_zero_vertical() {
 }
 
 #[test]
-fn the_approximation_leaves_every_line_height_exactly_where_it_was() {
+fn the_labelled_ink_guess_still_totals_one_point_two_em_on_the_fallback_path() {
     // The split of 0.8em/0.4em is a guess, but its total is not: 1.2em is the
     // `line_height` the wrap path has always used. So no line box moves when the
     // seam is introduced. This is checked over a wide range of sizes, and at the

@@ -1,4 +1,4 @@
-use crate::style::{VerticalAlign, WhiteSpace};
+use crate::style::{TextOverflow, VerticalAlign, WhiteSpace};
 use crate::{Length, VNode};
 
 /// Default font size for root element (used for rem calculations)
@@ -341,6 +341,12 @@ struct InlineContext<'a> {
     font_size: f32,
     text_align: &'a str,
     ws: WhiteSpace,
+    /// The container's `text-overflow`. Read by the line filler, and it was the
+    /// one thing the block text branch did that the inline formatting context did
+    /// not: R-5b deleted that branch, and with it the only production caller of
+    /// `text_wrap`'s single-string wrapper, so `text-overflow: ellipsis` stopped
+    /// reaching the layout tree while the renderer kept truncating at paint time.
+    text_overflow: TextOverflow,
     scale: f32,
     viewport_w: i32,
     viewport_h: i32,
@@ -406,13 +412,25 @@ fn lay_out_atomic(
         .max(4096)
         .saturating_add(inset)
         .min(i32::MAX / 4);
-    let (mut laid, laid_at) = lay_out_atomic_at(node, source_index, probe, ctx, y);
-    let max_content = max_content_width(&laid, laid_at);
-    if max_content > 0 && max_content < probe - inset {
-        let target = max_content.min(available).saturating_add(inset);
-        laid = lay_out_atomic_at(node, source_index, target, ctx, y).0;
-    }
-    laid
+    let (probe_layout, _) = lay_out_atomic_at(node, source_index, probe, ctx, y);
+    let max_content = max_content_width(&probe_layout);
+    // The second pass is UNCONDITIONAL, and the arithmetic is why it can be.
+    // `min(max_content, available) <= available < max(4 * available, 4096)` for
+    // every `available >= 0`, so `target < probe` always holds and there is
+    // nothing to guard.
+    //
+    // An earlier version guarded on `max_content > 0`, reading as "do not shrink
+    // to nothing". Its effect was the opposite: `max_content_width` returns 0
+    // when the tree has no content at all, which is exactly the case that
+    // should shrink to nothing, so an inline-block with no children came out
+    // `probe` wide -- 4096px. The content box of an empty atomic is 0 plus its
+    // padding and border, and `target` says so. Dropping the guard also closed
+    // the other degenerate case the guard was standing in for: content that asks
+    // for MORE than the line has used to be left at the probe width, so a box
+    // whose single unbreakable child is wider than the line came out as wide as
+    // the probe instead of as wide as the line.
+    let target = max_content.min(available).saturating_add(inset);
+    lay_out_atomic_at(node, source_index, target, ctx, y).0
 }
 
 /// Lay one atomic at an exact available width. `source_index` is the atomic's
@@ -594,8 +612,13 @@ fn atomic_overflow_is_visible(node: &VNode) -> bool {
 /// intrinsic size. It is the distance from the leftmost content edge to the
 /// furthest right edge any descendant reaches, so the box's own padding and
 /// border cancel out and no box-model arithmetic is needed. The root's own
-/// width is excluded: it is the probe, not the content.
-fn max_content_width(root: &LayoutNode, _probe: i32) -> i32 {
+/// width is excluded: it is the measurement probe, not the content.
+///
+/// ZERO means the tree has no content at all, which is a real answer and not a
+/// failure: CSS 2.1 §10.3.5's `min(max(preferred minimum, available),
+/// preferred)` gives an empty box a content width of 0. It used to be read as
+/// "unknown" by the caller, which turned every empty atomic into a 4096px box.
+fn max_content_width(root: &LayoutNode) -> i32 {
     let mut left = i32::MAX;
     let mut right = i32::MIN;
     let mut stack: Vec<&LayoutNode> = root.children.iter().collect();
@@ -752,6 +775,94 @@ fn inline_slots_to_nodes(slots: &[InlineSlot], merged: &[MergedRun]) -> Vec<Layo
 /// the last line's ink, which the block loop needs so a following block child
 /// knows a line was used.
 #[allow(clippy::too_many_arguments)]
+/// Truncate one filled line's TEXT pieces to the line limit, appending an
+/// ellipsis to the piece the text ran out in, and returning the line's new
+/// width. `None` when the line does not truncate.
+///
+/// Only text pieces take part. An atomic is a box, and clipping one to fit a
+/// line needs a clip region the layout tree does not carry, so a line made only
+/// of atomics does not truncate.
+///
+/// The ellipsis lands in the piece where the text ran out, so a run spanning
+/// `<b>aa</b> bbbbbb` keeps `aa ` inside the `<b>` and the ellipsis in the text
+/// node after it, which is where a browser puts it. Pieces emptied by the
+/// truncation keep their identity and stay in the line at width 0, because the
+/// tree has to keep mirroring the VNode tree.
+fn truncate_line_with_ellipsis(
+    pieces: &mut [InlinePiece],
+    line: &[usize],
+    run: &[InlineRunItem<'_>],
+    ctx: &InlineContext<'_>,
+) -> Option<i32> {
+    let text_pieces: Vec<usize> = line
+        .iter()
+        .copied()
+        .filter(|&pi| {
+            let p = &pieces[pi];
+            !p.atomic && !p.hard_break && !p.text.is_empty()
+        })
+        .collect();
+    if text_pieces.is_empty() {
+        return None;
+    }
+    let font_of = |item: usize| match &run[item] {
+        InlineRunItem::Fragment {
+            font_size,
+            font_family,
+            ..
+        }
+        | InlineRunItem::Atomic {
+            font_size,
+            font_family,
+            ..
+        } => (*font_size, font_family.as_str()),
+    };
+    let fragments: Vec<crate::text_wrap::MeasurableFragment> = text_pieces
+        .iter()
+        .map(|&pi| {
+            let (font_size, font_family) = font_of(pieces[pi].item);
+            crate::text_wrap::MeasurableFragment {
+                text: pieces[pi].text.clone(),
+                width: pieces[pi].width as f32,
+                font_size,
+                font_family: font_family.to_string(),
+            }
+        })
+        .collect();
+    let kept = crate::text_wrap::truncate_fragments_with_ellipsis(
+        &fragments,
+        ctx.line_limit as f32,
+        ctx.scale,
+    )?;
+
+    // Apply: every fragment keeps its prefix, everything from the truncation
+    // point on is emptied, and the ellipsis joins the fragment it stopped in.
+    for (fi, &pi) in text_pieces.iter().enumerate() {
+        let (font_size, font_family) = font_of(pieces[pi].item);
+        let full = pieces[pi].text.chars().count();
+        let take = kept[fi].min(full);
+        let mut text: String = pieces[pi].text.chars().take(take).collect();
+        if take < full {
+            text.push_str(crate::text_wrap::ELLIPSIS);
+        }
+        let width = crate::text_wrap::measure_text_metrics(&text, font_size, font_family, ctx.scale)
+            .width
+            .round() as i32;
+        pieces[pi].text = text;
+        pieces[pi].width = width;
+        if take < full {
+            // Everything after the truncation point is dropped, and nothing after
+            // it may end up holding the ellipsis.
+            for &after in &text_pieces[fi + 1..] {
+                pieces[after].text = String::new();
+                pieces[after].width = 0;
+            }
+            break;
+        }
+    }
+    Some(line.iter().map(|&pi| pieces[pi].width).sum())
+}
+
 fn flush_inline_run(
     run: &mut Vec<InlineRunItem<'_>>,
     ctx: &InlineContext<'_>,
@@ -934,6 +1045,40 @@ fn flush_inline_run(
         line_w.pop();
     }
 
+    // --- `text-overflow: ellipsis` ------------------------------------------
+    //
+    // Truncation happens AFTER the fill and BEFORE placement, so a truncated
+    // line is placed at its truncated width and the ellipsis hangs in the box
+    // the break happened in.
+    //
+    // WHICH lines truncate follows the rule the single-string wrapper used, which
+    // is the behaviour the block path had before R-5b: a white-space mode that
+    // does not wrap truncates each of its own overflowing lines, and one that
+    // does wrap truncates only when the whole run came out as a single
+    // overflowing line. A browser puts the ellipsis on the last line a block
+    // actually clips, which for a wrapping block is its last line whether or not
+    // the run came out as one line. That is a recorded divergence, and matching
+    // it needs to know which line is the clipped one, which needs the clip
+    // region the layout tree does not carry.
+    if matches!(ctx.text_overflow, TextOverflow::Ellipsis) {
+        let targets: Vec<usize> = if wrapping {
+            if lines.len() == 1 && line_w.first().is_some_and(|w| *w > ctx.line_limit) {
+                vec![0]
+            } else {
+                Vec::new()
+            }
+        } else {
+            (0..lines.len())
+                .filter(|li| line_w[*li] > ctx.line_limit)
+                .collect()
+        };
+        for li in targets {
+            if let Some(new_w) = truncate_line_with_ellipsis(&mut pieces, &lines[li], &run, ctx) {
+                line_w[li] = new_w;
+            }
+        }
+    }
+
     // --- place each line ----------------------------------------------------
     let strut = FontMetrics::from_font_size(ctx.font_size);
     let align_of = |item: usize| match &run[item] {
@@ -948,21 +1093,18 @@ fn flush_inline_run(
         let mut max_d = strut.descent;
         for &pi in line {
             let p = &pieces[pi];
-            // A space has no ink, so it contributes its FONT's content area
-            // instead -- which is what a browser's inline content area is, and
-            // which the strut is a floor for. This matters because the seam
-            // refuses a measurer that reports no vertical extent and substitutes
-            // the labelled fallback, so a space's "ink" is really the fallback
-            // guess, and taking it as a run's extent would let one space make a
-            // line taller than the font that owns it.
             // A piece's contribution to its line is its INK, floored by its own
             // font's content area. The floor is not optional: an inline element
             // in a larger font has an ink of its own x-height but a content area
             // of its own em, and without the floor its box would hang off the
-            // line instead of sitting in it. A space has no ink at all, so it
-            // contributes exactly its content area -- which is what the strut
-            // is a floor for, and which is why a space must not be allowed to
-            // make a line taller than the font that owns it.
+            // line instead of sitting in it.
+            //
+            // A space has no ink at all, so it contributes exactly its content
+            // area. That matters because the seam refuses a measurer that reports
+            // no vertical extent and substitutes the labelled fallback, so a
+            // space's "ink" is really the fallback's guess, and taking it as a
+            // run's extent let one space make a line taller than the font that
+            // owns it.
             let (ink_a, ink_d) = if p.is_space && !p.atomic {
                 (p.strut_a, p.strut_d)
             } else {
@@ -4199,6 +4341,9 @@ pub fn compute_layout(node: &VNode, viewport_w: i32, viewport_h: i32) -> LayoutN
                     let container_ws = style_lookup_str(style, "white-space")
                         .and_then(|v| WhiteSpace::parse(&v))
                         .unwrap_or_default();
+                    let container_text_overflow = style_lookup_str(style, "text-overflow")
+                        .and_then(|v| TextOverflow::parse(&v))
+                        .unwrap_or_default();
                     let mut inline_run: Vec<InlineRunItem<'_>> = Vec::new();
                     for (idx, c) in children.iter().enumerate() {
                         let is_text = matches!(c, VNode::Text(_));
@@ -4238,6 +4383,7 @@ pub fn compute_layout(node: &VNode, viewport_w: i32, viewport_h: i32) -> LayoutN
                                     font_size: container_font_size,
                                     text_align: &container_text_align,
                                     ws: container_ws,
+                                    text_overflow: container_text_overflow,
                                     scale: crate::text_wrap::current_scale(),
                                     viewport_w,
                                     viewport_h,
@@ -4444,6 +4590,7 @@ pub fn compute_layout(node: &VNode, viewport_w: i32, viewport_h: i32) -> LayoutN
                                 font_size: container_font_size,
                                 text_align: &container_text_align,
                                 ws: container_ws,
+                                text_overflow: container_text_overflow,
                                 scale: crate::text_wrap::current_scale(),
                                 viewport_w,
                                 viewport_h,

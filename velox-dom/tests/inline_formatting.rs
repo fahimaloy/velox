@@ -27,10 +27,13 @@
 //!     `g`, `j`, `p`, `q`, `y`, is OVER it, and that run decides the line's
 //!     height.
 //!
-//! Every expected height below is therefore either 21.792 -> 22 (the strut, from
-//! `FontMetrics::heuristic_vertical`, i.e. the font FILE and not this code) or
-//! 2.5 * 16 = 40 (the measurer, from `tests/common/mod.rs`). None of them is
-//! recomputed from the implementation.
+//! Every expected height below is therefore either 21.792 -> 22 (the STRUT, which
+//! is `FontMetrics::from_font_size`'s `ascent`/`descent`, 1.069em + 0.293em read
+//! out of the default face's font file and not out of this code -- NOT
+//! `FontMetrics::heuristic_vertical`, which is the labelled INK guess at
+//! 0.8em + 0.4em and is a different pair of numbers entirely) or 2.5 * 16 = 40
+//! (the measurer, from `tests/common/mod.rs`). None of them is recomputed from
+//! the implementation.
 
 mod common;
 
@@ -773,4 +776,241 @@ fn text_align_right_still_right_aligns_an_inline_line() {
         vec![h("b", vec![], vec![text("ccc")])],
     ));
     assert_eq!(d.children[0].rect.x, 200 - 24);
+}
+
+// ---------------------------------------------------------------------------
+// Fix round 1, C-1: `text-overflow: ellipsis` in the layout tree
+// ---------------------------------------------------------------------------
+
+/// C-1. The reviewer's own input, and the assertion is on `compute_layout`'s
+/// tree. **This is the test that distinguishes the layout from the paint, and
+/// the reason it is this one is worth stating:** the renderer truncates again at
+/// paint time from `text_style.ellipsis`, so before the fix the pixels were
+/// already right and every render-based check would have passed. A test that
+/// read the renderer could not have told the two apart. Reading the layout tree
+/// can, because the layout tree is what was wrong.
+///
+/// 40px of line, 8px per character, so four characters plus the one-character
+/// ellipsis is exactly 40. Before the fix the fragment was the full 80.
+#[test]
+fn an_ellipsis_is_reserved_space_in_the_layout_tree_and_never_overflows_its_line() {
+    register_synthetic();
+    let d = inner_of(&h(
+        "div",
+        vec![(
+            "style",
+            "width:40px;white-space:nowrap;text-overflow:ellipsis",
+        )],
+        vec![text("aaaaaaaaaa")],
+    ));
+    assert_eq!(
+        d.children.len(),
+        1,
+        "one overflowing line is one fragment, got {:?}",
+        d.children.iter().map(|c| c.rect).collect::<Vec<_>>()
+    );
+    assert_eq!(
+        d.children[0].rect.w, 40,
+        "four characters plus the ellipsis is exactly the 40px line; anything \
+         less means a character was dropped that fitted"
+    );
+    assert!(
+        d.children[0].rect.w <= 40,
+        "an ellipsis is RESERVED space, so a truncated fragment can never be \
+         wider than the line it is clipped in; got {}",
+        d.children[0].rect.w
+    );
+}
+
+/// The contrast case, and it is the same input without the property. Before the
+/// fix both of these produced a layout tree of 80 and only this one should.
+#[test]
+fn without_the_property_the_same_text_overflows_its_line_unchanged() {
+    register_synthetic();
+    let d = inner_of(&h(
+        "div",
+        vec![("style", "width:40px;white-space:nowrap")],
+        vec![text("aaaaaaaaaa")],
+    ));
+    assert_eq!(
+        d.children[0].rect.w, 80,
+        "with no `text-overflow` the fragment keeps its full width and overflows, \
+         which is what distinguishes this case from the truncated one"
+    );
+}
+
+/// The ellipsis lands in the piece where the text ran out, so `<b>aa</b>` is left
+/// alone and the text node after it is shortened. A browser puts the ellipsis at
+/// the end of the line, not at the end of the first element that did not fit, so
+/// this is a real decision and the widths distinguish it: 16 is `aa` untouched and
+/// 24 is `" b" + ellipsis`.
+#[test]
+fn the_ellipsis_lands_in_the_piece_where_the_text_ran_out_not_the_first_one() {
+    register_synthetic();
+    let d = inner_of(&h(
+        "div",
+        vec![(
+            "style",
+            "width:40px;white-space:nowrap;text-overflow:ellipsis",
+        )],
+        vec![h("b", vec![], vec![text("aa")]), text(" bbbbbb")],
+    ));
+    let b = d
+        .children
+        .iter()
+        .find(|c| c.children.len() == 1)
+        .expect("the <b> is a leaf one level down");
+    let after = d
+        .children
+        .iter()
+        .find(|c| c.children.is_empty())
+        .expect("the text after it is a bare fragment");
+    assert_eq!(
+        (b.rect.w, after.rect.w),
+        (16, 24),
+        "the <b> keeps `aa` at 16 and the text piece becomes ` b` + ellipsis at 24; \
+         if the ellipsis had gone into the <b> these would be 24 and 16"
+    );
+}
+
+/// C-1.3, and the reason it is a separate test: `max_content_width` reads the
+/// laid-out subtree, so if the subtree is untruncated the atomic sizes to the
+/// untruncated width. 200px of line, an inline-block that declares 40px and holds
+/// 80px of text, so `min(max_content, available)` gives 80 without the fix and 40
+/// with it.
+#[test]
+fn an_atomic_inline_box_shrinks_to_the_TRUNCATED_width_of_its_content() {
+    register_synthetic();
+    let d = inner_of(&h(
+        "div",
+        vec![("style", "width:200px")],
+        vec![h(
+            "span",
+            vec![(
+                "style",
+                "display:inline-block;width:40px;white-space:nowrap;text-overflow:ellipsis",
+            )],
+            vec![text("aaaaaaaaaa")],
+        )],
+    ));
+    let atomic = &d.children[0];
+    assert_eq!(
+        atomic.rect.w, 40,
+        "the atomic is as wide as its TRUNCATED content, not its untruncated width; \
+         a max-content of 80 would make it 80 here"
+    );
+}
+
+/// Which lines truncate follows the rule the single-string wrapper used, and for a
+/// wrapping block that is a recorded divergence: a browser puts the ellipsis on the
+/// last line the block actually clips, which is its last line whether or not the run
+/// came out as one line. Two lines here, so neither truncates.
+#[test]
+fn a_wrapping_block_does_not_truncate_which_is_a_recorded_divergence() {
+    register_synthetic();
+    let d = inner_of(&h(
+        "div",
+        vec![("style", "width:40px;text-overflow:ellipsis")],
+        vec![text("aaaa aaaa")],
+    ));
+    assert_eq!(
+        d.children.iter().map(|c| c.rect.w).collect::<Vec<_>>(),
+        vec![40, 32],
+        "the run wrapped, so the wrapper's rule leaves it alone; matching a browser \
+         needs to know which line is the clipped one, which needs the clip region \
+         the layout tree does not carry"
+    );
+}
+
+/// `pre` is the mode that DOES truncate each of its own overflowing lines, because
+/// each is its own line box and none of them can ever be the only one.
+#[test]
+fn a_pre_block_truncates_EACH_of_its_own_overflowing_lines() {
+    register_synthetic();
+    let d = inner_of(&h(
+        "div",
+        vec![("style", "width:40px;white-space:pre;text-overflow:ellipsis")],
+        vec![text("aaaaaaaaaa\nbbbbbbbbbb")],
+    ));
+    assert_eq!(
+        d.children.iter().map(|c| c.rect.w).collect::<Vec<_>>(),
+        vec![40, 40],
+        "both lines are their own line box and both overflow, so both truncate"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Fix round 1, C-2: the degenerate atomics
+// ---------------------------------------------------------------------------
+
+/// C-2. The `> 0` guard in the shrink-to-fit second pass read as "do not shrink to
+/// nothing" and its effect was the opposite: the content width stood at the probe,
+/// 4096. An empty atomic is 0 wide, and 10 wide with its own 5px padding on each
+/// side.
+#[test]
+fn an_empty_atomic_inline_box_is_zero_wide_plus_its_own_padding_and_border() {
+    register_synthetic();
+    for (label, style, want) in [
+        ("no padding", "display:inline-block", 0),
+        ("5px padding", "display:inline-block;padding:5px", 10),
+    ] {
+        let d = inner_of(&h(
+            "div",
+            vec![("style", "width:200px")],
+            vec![h("span", vec![("style", style)], vec![])],
+        ));
+        assert_eq!(
+            d.children[0].rect.w, want,
+            "an empty atomic ({label}) is its content area of 0 plus its own inset, \
+             not the probe width it used to get"
+        );
+    }
+}
+
+/// The same defect by another route: a subtree with no box in it at all measures
+/// as nothing, and the same `> 0` guard turned that into 4096.
+#[test]
+fn an_atomic_inline_box_whose_only_child_is_display_none_is_zero_wide() {
+    register_synthetic();
+    let d = inner_of(&h(
+        "div",
+        vec![("style", "width:200px")],
+        vec![h(
+            "span",
+            vec![("style", "display:inline-block")],
+            vec![h(
+                "div",
+                vec![("style", "display:none")],
+                vec![text("aaaaaaaaaa")],
+            )],
+        )],
+    ));
+    assert_eq!(
+        d.children[0].rect.w, 0,
+        "a child that is not laid out contributes no content, so the atomic's \
+         content width is 0"
+    );
+}
+
+/// The SAME guard, a third way, and the reviewer had not listed it: content asking
+/// for more than the line has used to be left at the probe width. 80px of
+/// unbreakable text on a 40px line, so `min(max_content, available)` is the line.
+#[test]
+fn an_atomic_inline_box_wider_than_the_line_is_the_line_wide() {
+    register_synthetic();
+    let d = inner_of(&h(
+        "div",
+        vec![("style", "width:40px")],
+        vec![h(
+            "span",
+            vec![("style", "display:inline-block")],
+            vec![text("aaaaaaaaaa")],
+        )],
+    ));
+    assert_eq!(
+        d.children[0].rect.w, 40,
+        "a preferred width wider than the line is clamped to the line, which is \
+         what `min(max_content, available)` says and what the probe width used to \
+         override"
+    );
 }

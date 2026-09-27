@@ -128,8 +128,24 @@ fn white_space_pre_wrap_preserves_newlines_and_wraps() {
     );
 }
 
+/// RENAMED IN R-5b FIX ROUND 1, and the rename is the point.
+///
+/// This test called `wrap_text_with_style` directly, and its name said
+/// "ellipsis truncates single-line overflow" as though that were the product's
+/// behaviour. It was not: R-5b replaced the block loop's only production caller of
+/// that function with the inline formatting context, so for one release
+/// `text-overflow: ellipsis` did not reach the layout tree at all, measured 40 ->
+/// 80 on the reviewer's own input -- while this test stayed green. Standing rule 1
+/// in its purest form: a green test whose subject is not the live path says nothing
+/// about the product.
+///
+/// The live path is pinned by `ellipsis_truncates_single_line_overflow` below, which
+/// goes through `compute_layout`, and by seven cases in
+/// `velox-dom/tests/inline_formatting.rs`. What is left here is a test of the
+/// retained wrapper, which is now reachable only from tests; see the retention note
+/// on `wrap_text_with_style` in `velox-dom/src/text_wrap.rs`.
 #[test]
-fn ellipsis_truncates_single_line_overflow() {
+fn the_single_string_wrapper_truncates_and_is_not_the_layout_path() {
     let lines = wrap_text_with_style(
         "This is a very long line that will not fit",
         60.0,
@@ -161,6 +177,66 @@ fn ellipsis_truncates_single_line_overflow() {
         TextOverflow::Ellipsis,
     );
     assert_eq!(short[0].0, "Hi");
+}
+
+/// The name the old test above used, pointed at the path that actually ships.
+///
+/// `compute_layout` is the whole product behaviour: if `text-overflow: ellipsis`
+/// stops reaching the layout tree, this fails and the renderer test does not,
+/// because the renderer truncates again at paint time from `text_style.ellipsis`
+/// and the pixels were right the whole time. No synthetic measurer is registered
+/// here, so this is on the no-measurer fallback, where the width is 0.5em per
+/// character: 16px * 0.5 = 8px per character, 60px of line.
+#[test]
+fn ellipsis_truncates_single_line_overflow() {
+    use velox_dom::layout::compute_layout;
+    use velox_dom::{VNode, h};
+    let v = h(
+        "div",
+        vec![(
+            "style",
+            "width:60px;white-space:nowrap;text-overflow:ellipsis",
+        )],
+        vec![VNode::Text(
+            "This is a very long line that will not fit".to_string(),
+        )],
+    );
+    let outer = compute_layout(&h("div", vec![], vec![v]), 600, 600);
+    let d = &outer.children[0];
+    assert_eq!(
+        d.children.len(),
+        1,
+        "`nowrap` never wraps, so one line is one fragment; got {:?}",
+        d.children.iter().map(|c| c.rect).collect::<Vec<_>>()
+    );
+    let w = d.children[0].rect.w;
+    assert!(
+        w <= 60,
+        "an ellipsis is reserved space, so a truncated fragment can never be wider \
+         than its 60px line; got {w}"
+    );
+    assert!(
+        w > 0 && w < 352,
+        "the untruncated text measures {} at 0.5em per character, so a layout tree \
+         that never truncated would report that; got {w}",
+        8 * "This is a very long line that will not fit".chars().count()
+    );
+    // A root is laid out at the viewport's size, so the box that matters is the
+    // inner one; the contrast case proves the property is what did it.
+    let plain_v = h(
+        "div",
+        vec![("style", "width:60px;white-space:nowrap")],
+        vec![VNode::Text(
+            "This is a very long line that will not fit".to_string(),
+        )],
+    );
+    let plain = compute_layout(&h("div", vec![], vec![plain_v]), 600, 600);
+    assert_eq!(
+        plain.children[0].children[0].rect.w,
+        (8 * "This is a very long line that will not fit".chars().count()) as i32,
+        "the same text without `text-overflow: ellipsis` keeps its full width and \
+         overflows, which is what makes the truncated case evidence of truncation"
+    );
 }
 
 #[test]
