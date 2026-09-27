@@ -272,37 +272,6 @@ impl GenericFamily {
     }
 }
 
-/// Font metrics (baseline, ascent, descent, etc.)
-#[derive(Debug, Clone, Copy)]
-pub struct FontMetrics {
-    /// Distance from baseline to top of font
-    pub ascent: f32,
-    /// Distance from baseline to bottom of font
-    pub descent: f32,
-    /// Gap between lines (internal leading)
-    pub line_gap: f32,
-    /// Total line height = ascent + descent + line_gap
-    pub line_height: f32,
-    /// Underline position (usually negative)
-    pub underline_position: f32,
-    /// Underline thickness
-    pub underline_thickness: f32,
-}
-
-impl FontMetrics {
-    pub fn new(ascent: f32, descent: f32, line_gap: f32) -> Self {
-        let line_height = ascent + descent + line_gap;
-        Self {
-            ascent,
-            descent,
-            line_gap,
-            line_height,
-            underline_position: descent / 2.0,
-            underline_thickness: 1.0,
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

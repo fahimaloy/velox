@@ -9,35 +9,6 @@
 
 use velox_style::fonts::{FontStyle, LineHeight};
 
-/// Text measurement and layout result
-#[derive(Debug, Clone)]
-pub struct TextLayout {
-    /// Lines of text with their bounds
-    pub lines: Vec<TextLine>,
-    /// Total width of the text
-    pub width: f32,
-    /// Total height of the text
-    pub height: f32,
-    /// Baseline position from top
-    pub baseline: f32,
-}
-
-/// A single line of text
-#[derive(Debug, Clone)]
-pub struct TextLine {
-    /// The text content
-    pub text: String,
-    /// Width of this line
-    pub width: f32,
-    /// Height of this line (usually same as font size + line height)
-    pub height: f32,
-    /// Y offset from text block top
-    pub y_offset: f32,
-    /// Baseline position within this line
-    pub baseline: f32,
-}
-
-/// Text rendering configuration
 #[derive(Debug, Clone)]
 pub struct TextRenderConfig {
     /// Font family name
@@ -167,91 +138,7 @@ impl TextMeasurer {
         let height = config.line_height.to_pixels(snapped);
         (width, height)
     }
-
-    /// Layout text with wrapping
-    pub fn layout(text: &str, config: &TextRenderConfig) -> TextLayout {
-        let line_height = config.line_height.to_pixels(config.font_size);
-
-        if config.max_width.is_none() {
-            // Single line, no wrapping
-            let (width, _) = Self::measure(text, config);
-            return TextLayout {
-                lines: vec![TextLine {
-                    text: text.to_string(),
-                    width,
-                    height: line_height,
-                    y_offset: 0.0,
-                    baseline: config.font_size * 0.8, // rough baseline
-                }],
-                width,
-                height: line_height,
-                baseline: config.font_size * 0.8,
-            };
-        }
-
-        // Multi-line with wrapping — safe to unwrap: None case handled above
-        let max_width = config.max_width.unwrap();
-        let _char_width = config.font_size * 0.5;
-        let mut lines = Vec::new();
-        let mut current_line = String::new();
-        let mut y_offset = 0.0;
-
-        for word in text.split_whitespace() {
-            let test_line = if current_line.is_empty() {
-                word.to_string()
-            } else {
-                format!("{} {}", current_line, word)
-            };
-
-            let (line_width, _) = Self::measure(&test_line, config);
-
-            if line_width > max_width && !current_line.is_empty() {
-                // Save current line and start new one
-                let (w, _) = Self::measure(&current_line, config);
-                lines.push(TextLine {
-                    text: current_line,
-                    width: w,
-                    height: line_height,
-                    y_offset,
-                    baseline: config.font_size * 0.8,
-                });
-                y_offset += line_height;
-                current_line = word.to_string();
-            } else {
-                current_line = test_line;
-            }
-        }
-
-        // Add final line
-        if !current_line.is_empty() {
-            let (w, _) = Self::measure(&current_line, config);
-            lines.push(TextLine {
-                text: current_line,
-                width: w,
-                height: line_height,
-                y_offset,
-                baseline: config.font_size * 0.8,
-            });
-        }
-
-        let total_height = if lines.is_empty() {
-            line_height
-        } else {
-            let last = &lines[lines.len() - 1];
-            last.y_offset + last.height
-        };
-
-        let total_width = lines.iter().map(|l| l.width).fold(0.0, f32::max);
-
-        TextLayout {
-            lines,
-            width: total_width,
-            height: total_height,
-            baseline: config.font_size * 0.8,
-        }
-    }
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;

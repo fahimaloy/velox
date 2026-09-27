@@ -13,8 +13,9 @@ pub mod visual_effects;
 
 // Re-export types from velox-dom
 pub use velox_dom::style::*;
-// Re-export non-conflicting font types.
-pub use fonts::{FontDescriptor, FontFamily, FontMetrics, FontStyle, GenericFamily, LineHeight};
+// Re-export the font types. (`FontMetrics` used to be re-exported here and collided
+// with `velox_dom::style`; it had no users, so it is deleted rather than aliased.)
+pub use fonts::{FontDescriptor, FontFamily, FontStyle, GenericFamily, LineHeight};
 // Avoid collision with velox_dom::style::BoxShadow by aliasing visual effects type.
 pub use visual_effects::{BorderRadius, BoxShadow as VisualBoxShadow, TextShadow};
 
