@@ -110,6 +110,18 @@ impl TextMeasurer {
     /// Snapped logical size helper (single rounding point via Viewport).
     #[inline]
     fn snapped_size(font_size: f32, scale: f32) -> f32 {
+        // NOT a second rounding authority, and deliberately NOT
+        // `Viewport::snap_logical_to_physical_grid`. The two agree only when
+        // `scale` is finite, positive and `!= 1.0`:
+        //   * `scale == 1.0` — this returns `font_size` unrounded, while the
+        //     authority returns `font_size.round()` (16.5 -> 17.0).
+        //   * `scale` non-finite or <= 0 — this returns `font_size` unrounded,
+        //     while the authority substitutes `scale = 1.0` and rounds.
+        // Substituting the authority would change the measured text size in
+        // those two cases, so this stays a font-size snap with its own guards.
+        // It is a glyph-advance sizing heuristic, not a logical->physical size
+        // conversion, and the divergence is load-bearing for the fallback
+        // measure the non-Skia build uses.
         if scale.is_finite() && scale > 0.0 && scale != 1.0 {
             (font_size * scale).round() / scale
         } else {
@@ -175,6 +187,14 @@ mod tests {
                 for scale in [1.0f32, 1.25, 1.5, 2.0] {
                     let config = TextRenderConfig::new("Arial", size);
                     let (w, _) = TextMeasurer::measure_with_scale(text, &config, scale);
+                    // This mirrors `TextMeasurer::snapped_size` above on purpose
+                    // and is NOT a second rounding authority: it is the test's
+                    // expectation for that function, so it must track its guards
+                    // (`scale != 1.0`, non-finite/`<= 0` -> unrounded) rather
+                    // than `snap_logical_to_physical_grid`'s, which rounds in both
+                    // of those cases. Swapping in the authority here would make
+                    // the test assert a different function's behaviour and would
+                    // fail for `size = 16.5, scale = 1.0`.
                     let snapped = if scale.is_finite() && scale > 0.0 && scale != 1.0 {
                         (size * scale).round() / scale
                     } else {

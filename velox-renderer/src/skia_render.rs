@@ -867,9 +867,28 @@ pub mod skia_impl {
         height: i32,
         scale_factor: f32,
     ) -> Result<Vec<u8>, String> {
-        let physical_w = ((width as f32) * scale_factor).round() as i32;
-        let physical_h = ((height as f32) * scale_factor).round() as i32;
-        let mut surface = crate::skia_surface::SkiaSurface::new_raster(physical_w, physical_h)?;
+        // Invariant 1: `viewport::physical_from_logical` is the single DPI/scale
+        // rounding authority. This used to inline a copy of the same formula
+        // the same multiply-then-round formula but was missing the authority's
+        // `.max(1)` and the authority's substitute-for-a-degenerate-scale rule, so
+        // a non-positive scale collapsed ANY requested size to a 1x1 surface.
+        // `SkiaSurface::new_raster` takes i32, so the
+        // authority's u32 result is narrowed with a saturating `try_from` rather
+        // than an `as` cast that would wrap above `i32::MAX`.
+        //
+        // The logical inputs are clamped to 0 before the u32 conversion because a
+        // negative `i32` cast to `u32` wraps to ~4 billion, which would ask for a
+        // 2-billion-pixel surface. Both normalisations are the `.max(1)` fix: a
+        // degenerate size now yields a 1px surface instead of a 0px or negative one.
+        let (physical_w, physical_h) = crate::Viewport::physical_from_logical(
+            width.max(0) as u32,
+            height.max(0) as u32,
+            scale_factor,
+        );
+        let mut surface = crate::skia_surface::SkiaSurface::new_raster(
+            i32::try_from(physical_w).unwrap_or(i32::MAX),
+            i32::try_from(physical_h).unwrap_or(i32::MAX),
+        )?;
         surface.set_scale_factor(scale_factor);
         velox_dom::text_wrap::set_current_scale(scale_factor);
         velox_dom::text_wrap::set_skia_measurer(measure_text);
@@ -957,6 +976,18 @@ pub mod skia_impl {
         /// instead of 0.25px subpixel blur after `canvas.scale(scale)`.
         #[inline]
         fn snapped_size(&self, logical_size: f32) -> f32 {
+            // NOT a second rounding authority. It differs from
+            // `Viewport::snap_logical_to_physical_grid` in two load-bearing ways,
+            // so substituting the authority would change font rasterisation:
+            //   * the `.max(1.0)` here clamps the DEVICE size; the authority has
+            //     no such clamp, so a size that rounds to 0 device pixels becomes
+            //     1 here and 0 there. A 0-device-pixel font is not renderable,
+            //     so this clamp is the point of the helper.
+            //   * the `scale == 1.0` early return skips the round trip entirely,
+            //     leaving `logical_size` unrounded; the authority would round it
+            //     (16.5 -> 17.0).
+            // This is a font-size snap for hinting, not a logical->physical size
+            // conversion, so it keeps its own clamp and guard.
             if self.scale == 1.0 {
                 return logical_size;
             }
@@ -1032,6 +1063,13 @@ pub mod skia_impl {
     /// Consumes: text, font_size (logical), font_family, scale -> logical px width
     /// (snapped) plus the run's ascent and descent.
     pub fn measure_text(text: &str, font_size: f32, font_family: &str, scale: f32) -> MeasuredText {
+        // NOT a second rounding authority. It agrees with
+        // `Viewport::snap_logical_to_physical_grid` only when `scale` is finite and
+        // positive; for a non-finite or `<= 0` scale this returns `font_size`
+        // unrounded, whereas the authority substitutes `scale = 1.0` and rounds.
+        // Substituting it would change the measured advance for a degenerate
+        // scale, so this keeps its own guard. This is a glyph-advance size snap
+        // for measurement, not a logical->physical size conversion.
         let snapped = if scale.is_finite() && scale > 0.0 {
             (font_size * scale).round() / scale
         } else {
@@ -1989,6 +2027,65 @@ pub mod skia_impl {
             }
             hash
         }
+
+        // ------------------------------------------------------------------
+        // Invariant 1: one DPI/scale rounding authority.
+        //
+        // `render_vnode_to_raster_png_with_scale` used to inline its own copy of
+        // the multiply-then-round formula. It now routes through
+        // `Viewport::physical_from_logical`. These read the ENCODED PNG's own IHDR
+        // dimensions rather than a value the same code path computed on the way
+        // in, so they observe the surface that was really allocated.
+        // ------------------------------------------------------------------
+
+        /// `(width, height)` from a PNG's IHDR chunk, which sits at a fixed offset:
+        /// 8-byte signature, 4-byte length, 4-byte "IHDR", then the two u32s.
+        fn png_dimensions(png: &[u8]) -> (u32, u32) {
+            assert_eq!(
+                &png[..8],
+                b"\x89PNG\r\n\x1a\n",
+                "encode_png did not emit a PNG signature, so there is no IHDR to read"
+            );
+            let be = |b: &[u8]| u32::from_be_bytes([b[0], b[1], b[2], b[3]]);
+            (be(&png[16..20]), be(&png[20..24]))
+        }
+
+        /// A logical size that rounds to zero at a fractional scale must still
+        /// render, and the surface must be a real pixel rather than a degenerate
+        /// one. `1 * 0.4 == 0.4`, which rounds to 0.
+        #[test]
+        fn a_logical_size_that_rounds_to_zero_at_a_fractional_scale_still_renders() {
+            let vnode = h("div", vec![], vec![]);
+            let png =
+                render_vnode_to_raster_png_with_scale(&vnode, &Stylesheet::default(), 1, 1, 0.4)
+                    .expect("a 1x1 logical size at scale 0.4 must render, not fail");
+            assert_eq!(
+                png_dimensions(&png),
+                (1, 1),
+                "a size that rounds to 0 at this scale must still allocate at least one pixel"
+            );
+        }
+
+        /// The discriminating half: the authority substitutes `scale = 1.0` for a
+        /// non-finite or non-positive scale, and the call site must inherit that.
+        ///
+        /// The inlined arithmetic fed the raw scale straight in, so `width * 0.0`
+        /// rounded to 0 for ANY width and the surface collapsed to 1x1 no matter
+        /// what size was asked for. This is the behaviour the substitution changes,
+        /// and it is the part that would silently drop a render to a single pixel.
+        #[test]
+        fn a_non_positive_scale_falls_back_to_one_instead_of_collapsing_the_surface() {
+            let vnode = h("div", vec![], vec![]);
+            let png =
+                render_vnode_to_raster_png_with_scale(&vnode, &Stylesheet::default(), 8, 6, 0.0)
+                    .expect("scale 0.0 must fall back to 1.0, not fail");
+            assert_eq!(
+                png_dimensions(&png),
+                (8, 6),
+                "a non-positive scale must be read as 1.0, so the full logical size survives; \
+                 an inlined `width * scale` collapses this to (1, 1)"
+            );
+        }
     }
 }
 
@@ -2037,6 +2134,12 @@ pub mod skia_impl {
         _font_family: &str,
         scale: f32,
     ) -> MeasuredText {
+        // NOT a second rounding authority. As in the `skia-native` `measure_text`
+        // above, this agrees with `Viewport::snap_logical_to_physical_grid` only
+        // when `scale` is finite and positive; for a non-finite or `<= 0` scale it
+        // returns `font_size` unrounded where the authority substitutes 1.0 and
+        // rounds. It is kept mirroring the `text.rs` fallback so the headless and
+        // native paths agree; it is a glyph-advance snap, not a size conversion.
         let snapped = if scale.is_finite() && scale > 0.0 {
             (font_size * scale).round() / scale
         } else {
