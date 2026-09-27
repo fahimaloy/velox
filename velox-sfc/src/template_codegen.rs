@@ -417,6 +417,8 @@ pub fn compile_template_to_rs_full_with_mode(
     let props = PropsChannel {
         fields: &props_fields,
         root: props_root,
+        state_fields: &fields,
+        script_declared: script_setup.is_some(),
         children: &child_props,
     };
 
@@ -454,9 +456,20 @@ pub fn render_with_state<F>(state: std::sync::Arc<script_rs::State>, mut resolve
     // (interpolations and bound-attribute expressions) to State getters so
     // main.rs does not hand-write a resolve closure. Supports both bare
     // (`title()`) and prefixed (`get_title()`) getter conventions.
-    let resolver_keys = collect_resolver_keys(&nodes, &methods, &fields, mode);
+    let resolver_keys = collect_resolver_keys(&nodes, &methods, &fields, mode, &props);
     for warning in &resolver_keys.warnings {
         eprintln!("velox: warning: {warning}");
+    }
+    // A `v-for` whose collection nothing can supply renders as a loop that
+    // never runs, which is the one silent defect here with no visible trace in
+    // the output — so it refuses rather than reports. Every refusal is listed,
+    // not just the first: they are independent mistakes in independent
+    // templates-as-authored, and an author fixing one loop and hitting the
+    // next one one build at a time is a worse experience than a longer message.
+    // `join` is the same shape [`validate_template`] failures take a few lines
+    // above, so this is the crate's existing fatal convention, not a new one.
+    if !resolver_keys.errors.is_empty() {
+        return Err(resolver_keys.errors.join("\n"));
     }
     out.push_str("\n\n");
     out.push_str(&generate_make_resolve(
@@ -1220,6 +1233,27 @@ struct PropsChannel<'a> {
     /// `state.props`. `props` when the child's `State` has nowhere to keep the
     /// value, `state.props` when it does.
     root: &'a str,
+    /// This component's own `State` field names. Not a second copy of
+    /// `collect_resolver_keys`'s `fields`: it is the same slice, carried so a
+    /// diagnostic that has to explain WHY a collection is unreachable can ask
+    /// the one predicate that owns the answer, `answerable`, the question it
+    /// already knows how to answer.
+    state_fields: &'a [String],
+    /// Did this component declare a `<script setup>` at all?
+    ///
+    /// This decides whether codegen may REFUSE a name, and it is the difference
+    /// between a defect and a choice. The script is the whole inventory of what
+    /// a component has, so with one declared that inventory is closed and a
+    /// `v-for` collection outside it is a name nothing in this file can supply.
+    /// With no script there IS no inventory: every name in the template,
+    /// collections included, is the caller's to bind through the `resolve`
+    /// closure — which is what a script-less `render_with` template is for, and
+    /// why codegen reports it and must not refuse to build it.
+    ///
+    /// It rides here because [`Self::state_fields`] already does, for the same
+    /// reason: this is the context a fatal diagnostic reasons over, and a
+    /// separate parameter would be a sixth one.
+    script_declared: bool,
     /// What each child component declares, keyed by its tag name, so a parent
     /// builds that child's `PropsArg` with the types that child asked for.
     children: &'a [(String, Vec<PropField>)],
@@ -1232,10 +1266,40 @@ impl<'a> PropsChannel<'a> {
     /// from, and the shape is what the generated loop actually needs — `item` is
     /// a `&T`, so the body reads `{item}.{path}` as a real field read.
     fn declares_vec_field(&self, expr: &str) -> bool {
-        self.fields
-            .iter()
-            .find(|f| f.name == expr)
-            .is_some_and(|f| is_vec_shaped(&f.ty))
+        self.field(expr).is_some_and(|f| is_vec_shaped(&f.ty))
+    }
+
+    /// This component's own `Props` field named `name`, whatever its declared
+    /// type.
+    ///
+    /// The ONE place "did the author declare this?" is asked, so the two things
+    /// that follow from the answer cannot disagree. [`Self::declares_vec_field`]
+    /// narrows this to the shape a `v-for` can bind an item from and so cannot
+    /// answer "declared at all" — a field declared `String` is declared and
+    /// still uniterable, and a diagnostic that asked the shape test for the
+    /// plain question would call it undeclared and name the wrong mistake.
+    fn field(&self, name: &str) -> Option<&'a PropField> {
+        self.fields.iter().find(|f| f.name == name)
+    }
+
+    /// Does this component already HOLD `name` as a collection, in a way some
+    /// renderer reads directly?
+    ///
+    /// The two that hold one are a declared `Props` field of a `Vec`-shaped type
+    /// ([`Self::declares_vec_field`]) and a `State` field a generated renderer
+    /// reads off `state` — `state.items.get()`, which is how a `State`-mode
+    /// `v-for` has always worked. Both answer `true` for a component that is NOT
+    /// broken, which is exactly what separates them from a name nothing holds:
+    /// [`unrenderable_collection_error`] only ever describes the latter.
+    ///
+    /// The `State` side is deliberately the plain name test, not a shape test.
+    /// The field's TYPE is not something codegen can read a collection out of —
+    /// `Rc<Signal<Vec<T>>>` is the shape, and the shape is the renderer's
+    /// business — and a `State` field that were somehow not a collection would
+    /// fail to type-check in the generated `state.{name}.get()` read, which is
+    /// a louder and more precise failure than anything said here.
+    fn holds_collection(&self, name: &str) -> bool {
+        self.declares_vec_field(name) || self.state_fields.iter().any(|f| f == name)
     }
 
     /// The field `name` of the child component tagged `comp_name`, if that
@@ -4176,11 +4240,62 @@ fn resolve_loop_warning(family: &ResolveLoopFamily, methods: &[StateMethod]) -> 
     )
 }
 
+/// The fatal diagnostic for a `v-for` whose collection nothing can supply.
+///
+/// A loop whose collection answers `""` counts zero items and never runs its
+/// body, so the component renders with the loop simply absent — no empty
+/// string, no placeholder, no clue that anything was asked for. That is the one
+/// failure a build should not carry silently, so it fails the build instead.
+/// The other Resolve-mode loop defect, where an arm DOES back the collection
+/// and only the loop ITEM's reads are empty, stays a warning: there the loop
+/// runs, and the warning says which quantity is wrong.
+fn unrenderable_collection_error(collection: &str, props: &PropsChannel<'_>) -> String {
+    // Each branch ends in a full stop, because the `format!` below adds one and
+    // a remedy that already carries its own would read `..` here.
+    let cause = if let Some(field) = props.field(collection) {
+        format!(
+            "it is declared as a `Props` field, but as `{}` rather than a collection type, so \
+             the generated `for` cannot read it: a `Vec<T>`, a slice or an array is what a \
+             `v-for` can iterate",
+            field.ty
+        )
+    } else {
+        match answerable(collection, &[], &props.state_fields) {
+            // `answerable` has already named the mistake and the fix; the fix
+            // sentence is lifted whole, so this reports the same defect the same
+            // way every other gate does.
+            Err(unrenderable) => unrenderable.remedy.trim_end_matches('.').to_string(),
+            // Reached only for a collection that is an EXPRESSION rather than a
+            // name — `items()`, `a + b` — which is neither a member path nor a
+            // bare identifier, so no `State` method can be named after it and
+            // the resolver table, which is keyed by name, has no key for it.
+            Ok(_) => "the resolver table is keyed by name, and this collection is an expression \
+                      rather than a name, so no arm can answer it"
+                .to_string(),
+        }
+    };
+    format!(
+        "`v-for` over `{collection}` cannot render — {cause}. The resolver is a flat \
+         `\"<key>\" => state.<getter>().to_string()` table built once, outside every loop, so the \
+         loop asks it for the collection and it answers an empty string, the count is zero, and \
+         the body never runs at all. Give the loop something it can read: declare `{collection}` \
+         in this component's `pub struct Props` as a `Vec<T>`, give it a zero-argument `State` \
+         getter, or render this component through `render_with_state`, which reads the collection \
+         and the loop item directly."
+    )
+}
+
 /// The resolver keys to register, plus diagnostics for bound expressions that
 /// cannot be resolved.
+///
+/// `errors` is the one family that is fatal rather than reported: a `v-for`
+/// whose collection nothing can supply. Everything else a key cannot be read
+/// for degrades to an empty string, which is visible in the output; a loop that
+/// never runs is not.
 struct ResolverKeys {
     keys: Vec<String>,
     warnings: Vec<String>,
+    errors: Vec<String>,
 }
 
 /// Collect every key the generated render path looks up through `resolve(...)`.
@@ -4205,8 +4320,10 @@ fn collect_resolver_keys(
     methods: &[StateMethod],
     fields: &[String],
     mode: RenderMode,
+    props: &PropsChannel<'_>,
 ) -> ResolverKeys {
     let mut warnings: Vec<String> = Vec::new();
+    let mut errors: Vec<String> = Vec::new();
     // An interpolation key is registered only when the arm for it can be
     // answered; a member path whose root has no accessor is reported instead.
     let mut keys = keep_answerable_interpolation_keys(
@@ -4253,11 +4370,12 @@ fn collect_resolver_keys(
                 ),
                 None => (item_name, idx_name, loop_info),
             };
-            // A `v-for` the Resolve renderer will emit is one whole family: the
-            // collection it counts and every value its body reads. It is
-            // reported once, below, from that collection's getter alone — not
-            // from the collected key set, which counts interpolation keys too
-            // and would silence a loop whose collection has no arm.
+            // A `v-for` is one whole family: the collection it counts and every
+            // value its body reads. It is reported once, below, from that
+            // collection's getter alone — not from the collected key set, which
+            // counts interpolation keys too and would silence a loop whose
+            // collection has no arm.
+            //
             if let (RenderMode::Resolve, Some(info)) = (mode, &loop_scope) {
                 resolve_loops.push(ResolveLoopFamily {
                     collection: info.expr.clone(),
@@ -4438,17 +4556,85 @@ fn collect_resolver_keys(
         &mut warnings,
         &mut resolve_loops,
     );
+    // Loop families arrive only from Resolve mode, so every report below
+    // describes the Resolve renderer and none of them needs a mode test.
+    //
+    // That is not a limitation of where the family is COLLECTED but where the
+    // defect is: in State mode an unsupplied collection generates
+    // `state.<name>.get()`, and `rustc` rejects that outright, so a hole there
+    // is already loud at compile time. In Resolve mode the same hole
+    // compiles and renders nothing, which is why it is a report and, below, a
+    // refusal. Only the silent mode needs to be loud about it.
     for family in &resolve_loops {
         // Only a real `State` getter backs an arm that can answer the
         // collection; a key that merely appears as an interpolation elsewhere in
         // the template does not, and treating it as one would leave this loop
         // silent and unrenderable.
-        let has_arm = has_state_getter(methods, &family.collection);
-        if !has_arm || family.body_reads_loop {
+        if has_state_getter(methods, &family.collection) {
+            if family.body_reads_loop {
+                warnings.push(resolve_loop_warning(family, methods));
+            }
+            continue;
+        }
+        // No getter behind the arm. Three things can hand a loop a collection,
+        // and this is the whole list: a declared `Props` field, a `State` field
+        // a renderer reads directly, and a `State` getter. The first two are
+        // collections this component already HOLDS, so the renderer that reads
+        // one of them binds the item and the loop runs — those are reported
+        // (the Resolve renderer counts a string they do not back) and not
+        // refused, because the component is not broken.
+        //
+        // What is left is a name the component's own declaration does not
+        // contain. Then nothing can supply it, the loop counts zero items, and
+        // its body never runs — which fails the build rather than shipping a
+        // component with a hole where its list should be. But only where the
+        // declaration can be held against that name: see `script_declared`.
+        if props.holds_collection(&family.collection) {
+            warnings.push(held_collection_loop_warning(&family.collection, props));
+        } else if props.script_declared {
+            errors.push(unrenderable_collection_error(&family.collection, props));
+        } else {
+            // No script means no inventory, so a name outside it is not a
+            // mistake — it is the caller's, supplied through the `resolve`
+            // closure at run time. That is exactly why this cannot be fatal,
+            // and it is also why it cannot fall silent: the loop may still be
+            // unanswered, and this is the one place that says so. So the
+            // pre-existing report stands unchanged, for the same reason it was
+            // written: the loop counts zero items and the body never runs.
             warnings.push(resolve_loop_warning(family, methods));
         }
     }
-    ResolverKeys { keys, warnings }
+    ResolverKeys {
+        keys,
+        warnings,
+        errors,
+    }
+}
+
+/// The warning for a `v-for` over a collection this component already holds, for
+/// the renderers that count the collection's string instead of reading the
+/// field it is held in.
+///
+/// Not fatal, and the difference matters: the collection IS here, so the
+/// renderer that reads it renders the loop. What is missing is a getter behind
+/// the string the OTHER renderer counts, so the message names which renderer
+/// reads the field and which one is left with nothing.
+fn held_collection_loop_warning(collection: &str, props: &PropsChannel<'_>) -> String {
+    let (holding, reads_it) = match props.field(collection) {
+        Some(field) => (
+            format!("a `Props` field of type `{}`", field.ty),
+            "`render_with_props`",
+        ),
+        None => ("a `State` field".to_string(), "`render_with_state`"),
+    };
+    format!(
+        "`v-for` over `{collection}` is {holding}, so {reads_it} reads it directly and binds the \
+         loop item — but `render_with` counts the resolver's string for it instead, and there is \
+         no zero-argument `State` getter behind that string, so `render_with` counts zero items \
+         and never runs the body. A parent that renders this component through {reads_it} is \
+         unaffected; a parent that calls `render_with` is not. Give `{collection}` a \
+         zero-argument `State` getter and both agree."
+    )
 }
 
 fn push_unique(out: &mut Vec<String>, key: impl AsRef<str>) {
@@ -4466,6 +4652,22 @@ mod tests {
         extract_state_methods(script)
     }
 
+    /// The `PropsChannel` for a test that compiles a component declaring no
+    /// `Props` of its own: no declared fields, and the `State` field list the
+    /// caller already passes as its third argument — that list IS the `State`
+    /// fields, so a test asking whether a collection is a declared prop and
+    /// whether it is a `State` field is answered from the same names the real
+    /// codegen pass sees, rather than from a fixture that answers both `no`.
+    fn props_of(state_fields: &[String]) -> PropsChannel<'_> {
+        PropsChannel {
+            fields: &[],
+            root: "props",
+            state_fields,
+            script_declared: false,
+            children: &[],
+        }
+    }
+
     /// A bound expression that cannot become a resolver lookup has to be
     /// reported, not silently rendered as an empty string.
     #[test]
@@ -4473,7 +4675,8 @@ mod tests {
         let nodes =
             crate::template_parse::parse_template_to_ast(r#"<input :value="draft.trim()" />"#)
                 .unwrap();
-        let collected = collect_resolver_keys(&nodes, &methods(""), &[], RenderMode::State);
+        let collected =
+            collect_resolver_keys(&nodes, &methods(""), &[], RenderMode::State, &props_of(&[]));
 
         assert!(
             collected.keys.is_empty(),
@@ -4494,7 +4697,13 @@ mod tests {
         let script = "impl State { pub fn on_input(&self, payload: &str) { let _ = payload; } }";
         let nodes =
             crate::template_parse::parse_template_to_ast(r#"<input :value="on_input" />"#).unwrap();
-        let collected = collect_resolver_keys(&nodes, &methods(script), &[], RenderMode::State);
+        let collected = collect_resolver_keys(
+            &nodes,
+            &methods(script),
+            &[],
+            RenderMode::State,
+            &props_of(&[]),
+        );
 
         assert!(collected.keys.is_empty(), "{:?}", collected.keys);
         assert_eq!(collected.warnings.len(), 1, "{:?}", collected.warnings);
@@ -4517,6 +4726,7 @@ mod tests {
             &methods(script),
             &["count".to_string()],
             RenderMode::State,
+            &props_of(&["count".to_string()]),
         );
 
         assert!(collected.keys.is_empty(), "{:?}", collected.keys);
@@ -4540,7 +4750,8 @@ mod tests {
         )
         .unwrap();
 
-        let state = collect_resolver_keys(&nodes, &methods(""), &[], RenderMode::State);
+        let state =
+            collect_resolver_keys(&nodes, &methods(""), &[], RenderMode::State, &props_of(&[]));
         assert!(state.keys.is_empty(), "{:?}", state.keys);
         assert!(
             state.warnings.is_empty(),
@@ -4548,7 +4759,13 @@ mod tests {
             state.warnings
         );
 
-        let resolve = collect_resolver_keys(&nodes, &methods(""), &[], RenderMode::Resolve);
+        let resolve = collect_resolver_keys(
+            &nodes,
+            &methods(""),
+            &[],
+            RenderMode::Resolve,
+            &props_of(&[]),
+        );
         assert!(resolve.keys.is_empty(), "{:?}", resolve.keys);
         assert_eq!(
             resolve.warnings.len(),
@@ -4576,7 +4793,13 @@ mod tests {
         )
         .unwrap();
 
-        let resolve = collect_resolver_keys(&nodes, &methods(""), &[], RenderMode::Resolve);
+        let resolve = collect_resolver_keys(
+            &nodes,
+            &methods(""),
+            &[],
+            RenderMode::Resolve,
+            &props_of(&[]),
+        );
         assert!(resolve.keys.is_empty(), "{:?}", resolve.keys);
         assert_eq!(resolve.warnings.len(), 1, "{:?}", resolve.warnings);
         let warning = &resolve.warnings[0];
@@ -4587,7 +4810,8 @@ mod tests {
              binding must not add a second one: {warning}"
         );
 
-        let state = collect_resolver_keys(&nodes, &methods(""), &[], RenderMode::State);
+        let state =
+            collect_resolver_keys(&nodes, &methods(""), &[], RenderMode::State, &props_of(&[]));
         assert!(
             state.warnings.is_empty(),
             "State mode reads the fields off the loop item, so it resolves: {:?}",
@@ -4604,7 +4828,13 @@ mod tests {
         )
         .unwrap();
 
-        let resolve = collect_resolver_keys(&nodes, &methods(""), &[], RenderMode::Resolve);
+        let resolve = collect_resolver_keys(
+            &nodes,
+            &methods(""),
+            &[],
+            RenderMode::Resolve,
+            &props_of(&[]),
+        );
         assert_eq!(resolve.warnings.len(), 2, "{:?}", resolve.warnings);
         let binding = resolve
             .warnings
@@ -4625,7 +4855,8 @@ mod tests {
         let fields = ["count".to_string()];
 
         for mode in [RenderMode::State, RenderMode::Resolve] {
-            let collected = collect_resolver_keys(&nodes, &methods, &fields, mode);
+            let collected =
+                collect_resolver_keys(&nodes, &methods, &fields, mode, &props_of(&fields));
             assert!(collected.keys.is_empty(), "{mode:?}: {:?}", collected.keys);
             assert_eq!(
                 collected.warnings.len(),
@@ -4655,7 +4886,8 @@ mod tests {
         ] {
             let nodes = crate::template_parse::parse_template_to_ast(tpl).unwrap();
 
-            let state = collect_resolver_keys(&nodes, &methods(""), &[], RenderMode::State);
+            let state =
+                collect_resolver_keys(&nodes, &methods(""), &[], RenderMode::State, &props_of(&[]));
             assert!(state.keys.is_empty(), "{tpl} {:?}", state.keys);
             assert!(
                 state.warnings.is_empty(),
@@ -4663,7 +4895,13 @@ mod tests {
                 state.warnings
             );
 
-            let resolve = collect_resolver_keys(&nodes, &methods(""), &[], RenderMode::Resolve);
+            let resolve = collect_resolver_keys(
+                &nodes,
+                &methods(""),
+                &[],
+                RenderMode::Resolve,
+                &props_of(&[]),
+            );
             assert!(resolve.keys.is_empty(), "{tpl} {:?}", resolve.keys);
             assert_eq!(resolve.warnings.len(), 1, "{tpl} {:?}", resolve.warnings);
             assert!(
@@ -4686,7 +4924,7 @@ mod tests {
         .unwrap();
 
         for mode in [RenderMode::Resolve, RenderMode::State] {
-            let collected = collect_resolver_keys(&nodes, &methods(""), &[], mode);
+            let collected = collect_resolver_keys(&nodes, &methods(""), &[], mode, &props_of(&[]));
             for warning in &collected.warnings {
                 assert!(
                     !warning.contains("{{"),
@@ -4740,7 +4978,13 @@ mod tests {
         // An empty answer takes the `is_empty()` branch, so the count is zero and
         // the body never runs. Reported, not silent.
         let nodes = crate::template_parse::parse_template_to_ast(TPL).unwrap();
-        let resolve = collect_resolver_keys(&nodes, &methods(""), &[], RenderMode::Resolve);
+        let resolve = collect_resolver_keys(
+            &nodes,
+            &methods(""),
+            &[],
+            RenderMode::Resolve,
+            &props_of(&[]),
+        );
         assert_eq!(resolve.warnings.len(), 1, "{:?}", resolve.warnings);
         let warning = &resolve.warnings[0];
         assert!(warning.contains("`items`"), "{warning}");
@@ -4751,7 +4995,8 @@ mod tests {
 
         // State mode reads the collection and the item straight off the state, so
         // the same template renders and is not reported there.
-        let state = collect_resolver_keys(&nodes, &methods(""), &[], RenderMode::State);
+        let state =
+            collect_resolver_keys(&nodes, &methods(""), &[], RenderMode::State, &props_of(&[]));
         assert!(state.warnings.is_empty(), "{:?}", state.warnings);
     }
 
@@ -4767,7 +5012,13 @@ mod tests {
         )
         .unwrap();
 
-        let resolve = collect_resolver_keys(&nodes, &methods(""), &[], RenderMode::Resolve);
+        let resolve = collect_resolver_keys(
+            &nodes,
+            &methods(""),
+            &[],
+            RenderMode::Resolve,
+            &props_of(&[]),
+        );
         assert_eq!(resolve.warnings.len(), 1, "{:?}", resolve.warnings);
         assert!(
             resolve.warnings[0].contains("`todos`"),
@@ -4791,7 +5042,13 @@ mod tests {
         )
         .unwrap();
 
-        let resolve = collect_resolver_keys(&nodes, &methods(script), &[], RenderMode::Resolve);
+        let resolve = collect_resolver_keys(
+            &nodes,
+            &methods(script),
+            &[],
+            RenderMode::Resolve,
+            &props_of(&[]),
+        );
         assert_eq!(
             resolve.keys,
             vec!["draft".to_string()],
@@ -4823,7 +5080,13 @@ mod tests {
         )
         .unwrap();
 
-        let resolve = collect_resolver_keys(&nodes, &methods(script), &[], RenderMode::Resolve);
+        let resolve = collect_resolver_keys(
+            &nodes,
+            &methods(script),
+            &[],
+            RenderMode::Resolve,
+            &props_of(&[]),
+        );
         assert!(
             resolve.warnings.is_empty(),
             "the collection is a registered getter and the body reads only the loop \
@@ -4849,7 +5112,13 @@ mod tests {
         )
         .unwrap();
 
-        let resolve = collect_resolver_keys(&nodes, &methods(script), &[], RenderMode::Resolve);
+        let resolve = collect_resolver_keys(
+            &nodes,
+            &methods(script),
+            &[],
+            RenderMode::Resolve,
+            &props_of(&[]),
+        );
         assert_loop_reported_for_unanswerable_reads(&resolve.warnings);
     }
 
@@ -4868,7 +5137,13 @@ mod tests {
         )
         .unwrap();
 
-        let resolve = collect_resolver_keys(&nodes, &methods(script), &[], RenderMode::Resolve);
+        let resolve = collect_resolver_keys(
+            &nodes,
+            &methods(script),
+            &[],
+            RenderMode::Resolve,
+            &props_of(&[]),
+        );
         assert_loop_reported_for_unanswerable_reads(&resolve.warnings);
     }
 
@@ -4892,7 +5167,13 @@ mod tests {
         )
         .unwrap();
 
-        let resolve = collect_resolver_keys(&nodes, &methods(script), &[], RenderMode::Resolve);
+        let resolve = collect_resolver_keys(
+            &nodes,
+            &methods(script),
+            &[],
+            RenderMode::Resolve,
+            &props_of(&[]),
+        );
         assert_loop_reported_for_unanswerable_reads(&resolve.warnings);
     }
 
@@ -4947,7 +5228,13 @@ mod tests {
         )
         .unwrap();
 
-        let resolve = collect_resolver_keys(&nodes, &methods(script), &[], RenderMode::Resolve);
+        let resolve = collect_resolver_keys(
+            &nodes,
+            &methods(script),
+            &[],
+            RenderMode::Resolve,
+            &props_of(&[]),
+        );
         assert_loop_reported_for_unanswerable_reads(&resolve.warnings);
     }
 
@@ -4965,7 +5252,13 @@ mod tests {
         )
         .unwrap();
 
-        let resolve = collect_resolver_keys(&nodes, &methods(script), &[], RenderMode::Resolve);
+        let resolve = collect_resolver_keys(
+            &nodes,
+            &methods(script),
+            &[],
+            RenderMode::Resolve,
+            &props_of(&[]),
+        );
         assert_loop_reported_for_unanswerable_reads(&resolve.warnings);
         let warning = &resolve.warnings[0];
         assert!(
@@ -4999,7 +5292,13 @@ mod tests {
         )
         .unwrap();
 
-        let resolve = collect_resolver_keys(&nodes, &methods(script), &[], RenderMode::Resolve);
+        let resolve = collect_resolver_keys(
+            &nodes,
+            &methods(script),
+            &[],
+            RenderMode::Resolve,
+            &props_of(&[]),
+        );
         // Reported on purpose — the direction that is safe to be wrong in.
         assert_loop_reported_for_unanswerable_reads(&resolve.warnings);
         let warning = &resolve.warnings[0];
@@ -5024,7 +5323,13 @@ mod tests {
         )
         .unwrap();
 
-        let resolve = collect_resolver_keys(&nodes, &methods(script), &[], RenderMode::Resolve);
+        let resolve = collect_resolver_keys(
+            &nodes,
+            &methods(script),
+            &[],
+            RenderMode::Resolve,
+            &props_of(&[]),
+        );
         assert_loop_reported_for_unanswerable_reads(&resolve.warnings);
     }
 
@@ -5043,7 +5348,13 @@ mod tests {
         )
         .unwrap();
 
-        let resolve = collect_resolver_keys(&nodes, &methods(script), &[], RenderMode::Resolve);
+        let resolve = collect_resolver_keys(
+            &nodes,
+            &methods(script),
+            &[],
+            RenderMode::Resolve,
+            &props_of(&[]),
+        );
         assert!(
             resolve.warnings.is_empty(),
             "a dropped directive emits no read, so nothing in the body renders \
@@ -5159,7 +5470,13 @@ mod tests {
             let emitted_resolver_read = resolve_renderer.contains("resolve(\"i\")")
                 || resolve_renderer.contains("resolve(\"i + 1\")");
             let nodes = crate::template_parse::parse_template_to_ast(tpl).expect("template parses");
-            let resolve = collect_resolver_keys(&nodes, &methods(script), &[], RenderMode::Resolve);
+            let resolve = collect_resolver_keys(
+                &nodes,
+                &methods(script),
+                &[],
+                RenderMode::Resolve,
+                &props_of(&[]),
+            );
             assert_eq!(
                 emitted_resolver_read, resolves_index,
                 "{label}: the emitted read changed ({why})\n{resolve_renderer}"
@@ -5189,7 +5506,13 @@ mod tests {
         )
         .unwrap();
 
-        let resolve = collect_resolver_keys(&nodes, &methods(script), &[], RenderMode::Resolve);
+        let resolve = collect_resolver_keys(
+            &nodes,
+            &methods(script),
+            &[],
+            RenderMode::Resolve,
+            &props_of(&[]),
+        );
         assert_loop_reported_for_unanswerable_reads(&resolve.warnings);
     }
 
@@ -5207,7 +5530,13 @@ mod tests {
         )
         .unwrap();
 
-        let resolve = collect_resolver_keys(&nodes, &methods(script), &[], RenderMode::Resolve);
+        let resolve = collect_resolver_keys(
+            &nodes,
+            &methods(script),
+            &[],
+            RenderMode::Resolve,
+            &props_of(&[]),
+        );
         assert_loop_reported_for_unanswerable_reads(&resolve.warnings);
     }
 
@@ -5224,7 +5553,13 @@ mod tests {
         )
         .unwrap();
 
-        let resolve = collect_resolver_keys(&nodes, &methods(script), &[], RenderMode::Resolve);
+        let resolve = collect_resolver_keys(
+            &nodes,
+            &methods(script),
+            &[],
+            RenderMode::Resolve,
+            &props_of(&[]),
+        );
         assert_loop_reported_for_unanswerable_reads(&resolve.warnings);
     }
 
@@ -5242,7 +5577,13 @@ mod tests {
         )
         .unwrap();
 
-        let resolve = collect_resolver_keys(&nodes, &methods(script), &[], RenderMode::Resolve);
+        let resolve = collect_resolver_keys(
+            &nodes,
+            &methods(script),
+            &[],
+            RenderMode::Resolve,
+            &props_of(&[]),
+        );
         assert_loop_reported_for_unanswerable_reads(&resolve.warnings);
     }
 
@@ -5263,7 +5604,13 @@ mod tests {
         )
         .unwrap();
 
-        let resolve = collect_resolver_keys(&nodes, &methods(script), &[], RenderMode::Resolve);
+        let resolve = collect_resolver_keys(
+            &nodes,
+            &methods(script),
+            &[],
+            RenderMode::Resolve,
+            &props_of(&[]),
+        );
         assert_eq!(resolve.warnings.len(), 2, "{:?}", resolve.warnings);
         let nested = resolve
             .warnings
@@ -5321,7 +5668,13 @@ mod tests {
         )
         .unwrap();
 
-        let resolve = collect_resolver_keys(&nodes, &methods(script), &[], RenderMode::Resolve);
+        let resolve = collect_resolver_keys(
+            &nodes,
+            &methods(script),
+            &[],
+            RenderMode::Resolve,
+            &props_of(&[]),
+        );
         assert_loop_reported_for_unanswerable_reads(&resolve.warnings);
     }
 
@@ -5339,7 +5692,13 @@ mod tests {
         )
         .unwrap();
 
-        let resolve = collect_resolver_keys(&nodes, &methods(script), &[], RenderMode::Resolve);
+        let resolve = collect_resolver_keys(
+            &nodes,
+            &methods(script),
+            &[],
+            RenderMode::Resolve,
+            &props_of(&[]),
+        );
         assert_eq!(resolve.warnings.len(), 1, "{:?}", resolve.warnings);
         let warning = &resolve.warnings[0];
         assert!(
@@ -5374,7 +5733,13 @@ mod tests {
         )
         .unwrap();
 
-        let resolve = collect_resolver_keys(&nodes, &methods(script), &[], RenderMode::Resolve);
+        let resolve = collect_resolver_keys(
+            &nodes,
+            &methods(script),
+            &[],
+            RenderMode::Resolve,
+            &props_of(&[]),
+        );
         assert!(
             !resolve.keys.iter().any(|k| k == "items"),
             "neither route can register a key `State` has no getter for — the \
@@ -5408,7 +5773,13 @@ mod tests {
         // loop is not reported there — the family is pushed only under
         // `if let (RenderMode::Resolve, Some(info))`, and this is the pin: the two
         // key-gate warnings are mode-independent, the loop report is not.
-        let state = collect_resolver_keys(&nodes, &methods(script), &[], RenderMode::State);
+        let state = collect_resolver_keys(
+            &nodes,
+            &methods(script),
+            &[],
+            RenderMode::State,
+            &props_of(&[]),
+        );
         assert_eq!(state.keys, resolve.keys, "the key set is mode-independent");
         assert_eq!(state.warnings.len(), 2, "{:?}", state.warnings);
         assert!(
@@ -5428,7 +5799,13 @@ mod tests {
         let script = "impl State { pub fn reset(&self) {} }";
         let nodes =
             crate::template_parse::parse_template_to_ast(r#"<input :value="reset" />"#).unwrap();
-        let collected = collect_resolver_keys(&nodes, &methods(script), &[], RenderMode::State);
+        let collected = collect_resolver_keys(
+            &nodes,
+            &methods(script),
+            &[],
+            RenderMode::State,
+            &props_of(&[]),
+        );
 
         assert!(collected.keys.is_empty(), "{:?}", collected.keys);
         assert_eq!(collected.warnings.len(), 1, "{:?}", collected.warnings);
@@ -5446,7 +5823,13 @@ mod tests {
         let script = "impl State { pub fn items(&self) -> Vec<String> { Vec::new() } }";
         let nodes =
             crate::template_parse::parse_template_to_ast(r#"<input :value="items" />"#).unwrap();
-        let collected = collect_resolver_keys(&nodes, &methods(script), &[], RenderMode::State);
+        let collected = collect_resolver_keys(
+            &nodes,
+            &methods(script),
+            &[],
+            RenderMode::State,
+            &props_of(&[]),
+        );
 
         assert!(collected.keys.is_empty(), "{:?}", collected.keys);
         assert_eq!(collected.warnings.len(), 1, "{:?}", collected.warnings);
@@ -5560,8 +5943,13 @@ impl State {
         let with_accessor =
             crate::template_parse::parse_template_to_ast(r#"<p>{{ user.name }} {{ title }}</p>"#)
                 .unwrap();
-        let answerable =
-            collect_resolver_keys(&with_accessor, &methods(script), &[], RenderMode::State);
+        let answerable = collect_resolver_keys(
+            &with_accessor,
+            &methods(script),
+            &[],
+            RenderMode::State,
+            &props_of(&[]),
+        );
         assert_eq!(
             answerable.keys,
             vec!["user.name".to_string(), "title".to_string()],
@@ -5573,7 +5961,7 @@ impl State {
             crate::template_parse::parse_template_to_ast(r#"<p>{{ user.name }} {{ title }}</p>"#)
                 .unwrap();
         for mode in [RenderMode::State, RenderMode::Resolve] {
-            let dropped = collect_resolver_keys(&without, &methods(""), &[], mode);
+            let dropped = collect_resolver_keys(&without, &methods(""), &[], mode, &props_of(&[]));
             assert_eq!(
                 dropped.keys,
                 Vec::<String>::new(),
@@ -5621,8 +6009,13 @@ impl State { pub fn new() -> Self { Self { user: String::new() } } }
                 "`user` is a `State` field",
             ),
         ] {
-            let collected =
-                collect_resolver_keys(&nodes, &methods(script_text), &fields, RenderMode::State);
+            let collected = collect_resolver_keys(
+                &nodes,
+                &methods(script_text),
+                &fields,
+                RenderMode::State,
+                &props_of(&fields),
+            );
             assert_eq!(collected.keys, Vec::<String>::new(), "{expected}");
             assert_eq!(collected.warnings.len(), 1, "{:?}", collected.warnings);
             assert!(
@@ -5649,7 +6042,8 @@ impl State { pub fn new() -> Self { Self { user: String::new() } } }
 
         // No getters at all: every bare name is dropped, and the paren key — which
         // no rule here can speak about — is the only one that survives.
-        let collected = collect_resolver_keys(&nodes, &methods(""), &[], RenderMode::State);
+        let collected =
+            collect_resolver_keys(&nodes, &methods(""), &[], RenderMode::State, &props_of(&[]));
         assert_eq!(
             collected.keys,
             vec!["user.name()".to_string()],
@@ -5676,8 +6070,13 @@ impl State {
     pub fn count(&self) -> i32 { 0 }
 }
 "#;
-        let answered =
-            collect_resolver_keys(&nodes, &methods(with_getters), &[], RenderMode::State);
+        let answered = collect_resolver_keys(
+            &nodes,
+            &methods(with_getters),
+            &[],
+            RenderMode::State,
+            &props_of(&[]),
+        );
         assert_eq!(
             answered.keys,
             vec![
@@ -5701,7 +6100,13 @@ impl State {
 }
 "#;
         let nodes = crate::template_parse::parse_template_to_ast(r#"<p>{{ items }}</p>"#).unwrap();
-        let collected = collect_resolver_keys(&nodes, &methods(script), &[], RenderMode::State);
+        let collected = collect_resolver_keys(
+            &nodes,
+            &methods(script),
+            &[],
+            RenderMode::State,
+            &props_of(&[]),
+        );
         assert_eq!(collected.keys, Vec::<String>::new(), "{:?}", collected.keys);
         assert_eq!(collected.warnings.len(), 1, "{:?}", collected.warnings);
         assert!(
@@ -5871,7 +6276,7 @@ impl State {
 
     fn keys_of(tpl: &str, mode: RenderMode) -> Vec<String> {
         let nodes = crate::template_parse::parse_template_to_ast(tpl).expect("template parses");
-        collect_resolver_keys(&nodes, &methods(R1C_SCRIPT), &[], mode).keys
+        collect_resolver_keys(&nodes, &methods(R1C_SCRIPT), &[], mode, &props_of(&[])).keys
     }
 
     #[test]
@@ -5959,12 +6364,14 @@ impl State {
             &methods(R1C_SCRIPT),
             &[],
             RenderMode::Resolve,
+            &props_of(&[]),
         );
         let compound_resolve = collect_resolver_keys(
             &nodes(compound),
             &methods(R1C_SCRIPT),
             &[],
             RenderMode::Resolve,
+            &props_of(&[]),
         );
 
         assert_eq!(
@@ -6009,7 +6416,13 @@ impl State {
             pub fn draft(&self) -> String { String::new() }
         }"#;
 
-        let resolve = collect_resolver_keys(&nodes, &methods(script), &[], RenderMode::Resolve);
+        let resolve = collect_resolver_keys(
+            &nodes,
+            &methods(script),
+            &[],
+            RenderMode::Resolve,
+            &props_of(&[]),
+        );
         assert!(
             !resolve.keys.iter().any(|k| k == "items"),
             "a collection with no accessor is registered from neither route: {:?}",
@@ -6052,7 +6465,8 @@ impl State {
     ) -> (Vec<String>, Vec<String>) {
         let nodes = crate::template_parse::parse_template_to_ast(tpl).expect("template parses");
         let fields: Vec<String> = fields.iter().map(|f| f.to_string()).collect();
-        let collected = collect_resolver_keys(&nodes, &methods(script), &fields, mode);
+        let collected =
+            collect_resolver_keys(&nodes, &methods(script), &fields, mode, &props_of(&fields));
         (collected.keys, collected.warnings)
     }
 
@@ -6280,7 +6694,8 @@ impl State {
 
     fn r3_keys_and_warnings(tpl: &str, mode: RenderMode) -> (Vec<String>, Vec<String>) {
         let nodes = crate::template_parse::parse_template_to_ast(tpl).expect("template parses");
-        let collected = collect_resolver_keys(&nodes, &methods(R3_SCRIPT), &[], mode);
+        let collected =
+            collect_resolver_keys(&nodes, &methods(R3_SCRIPT), &[], mode, &props_of(&[]));
         (collected.keys, collected.warnings)
     }
 
@@ -6328,7 +6743,13 @@ impl State {
             r#"<div><p v-if="missing">x</p><b v-show="gone"/></div>"#,
         )
         .expect("template parses");
-        let collected = collect_resolver_keys(&nodes, &methods(R3_SCRIPT), &[], RenderMode::State);
+        let collected = collect_resolver_keys(
+            &nodes,
+            &methods(R3_SCRIPT),
+            &[],
+            RenderMode::State,
+            &props_of(&[]),
+        );
         assert!(
             collected.keys.is_empty(),
             "nothing about the condition is answerable, so nothing is registered: {:?}",
@@ -6373,7 +6794,8 @@ impl State {
             pub fn todos(&self) -> String { String::new() }
         }"#;
         for mode in [RenderMode::State, RenderMode::Resolve] {
-            let collected = collect_resolver_keys(&nodes, &methods(script), &[], mode);
+            let collected =
+                collect_resolver_keys(&nodes, &methods(script), &[], mode, &props_of(&[]));
             assert!(
                 collected.keys.is_empty(),
                 "a read of a loop item is not a `State` field: {:?} in {mode:?}",
@@ -7165,7 +7587,13 @@ impl State {
 "#;
         let nodes = crate::template_parse::parse_template_to_ast(template).unwrap();
         let fields = vec!["rows".to_string()];
-        let collected = collect_resolver_keys(&nodes, &methods(script), &fields, RenderMode::State);
+        let collected = collect_resolver_keys(
+            &nodes,
+            &methods(script),
+            &fields,
+            RenderMode::State,
+            &props_of(&fields),
+        );
 
         let registered: std::collections::BTreeSet<&str> =
             collected.keys.iter().map(String::as_str).collect();

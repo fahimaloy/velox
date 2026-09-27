@@ -537,12 +537,32 @@ fn v_for_key_generation_is_single_interpolation_in_both_renderers() {
 fn render_mode_changes_diagnostics_not_generated_code() {
     let template =
         r#"<div v-for="(todo, idx) in todos"><TodoItem :todo="todo.text" :index="idx" /></div>"#;
+    // A script of its own, declaring the collection the template loops over.
+    // `SCRIPT_WITH_GETTERS_AND_HANDLER` declares only `count`, and a `v-for`
+    // over a name its script does not contain is refused outright — a refusal
+    // that would leave this test comparing two `Err`s and never reaching the
+    // comparison it exists to make.
+    let script = r#"
+pub struct Todo {
+    pub text: String,
+}
+
+pub struct State {
+    pub todos: std::rc::Rc<velox_core::signal::Signal<Vec<Todo>>>,
+}
+
+impl State {
+    pub fn new() -> Self {
+        State { todos: std::rc::Rc::new(velox_core::signal::Signal::new(Vec::new())) }
+    }
+}
+"#;
 
     let state = compile_template_to_rs_full_with_mode(
         template,
         "TodoApp",
         None,
-        Some(SCRIPT_WITH_GETTERS_AND_HANDLER),
+        Some(script),
         None,
         RenderMode::State,
     )
@@ -551,7 +571,7 @@ fn render_mode_changes_diagnostics_not_generated_code() {
         template,
         "TodoApp",
         None,
-        Some(SCRIPT_WITH_GETTERS_AND_HANDLER),
+        Some(script),
         None,
         RenderMode::Resolve,
     )
@@ -561,14 +581,8 @@ fn render_mode_changes_diagnostics_not_generated_code() {
         "the mode must only select diagnostics, not codegen output"
     );
 
-    let defaulted = compile_template_to_rs_full(
-        template,
-        "TodoApp",
-        None,
-        Some(SCRIPT_WITH_GETTERS_AND_HANDLER),
-        None,
-    )
-    .unwrap();
+    let defaulted =
+        compile_template_to_rs_full(template, "TodoApp", None, Some(script), None).unwrap();
     assert_eq!(
         state, defaulted,
         "the default entry point must compile in State mode"

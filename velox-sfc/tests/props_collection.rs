@@ -171,6 +171,90 @@ impl State {
 </template>
 "#;
 
+/// A component whose `State` declares a collection the template never names, so
+/// the script is present and `State` is otherwise well-formed. The collection
+/// these loops reach for is deliberately NOT declared anywhere: it is the
+/// absence the refusals below are about, and the presence of a script is what
+/// makes an absence a mistake rather than the caller's business.
+const STATE_WITHOUT_THE_COLLECTION: &str = r#"
+pub struct Todo {
+    pub text: String,
+}
+
+pub struct State {
+    pub count: i32,
+}
+
+impl State {
+    pub fn new() -> Self {
+        State { count: 0 }
+    }
+
+    pub fn count(&self) -> i32 {
+        self.count
+    }
+}
+"#;
+
+/// A component that declares `rows` as a `Props` field of a type a `v-for`
+/// cannot iterate. The field is REAL and declared, so this is the other
+/// absence: not a name nothing supplies, but a name supplied in the wrong shape.
+const PROPS_ROWS_OF_THE_WRONG_SHAPE: &str = r#"
+pub struct Props {
+    pub rows: String,
+}
+
+pub struct State {
+    pub props: Props,
+}
+
+impl State {
+    pub fn new() -> Self {
+        State { props: Props { rows: String::new() } }
+    }
+}
+"#;
+
+/// A component that holds the collection as a `State` field, which is the
+/// third way a loop can be given something to count and the one with no
+/// `Props` and no getter involved.
+const STATE_FIELD_COLLECTION: &str = r#"
+pub struct Todo {
+    pub text: String,
+}
+
+pub struct State {
+    pub todos: std::rc::Rc<velox_core::signal::Signal<Vec<Todo>>>,
+}
+
+impl State {
+    pub fn new() -> Self {
+        State { todos: std::rc::Rc::new(velox_core::signal::Signal::new(Vec::new())) }
+    }
+}
+"#;
+
+/// Compile a bare template in `Resolve` mode and hand back the compiler's own
+/// verdict, unchanged.
+///
+/// `Resolve` is the mode the refusals below are raised in, and it is the mode
+/// where the defect is SILENT: the resolver is asked for the collection, answers
+/// an empty string, the count is zero and the body never runs, with nothing in
+/// the output to show for it. `State` mode emits `state.<name>.get()` for the
+/// same template instead, and `rustc` rejects that outright, so a hole there is
+/// already loud without help from here. See the loop-family gate in
+/// `collect_resolver_keys`.
+fn resolve_mode_verdict(template: &str, script_setup: &str) -> Result<String, String> {
+    compile_template_to_rs_full_with_mode(
+        template,
+        "App",
+        None,
+        Some(script_setup),
+        None,
+        RenderMode::Resolve,
+    )
+}
+
 // ---------------------------------------------------------------------------
 // The generated modules, exactly as a build would emit them.
 // ---------------------------------------------------------------------------
@@ -558,5 +642,161 @@ fn a_parent_binding_covers_every_declared_props_field() {
         "the child's declared Props fields, and the two the parent binds. If this \
          assertion fails the declarations and the bindings have drifted apart, and the \
          totals the contract rests on have to be re-checked."
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Refusing to generate a `v-for` whose collection nothing can supply.
+//
+// These four tests are the negative half of the collection story the tests above
+// tell the positive half of, and they observe the compiler's OWN `Err` from the
+// real entry point. Nothing here re-derives the rule being checked: each one
+// hands the compiler a component and reads back what it decided, so a test that
+// reimplements the gate could not pass these.
+// ---------------------------------------------------------------------------
+
+/// A `v-for` over a collection this component's own declaration does not contain
+/// must REFUSE, not warn.
+///
+/// The script is present, so it is the whole inventory of what the component
+/// has, and `todos` is in none of it. Nothing can answer the resolver for it, the
+/// count is zero, and the body never runs — a list-shaped hole in the rendered
+/// tree with nothing in the output to show for it. A warning on stderr does not
+/// stop that from shipping; the `Err` does.
+#[test]
+fn a_v_for_over_a_collection_the_component_does_not_declare_is_refused() {
+    let verdict = resolve_mode_verdict(
+        r#"<ul><li v-for="todo in todos">{{ todo.text }}</li></ul>"#,
+        STATE_WITHOUT_THE_COLLECTION,
+    );
+    let Err(refusal) = verdict else {
+        panic!(
+            "a `v-for` over a collection this component does not declare must be refused, \
+             and a component that renders no list at all must not compile. It compiled."
+        );
+    };
+    assert!(
+        refusal.contains("todos"),
+        "the refusal must name the collection it cannot supply, so the author knows \
+         which loop to fix. The message was:\n{refusal}"
+    );
+    for remedy in ["pub struct Props", "getter", "render_with_state"] {
+        assert!(
+            refusal.contains(remedy),
+            "the refusal must name every way to fix it: declare `todos` in \
+             `pub struct Props` as a `Vec<T>`, give it a zero-argument `State` \
+             getter, or render through `render_with_state`. `{remedy}` is missing \
+             from:\n{refusal}"
+        );
+    }
+}
+
+/// A collection that IS declared, in a shape a `v-for` cannot iterate, is a
+/// different mistake from one that is not declared at all, and the refusal has
+/// to tell them apart.
+///
+/// Here `rows` is a real `Props` field of type `String`. The author wrote a name
+/// and got the shape wrong, so the message has to quote the type they wrote —
+/// reporting this as "this component does not declare `rows`" would send them
+/// looking for a missing declaration that is right there in their own file.
+#[test]
+fn a_refusal_for_a_declared_but_uniterable_field_names_the_type_that_was_written() {
+    let verdict = resolve_mode_verdict(
+        r#"<ul><li v-for="row in rows">{{ row }}</li></ul>"#,
+        PROPS_ROWS_OF_THE_WRONG_SHAPE,
+    );
+    let Err(refusal) = verdict else {
+        panic!(
+            "a `v-for` over a `Props` field of type `String` must be refused; the \
+             generated `for` cannot read it. It compiled."
+        );
+    };
+    assert!(
+        refusal.contains("String"),
+        "the refusal must quote the declared type the author wrote, or they have no \
+         way to see which of their own declarations is wrong. The message was:\n{refusal}"
+    );
+    assert!(
+        !refusal.contains("does not declare"),
+        "`rows` IS declared — as a `String`. Reporting it as undeclared would name \
+         the wrong mistake. The message was:\n{refusal}"
+    );
+}
+
+/// Holding the collection as a `State` field is the third way a loop gets
+/// something to count, and a component that does it is NOT broken.
+///
+/// `render_with_state` reads `state.todos.get()` directly, so the loop runs. That
+/// is a component that renders, so it must compile — the refusal is for names
+/// nothing holds, and this name is held. What it earns instead is the warning
+/// that names which renderer reads the field and which one is left with nothing.
+#[test]
+fn a_collection_held_as_a_state_field_is_not_refused() {
+    let verdict = resolve_mode_verdict(
+        r#"<ul><li v-for="todo in todos">{{ todo.text }}</li></ul>"#,
+        STATE_FIELD_COLLECTION,
+    );
+    assert!(
+        verdict.is_ok(),
+        "a component that holds the collection as a `State` field renders its loop \
+         through `render_with_state`, so it must still compile. It was refused with:\n{:?}",
+        verdict.err()
+    );
+}
+
+/// Every unrenderable collection is listed, not just the first.
+///
+/// Two loops, two independent mistakes in the same template, and the author who
+/// is told about one and builds again meets the other a build later. The crate's
+/// existing fatal path for template validation already reports its whole list for
+/// this reason, so this is the crate's convention rather than a new one.
+#[test]
+fn every_unrenderable_collection_is_listed_not_only_the_first() {
+    let verdict = resolve_mode_verdict(
+        r#"<div><ul><li v-for="todo in todos">{{ todo.text }}</li></ul>\
+           <ul><li v-for="task in tasks">{{ task.title }}</li></ul></div>"#,
+        STATE_WITHOUT_THE_COLLECTION,
+    );
+    let Err(refusal) = verdict else {
+        panic!("two collections this component does not declare must be refused together");
+    };
+    for collection in ["todos", "tasks"] {
+        assert!(
+            refusal.contains(collection),
+            "the refusal must list EVERY unrenderable collection, not stop at the \
+             first. `{collection}` is missing from:\n{refusal}"
+        );
+    }
+    assert_eq!(
+        refusal.matches("cannot render").count(),
+        2,
+        "exactly one refusal per unrenderable collection, so a count assertion can \
+         tell 'both are named' from 'one is named twice'. The message was:\n{refusal}"
+    );
+}
+
+/// A component with no `<script setup>` at all is never refused.
+///
+/// With no script there is no inventory, so there is nothing to hold an absence
+/// against: every name in a script-less `render_with` template is the caller's
+/// to bind through the `resolve` closure, which is what such a template is for.
+/// Refusing one would refuse a legitimate component on a rule that cannot
+/// distinguish it from a typo.
+#[test]
+fn a_script_less_component_is_never_refused_for_its_collection() {
+    let verdict = compile_template_to_rs_full_with_mode(
+        r#"<ul><li v-for="item in items">{{ item.name }}</li></ul>"#,
+        "App",
+        None,
+        None,
+        None,
+        RenderMode::Resolve,
+    );
+    assert!(
+        verdict.is_ok(),
+        "a script-less component binds its collection through the caller's \
+         `resolve` closure, so codegen has no inventory to call the name missing \
+         and must not refuse. It was refused with:\n{:?}",
+        verdict.err()
     );
 }
