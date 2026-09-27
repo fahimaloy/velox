@@ -422,7 +422,11 @@ pub fn render_with_state<F>(state: std::sync::Arc<script_rs::State>, mut resolve
         eprintln!("velox: warning: {warning}");
     }
     out.push_str("\n\n");
-    out.push_str(&generate_make_resolve(&resolver_keys.keys, &methods));
+    out.push_str(&generate_make_resolve(
+        &resolver_keys.keys,
+        &methods,
+        &fields,
+    ));
 
     // make_on_event: dispatch every template handler (plus, for the root, every
     // handler anywhere in the component tree) to the owning State method.
@@ -433,7 +437,11 @@ pub fn render_with_state<F>(state: std::sync::Arc<script_rs::State>, mut resolve
     // render_with_props: for presentational child components. Props take
     // priority; interpolations fall back to State getters.
     out.push_str("\n\n");
-    out.push_str(&generate_render_with_props(&resolver_keys.keys, &methods));
+    out.push_str(&generate_render_with_props(
+        &resolver_keys.keys,
+        &methods,
+        &fields,
+    ));
 
     Ok(out)
 }
@@ -767,10 +775,14 @@ pub fn make_on_event(state: std::sync::Arc<script_rs::State>) -> impl FnMut(&str
 
 /// Generate a `make_resolve(state)` helper that maps template interpolation keys
 /// to State getters. `main.rs` uses it instead of hand-writing a resolve closure.
-fn generate_make_resolve(interp_keys: &[String], methods: &[StateMethod]) -> String {
+fn generate_make_resolve(
+    interp_keys: &[String],
+    methods: &[StateMethod],
+    fields: &[String],
+) -> String {
     let mut arms = String::new();
     for key in interp_keys {
-        let method = resolve_getter_call(methods, key);
+        let method = resolve_getter_call(methods, fields, key);
         arms.push_str(&format!(
             "        \"{}\" => state.{}.to_string(),\n",
             key, method
@@ -787,19 +799,164 @@ pub fn make_resolve(state: std::sync::Arc<script_rs::State>) -> impl FnMut(&str)
     )
 }
 
-/// Why a key cannot be answered by a resolver arm, in the vocabulary the
-/// `v-for` loop diagnostic uses.
-///
-/// One predicate for every diagnostic that asks "can this key be looked up?",
-/// so the bound-attribute path and the `v-model` value path cannot drift into
-/// describing the same mistake differently.
-fn unresolvable_key_reason(key: &str, methods: &[StateMethod], fields: &[String]) -> String {
-    // A member path is answered by a chain rather than by a getter of that name,
-    // so what is wrong with it is whatever is wrong with its ROOT. Anything else —
-    // a call expression, an index into a collection — has no root to name.
-    if let Some((root, _)) = member_path(key) {
-        return unanswerable_root_reason(root, true, methods, fields);
+/// How a resolver key is answered, when it is: one variant per shape an arm
+/// body can take.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Answer {
+    /// A bare name, answered by the one zero-argument `State` method whose
+    /// return type renders as text: `{{ title }}` → `title()`.
+    Getter { root: String, name: String },
+    /// A member path, answered by a chain of calls on the root accessor:
+    /// `{{ user.name }}` → `user().name()`.
+    MemberChain { root: String, chain: String },
+    /// A key that is neither a bare name nor a member path — a call expression
+    /// (`user.name()`), an unterminated index (`a.b[0`), anything whose
+    /// segments are not names — answered by the name-only spelling, which is the
+    /// only thing the emitter has ever been able to write down for one.
+    ///
+    /// It is `Ok` because refusing it is a behaviour change, not a fix: a
+    /// `{{ user.name() }}` interpolation compiles today only as
+    /// `state.user.name()()`, and that arm text is pinned. Nothing in this crate
+    /// can say whether such a key means anything — codegen cannot type it — so
+    /// gating it needs a typed resolver and is a separate task. See the report.
+    Conventional { name: String },
+}
+
+impl Answer {
+    /// The call expression the arm body makes on `state`, parentheses included.
+    fn call(&self) -> String {
+        match self {
+            Answer::Getter { name, .. } | Answer::Conventional { name } => format!("{name}()"),
+            Answer::MemberChain { chain, .. } => chain.clone(),
+        }
     }
+
+    /// The sentence [`unresolvable_key_reason`] shows for a key this function
+    /// ANSWERS.
+    ///
+    /// One caller can be handed an answerable key: the bound-attribute path
+    /// gates on [`has_state_getter`], a narrower question than `answerable`
+    /// asks — a member chain and a `State` field's name both answer here and not
+    /// there — so a key it refuses still needs naming. The register is the
+    /// caller's, and it is this shape's own, so nothing here re-tests the key.
+    fn refusal(&self, key: &str, methods: &[StateMethod], fields: &[String]) -> String {
+        match self {
+            // The root is a provable accessor, so the only sentence that can
+            // describe a provable accessor refused for a chain is the root
+            // register's.
+            Answer::MemberChain { root, .. } => root_reason(root, true, methods, fields),
+            // A key nothing is known about names no method at all.
+            Answer::Conventional { .. } => key_reason(key, false, methods, fields),
+            // A bare name, and the register is its own. Unreachable from every
+            // call site: `Ok(Getter)` asserts a zero-argument renderable method
+            // named `key` exists, which is exactly what the one caller that can
+            // reach an answerable key has already tested. Total so this stays a
+            // reader of [`answerable`] rather than a second decision.
+            Answer::Getter { .. } => key_reason(key, true, methods, fields),
+        }
+    }
+}
+
+/// A key nothing answers, and the words a refusal is reported in.
+///
+/// The wording is two registers because it has always been two and both are
+/// frozen: one quotes the key as the author wrote it ([`key_reason`], read by
+/// [`unresolvable_key_reason`] for the bound-attribute, `v-model` and condition
+/// paths) and one quotes the key's first segment together with the fix
+/// ([`root_reason`] and [`remedy`], read by [`keep_answerable_interpolation_keys`]
+/// for the interpolation gate). The DECISION is [`answerable`]'s alone and is
+/// made exactly once; only the sentence carrying it is per-caller, because
+/// R-1/R-1c/R-1d/R-3's reviews pinned both registers and an author shown new
+/// wording for an old mistake is being told the mistake is new.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Unrenderable {
+    /// Names the key as authored.
+    key_reason: String,
+    /// Names the key's first segment.
+    root_reason: String,
+    /// The fix the interpolation gate offers, in its own words.
+    remedy: String,
+}
+
+/// Can a resolver key be read at all, and if not, what to tell the author.
+///
+/// This is the whole of answerability. Everything that has to decide asks here:
+/// the arm emitter (which call expression the arm body makes), the registration
+/// gate (whether a key is registered at all) and every diagnostic that refuses
+/// one. Those are one question asked at three layers, and while each had its own
+/// copy the copies disagreed — a key could end up registered but unanswerable, or
+/// answerable but unregistered, and which of the two happened depended on which
+/// path the template happened to take. `Result` is the contract that closes that:
+/// `Ok` is an answer the emitter can write down, `Err` is a refusal that already
+/// carries its sentence, and a key is registered only when it is `Ok`. A later
+/// task adds an arm here for the loop collection `State` cannot hand over; the
+/// boundary it will cross is this `Result`, not a copy of this question.
+///
+/// The tests below run in the order of the shapes an arm can take, and each one
+/// is asked by the answer rather than guessed from the key.
+fn answerable(
+    key: &str,
+    methods: &[StateMethod],
+    fields: &[String],
+) -> Result<Answer, Unrenderable> {
+    // A member path is answered by a chain on its root accessor, so what is
+    // wrong with the key is whatever is wrong with the root. Asked first because
+    // `member_path` is the stricter of the two shapes: it refuses a key with a
+    // call in it, which a bare name cannot be.
+    if let Some((root, _)) = member_path(key) {
+        let reason = root_reason(root, true, methods, fields);
+        return match member_path_call(methods, key) {
+            Some(chain) => Ok(Answer::MemberChain {
+                root: root.to_string(),
+                chain,
+            }),
+            None => Err(Unrenderable {
+                key_reason: reason.clone(),
+                root_reason: reason,
+                remedy: path_remedy(root),
+            }),
+        };
+    }
+    if is_bare_identifier(key) {
+        return match getter_method_name(methods, key) {
+            Some(name) => Ok(Answer::Getter {
+                root: key.to_string(),
+                name: name.to_string(),
+            }),
+            None => Err(Unrenderable {
+                key_reason: key_reason(key, true, methods, fields),
+                root_reason: root_reason(key, false, methods, fields),
+                remedy: name_remedy(key),
+            }),
+        };
+    }
+    // Neither shape. `member_path` refuses it and no `State` method can be named
+    // after it, so the two tests above have nothing to say about it — see
+    // `Answer::Conventional` for why the answer is still `Ok`.
+    Ok(Answer::Conventional {
+        name: conventional_name(methods, key),
+    })
+}
+
+/// The method name a key is called by when the naming convention is all there is
+/// to go on: the exact name if `State` has it, else the `get_`/`is_`/`has_`
+/// variant, else the key itself. One helper for [`answerable`]'s ungated shape
+/// and for [`resolve_getter_call`]'s dead arm, so a guessed name is spelled once.
+fn conventional_name(methods: &[StateMethod], key: &str) -> String {
+    resolve_method_name(&method_names(methods), key)
+}
+
+/// Why `key` as authored cannot be read — the register the bound-attribute,
+/// `v-model` and condition diagnostics quote in.
+///
+/// `is_bare` is the CALLER's knowledge of the key's shape, never a re-test of
+/// it: [`answerable`] has already decided, and a caller holding an [`Answer`]
+/// knows which shape it is. Nothing here decides anything; the arms are frozen
+/// wording, and this is the whole of the key register R-1/R-1c/R-1d/R-3 left.
+fn key_reason(key: &str, is_bare: bool, methods: &[StateMethod], fields: &[String]) -> String {
+    // The exact declared name only, with no `get_`/`is_`/`has_` fallback: this
+    // register names the method the author wrote, so naming a different one here
+    // would be a second answer to the same question.
     let named = methods.iter().find(|m| &m.name == key);
     match named {
         Some(m) if m.takes_payload => {
@@ -816,10 +973,69 @@ fn unresolvable_key_reason(key: &str, methods: &[StateMethod], fields: &[String]
             "`{key}` is a `State` field, not a getter — reading a field in a \
              template needs a typed field resolver, which is not implemented yet"
         ),
-        None if !is_bare_identifier(key) => {
+        None if !is_bare => {
             format!("`{key}` is an expression, not a `State` getter name")
         }
         None => format!("`{key}` is not a zero-argument `State` getter"),
+    }
+}
+
+/// Why the first segment of a key cannot be read — the register the
+/// interpolation gate quotes in, so `{{ form.name }}` and `v-model="form.name"`
+/// name the same cause in the same words.
+///
+/// `is_path` is the caller's knowledge of the key's shape, as in [`key_reason`].
+/// The arms are frozen wording, reproduced as R-1/R-1c/R-1d/R-3 left them.
+fn root_reason(root: &str, is_path: bool, methods: &[StateMethod], fields: &[String]) -> String {
+    let declared = methods.iter().find(|m| &m.name == root);
+    match declared {
+        Some(m) if m.takes_payload => {
+            format!("`{root}` is a payload-taking State method, not an accessor")
+        }
+        Some(m) if !returns_a_value(m.return_type.as_deref()) => {
+            format!("`{root}` returns nothing, so there is no value to read from")
+        }
+        Some(_) if is_path => {
+            format!("`{root}` is a State method, but a member path needs an accessor")
+        }
+        Some(_) => {
+            format!("`{root}` is a `State` method, but its return type cannot be rendered as text")
+        }
+        None if fields.iter().any(|f| f == root) => format!(
+            "`{root}` is a `State` field, not an accessor — reading a field in a \
+             template needs a typed field resolver, which is not implemented yet"
+        ),
+        None => format!("`{root}` is not a zero-argument `State` method"),
+    }
+}
+
+/// The fix the interpolation gate offers for a bare name.
+fn name_remedy(name: &str) -> String {
+    format!("Declare `pub fn {name}(&self) -> impl std::fmt::Display` on `State`.")
+}
+
+/// The fix the interpolation gate offers for a member path, which needs an
+/// accessor for the root and a method for every segment after it.
+fn path_remedy(root: &str) -> String {
+    format!(
+        "Declare `pub fn {root}(&self) -> YourType` on `State` and a method for each \
+         segment after it."
+    )
+}
+
+/// Why a key cannot be answered by a resolver arm, in the register the
+/// bound-attribute, `v-model` and condition diagnostics quote it in.
+///
+/// A reader of [`answerable`], not a second question. The one caller that can be
+/// handed an answerable key is the bound-attribute path, which gates on
+/// [`has_state_getter`], and [`Answer::refusal`] covers it. One predicate for
+/// every diagnostic that asks "can this key be looked up?", so the
+/// bound-attribute path and the `v-model` value path cannot drift into
+/// describing the same mistake differently.
+fn unresolvable_key_reason(key: &str, methods: &[StateMethod], fields: &[String]) -> String {
+    match answerable(key, methods, fields) {
+        Err(unrenderable) => unrenderable.key_reason,
+        Ok(answer) => answer.refusal(key, methods, fields),
     }
 }
 
@@ -895,7 +1111,11 @@ fn vmodel_resolve_mode_warning(expr: &str) -> String {
 /// Generate `render_with_props` — props take priority, interpolations fall back
 /// to State getters so a presentational child renders correctly even when the
 /// parent omits a prop.
-fn generate_render_with_props(interp_keys: &[String], methods: &[StateMethod]) -> String {
+fn generate_render_with_props(
+    interp_keys: &[String],
+    methods: &[StateMethod],
+    fields: &[String],
+) -> String {
     if interp_keys.is_empty() {
         return r#"pub fn render_with_props(props: std::collections::HashMap<&str, String>) -> velox_dom::VNode {
     let resolve_props = |key: &str| -> String {
@@ -907,7 +1127,7 @@ fn generate_render_with_props(interp_keys: &[String], methods: &[StateMethod]) -
     }
     let mut match_arms = String::new();
     for key in interp_keys {
-        let method = resolve_getter_call(methods, key);
+        let method = resolve_getter_call(methods, fields, key);
         match_arms.push_str(&format!(
             "            \"{}\" => state.{}.to_string(),\n",
             key, method
@@ -2894,27 +3114,30 @@ fn has_state_getter(methods: &[StateMethod], key: &str) -> bool {
 }
 
 /// The call expression a resolver arm should make on `state` for `key`,
-/// parentheses included: `title()`, `is_open()`, `user().name`.
+/// parentheses included: `title()`, `is_open()`, `user().name()`.
 ///
-/// Both key sources are gated before they get here — bound-attribute keys by
-/// [`has_state_getter`], interpolation keys by
-/// [`keep_answerable_interpolation_keys`] — so a key that reaches an arm always
-/// has a getter to call, spelled `title`, `get_title`, `is_title` or `has_title`
-/// by the same [`find_state_method`] convention. The fallbacks below are what a
-/// key the gates let through but this call cannot chain would use; they are not
-/// a route to an arm for a name `State` does not expose.
+/// A reader of [`answerable`], which is where the choice between a getter, a
+/// member chain and the name-only spelling is made. Nothing decides here, so the
+/// arm an emitter writes and the arm a gate believed it was writing cannot be
+/// two different arms.
 ///
-/// A member path is the exception: it is emitted as a chain of calls on the
-/// root accessor (see [`member_path_call`]), because `state.user.name()` is not
-/// a legal expression for a hand-written `State` — it needs a `user` *field*
-/// holding something with a `name` method, and a template cannot produce that.
-fn resolve_getter_call(methods: &[StateMethod], key: &str) -> String {
-    if let Some(chain) = member_path_call(methods, key) {
-        return chain;
-    }
-    match getter_method_name(methods, key) {
-        Some(method) => format!("{method}()"),
-        None => format!("{}()", resolve_method_name(&method_names(methods), key)),
+/// Every key that reaches an arm was registered by a path that asked
+/// [`answerable`] — `keep_answerable_interpolation_keys` registers an `Ok` and
+/// nothing else, and the bound-attribute, `v-model` and condition paths all gate
+/// on a question `answerable` answers — so the `Err` arm is dead, and
+/// `every_registered_key_is_answerable` is what keeps it dead.
+///
+/// The guess is what the arm used to be in that case, kept byte for byte rather
+/// than turned into a panic. An `Err` key cannot be answered by anything, so the
+/// guess is a name `State` does not expose, and the arm it produces is a compile
+/// error in the generated crate — not a silent wrong value. Codegen must not
+/// turn a compile error into a process exit, and R-1e-1's second commit is where
+/// the guess can go away for good, because by then the loop's `items` ask has
+/// somewhere else to land.
+fn resolve_getter_call(methods: &[StateMethod], fields: &[String], key: &str) -> String {
+    match answerable(key, methods, fields) {
+        Ok(answer) => answer.call(),
+        Err(_) => format!("{}()", conventional_name(methods, key)),
     }
 }
 
@@ -3036,47 +3259,8 @@ fn is_ident_char(ch: char) -> bool {
 /// `v-model` path asks it for a two-way binding, so `{{ form.name }}` and
 /// `v-model="form.name"` are answered or dropped together instead of one of them
 /// quietly rendering empty.
-fn key_is_answerable(methods: &[StateMethod], key: &str) -> bool {
-    if is_bare_identifier(key) {
-        getter_method_name(methods, key).is_some()
-    } else if member_path(key).is_some() {
-        member_path_call(methods, key).is_some()
-    } else {
-        true
-    }
-}
-
-/// Why a binding cannot be read: what is wrong with `root`, the first segment of
-/// whatever shape the key has. `keep_answerable_interpolation_keys` and
-/// `unresolvable_key_reason` both call it, so the interpolation gate and the
-/// `v-model` gate name the same cause in the same words — `v-model="form.name"`
-/// and `{{ form.name }}` fail or succeed together, and they say so identically.
-fn unanswerable_root_reason(
-    root: &str,
-    is_path: bool,
-    methods: &[StateMethod],
-    fields: &[String],
-) -> String {
-    let declared = methods.iter().find(|m| &m.name == root);
-    match declared {
-        Some(m) if m.takes_payload => {
-            format!("`{root}` is a payload-taking State method, not an accessor")
-        }
-        Some(m) if !returns_a_value(m.return_type.as_deref()) => {
-            format!("`{root}` returns nothing, so there is no value to read from")
-        }
-        Some(_) if is_path => {
-            format!("`{root}` is a State method, but a member path needs an accessor")
-        }
-        Some(_) => {
-            format!("`{root}` is a `State` method, but its return type cannot be rendered as text")
-        }
-        None if fields.iter().any(|f| f == root) => format!(
-            "`{root}` is a `State` field, not an accessor — reading a field in a \
-             template needs a typed field resolver, which is not implemented yet"
-        ),
-        None => format!("`{root}` is not a zero-argument `State` method"),
-    }
+fn key_is_answerable(methods: &[StateMethod], fields: &[String], key: &str) -> bool {
+    answerable(key, methods, fields).is_ok()
 }
 
 fn keep_answerable_interpolation_keys(
@@ -3085,38 +3269,22 @@ fn keep_answerable_interpolation_keys(
     keys: Vec<String>,
     warnings: &mut Vec<String>,
 ) -> Vec<String> {
-    let mut answerable = Vec::with_capacity(keys.len());
+    let mut registered = Vec::with_capacity(keys.len());
     for key in keys {
-        let path = member_path(&key);
-        let root = if is_bare_identifier(&key) {
-            Some(key.as_str())
-        } else {
-            path.as_ref().map(|(root, _)| *root)
-        };
-        let Some(root) = root else {
-            answerable.push(key);
+        // One predicate for the gate, so a key is registered exactly when it can
+        // be read and the reason for a refusal is the same sentence the other
+        // three call sites would print for it.
+        let Err(unrenderable) = answerable(&key, methods, fields) else {
+            registered.push(key);
             continue;
-        };
-        let answered = key_is_answerable(methods, &key);
-        if answered {
-            answerable.push(key);
-            continue;
-        }
-        let reason = unanswerable_root_reason(root, path.is_some(), methods, fields);
-        let remedy = if path.is_some() {
-            format!(
-                "Declare `pub fn {root}(&self) -> YourType` on `State` and a method for each \
-                 segment after it."
-            )
-        } else {
-            format!("Declare `pub fn {root}(&self) -> impl std::fmt::Display` on `State`.")
         };
         warnings.push(format!(
-            "interpolation {{{{ {key} }}}} cannot be resolved — {reason}; the interpolation \
-             renders empty. {remedy}"
+            "interpolation {{{{ {key} }}}} cannot be resolved — {}; the interpolation \
+             renders empty. {}",
+            unrenderable.root_reason, unrenderable.remedy
         ));
     }
-    answerable
+    registered
 }
 
 /// The Rust value one `:attr="expr"` binding emits, together with the resolver
@@ -3795,7 +3963,7 @@ fn collect_resolver_keys(
                     // `v-model` is answered by the same method chain `{{ form.name }}`
                     // reads, and an unanswerable one is reported in the same terms.
 
-                    if key_is_answerable(methods, expr) {
+                    if key_is_answerable(methods, fields, expr) {
                         push_unique(keys, expr);
                     } else {
                         // The write is named, not claimed: the generated setter is
@@ -3848,7 +4016,7 @@ fn collect_resolver_keys(
                         continue;
                     }
                     for key in condition_resolver_keys(expr) {
-                        if key_is_answerable(methods, &key) {
+                        if key_is_answerable(methods, fields, &key) {
                             push_unique(keys, &key);
                         } else {
                             warnings.push(condition_unresolvable_warning(
@@ -6257,6 +6425,464 @@ impl State {
                 looked_up, keys,
                 "`{cond}` is rewritten into exactly the reads that are registered, so \
                  there is no way for a key to be missing"
+            );
+        }
+    }
+
+    /// A `State` with one method of every kind the answerability rules care
+    /// about: a renderable getter, a prefixed getter, a payload-taking method, a
+    /// method with no return type, a `()` method, a collection, a struct-valued
+    /// accessor and a `bool`. Two `State` fields are in scope as well, so the
+    /// "a field is not an accessor" arm is reachable.
+    ///
+    /// This is the fixture the R-1e differential was measured against: every
+    /// expectation below was read off the code as it stood BEFORE the predicate
+    /// existed, so a table entry that drifts is a behaviour change, not a
+    /// restatement of what the new code does.
+    fn answerable_fixture() -> (Vec<StateMethod>, Vec<String>) {
+        let method = |name: &str, takes_payload: bool, return_type: Option<&str>| StateMethod {
+            name: name.to_string(),
+            takes_payload,
+            return_type: return_type.map(|t| t.to_string()),
+        };
+        let methods = vec![
+            method("title", false, Some("String")),
+            method("get_sub", false, Some("String")),
+            method("on_input", true, Some("String")),
+            method("nothing", false, None),
+            method("unit", false, Some("()")),
+            method("vecs", false, Some("Vec<String>")),
+            method("user", false, Some("User")),
+            method("flag", false, Some("bool")),
+        ];
+        let fields = vec!["rows".to_string(), "sub".to_string()];
+        (methods, fields)
+    }
+
+    /// The keys the differential was measured over: a member path, an index, a
+    /// call, a compound expression, a key no `State` member can be named after,
+    /// and the empty key.
+    const ANSWERABLE_KEYS: [&str; 23] = [
+        "title",
+        "get_sub",
+        "on_input",
+        "nothing",
+        "unit",
+        "vecs",
+        "user",
+        "flag",
+        "nope",
+        "user.name",
+        "user.missing",
+        "vecs[0]",
+        "items[0].name",
+        "user.name()",
+        "a.b[0",
+        "1bad",
+        "a + b",
+        "user + other",
+        "items[0",
+        "a.b()",
+        "",
+        "user.name.deep",
+        "sub",
+    ];
+
+    /// Every shape an arm body can take is an `Ok` answer, and each one emits the
+    /// call expression it was emitting before the predicate existed.
+    ///
+    /// The three variants are the point: a getter, a member chain and a
+    /// name-only spelling are different answers to the same question, and a
+    /// single one of them used to be inferred at the arm site from whichever
+    /// helper happened to be tried first.
+    #[test]
+    fn answerable_names_each_of_the_three_arms_a_key_can_take() {
+        let (methods, fields) = answerable_fixture();
+
+        // A bare name with a renderable getter, whether declared under the
+        // template's name or under the `get_` convention.
+        assert_eq!(
+            answerable("title", &methods, &fields),
+            Ok(Answer::Getter {
+                root: "title".to_string(),
+                name: "title".to_string(),
+            })
+        );
+        assert_eq!(
+            answerable("sub", &methods, &fields),
+            Ok(Answer::Getter {
+                root: "sub".to_string(),
+                name: "get_sub".to_string(),
+            })
+        );
+
+        // A member path is answered by a chain on the root accessor, and every
+        // later segment is a call — including the ones no `State` member names,
+        // because a chain's legality is the type's business, not codegen's.
+        assert_eq!(
+            answerable("user.name", &methods, &fields),
+            Ok(Answer::MemberChain {
+                root: "user".to_string(),
+                chain: "user().name()".to_string(),
+            })
+        );
+        assert_eq!(
+            answerable("vecs[0]", &methods, &fields),
+            Ok(Answer::MemberChain {
+                root: "vecs".to_string(),
+                chain: "vecs()[0]".to_string(),
+            })
+        );
+        assert_eq!(
+            answerable("user.name.deep", &methods, &fields),
+            Ok(Answer::MemberChain {
+                root: "user".to_string(),
+                chain: "user().name().deep()".to_string(),
+            })
+        );
+
+        // A key that is neither a bare name nor a member path keeps the
+        // name-only spelling it has always been answered with.
+        for key in ["user.name()", "a.b[0", "1bad", "a + b", "items[0", ""] {
+            assert_eq!(
+                answerable(key, &methods, &fields),
+                Ok(Answer::Conventional {
+                    name: key.to_string(),
+                }),
+                "`{key}` is not a shape the arm emitter can spell, so it keeps the \\
+                 name-only answer it has always had"
+            );
+        }
+    }
+
+    /// The call expression each answer emits is byte-identical to the one the
+    /// arm emitter produced before the predicate existed, for every key the
+    /// differential covered — including the keys nothing answers, whose arm text
+    /// the three old fallbacks all agreed on by accident.
+    #[test]
+    fn the_arm_text_of_every_key_is_unchanged() {
+        let (methods, fields) = answerable_fixture();
+        // (key, the `state.…` expression the arm body used to make)
+        let expected = [
+            ("title", "title()"),
+            ("get_sub", "get_sub()"),
+            ("on_input", "on_input()"),
+            ("nothing", "nothing()"),
+            ("unit", "unit()"),
+            ("vecs", "vecs()"),
+            ("user", "user()"),
+            ("flag", "flag()"),
+            ("nope", "nope()"),
+            ("user.name", "user().name()"),
+            ("user.missing", "user().missing()"),
+            ("vecs[0]", "vecs()[0]"),
+            ("items[0].name", "items[0].name()"),
+            ("user.name()", "user.name()()"),
+            ("a.b[0", "a.b[0()"),
+            ("1bad", "1bad()"),
+            ("a + b", "a + b()"),
+            ("user + other", "user + other()"),
+            ("items[0", "items[0()"),
+            ("a.b()", "a.b()()"),
+            ("", "()"),
+            ("user.name.deep", "user().name().deep()"),
+            ("sub", "get_sub()"),
+        ];
+        for (key, call) in expected {
+            assert_eq!(
+                resolve_getter_call(&methods, &fields, key),
+                call,
+                "the arm text for `{key}` moved"
+            );
+        }
+    }
+
+    /// Every sentence a refusal is reported in, byte for byte, in the register
+    /// the caller quotes it in.
+    ///
+    /// These are user-facing strings, they were frozen by the reviews of R-1,
+    /// R-1c, R-1d and R-3, and they were read off that code rather than
+    /// re-derived from it. Two registers exist and both are pinned: the
+    /// key-as-authored one the bound-attribute, `v-model` and condition paths
+    /// print, and the root one the interpolation gate prints. They disagree for
+    /// a bare key — "not a zero-argument `State` getter" against "not a
+    /// zero-argument `State` method" — and that disagreement is pre-existing and
+    /// frozen, so it is pinned rather than tidied.
+    #[test]
+    fn every_refusal_sentence_is_unchanged() {
+        let (methods, fields) = answerable_fixture();
+        let expected = [
+            (
+                "title",
+                "`title` returns `String`, which cannot be rendered as text",
+            ),
+            (
+                "get_sub",
+                "`get_sub` returns `String`, which cannot be rendered as text",
+            ),
+            (
+                "on_input",
+                "`on_input` is a payload-taking State method, not a getter",
+            ),
+            (
+                "nothing",
+                "`nothing` declares no return type, so there is no text to render",
+            ),
+            (
+                "unit",
+                "`unit` returns `()`, which cannot be rendered as text",
+            ),
+            (
+                "vecs",
+                "`vecs` returns `Vec<String>`, which cannot be rendered as text",
+            ),
+            (
+                "user",
+                "`user` returns `User`, which cannot be rendered as text",
+            ),
+            (
+                "flag",
+                "`flag` returns `bool`, which cannot be rendered as text",
+            ),
+            ("nope", "`nope` is not a zero-argument `State` getter"),
+            (
+                "user.name",
+                "`user` is a State method, but a member path needs an accessor",
+            ),
+            (
+                "user.missing",
+                "`user` is a State method, but a member path needs an accessor",
+            ),
+            (
+                "vecs[0]",
+                "`vecs` is a State method, but a member path needs an accessor",
+            ),
+            (
+                "items[0].name",
+                "`items` is not a zero-argument `State` method",
+            ),
+            (
+                "user.name()",
+                "`user.name()` is an expression, not a `State` getter name",
+            ),
+            (
+                "a.b[0",
+                "`a.b[0` is an expression, not a `State` getter name",
+            ),
+            ("1bad", "`1bad` is an expression, not a `State` getter name"),
+            (
+                "a + b",
+                "`a + b` is an expression, not a `State` getter name",
+            ),
+            (
+                "user + other",
+                "`user + other` is an expression, not a `State` getter name",
+            ),
+            (
+                "items[0",
+                "`items[0` is an expression, not a `State` getter name",
+            ),
+            (
+                "a.b()",
+                "`a.b()` is an expression, not a `State` getter name",
+            ),
+            ("", "`` is an expression, not a `State` getter name"),
+            (
+                "user.name.deep",
+                "`user` is a State method, but a member path needs an accessor",
+            ),
+            (
+                "sub",
+                "`sub` is a `State` field, not a getter — reading a field in a template needs a typed field resolver, which is not implemented yet",
+            ),
+        ];
+        for (key, reason) in expected {
+            assert_eq!(
+                unresolvable_key_reason(key, &methods, &fields),
+                reason,
+                "the key register's sentence for `{key}` moved"
+            );
+        }
+    }
+
+    /// The interpolation gate registers exactly the keys it used to, and reports
+    /// exactly the sentences it used to — one whole decision with one whole set
+    /// of words, so the two cannot be right about the key and wrong about the
+    /// sentence.
+    #[test]
+    fn the_interpolation_gate_registers_and_reports_exactly_what_it_did() {
+        let (methods, fields) = answerable_fixture();
+        let mut warnings = Vec::new();
+        let registered = keep_answerable_interpolation_keys(
+            &methods,
+            &fields,
+            ANSWERABLE_KEYS.iter().map(|k| k.to_string()).collect(),
+            &mut warnings,
+        );
+        // `sub` stays registered: `get_sub` answers it, and a key that is also a
+        // `State` field is answered by the getter that exists.
+        assert_eq!(
+            registered,
+            [
+                "title",
+                "get_sub",
+                "flag",
+                "user.name",
+                "user.missing",
+                "vecs[0]",
+                "user.name()",
+                "a.b[0",
+                "1bad",
+                "a + b",
+                "user + other",
+                "items[0",
+                "a.b()",
+                "",
+                "user.name.deep",
+                "sub",
+            ]
+            .map(String::from)
+        );
+        let expected = [
+            "interpolation {{ on_input }} cannot be resolved — `on_input` is a payload-taking State method, not an accessor; the interpolation renders empty. Declare `pub fn on_input(&self) -> impl std::fmt::Display` on `State`.",
+            "interpolation {{ nothing }} cannot be resolved — `nothing` returns nothing, so there is no value to read from; the interpolation renders empty. Declare `pub fn nothing(&self) -> impl std::fmt::Display` on `State`.",
+            "interpolation {{ unit }} cannot be resolved — `unit` returns nothing, so there is no value to read from; the interpolation renders empty. Declare `pub fn unit(&self) -> impl std::fmt::Display` on `State`.",
+            "interpolation {{ vecs }} cannot be resolved — `vecs` is a `State` method, but its return type cannot be rendered as text; the interpolation renders empty. Declare `pub fn vecs(&self) -> impl std::fmt::Display` on `State`.",
+            "interpolation {{ user }} cannot be resolved — `user` is a `State` method, but its return type cannot be rendered as text; the interpolation renders empty. Declare `pub fn user(&self) -> impl std::fmt::Display` on `State`.",
+            "interpolation {{ nope }} cannot be resolved — `nope` is not a zero-argument `State` method; the interpolation renders empty. Declare `pub fn nope(&self) -> impl std::fmt::Display` on `State`.",
+            "interpolation {{ items[0].name }} cannot be resolved — `items` is not a zero-argument `State` method; the interpolation renders empty. Declare `pub fn items(&self) -> YourType` on `State` and a method for each segment after it.",
+        ];
+        assert_eq!(warnings, expected);
+    }
+
+    /// A refusal carries the sentence the interpolation gate prints AND the one
+    /// the bound-attribute path prints, because the gate and the diagnostic
+    /// disagree about a bare key's wording and both are frozen. The two are
+    /// produced from the same answer, so neither can be right about the key
+    /// while the other is wrong about it.
+    #[test]
+    fn a_refusal_carries_both_frozen_registers() {
+        let (methods, fields) = answerable_fixture();
+        let unrenderable = answerable("on_input", &methods, &fields)
+            .expect_err("a payload-taking method cannot be read as a value");
+        assert_eq!(
+            unrenderable.root_reason,
+            "`on_input` is a payload-taking State method, not an accessor"
+        );
+        assert_eq!(
+            unrenderable.key_reason,
+            "`on_input` is a payload-taking State method, not a getter"
+        );
+        assert_eq!(
+            unrenderable.remedy,
+            "Declare `pub fn on_input(&self) -> impl std::fmt::Display` on `State`."
+        );
+    }
+
+    /// The invariant [`resolve_getter_call`] relies on: a key only ever reaches
+    /// an arm emitter because a registration path asked [`answerable`] and took
+    /// its `Ok` branch, so `Err` there would mean a registration path stopped
+    /// consulting the predicate. [`resolve_getter_call`] keeps answering `Err`
+    /// with the guess it always produced rather than panicking, which means this
+    /// test — not an assertion inside the codegen pass — is what makes the dead
+    /// arm dead, and it fails the moment a gate grows a second notion.
+    ///
+    /// The template names all four registration paths, and the expected set is
+    /// read off it: `flag` from the `:class` object condition, from `v-if` and
+    /// from `:data-name`; `sub` from `:title`, from the interpolation and from
+    /// `v-show`; `title` from the interpolation and from `v-model`; and
+    /// `user.name()` from the ungated call shape. `{{ rows }}` is the one
+    /// refusal: `rows` is a `State` field, and a field is not a getter. `user`
+    /// is not registered even though it is a getter, because `User` is not a
+    /// renderable return type — which is why the bound attributes bind `sub`
+    /// and `flag` and not `user`.
+    ///
+    /// The three refusals are one per gate, each pinned to the sentence that
+    /// gate assembles: `{{ rows }}` is the interpolation register, and `rows`
+    /// is a `State` field, which is not a getter; `v-if="nope"` and
+    /// `v-model="nope"` are the condition and `v-model` gates refusing a name
+    /// `State` does not declare, through the reason register a bare key is
+    /// answered with. Without those two this invariant would be measured over
+    /// the interpolation gate alone, and a condition or `v-model` gate that
+    /// stopped asking the predicate would not show up.
+    ///
+    /// The last `v-if="user.name"` is there for the other half: a member path
+    /// whose root IS a real accessor is answerable even though that accessor
+    /// returns something unrenderable, so it registers — and `User` not being
+    /// renderable is not what lets it.
+    #[test]
+    fn every_registered_key_is_answerable() {
+        let template = r#"
+<p :class="{ on: flag }" :title="sub">{{ title }} {{ user.name() }} {{ sub }}</p>
+<input v-model="title" />
+<p v-if="flag">{{ rows }}</p>
+<span v-show="sub" :data-name="flag">x</span>
+<p v-if="nope">CH</p>
+<input v-model="nope" />
+<p v-if="user.name">CH</p>
+"#;
+        let script = r#"
+pub struct User { pub name: String }
+impl State {
+    pub fn title(&self) -> String { String::new() }
+    pub fn flag(&self) -> bool { true }
+    pub fn user(&self) -> User { User { name: String::new() } }
+    pub fn sub(&self) -> String { String::new() }
+}
+"#;
+        let nodes = crate::template_parse::parse_template_to_ast(template).unwrap();
+        let fields = vec!["rows".to_string()];
+        let collected = collect_resolver_keys(&nodes, &methods(script), &fields, RenderMode::State);
+
+        let registered: std::collections::BTreeSet<&str> =
+            collected.keys.iter().map(String::as_str).collect();
+        assert_eq!(
+            registered,
+            ["flag", "sub", "title", "user.name", "user.name()"]
+                .into_iter()
+                .collect::<std::collections::BTreeSet<&str>>(),
+            "the set of keys a template registers is itself a decision about \
+             answerability, so it is pinned: a fourth key here means a gate \
+             stopped asking the one predicate, and a missing key means one \
+             started refusing what it used to register"
+        );
+
+        assert_eq!(
+            collected.warnings,
+            vec![
+                "interpolation {{ rows }} cannot be resolved — `rows` is a \
+                  `State` field, not an accessor — reading a field in a \
+                  template needs a typed field resolver, which is not \
+                  implemented yet; the interpolation renders empty. Declare \
+                  `pub fn rows(&self) -> impl std::fmt::Display` on `State`."
+                    .to_string(),
+                "if=\"nope\" cannot be resolved — `nope` is not a \
+                  zero-argument `State` getter; the condition reads an empty \
+                  value, so the element and everything inside it are not \
+                  rendered. Bind a zero-argument State getter for `nope` \
+                  instead."
+                    .to_string(),
+                "v-model=\"nope\" cannot render its value — `nope` is not a \
+                  zero-argument `State` getter; the input renders empty. The \
+                  write needs every segment of `nope` to be a `State` field and \
+                  the last one to be a type `VModel` is implemented for \
+                  (`Signal<T>`, `RefCell<String>` or `Cell<T>`); otherwise the \
+                  generated setter does not compile. Bind a zero-argument \
+                  `State` getter, or a method for each segment of a dotted \
+                  expression."
+                    .to_string()
+            ],
+            "one of the names in the template is refused by each of the three \
+             gates, and each sentence is the register that gate assembles"
+        );
+
+        for key in &collected.keys {
+            let answered = answerable(key, &methods(script), &fields);
+            assert!(
+                answered.is_ok(),
+                "`{key}` was registered by a path that has not asked the \
+                 predicate, so its arm is the guess and not an answer: {:?}",
+                answered.err()
             );
         }
     }
