@@ -2907,31 +2907,26 @@ pub fn compute_layout(node: &VNode, viewport_w: i32, viewport_h: i32) -> LayoutN
                                 // `position: relative` flex item lands at the wrong offset
                                 // in the flex path.
                                 //
-                                // The MECHANISM IS NOT ESTABLISHED, and two readings of it are
-                                // still live. This comment previously claimed that
-                                // `translate_layout_subtree` above moves the item's finished
-                                // subtree and `apply_relative_position` then re-displaces it, so
-                                // an absolute descendant lands at twice the offset. That account
-                                // does not survive reading the code: `translate_layout_subtree`
-                                // does recurse over the whole subtree, but `apply_relative_position`
-                                // mutates only `node.rect` and never touches descendants — so on
-                                // that reading the relative offset reaches the item alone and the
-                                // double displacement cannot arise. That does not make the defect
-                                // go away. A second reading is also available and is not settled
-                                // here either: `at()` resolved the absolute descendant against
-                                // the item's origin while the item was still at its un-displaced
-                                // position, and whether anything re-establishes that relationship
-                                // once the flex delta has been applied has not been checked.
-                                // Treat both as open.
+                                // The MECHANISM IS NOT ESTABLISHED. What IS established is that
+                                // the item's descendants are ALREADY re-displaced by the item's
+                                // own displacement, so an earlier account of this comment — that
+                                // `apply_relative_position` leaves the descendants behind and they
+                                // land at twice the offset — cannot be the cause, and an earlier
+                                // LEAD proposing that descendants be re-displaced with the
+                                // relative offset described code that is already here.
+                                // `apply_relative_position` mutates only `node.rect`, and the
+                                // `translate_layout_descendants` call a few lines below this
+                                // comment re-displaces the whole subtree by exactly the distance
+                                // this call moved the item by, so descendants and item end up
+                                // moved together. That call site is the only one in the file: the
+                                // block path's `apply_relative_position` call, further down, has no
+                                // matching descendant pass, which is why the two paths can differ
+                                // at all.
                                 //
-                                // A LEAD, not a conclusion: `translate_layout_subtree(&mut ln, dx,
-                                // dy)` is already in scope at this call site, takes the same
-                                // `&mut ln` this call is about to move, and recurses — so if the
-                                // second reading is the cause, the fix may be as local as
-                                // re-displacing descendants with the relative offset here. Nobody
-                                // has tried that or confirmed it would work, and the block path's
-                                // own `apply_relative_position` call site would need the same
-                                // reasoning. Establish the mechanism first.
+                                // The remaining suspect is the out-of-flow pass, which resolves
+                                // `PendingAbsolute` entries after every child has been laid out
+                                // and therefore runs after the displacement above. Establish the
+                                // mechanism before changing anything here.
                                 apply_relative_position(
                                     child_style,
                                     &mut ln,

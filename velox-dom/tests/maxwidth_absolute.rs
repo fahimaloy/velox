@@ -1078,8 +1078,8 @@ fn negative_max_width_is_dropped_as_an_invalid_declaration() {
 ///
 /// `min-width` is honoured on the flex main axis only. There is no block-flow
 /// `min-width` clamp anywhere in the engine, so `min-width: 200px; max-width: 100px`
-/// on a block box yields 100 where a browser yields 200 — the `max-width` cap is
-/// applied and then nothing raises it back.
+/// on a block box yields 100 where the two specs cited above require 200 — the
+/// `max-width` cap is applied and then nothing raises it back.
 ///
 /// A correct block-flow `min-width` has to answer the same percentage-basis
 /// question the out-of-flow rule answers, and that basis is now decided once, for
@@ -1097,7 +1097,8 @@ fn min_width_is_a_known_divergence_on_a_block_box() {
         compute_layout(&root, 400, 300).rect.w,
         100,
         "KNOWN DIVERGENCE: a block box has no min-width clamp, so the 100px \
-         max-width stands where a browser would use the 200px min-width. If this \
+         max-width stands where CSS 2.1 s10.4 and css-sizing-3 s3.1 require the \
+         200px min-width. If this \
          assertion is failing, block-flow min-width was implemented — update this \
          label and the deviation list in the same change."
     );
