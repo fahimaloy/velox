@@ -58,7 +58,14 @@ const IF_TEMPLATE: &str = r#"<template>
 const IF_STYLE: &str = r#"
 .if-box { background: #ff0000; width: 120px; height: 40px; }
 .show-box { background: #00ff00; width: 120px; height: 40px; }
-.li-inner { background: #0000ff; width: 120px; height: 20px; }
+/* `display: block` is stated here because `velox-style/src/ua.css` gives `span`
+   `display: inline`, which is the correct browser default: width and height do
+   not apply to a non-replaced inline box, so without this the `width`/`height`
+   below are inert and the element paints text-sized. Declaring the display in
+   the test's own stylesheet is the fix — the UA default is right, and the
+   measurement is about whether the `v-if` renders the element, not about how an
+   inline box is sized. */
+.li-inner { background: #0000ff; display: block; width: 120px; height: 20px; }
 .user-box { background: #ffff00; width: 60px; height: 20px; }
 "#;
 
@@ -822,7 +829,6 @@ fn pixels(key: &str) -> usize {
 const PAINTED: usize = 500;
 
 #[test]
-#[ignore = "slow: compiles a generated crate with the Skia backend"]
 fn a_v_if_on_the_root_element_paints_it_only_while_its_condition_holds() {
     assert_eq!(
         pixels("rootif.off.magenta"),
@@ -839,7 +845,6 @@ fn a_v_if_on_the_root_element_paints_it_only_while_its_condition_holds() {
 }
 
 #[test]
-#[ignore = "slow: compiles a generated crate with the Skia backend"]
 fn a_v_show_on_the_root_element_hides_and_reveals_it_with_its_condition() {
     assert_eq!(
         pixels("rootshow.off.cyan"),
@@ -856,7 +861,6 @@ fn a_v_show_on_the_root_element_hides_and_reveals_it_with_its_condition() {
 }
 
 #[test]
-#[ignore = "slow: compiles a generated crate with the Skia backend"]
 fn a_v_if_on_a_nested_element_paints_it_only_while_its_condition_holds() {
     assert_eq!(
         pixels("if.off.red"),
@@ -871,7 +875,6 @@ fn a_v_if_on_a_nested_element_paints_it_only_while_its_condition_holds() {
 }
 
 #[test]
-#[ignore = "slow: compiles a generated crate with the Skia backend"]
 fn a_v_show_on_a_nested_element_hides_and_reveals_it_with_its_condition() {
     assert_eq!(
         pixels("show.off.green"),
@@ -889,7 +892,6 @@ fn a_v_show_on_a_nested_element_hides_and_reveals_it_with_its_condition() {
 /// A dotted condition is one lookup of one value. Before this task it was two
 /// lookups with a `.` between them, which does not compile at all.
 #[test]
-#[ignore = "slow: compiles a generated crate with the Skia backend"]
 fn a_dotted_condition_re_evaluates_as_one_value() {
     assert_eq!(
         pixels("user.off.yellow"),
@@ -907,7 +909,6 @@ fn a_dotted_condition_re_evaluates_as_one_value() {
 }
 
 #[test]
-#[ignore = "slow: compiles a generated crate with the Skia backend"]
 fn a_v_if_on_an_element_inside_a_v_for_body_follows_the_loop_item() {
     assert_eq!(
         pixels("loop.off.blue"),
@@ -924,7 +925,6 @@ fn a_v_if_on_an_element_inside_a_v_for_body_follows_the_loop_item() {
 }
 
 #[test]
-#[ignore = "slow: compiles a generated crate with the Skia backend"]
 fn a_static_class_merges_with_an_object_syntax_class() {
     assert_eq!(
         measurement("class.off.card"),
@@ -947,7 +947,6 @@ fn a_static_class_merges_with_an_object_syntax_class() {
 }
 
 #[test]
-#[ignore = "slow: compiles a generated crate with the Skia backend"]
 fn the_cascade_paints_the_merged_class_list() {
     assert!(
         pixels("class.off.green") > PAINTED,
@@ -978,7 +977,6 @@ fn the_cascade_paints_the_merged_class_list() {
 }
 
 #[test]
-#[ignore = "slow: compiles a generated crate with the Skia backend"]
 fn a_string_syntax_class_joins_the_static_one() {
     assert_eq!(
         measurement("class.string.card2"),
@@ -1004,7 +1002,6 @@ fn a_string_syntax_class_joins_the_static_one() {
 /// operand is a resolver read on the same path a `v-if`'s is, so registering it
 /// is what makes the element render at all.
 #[test]
-#[ignore = "slow: compiles a generated crate with the Skia backend"]
 fn a_v_else_if_element_paints_only_while_the_chain_reaches_it() {
     assert_eq!(
         pixels("chain.off.first.red"),
@@ -1049,7 +1046,6 @@ fn a_v_else_if_element_paints_only_while_the_chain_reaches_it() {
 /// would either not compile (`f64 && f64`) or ride on the comparison's operand,
 /// so these three measurements are what distinguishes the two.
 #[test]
-#[ignore = "slow: compiles a generated crate with the Skia backend"]
 fn a_compound_condition_re_evaluates_both_of_its_operands() {
     assert_eq!(
         pixels("chain.count0.bothtrue.green"),
@@ -1081,7 +1077,6 @@ fn a_compound_condition_re_evaluates_both_of_its_operands() {
 /// ends the numeric branch must not disturb: text that is not a number stays
 /// truthy, and an empty string stays falsy.
 #[test]
-#[ignore = "slow: compiles a generated crate with the Skia backend"]
 fn a_numeric_operand_in_a_logic_position_is_falsy_when_it_is_zero() {
     assert_eq!(
         pixels("chain.count2.zero.orange"),
@@ -1117,7 +1112,6 @@ fn a_numeric_operand_in_a_logic_position_is_falsy_when_it_is_zero() {
 /// render, because the list is built inside the render and a list that survived
 /// one would grow.
 #[test]
-#[ignore = "slow: compiles a generated crate with the Skia backend"]
 fn the_class_list_does_not_accumulate_across_re_renders() {
     assert_eq!(
         measurement("class.back.card"),
