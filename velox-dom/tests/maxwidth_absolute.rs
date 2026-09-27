@@ -1003,9 +1003,10 @@ fn max_width_clamps_a_block_box() {
 /// constraint at all, and neither does one that is. Each case is compared against
 /// the identical tree with the declaration removed.
 ///
-/// A NEGATIVE `max-width` is deliberately not in this list. It is a known
-/// divergence and has its own test, `negative_max_width_is_a_known_divergence`,
-/// because it is not the same class of fact as absent or `auto`.
+/// A NEGATIVE `max-width` is deliberately not in this list. It is not a cap that
+/// fails to bind, it is an INVALID declaration: it is dropped by the filter in
+/// `used_max_width` and has its own test,
+/// `negative_max_width_is_dropped_as_an_invalid_declaration`.
 #[test]
 fn absent_or_non_binding_max_width_changes_nothing() {
     for style in [
@@ -1023,22 +1024,29 @@ fn absent_or_non_binding_max_width_changes_nothing() {
     }
 }
 
-/// KNOWN DIVERGENCE, not a rule. This test exists so the wrong number is
-/// discoverable from the suite rather than only from a comment nobody opens, and so
-/// nobody "fixes" it by accident without reading this label.
+/// Velox drops a negative `max-width` as an invalid declaration, so it constrains
+/// nothing and the used width is left alone. That is spec-conforming behaviour, not
+/// a divergence, and this test pins it so that changing the filter in
+/// `used_max_width` has to be a deliberate act.
 ///
-/// Velox treats a negative `max-width` as imposing no constraint at all, leaving the
-/// width unconstrained. A reviewer reported that browsers instead clamp
-/// `max-width` into the non-negative range, collapsing the used width to 0, and that
-/// claim could not be pinned to a citation. The reading this engine implements —
-/// drop the declaration — is what CSS 2.1 §10.4's grammar implies, since `max-width`
-/// takes `<'max-width'> = none | <length> | <percentage>` and `<length>` is
-/// non-negative, so a negative value is an invalid declaration and is ignored. The
-/// behaviour is therefore left alone on the strength of a reading nobody has
-/// confirmed against an engine, and that is exactly why it is labelled rather than
-/// asserted as correct.
+/// The spec, in the spec's own words: CSS 2.1 §10.4 prose states that "Negative
+/// values for 'min-width' and 'max-width' are illegal", and css-sizing-3 §3.2 states
+/// of `<length-percentage [0,∞]>` that "Negative values are invalid". An invalid
+/// declaration is dropped, so the used width is whatever it would have been without
+/// it.
+///
+/// NO ENGINE HAS BEEN CONSULTED for that reading, and this test does not pretend
+/// otherwise. An earlier version of it was named `..._is_a_known_divergence` and its
+/// failure message claimed a browser "may clamp the used width to 0". That was not
+/// true: no browser was checked, and the spec says the opposite of what the label
+/// implied. A label asserting something unverified is worse than no label, because
+/// it converts an unverified reading into an invariant, so the claim is gone.
+///
+/// If this assertion is failing, the filter in `used_max_width` changed. Update this
+/// label, and add the new behaviour to the deviation list in the same change if it is
+/// a divergence.
 #[test]
-fn negative_max_width_is_a_known_divergence() {
+fn negative_max_width_is_dropped_as_an_invalid_declaration() {
     for style in [
         "width: 200px; max-width: -50px;",
         "width: 200px; max-width: -1%;",
@@ -1048,16 +1056,22 @@ fn negative_max_width_is_a_known_divergence() {
         assert_eq!(
             compute_layout(&root, 400, 300).rect.w,
             200,
-            "KNOWN DIVERGENCE: `{style}` currently imposes no constraint, and a \
-             browser may clamp the used width to 0 instead. If this assertion is \
-             failing, the clamp behaviour was implemented — update this label and \
-             the deviation list in the same change."
+            "`{style}` is an invalid declaration — CSS 2.1 §10.4 says of \
+             'min-width' and 'max-width' that \"Negative values ... are illegal\" — so \
+             it is dropped and constrains nothing, leaving 200. That is the spec's \
+             reading, not a measurement: no engine has been consulted for it. If this \
+             assertion is failing, the filter in `used_max_width` changed: update \
+             this label, and add the behaviour to the deviation list in the same \
+             change if it is a divergence."
         );
     }
 }
 
-/// KNOWN DIVERGENCE, not a rule, for the same reason and with the same label
-/// requirement as `negative_max_width_is_a_known_divergence`.
+/// KNOWN DIVERGENCE, not a rule, and the OPPOSITE case to
+/// `negative_max_width_is_dropped_as_an_invalid_declaration`: that one asserts
+/// spec-conforming behaviour that no engine has been checked against, while this one
+/// asserts behaviour a browser demonstrably does not have. They share a labelling
+/// requirement, so this stays explicit about which is which.
 ///
 /// `min-width` is honoured on the flex main axis only. There is no block-flow
 /// `min-width` clamp anywhere in the engine, so `min-width: 200px; max-width: 100px`

@@ -214,6 +214,10 @@ fn used_max_width(
         viewport_w,
         viewport_h,
     )
+    // A negative `max-width` is an invalid declaration, not a cap of zero: CSS 2.1
+    // §10.4 says "Negative values for 'min-width' and 'max-width' are illegal", and
+    // an invalid declaration is dropped, so it constrains nothing. Reading it as
+    // `max(0)` would collapse the box instead of leaving it alone.
     .filter(|v| *v >= 0)
 }
 
@@ -2879,6 +2883,13 @@ pub fn compute_layout(node: &VNode, viewport_w: i32, viewport_h: i32) -> LayoutN
                                 ln.rect.x = resolved_x;
                                 ln.rect.y = resolved_y;
                                 let child_style = item_style;
+                                // KNOWN DEFECT, tracked separately. `translate_layout_subtree`
+                                // above has already moved this item's finished subtree, so an
+                                // absolute descendant that `at()` positioned against the item's
+                                // un-displaced origin is shifted a second time and lands at twice
+                                // the offset the item itself moved. Fixing it means deferring the
+                                // item's out-of-flow descendants to the shared tail, not
+                                // re-displacing them here.
                                 apply_relative_position(
                                     child_style,
                                     &mut ln,
