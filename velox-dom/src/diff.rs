@@ -1,3 +1,33 @@
+//! Keyed diffing for `VNode` trees.
+//!
+//! # `:key` is a stated non-goal, not an oversight
+//!
+//! `:key` compiles, resolves, and lands as a **plain runtime `key` attribute on
+//! the `VNode`** — a stable per-render string and nothing more. In the shipped
+//! pipeline it does **not** reorder, does **not** diff, and does **not**
+//! preserve identity across a reorder.
+//!
+//! Reordering nonetheless appears to work, and it is worth being precise about
+//! why: `compute_layout` lays children out in `VNode` order, so a reordered
+//! list already lays out reordered. That is plain block flow over the current
+//! tree, not reconciliation. `tests/key_reorder_layout.rs` pins this: two trees
+//! with the same keyed children in opposite orders produce different laid-out
+//! geometry, and the `key` values are inert to layout.
+//!
+//! Identity and state preservation across a reorder is **not implemented and
+//! not implementable as a codegen or renderer change**: `VNode` is pure data
+//! (`Element { tag, props, children } | Text(String)`) with no state cell, no
+//! instance handle, and no lifecycle hook, so there is no per-node state for a
+//! reorder to preserve or destroy — and consequently no observable that a
+//! correct keyed reconciler would produce and a broken one would not.
+//! Implementing it means giving `VNode` a state slot or standing up a
+//! component-instance registry, which is a public shape change to `VNode`.
+//!
+//! This module IS that reconciler, and it is complete and duplicate-key safe
+//! (`diff_children_keyed` tracks a consumed set). It has no production caller:
+//! the renderer's own `reconcile_keyed_children` is a separate and incorrect
+//! helper. See `velox-renderer/src/lib.rs`.
+
 use crate::{Props, VNode};
 use std::collections::HashSet;
 
