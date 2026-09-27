@@ -920,7 +920,7 @@ fn an_atomic_inline_box_with_a_declared_width_truncates_its_content_to_it() {
 /// The contrast is the evidence and it is a second test below, not a bound here:
 /// 40 on its own is a bare number that a wrong implementation also produces.
 #[test]
-fn an_atomic_with_no_declared_width_shrink_fits_to_the_LINE_and_truncates_its_label() {
+fn an_atomic_with_no_declared_width_shrink_fits_to_the_line_and_truncates_its_label() {
     register_synthetic();
     let d = inner_of(&h(
         "div",
@@ -1004,7 +1004,7 @@ fn a_wrapping_block_does_not_truncate_which_is_a_recorded_divergence() {
 /// `pre` is the mode that DOES truncate each of its own overflowing lines, because
 /// each is its own line box and none of them can ever be the only one.
 #[test]
-fn a_pre_block_truncates_EACH_of_its_own_overflowing_lines() {
+fn a_pre_block_truncates_each_of_its_own_overflowing_lines() {
     register_synthetic();
     let d = inner_of(&h(
         "div",
