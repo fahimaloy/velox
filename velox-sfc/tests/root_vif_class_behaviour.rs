@@ -681,8 +681,20 @@ fn generated_app(template: &str, script: &str) -> String {
 fn write_case(root: &Path, name: &str, template: &str, style: &str, script: &str) {
     let dir = root.join("src").join(name);
     std::fs::create_dir_all(&dir).expect("create the case directory");
-    std::fs::write(dir.join("app.rs"), generated_app(template, script))
-        .expect("write the generated app");
+    // `compile_template_to_rs_full_with_mode` is the TEMPLATE half of a component:
+    // it emits the `render_*` functions, and every `render_with_props` among them
+    // names `PropsArg` in its signature. The DEFINING half of that name is in the
+    // stub half (`velox_sfc::generate_props_arg`, which `to_stub_rs*` emits), so a
+    // module assembled by hand has to ask for it explicitly. Omitting it left all
+    // five cases with a dangling `PropsArg` — 13 tests, one `E0412` per case —
+    // and the `module.golden` fixtures never caught it, because they pin the
+    // template half alone and a golden is not compiled.
+    let app = format!(
+        "{}{}",
+        velox_sfc::generate_props_arg(script, ""),
+        generated_app(template, script)
+    );
+    std::fs::write(dir.join("app.rs"), app).expect("write the generated app");
     std::fs::write(dir.join("script_rs.rs"), script).expect("write the script");
     // The shape `velox-sfc::codegen` produces for a component, which is what
     // `compile_template_to_rs_full_with_mode` is one half of: the `app` module,

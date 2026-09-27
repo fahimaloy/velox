@@ -523,7 +523,16 @@ fn generate_component_emit_helpers() -> String {
 /// something cannot. Its `values` map is still readable, because a component
 /// with no `Props` struct and no way to receive an attribute has nothing else to
 /// resolve a read from.
-fn generate_props_arg(ss: &str, indent: &str) -> String {
+///
+/// This is the DEFINING half of the name and it lives in the stub half of the
+/// pipeline, while every `render_with_props(props: PropsArg)` that names it is
+/// emitted by the template half (`template_codegen::generate_render_with_props`).
+/// The two halves are only ever correct together, so a caller that assembles a
+/// module by hand — rather than through `to_stub_rs*` plus
+/// `compile_template_to_rs_full*` as `velox-cli` does — must emit both or
+/// neither, or the module does not compile (`E0412: cannot find type 'PropsArg'`).
+/// It is `pub` for exactly that caller.
+pub fn generate_props_arg(ss: &str, indent: &str) -> String {
     if crate::script_index::extract_props_fields(ss).is_empty() {
         return format!(
             "{indent}/// This component declares no `Props` struct, so a parent binds nothing to it.\n\
