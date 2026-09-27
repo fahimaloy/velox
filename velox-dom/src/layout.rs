@@ -107,12 +107,9 @@ enum InlineToken {
 
 /// Where the inline run ended, and how tall it was.
 struct InlineRunResult {
-    /// Right edge of the last line's ink, for the block loop's `cur_x`.
-    cur_x: i32,
-    /// `cur_y` after the run.
+    /// `cur_y` after the run: below its last line.
     cur_y: i32,
-    /// Height of the last line, for the block loop's `line_h`.
-    line_h: i32,
+    /// The run's own furthest bottom, for the block loop's `max_y_end`.
     max_y_end: i32,
 }
 
@@ -383,41 +380,231 @@ fn inline_leaf_node(rect: Rect, source_index: usize, children: Vec<LayoutNode>) 
 /// a single text child is the same number.
 fn lay_out_atomic(
     node: &VNode,
-    font_size: f32,
+    source_index: usize,
     ctx: &InlineContext<'_>,
     line_width_used: i32,
     y: i32,
 ) -> LayoutNode {
     let available = (ctx.line_limit - line_width_used).max(0);
-    let mut laid = (ctx.at)(
+    let inset = atomic_padding_and_border(node, ctx);
+
+    // `at` lays a block out at whatever width it is given and a block with no
+    // declared `width` FILLS it, so a first pass at the available width cannot
+    // report how wide the content would like to be -- it just reports the
+    // available width. CSS 2.1 §10.3.5 wants the max-content width clamped by
+    // the available space, so the content is measured first, at a width wide
+    // enough that it cannot wrap, and read back off the result.
+    //
+    // APPROXIMATION, and it is a real one: a descendant whose width is a
+    // PERCENTAGE resolves against the probe, so it asks for the probe's share
+    // and the box comes out as wide as the line instead of its max-content
+    // width. A child with no percentage width is exact. The preferred-MINIMUM
+    // term of §10.3.5 is not modelled either, so content with no break
+    // opportunity does not overflow the way a browser's would.
+    let probe = available
+        .saturating_mul(4)
+        .max(4096)
+        .saturating_add(inset)
+        .min(i32::MAX / 4);
+    let (mut laid, laid_at) = lay_out_atomic_at(node, source_index, probe, ctx, y);
+    let max_content = max_content_width(&laid, laid_at);
+    if max_content > 0 && max_content < probe - inset {
+        let target = max_content.min(available).saturating_add(inset);
+        laid = lay_out_atomic_at(node, source_index, target, ctx, y).0;
+    }
+    laid
+}
+
+/// Lay one atomic at an exact available width. `source_index` is the atomic's
+/// own index among the block's children, and it is REQUIRED: `at` treats a
+/// `None` as "this is the viewport root" and hands back a box that fills the
+/// viewport in both axes, and the renderer and the hit tester both resolve a
+/// `None` by skipping the node's whole subtree.
+fn lay_out_atomic_at(
+    node: &VNode,
+    source_index: usize,
+    avail_w: i32,
+    ctx: &InlineContext<'_>,
+    y: i32,
+) -> (LayoutNode, i32) {
+    let laid = (ctx.at)(
         node,
         ctx.content_x,
         y,
-        ctx.line_limit,
+        avail_w,
         ctx.cb.h,
         ctx.viewport_w,
         ctx.viewport_h,
         ctx.cb,
-        None,
+        Some(source_index),
         ctx.root_font_size,
-        font_size,
+        font_size_of(node, ctx),
     );
-    if laid.rect.w > available {
-        laid = (ctx.at)(
-            node,
-            ctx.content_x,
-            y,
-            available,
-            ctx.cb.h,
-            ctx.viewport_w,
-            ctx.viewport_h,
-            ctx.cb,
-            None,
-            ctx.root_font_size,
-            font_size,
-        );
+    (laid, avail_w)
+}
+
+/// The padding and border an atomic adds around its content, which is the
+/// difference between the CONTENT width §10.3.5 clamps and the containing width
+/// `at` is handed.
+fn atomic_padding_and_border(node: &VNode, ctx: &InlineContext<'_>) -> i32 {
+    let VNode::Element { props, .. } = node else {
+        return 0;
+    };
+    let style = props.attrs.get("style").map(|s| s.as_str());
+    let basis = ctx.cb.w as f32;
+    let (vw, vh) = (ctx.viewport_w as f32, ctx.viewport_h as f32);
+    let fs = font_size_of(node, ctx);
+    let (pl, pr, _, _) = style_box_sides_full(style, "padding", basis, fs, ctx.root_font_size, vw, vh);
+    let (bl, br, _, _) = style_border_widths(style, basis, fs, ctx.root_font_size, vw, vh);
+    pl + pr + bl + br
+}
+
+/// The font size an atomic's own style declares, for resolving its padding and
+/// border percentages.
+fn font_size_of(node: &VNode, ctx: &InlineContext<'_>) -> f32 {
+    let VNode::Element { props, .. } = node else {
+        return ctx.font_size;
+    };
+    let style = props.attrs.get("style").map(|s| s.as_str());
+    style_lookup_font_size(
+        style,
+        ctx.font_size,
+        ctx.root_font_size,
+        (ctx.viewport_w as f32, ctx.viewport_h as f32),
+    )
+    .unwrap_or(ctx.font_size)
+}
+
+/// The ascent above, and descent below, an atomic's own baseline.
+fn atomic_baseline(node: &VNode, laid: &LayoutNode) -> (f32, f32) {
+    let h = laid.rect.h as f32;
+    let asc = atomic_baseline_offset(node, laid).clamp(0.0, h);
+    (asc, (h - asc).max(0.0))
+}
+
+/// Where an atomic's baseline sits, measured down from its own top edge.
+///
+/// CSS 2.1 §10.8.1 makes an inline box's baseline the baseline of its last
+/// in-flow line box, "unless it has either no in-flow line boxes or if its
+/// 'overflow' property has a computed value other than 'visible', in which case
+/// the baseline is the bottom margin edge". Both halves of that are honoured
+/// here. The last line box is not marked in the laid-out tree, so it is found
+/// in the VNode instead: the last text or atomic-inline descendant, which is
+/// where a browser looks too, paired with the last leaf box in the tree, which
+/// is that line's box.
+///
+/// APPROXIMATION, and the exactness is stated rather than assumed: the offset
+/// added is the descendant's own font ascent, which is EXACT when the tallest
+/// thing on that line is its own strut, and short by the overshoot when a run on
+/// that line reaches higher than the strut. An atomic with no in-flow text or
+/// atomic-inline descendant reports its bottom edge, which is also what a
+/// browser does.
+fn atomic_baseline_offset(node: &VNode, laid: &LayoutNode) -> f32 {
+    if !atomic_overflow_is_visible(node) {
+        return laid.rect.h as f32;
     }
-    laid
+    let mut last: Option<&LayoutNode> = None;
+    let mut stack: Vec<&LayoutNode> = laid.children.iter().collect();
+    while let Some(n) = stack.pop() {
+        if n.children.is_empty()
+            && n.rect.h > 0
+            && last.is_none_or(|l: &LayoutNode| n.rect.y >= l.rect.y)
+        {
+            last = Some(n);
+        }
+        stack.extend(n.children.iter());
+    }
+    let Some(leaf) = last else {
+        return laid.rect.h as f32;
+    };
+    let top = (leaf.rect.y - laid.rect.y) as f32;
+    match last_inline_leaf_below(node, inherited_font_size(node)) {
+        Some(InlineLeaf::Text(fs)) => top + FontMetrics::from_font_size(fs).ascent,
+        Some(InlineLeaf::Atomic(child)) => top + atomic_baseline_offset(child, leaf),
+        None => laid.rect.h as f32,
+    }
+}
+
+/// The two kinds of descendant an inline formatting context is made of, for the
+/// purpose of finding a line's baseline.
+enum InlineLeaf<'a> {
+    Text(f32),
+    Atomic(&'a VNode),
+}
+
+/// The last in-flow text or atomic-inline descendant BENEATH `node`, in
+/// document order, and the font size it inherits. `node` itself is never the
+/// answer: this is only ever asked about an atomic, and asking an atomic about
+/// itself would recurse forever.
+///
+/// An atomic-inline child is returned whole and not descended into: it
+/// establishes its own block formatting context, so what is inside it is not on
+/// this line.
+fn last_inline_leaf_below<'a>(node: &'a VNode, inherited: f32) -> Option<InlineLeaf<'a>> {
+    let VNode::Element { props, children, .. } = node else {
+        return None;
+    };
+    let style = props.attrs.get("style").map(|s| s.as_str());
+    let fs = own_font_size(style, inherited);
+    children.iter().rev().find_map(|c| match c {
+        VNode::Text(_) => Some(InlineLeaf::Text(fs)),
+        VNode::Element { .. } if is_out_of_flow(c) => None,
+        VNode::Element { .. } if is_atomic_inline_box(c) => Some(InlineLeaf::Atomic(c)),
+        other => last_inline_leaf_below(other, fs),
+    })
+}
+
+/// The font size `style` declares, or `inherited` when it declares none.
+fn own_font_size(style: Option<&str>, inherited: f32) -> f32 {
+    style_lookup_font_size(style, inherited, inherited, (0.0, 0.0)).unwrap_or(inherited)
+}
+
+/// The font size a node inherits, which is its own when it does not declare
+/// one. `last_inline_leaf` only needs it to read the STRUT off, and a strut is
+/// defined against the element's own font, so the root default of 16 is the
+/// right answer for a node that inherits from nothing.
+fn inherited_font_size(node: &VNode) -> f32 {
+    let VNode::Element { props, .. } = node else {
+        return 16.0;
+    };
+    let style = props.attrs.get("style").map(|s| s.as_str());
+    style_lookup_font_size(style, 16.0, 16.0, (0.0, 0.0)).unwrap_or(16.0)
+}
+
+/// Whether an atomic's computed `overflow` is `visible`, which decides whether
+/// it has a baseline at all (CSS 2.1 §10.8.1). An absent `overflow` is
+/// `visible`.
+fn atomic_overflow_is_visible(node: &VNode) -> bool {
+    let VNode::Element { props, .. } = node else {
+        return true;
+    };
+    match style_lookup_str(props.attrs.get("style").map(|s| s.as_str()), "overflow") {
+        None => true,
+        Some(v) => v.trim() == "visible",
+    }
+}
+
+/// How wide the content of a laid-out tree asked to be.
+///
+/// Read back rather than computed, because nothing in this crate returns an
+/// intrinsic size. It is the distance from the leftmost content edge to the
+/// furthest right edge any descendant reaches, so the box's own padding and
+/// border cancel out and no box-model arithmetic is needed. The root's own
+/// width is excluded: it is the probe, not the content.
+fn max_content_width(root: &LayoutNode, _probe: i32) -> i32 {
+    let mut left = i32::MAX;
+    let mut right = i32::MIN;
+    let mut stack: Vec<&LayoutNode> = root.children.iter().collect();
+    while let Some(n) = stack.pop() {
+        left = left.min(n.rect.x);
+        right = right.max(n.rect.x + n.rect.w);
+        stack.extend(n.children.iter());
+    }
+    if left == i32::MAX {
+        0
+    } else {
+        right - left
+    }
 }
 
 /// A piece of one line, merged back into the single `LayoutNode` the renderer
@@ -496,13 +683,7 @@ fn translate_inline_box(node: &mut LayoutNode, dx: i32, dy: i32) {
     }
 }
 
-fn inline_slots_to_nodes(
-    slots: &[InlineSlot],
-    merged: &[MergedRun],
-    line_top: i32,
-    line_h: i32,
-) -> Vec<LayoutNode> {
-    let _ = line_h;
+fn inline_slots_to_nodes(slots: &[InlineSlot], merged: &[MergedRun]) -> Vec<LayoutNode> {
     let mut out: Vec<LayoutNode> = Vec::new();
     for (idx, slot) in slots.iter().enumerate() {
         match slot {
@@ -533,7 +714,7 @@ fn inline_slots_to_nodes(
                 ));
             }
             InlineSlot::Node(kids) => {
-                let kids = inline_slots_to_nodes(kids, merged, line_top, line_h);
+                let kids = inline_slots_to_nodes(kids, merged);
                 if kids.is_empty() {
                     continue;
                 }
@@ -541,15 +722,20 @@ fn inline_slots_to_nodes(
                 // no box, so this rect is the union of its fragments on this line
                 // and nothing more. It is what lets the renderer reach a text node
                 // inside an inline element, which it does by index.
-                let x = kids.iter().map(|k| k.rect.x).min().unwrap_or(line_top);
-                let right = kids.iter().map(|k| k.rect.x + k.rect.w).max().unwrap_or(x);
-                let top = kids.iter().map(|k| k.rect.y).min().unwrap_or(line_top);
+                // The rect is the union of the fragments, in BOTH axes. Using
+                // the line box's height here instead would report a top-aligned
+                // inline element as as tall as the line, which is the one thing
+                // its own box is not.
+                let x = kids.iter().map(|k| k.rect.x).min().unwrap();
+                let right = kids.iter().map(|k| k.rect.x + k.rect.w).max().unwrap();
+                let top = kids.iter().map(|k| k.rect.y).min().unwrap();
+                let bottom = kids.iter().map(|k| k.rect.y + k.rect.h).max().unwrap();
                 out.push(inline_leaf_node(
                     Rect {
                         x,
                         y: top,
                         w: right - x,
-                        h: line_h,
+                        h: bottom - top,
                     },
                     idx,
                     kids,
@@ -574,9 +760,7 @@ fn flush_inline_run(
 ) -> InlineRunResult {
     if run.is_empty() {
         return InlineRunResult {
-            cur_x: ctx.content_x,
             cur_y,
-            line_h: 0,
             max_y_end: cur_y,
         };
     }
@@ -667,19 +851,26 @@ fn flush_inline_run(
             }
             InlineRunItem::Atomic {
                 node,
+                path,
+                font_family: _,
                 font_size,
                 align: _,
-                ..
             } => {
                 let strut = FontMetrics::from_font_size(*font_size);
-                let laid = lay_out_atomic(node, *font_size, ctx, 0, cur_y);
-                let ascent = strut.ascent.min(laid.rect.h as f32);
+                let laid = lay_out_atomic(
+                    node,
+                    *path.last().expect("an inline run item's path is never empty"),
+                    ctx,
+                    0,
+                    cur_y,
+                );
+                let (ascent, descent) = atomic_baseline(node, &laid);
                 pieces.push(InlinePiece {
                     item: ii,
                     text: String::new(),
                     width: laid.rect.w,
                     ascent,
-                    descent: (laid.rect.h as f32 - ascent).max(0.0),
+                    descent,
                     is_space: false,
                     atomic: true,
                     strut_a: strut.ascent,
@@ -747,8 +938,6 @@ fn flush_inline_run(
         InlineRunItem::Fragment { align, .. } | InlineRunItem::Atomic { align, .. } => *align,
     };
     let mut y = cur_y;
-    let mut cur_x = ctx.content_x;
-    let mut line_h = 0;
     let mut max_y_end = cur_y;
     for (li, line) in lines.iter().enumerate() {
         // The line box's extents. The strut is a floor, so a run of "xxx" -- whose
@@ -795,7 +984,17 @@ fn flush_inline_run(
         let (base_a, base_d) = (max_a, max_d);
         for &pi in line {
             let p = &pieces[pi];
-            let h = p.ascent + p.descent;
+            // The height that is being aligned is the BOX's height, and a box's
+            // height is not its ink: an atomic inline is its own box, while a
+            // text fragment or a plain inline element is the line's font's
+            // content area. Using the ink here would let a top-aligned run of
+            // "Hg" grow the line by its descender even though its box does not
+            // reach that far.
+            let h = if p.atomic {
+                p.ascent + p.descent
+            } else {
+                p.strut_a + p.strut_d
+            };
             match align_of(p.item) {
                 VerticalAlign::Top => max_d = max_d.max((h - base_a).max(0.0)),
                 VerticalAlign::Bottom => max_a = max_a.max((h - base_d).max(0.0)),
@@ -925,17 +1124,14 @@ fn flush_inline_run(
         }
         merged.sort_by_key(|m| m.item);
         let slots = build_inline_slots(&merged, &run);
-        let mut nodes = inline_slots_to_nodes(&slots, &merged, y, height);
+        let mut nodes = inline_slots_to_nodes(&slots, &merged);
         laid_children.append(&mut nodes);
         y += height;
         max_y_end = max_y_end.max(y);
-        cur_x = left + ink;
-        line_h = height;
+
     }
     InlineRunResult {
-        cur_x,
         cur_y: y,
-        line_h,
         max_y_end,
     }
 }
@@ -4043,9 +4239,17 @@ pub fn compute_layout(node: &VNode, viewport_w: i32, viewport_h: i32) -> LayoutN
                                 &mut laid_children,
                                 cur_y,
                             );
-                            cur_x = flushed.cur_x;
                             cur_y = flushed.cur_y;
-                            line_h = flushed.line_h;
+                            // The run CONSUMES its last line: `cur_y` already
+                            // sits below it, so the block child's own
+                            // line-advance must not be charged a second time.
+                            // Resetting `cur_x` to the content origin also makes
+                            // the block loop's `cur_x != content_x` test agree
+                            // that the next child starts a fresh line, rather
+                            // than reaching the same conclusion from a stale
+                            // cursor and advancing again.
+                            cur_x = content_x_scrolled;
+                            line_h = 0;
                             max_y_end = max_y_end.max(flushed.max_y_end);
                         }
                         let mut child_path = vec![idx];
