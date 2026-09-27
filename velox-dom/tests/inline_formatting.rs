@@ -873,13 +873,20 @@ fn the_ellipsis_lands_in_the_piece_where_the_text_ran_out_not_the_first_one() {
     );
 }
 
-/// C-1.3, and the reason it is a separate test: `max_content_width` reads the
-/// laid-out subtree, so if the subtree is untruncated the atomic sizes to the
-/// untruncated width. 200px of line, an inline-block that declares 40px and holds
-/// 80px of text, so `min(max_content, available)` gives 80 without the fix and 40
-/// with it.
+/// A fixed-width atomic truncates its own content, which is the case a label in a
+/// sized box is.
+///
+/// It was first written to pin C-1.3 -- that `max_content_width` reads the laid-out
+/// subtree, so an ellipsised label shrink-fits the UNTRUNCATED width. **That is
+/// not reachable in this implementation, and the test as first written passed for
+/// the wrong reason:** giving the atomic a declared width means `at()` uses that
+/// width and `target` is never consulted, so the test said nothing about
+/// `max_content_width` at all. The reviewer's mechanism needs the truncation to
+/// feed back into the width measurement, and the order here forbids it -- the
+/// subtree is measured at the probe, where nothing truncates, and the second
+/// layout's truncation is never re-measured. See the report.
 #[test]
-fn an_atomic_inline_box_shrinks_to_the_TRUNCATED_width_of_its_content() {
+fn an_atomic_inline_box_with_a_declared_width_truncates_its_content_to_it() {
     register_synthetic();
     let d = inner_of(&h(
         "div",
@@ -894,10 +901,11 @@ fn an_atomic_inline_box_shrinks_to_the_TRUNCATED_width_of_its_content() {
         )],
     ));
     let atomic = &d.children[0];
+    assert_eq!(atomic.rect.w, 40, "the atomic keeps its declared width");
     assert_eq!(
-        atomic.rect.w, 40,
-        "the atomic is as wide as its TRUNCATED content, not its untruncated width; \
-         a max-content of 80 would make it 80 here"
+        atomic.children[0].rect.w, 40,
+        "and its own content truncates to it, so 80px of text becomes four \
+         characters plus an ellipsis and the box does not overflow"
     );
 }
 
