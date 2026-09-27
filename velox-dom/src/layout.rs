@@ -454,7 +454,8 @@ fn atomic_padding_and_border(node: &VNode, ctx: &InlineContext<'_>) -> i32 {
     let basis = ctx.cb.w as f32;
     let (vw, vh) = (ctx.viewport_w as f32, ctx.viewport_h as f32);
     let fs = font_size_of(node, ctx);
-    let (pl, pr, _, _) = style_box_sides_full(style, "padding", basis, fs, ctx.root_font_size, vw, vh);
+    let (pl, pr, _, _) =
+        style_box_sides_full(style, "padding", basis, fs, ctx.root_font_size, vw, vh);
     let (bl, br, _, _) = style_border_widths(style, basis, fs, ctx.root_font_size, vw, vh);
     pl + pr + bl + br
 }
@@ -541,7 +542,10 @@ enum InlineLeaf<'a> {
 /// establishes its own block formatting context, so what is inside it is not on
 /// this line.
 fn last_inline_leaf_below<'a>(node: &'a VNode, inherited: f32) -> Option<InlineLeaf<'a>> {
-    let VNode::Element { props, children, .. } = node else {
+    let VNode::Element {
+        props, children, ..
+    } = node
+    else {
         return None;
     };
     let style = props.attrs.get("style").map(|s| s.as_str());
@@ -600,11 +604,7 @@ fn max_content_width(root: &LayoutNode, _probe: i32) -> i32 {
         right = right.max(n.rect.x + n.rect.w);
         stack.extend(n.children.iter());
     }
-    if left == i32::MAX {
-        0
-    } else {
-        right - left
-    }
+    if left == i32::MAX { 0 } else { right - left }
 }
 
 /// A piece of one line, merged back into the single `LayoutNode` the renderer
@@ -859,7 +859,9 @@ fn flush_inline_run(
                 let strut = FontMetrics::from_font_size(*font_size);
                 let laid = lay_out_atomic(
                     node,
-                    *path.last().expect("an inline run item's path is never empty"),
+                    *path
+                        .last()
+                        .expect("an inline run item's path is never empty"),
                     ctx,
                     0,
                     cur_y,
@@ -1136,7 +1138,6 @@ fn flush_inline_run(
         laid_children.append(&mut nodes);
         y += height;
         max_y_end = max_y_end.max(y);
-
     }
     InlineRunResult {
         cur_y: y,
@@ -4182,7 +4183,6 @@ pub fn compute_layout(node: &VNode, viewport_w: i32, viewport_h: i32) -> LayoutN
                     let mut cur_x = content_x_scrolled;
                     let mut cur_y = content_y_scrolled;
                     let mut last_bottom_margin = 0;
-                    let mut line_h = 0;
                     // The inline run's own settings, read once: every text child
                     // and every inline descendant inherits them unless it sets its
                     // own. `WhiteSpace::parse` is the single definition of the
@@ -4220,7 +4220,7 @@ pub fn compute_layout(node: &VNode, viewport_w: i32, viewport_h: i32) -> LayoutN
                         // by the inline formatting context, which is what decides
                         // where lines break -- including across the edge of an
                         // inline element. The run is flushed before anything that
-                        // is not inline-level, so `cur_x`, `line_h` and an
+                        // is not inline-level, so `cur_x` and an
                         // out-of-flow child's static position all see the real end
                         // of the text that precedes them.
                         //
@@ -4257,7 +4257,6 @@ pub fn compute_layout(node: &VNode, viewport_w: i32, viewport_h: i32) -> LayoutN
                             // than reaching the same conclusion from a stale
                             // cursor and advancing again.
                             cur_x = content_x_scrolled;
-                            line_h = 0;
                             max_y_end = max_y_end.max(flushed.max_y_end);
                         }
                         let mut child_path = vec![idx];
@@ -4295,7 +4294,7 @@ pub fn compute_layout(node: &VNode, viewport_w: i32, viewport_h: i32) -> LayoutN
                             // without moving the cursor, so the following sibling is
                             // unaffected.
                             let (static_x, static_y) = if cur_x != content_x_scrolled {
-                                (content_x_scrolled, cur_y + last_bottom_margin.max(line_h))
+                                (content_x_scrolled, cur_y + last_bottom_margin.max(0))
                             } else {
                                 (cur_x, cur_y)
                             };
@@ -4324,13 +4323,8 @@ pub fn compute_layout(node: &VNode, viewport_w: i32, viewport_h: i32) -> LayoutN
                         }
 
                         if !is_text && cur_x != content_x_scrolled {
-                            cur_y += last_bottom_margin.max(line_h); // Consider bottom margin of last child
+                            cur_y += last_bottom_margin.max(0); // Consider bottom margin of last child
                             cur_x = content_x_scrolled;
-                            // `line_h` is deliberately NOT cleared here. It is
-                            // assigned afresh at the top of every iteration, by the
-                            // inline run's flush or by nothing at all, and the next
-                            // time this branch is taken `cur_x` has already been
-                            // reset, so no value written here is ever read.
                         }
 
                         // Get child's margins for collapsing
@@ -4424,14 +4418,12 @@ pub fn compute_layout(node: &VNode, viewport_w: i32, viewport_h: i32) -> LayoutN
                             // Empty does not advance cur_y beyond previous position;
                             // its collapsed margins are represented via last_bottom_margin for next sibling.
                             cur_x = content_x;
-                            line_h = 0;
                             max_y_end = max_y_end.max(cur_y);
                             laid_children.push(child_ln);
                         } else {
                             cur_y = child_ln.rect.y + child_ln.rect.h;
                             last_bottom_margin = cmb;
                             cur_x = content_x;
-                            line_h = 0;
 
                             max_y_end = max_y_end.max(child_ln.rect.y + child_ln.rect.h);
                             laid_children.push(child_ln);
@@ -4440,8 +4432,8 @@ pub fn compute_layout(node: &VNode, viewport_w: i32, viewport_h: i32) -> LayoutN
                     // A run left open at the end of the children is the last
                     // thing in the block, so it is flushed after the loop. Only
                     // `cur_y` and `max_y_end` are read from the result: a block
-                    // loop that ends here has no following child to inherit a
-                    // `cur_x` or a `line_h`.
+                    // loop that ends here has no following child to place, so
+                    // there is no cursor to leave it at.
                     if !inline_run.is_empty() {
                         let flushed = flush_inline_run(
                             &mut inline_run,
@@ -4461,11 +4453,11 @@ pub fn compute_layout(node: &VNode, viewport_w: i32, viewport_h: i32) -> LayoutN
                             &mut laid_children,
                             cur_y,
                         );
-                        cur_y = flushed.cur_y;
+                        // `cur_y` is deliberately not taken from the result:
+                        // this flush is the last thing the loop does and nothing
+                        // after it reads the cursor. `max_y_end` is what decides
+                        // the block's height, and it is what the flush reports.
                         max_y_end = max_y_end.max(flushed.max_y_end);
-                    }
-                    if line_h > 0 {
-                        max_y_end = max_y_end.max(cur_y + line_h);
                     }
                 }
 
