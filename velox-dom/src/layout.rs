@@ -953,10 +953,18 @@ fn flush_inline_run(
             // the labelled fallback, so a space's "ink" is really the fallback
             // guess, and taking it as a run's extent would let one space make a
             // line taller than the font that owns it.
+            // A piece's contribution to its line is its INK, floored by its own
+            // font's content area. The floor is not optional: an inline element
+            // in a larger font has an ink of its own x-height but a content area
+            // of its own em, and without the floor its box would hang off the
+            // line instead of sitting in it. A space has no ink at all, so it
+            // contributes exactly its content area -- which is what the strut
+            // is a floor for, and which is why a space must not be allowed to
+            // make a line taller than the font that owns it.
             let (ink_a, ink_d) = if p.is_space && !p.atomic {
                 (p.strut_a, p.strut_d)
             } else {
-                (p.ascent, p.descent)
+                (p.ascent.max(p.strut_a), p.descent.max(p.strut_d))
             };
             match align_of(p.item) {
                 VerticalAlign::Baseline => {
