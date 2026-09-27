@@ -159,6 +159,183 @@ fn content_size_for(
     }
 }
 
+/// The used cap from `max-width`, resolved against the containing block's width
+/// so `max-width: 50%` tracks the parent (CSS 2.1 §10.4). `None` means the
+/// property imposes no constraint: it is absent, `auto`, or negative.
+#[allow(clippy::too_many_arguments)]
+fn used_max_width(
+    style: Option<&str>,
+    containing_w: f32,
+    parent_font_size: f32,
+    root_font_size: f32,
+    viewport_w: f32,
+    viewport_h: f32,
+) -> Option<i32> {
+    style_lookup_len_full(
+        style,
+        "max-width",
+        containing_w,
+        parent_font_size,
+        root_font_size,
+        viewport_w,
+        viewport_h,
+    )
+    .filter(|v| *v >= 0)
+}
+
+/// Clamp a computed border-box width to an already-resolved `max-width`.
+///
+/// The cap is expressed in the same box the element's `width` is expressed in,
+/// so under `box-sizing: content-box` the padding and border sit *outside* it
+/// and the border box ends up `max-width + padding + border` wide — which is
+/// what a browser renders. `min-width` is not applied here: this engine has no
+/// `min-width` clamp outside the flex main axis, and adding one is a separate
+/// change from closing the `max-width` gap.
+fn cap_to_max_width(
+    rect_w: i32,
+    max_w: Option<i32>,
+    is_border_box: bool,
+    pl: i32,
+    pr: i32,
+    bl: i32,
+    br: i32,
+) -> i32 {
+    let Some(max_w) = max_w else {
+        return rect_w;
+    };
+    if is_border_box {
+        return rect_w.min(max_w);
+    }
+    let edges = pl + pr + bl + br;
+    (rect_w - edges).min(max_w).max(0) + edges
+}
+
+/// Clamp an already-computed border-box width to the element's own `max-width`.
+///
+/// Both width writers go through here so the box model for the cap is decided in
+/// exactly one place: `at()` for every box, and the flex cross/main-size pass
+/// for flex items whose width the sizing algorithm overwrites after `at()`
+/// returned.
+#[allow(clippy::too_many_arguments)]
+fn clamp_width_to_max_width(
+    rect_w: i32,
+    style: Option<&str>,
+    containing_w: f32,
+    parent_font_size: f32,
+    root_font_size: f32,
+    viewport_w: f32,
+    viewport_h: f32,
+) -> i32 {
+    let Some(max_w) = used_max_width(
+        style,
+        containing_w,
+        parent_font_size,
+        root_font_size,
+        viewport_w,
+        viewport_h,
+    ) else {
+        return rect_w;
+    };
+    let is_border_box = style_lookup_str(style, "box-sizing")
+        .map(|s| s.trim().eq_ignore_ascii_case("border-box"))
+        .unwrap_or(false);
+    let (pl, pr, _, _) = style_box_sides_full(
+        style,
+        "padding",
+        containing_w,
+        parent_font_size,
+        root_font_size,
+        viewport_w,
+        viewport_h,
+    );
+    let (bl, br, _, _) = style_border_widths(
+        style,
+        containing_w,
+        parent_font_size,
+        root_font_size,
+        viewport_w,
+        viewport_h,
+    );
+    cap_to_max_width(rect_w, Some(max_w), is_border_box, pl, pr, bl, br)
+}
+
+/// The CSS containing block for out-of-flow descendants (CSS 2.1 §10.1).
+///
+/// `x`/`y` are the PADDING-edge origin and `w`/`h` the padding-box dimensions of
+/// the nearest positioned ancestor, because a padding box is what CSS makes a
+/// positioned ancestor establish. For the initial containing block these are the
+/// viewport rectangle, which is what the top-level `compute_layout` call passes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ContainingBlock {
+    x: i32,
+    y: i32,
+    w: i32,
+    h: i32,
+    /// Width of the containing block's CONTENT box, which is what percentages
+    /// resolve against. It is only distinct from `w` for a positioned ancestor
+    /// that has horizontal padding or border: that ancestor's PADDING box is the
+    /// containing block, but a descendant's `width: 50%` is half the content
+    /// width, not half the padding-box width.
+    content_w: i32,
+}
+
+/// Whether a box's `position` makes it establish a containing block for its
+/// absolutely positioned descendants (CSS 2.1 §10.1: any `position` other than
+/// `static`).
+///
+/// `position: sticky` is deliberately excluded. It does establish a containing
+/// block in CSS, so this is a known divergence, but sticky is out of scope for
+/// this change and nothing here should quietly change sticky behaviour.
+fn establishes_containing_block(position: &str) -> bool {
+    matches!(position, "relative" | "absolute" | "fixed")
+}
+
+/// The containing block an out-of-flow child resolves against.
+///
+/// `position: fixed` is pinned to the viewport no matter how deeply it is nested
+/// (CSS 2.1 §10.3.4, with the transform/filter caveat that is out of scope here);
+/// `position: absolute` uses its parent's `descendant_cb`.
+fn out_of_flow_containing_block(
+    is_fixed: bool,
+    descendant_cb: ContainingBlock,
+    viewport_w: i32,
+    viewport_h: i32,
+) -> ContainingBlock {
+    if is_fixed {
+        ContainingBlock {
+            x: 0,
+            y: 0,
+            w: viewport_w,
+            h: viewport_h,
+            content_w: viewport_w,
+        }
+    } else {
+        descendant_cb
+    }
+}
+
+/// An out-of-flow child captured during the in-flow pass, held until the
+/// parent's own box is final.
+///
+/// `apply_absolute_position` needs the containing block's size, and for a
+/// positioned ancestor with an auto height that size is not known until the
+/// child tree has been built (the parent's `rect_h` is only final after the
+/// min/max-height clamp). Deferring also means the containing block reflects any
+/// `max-width` clamp, which lands before the child pass.
+struct PendingAbsolute {
+    style: Option<String>,
+    /// `position: fixed` resolves against the viewport regardless of any
+    /// ancestor; `absolute` resolves against `descendant_cb`.
+    is_fixed: bool,
+    /// Where the box lands if it were in flow — its static position
+    /// (CSS 2.1 §10.3.7). Used when neither `left`/`right` nor `top`/`bottom`
+    /// is specified, where the spec's static-position rule applies rather than a
+    /// containing-block corner.
+    static_x: i32,
+    static_y: i32,
+    node: LayoutNode,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Rect {
     pub x: i32,
@@ -643,6 +820,57 @@ fn style_box_sides(style: Option<&str>, base: &str) -> (i32, i32, i32, i32) {
     (l, r, t, b)
 }
 
+/// The displacement `position: relative` / `position: sticky` applies to a box,
+/// derived from the style alone.
+///
+/// `apply_relative_position` moves the box by it, and a positioned element's
+/// PADDING box after that move is the containing block for its absolutely
+/// positioned descendants — so the same offset has to be added to that padding
+/// box, and both read it from here so they cannot drift apart.
+fn relative_offset_delta(
+    style: Option<&str>,
+    base_w: i32,
+    base_h: i32,
+    parent_font_size: f32,
+    root_font_size: f32,
+    viewport_w: f32,
+    viewport_h: f32,
+) -> (i32, i32) {
+    let pos = style_lookup_str(style, "position").unwrap_or_else(|| "static".to_string());
+    if pos != "relative" && pos != "sticky" {
+        return (0, 0);
+    }
+    let axis_delta = |near: &str, far: &str, base: i32| -> i32 {
+        if let Some(v) = style_lookup_len_full(
+            style,
+            near,
+            base as f32,
+            parent_font_size,
+            root_font_size,
+            viewport_w,
+            viewport_h,
+        ) {
+            v
+        } else if let Some(v) = style_lookup_len_full(
+            style,
+            far,
+            base as f32,
+            parent_font_size,
+            root_font_size,
+            viewport_w,
+            viewport_h,
+        ) {
+            -v
+        } else {
+            0
+        }
+    };
+    (
+        axis_delta("left", "right", base_w),
+        axis_delta("top", "bottom", base_h),
+    )
+}
+
 fn apply_relative_position(
     style: Option<&str>,
     node: &mut LayoutNode,
@@ -657,48 +885,17 @@ fn apply_relative_position(
     if pos != "relative" && pos != "sticky" {
         return;
     }
-    if let Some(left) = style_lookup_len_full(
+    let (dx, dy) = relative_offset_delta(
         style,
-        "left",
-        base_w as f32,
+        base_w,
+        base_h,
         parent_font_size,
         root_font_size,
         viewport_w,
         viewport_h,
-    ) {
-        node.rect.x += left;
-    } else if let Some(right) = style_lookup_len_full(
-        style,
-        "right",
-        base_w as f32,
-        parent_font_size,
-        root_font_size,
-        viewport_w,
-        viewport_h,
-    ) {
-        node.rect.x -= right;
-    }
-    if let Some(top) = style_lookup_len_full(
-        style,
-        "top",
-        base_h as f32,
-        parent_font_size,
-        root_font_size,
-        viewport_w,
-        viewport_h,
-    ) {
-        node.rect.y += top;
-    } else if let Some(bottom) = style_lookup_len_full(
-        style,
-        "bottom",
-        base_h as f32,
-        parent_font_size,
-        root_font_size,
-        viewport_w,
-        viewport_h,
-    ) {
-        node.rect.y -= bottom;
-    }
+    );
+    node.rect.x += dx;
+    node.rect.y += dy;
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -810,14 +1007,21 @@ fn apply_sticky_position(
     node.rect.y = final_y;
 }
 
+/// Resolve an out-of-flow box against its containing block (CSS 2.1 §10.3.7).
+///
+/// `cb` is the PADDING box of the nearest positioned ancestor, or the viewport
+/// for the initial containing block — CSS 2.1 §10.1 forms a containing block
+/// from an ancestor's padding edges, not its content box.
+///
+/// `static_pos` is where the box would have been placed by the in-flow pass.
+/// It is used for whichever axis has neither offset, because in that case the
+/// spec's static-position rule applies instead of a containing-block corner.
 #[allow(clippy::too_many_arguments)]
 fn apply_absolute_position(
     style: Option<&str>,
     node: &mut LayoutNode,
-    cb_x: i32,
-    cb_y: i32,
-    cb_w: i32,
-    cb_h: i32,
+    cb: ContainingBlock,
+    static_pos: (i32, i32),
     parent_font_size: f32,
     root_font_size: f32,
     viewport_w: f32,
@@ -826,7 +1030,7 @@ fn apply_absolute_position(
     let left = style_lookup_len_full(
         style,
         "left",
-        cb_w as f32,
+        cb.w as f32,
         parent_font_size,
         root_font_size,
         viewport_w,
@@ -835,7 +1039,7 @@ fn apply_absolute_position(
     let right = style_lookup_len_full(
         style,
         "right",
-        cb_w as f32,
+        cb.w as f32,
         parent_font_size,
         root_font_size,
         viewport_w,
@@ -844,7 +1048,7 @@ fn apply_absolute_position(
     let top = style_lookup_len_full(
         style,
         "top",
-        cb_h as f32,
+        cb.h as f32,
         parent_font_size,
         root_font_size,
         viewport_w,
@@ -853,7 +1057,7 @@ fn apply_absolute_position(
     let bottom = style_lookup_len_full(
         style,
         "bottom",
-        cb_h as f32,
+        cb.h as f32,
         parent_font_size,
         root_font_size,
         viewport_w,
@@ -862,7 +1066,7 @@ fn apply_absolute_position(
     let declared_w = style_lookup_len_full(
         style,
         "width",
-        cb_w as f32,
+        cb.w as f32,
         parent_font_size,
         root_font_size,
         viewport_w,
@@ -871,38 +1075,40 @@ fn apply_absolute_position(
     let declared_h = style_lookup_len_full(
         style,
         "height",
-        cb_h as f32,
+        cb.h as f32,
         parent_font_size,
         root_font_size,
         viewport_w,
         viewport_h,
     );
 
+    // Both offsets on an axis: the box spans the gap between them, which is how
+    // an element with `left:0; right:0` fills its containing block.
     if declared_w.is_none()
         && let (Some(l), Some(r)) = (left, right)
     {
-        node.rect.w = (cb_w - l - r).max(0);
+        node.rect.w = (cb.w - l - r).max(0);
     }
     if declared_h.is_none()
         && let (Some(t), Some(b)) = (top, bottom)
     {
-        node.rect.h = (cb_h - t - b).max(0);
+        node.rect.h = (cb.h - t - b).max(0);
     }
 
     if let Some(l) = left {
-        node.rect.x = cb_x + l;
+        node.rect.x = cb.x + l;
     } else if let Some(r) = right {
-        node.rect.x = cb_x + (cb_w - r - node.rect.w);
+        node.rect.x = cb.x + (cb.w - r - node.rect.w);
     } else {
-        node.rect.x = cb_x;
+        node.rect.x = static_pos.0;
     }
 
     if let Some(t) = top {
-        node.rect.y = cb_y + t;
+        node.rect.y = cb.y + t;
     } else if let Some(b) = bottom {
-        node.rect.y = cb_y + (cb_h - b - node.rect.h);
+        node.rect.y = cb.y + (cb.h - b - node.rect.h);
     } else {
-        node.rect.y = cb_y;
+        node.rect.y = static_pos.1;
     }
 }
 
@@ -1243,10 +1449,7 @@ pub fn compute_layout(node: &VNode, viewport_w: i32, viewport_h: i32) -> LayoutN
         avail_h: i32,
         viewport_w: i32,
         viewport_h: i32,
-        _containing_x: i32,
-        _containing_y: i32,
-        containing_w: i32,
-        _containing_h: i32,
+        containing: ContainingBlock,
         source_index: Option<usize>,
         root_font_size: f32,
         parent_font_size: f32,
@@ -1292,7 +1495,7 @@ pub fn compute_layout(node: &VNode, viewport_w: i32, viewport_h: i32) -> LayoutN
                 let (ml, mr, mt, mb) = style_box_sides_full(
                     style,
                     "margin",
-                    containing_w as f32,
+                    containing.content_w as f32,
                     parent_font_size,
                     root_font_size,
                     vw_f,
@@ -1301,7 +1504,7 @@ pub fn compute_layout(node: &VNode, viewport_w: i32, viewport_h: i32) -> LayoutN
                 let (pl, pr, pt, pb) = style_box_sides_full(
                     style,
                     "padding",
-                    containing_w as f32,
+                    containing.content_w as f32,
                     parent_font_size,
                     root_font_size,
                     vw_f,
@@ -1309,7 +1512,7 @@ pub fn compute_layout(node: &VNode, viewport_w: i32, viewport_h: i32) -> LayoutN
                 );
                 let (bl, br, bt, bb) = style_border_widths(
                     style,
-                    containing_w as f32,
+                    containing.content_w as f32,
                     parent_font_size,
                     root_font_size,
                     vw_f,
@@ -1439,18 +1642,35 @@ pub fn compute_layout(node: &VNode, viewport_w: i32, viewport_h: i32) -> LayoutN
                     || min_height_vh
                     || min_height_is_100pct;
 
-                let rect_w = content_size_for(
-                    declared_w,
-                    avail_w,
-                    is_border_box,
-                    pl,
-                    pr,
-                    bl,
-                    br,
-                    ml,
-                    mr,
-                    is_viewport_filling,
-                    legacy_pair,
+                // `max-width` caps the used width (CSS 2.1 §10.4), so the smaller
+                // of the declared/available width and the cap wins.
+                //
+                // This has to sit between content_size_for and `content_w` below:
+                // `content_w` is what every child is measured against, what text is
+                // wrapped to, and — via `rect_w` — what `overflow`, `clip` and the
+                // scroll metrics are derived from once the child tree exists. A
+                // clamp placed after the child pass would move the box without
+                // moving anything inside it.
+                let rect_w = clamp_width_to_max_width(
+                    content_size_for(
+                        declared_w,
+                        avail_w,
+                        is_border_box,
+                        pl,
+                        pr,
+                        bl,
+                        br,
+                        ml,
+                        mr,
+                        is_viewport_filling,
+                        legacy_pair,
+                    ),
+                    style,
+                    containing.content_w as f32,
+                    my_font_size,
+                    root_font_size,
+                    vw_f,
+                    vh_f,
                 );
 
                 // For viewport-height elements, use viewport height as the base, otherwise box-sizing adjusted
@@ -1560,8 +1780,51 @@ pub fn compute_layout(node: &VNode, viewport_w: i32, viewport_h: i32) -> LayoutN
                 }
 
                 let mut laid_children: Vec<LayoutNode> = Vec::new();
-                let mut abs_children: Vec<LayoutNode> = Vec::new();
+                let mut abs_children: Vec<PendingAbsolute> = Vec::new();
                 let mut max_y_end = content_y_start;
+
+                // The containing block for out-of-flow children (CSS 2.1 §10.1): a
+                // positioned element's PADDING box, or else the containing block
+                // this element was itself handed. A `position: relative` ancestor
+                // displaces its padding box, and that displaced box is what its
+                // absolutely positioned descendants resolve against, so the
+                // relative offset is folded in — from the same helper
+                // `apply_relative_position` moves the box with, so the two cannot
+                // disagree.
+                //
+                // Read twice. The provisional read sizes an out-of-flow child's own
+                // subtree during the child pass; the read in the shared tail, after
+                // `rect_h` exists, is what offsets are resolved against. They differ
+                // only in height, because a positioned ancestor with an auto height
+                // has no height until its children have been laid out.
+                let (rel_dx, rel_dy) = if position == "relative" {
+                    relative_offset_delta(
+                        style,
+                        content_w,
+                        content_h_available,
+                        my_font_size,
+                        root_font_size,
+                        vw_f,
+                        vh_f,
+                    )
+                } else {
+                    (0, 0)
+                };
+                let out_of_flow_cb = |border_box_h: i32| -> ContainingBlock {
+                    if establishes_containing_block(&position) {
+                        ContainingBlock {
+                            x: elem_x + bl + rel_dx,
+                            y: elem_y + bt + rel_dy,
+                            w: (rect_w - bl - br).max(0),
+                            h: (border_box_h - bt - bb).max(0),
+                            content_w: (rect_w - pl - pr - bl - br).max(0),
+                        }
+                    } else {
+                        containing
+                    }
+                };
+                let descendant_cb = out_of_flow_cb(_rect_h);
+
                 if display == "flex" {
                     // Full CSS Flexbox implementation
                     let flex_dir = style_lookup_str(style, "flex-direction")
@@ -1643,56 +1906,41 @@ pub fn compute_layout(node: &VNode, viewport_w: i32, viewport_h: i32) -> LayoutN
                         let position = style_lookup_str(child_style, "position")
                             .unwrap_or_else(|| "static".to_string());
                         if position == "absolute" || position == "fixed" {
-                            // Handle absolute children separately
-                            let cb_x = if position == "fixed" {
-                                0
-                            } else {
-                                content_x_scrolled
-                            };
-                            let cb_y = if position == "fixed" {
-                                0
-                            } else {
-                                content_y_scrolled
-                            };
-                            let cb_w = if position == "fixed" {
-                                viewport_w
-                            } else {
-                                content_w
-                            };
-                            let cb_h = if position == "fixed" {
-                                viewport_h
-                            } else {
-                                content_h_available
-                            };
-                            let mut child_ln = at(
-                                c,
-                                cb_x,
-                                cb_y,
-                                cb_w,
-                                cb_h,
+                            // Out of flow: laid out but never a flex item. `fixed` is
+                            // pinned to the viewport; `absolute` resolves against the
+                            // container's own containing block. The actual offset
+                            // resolution is deferred to the shared tail, once this
+                            // element's own box is final.
+                            let is_fixed = position == "fixed";
+                            let out_cb = out_of_flow_containing_block(
+                                is_fixed,
+                                descendant_cb,
                                 viewport_w,
                                 viewport_h,
-                                cb_x,
-                                cb_y,
-                                cb_w,
-                                cb_h,
+                            );
+                            // Laid out at the flex container's content-box origin: for a
+                            // flex container that is also the static position (CSS Flexbox
+                            // §4.1 puts an out-of-flow child at the content-box start).
+                            let child_ln = at(
+                                c,
+                                content_x_scrolled,
+                                content_y_scrolled,
+                                out_cb.w,
+                                out_cb.h,
+                                viewport_w,
+                                viewport_h,
+                                out_cb,
                                 Some(idx),
                                 root_font_size,
                                 my_font_size,
                             );
-                            apply_absolute_position(
-                                child_style,
-                                &mut child_ln,
-                                cb_x,
-                                cb_y,
-                                cb_w,
-                                cb_h,
-                                my_font_size,
-                                root_font_size,
-                                vw_f,
-                                vh_f,
-                            );
-                            abs_children.push(child_ln);
+                            abs_children.push(PendingAbsolute {
+                                style: child_style.map(str::to_string),
+                                is_fixed,
+                                static_x: child_ln.rect.x,
+                                static_y: child_ln.rect.y,
+                                node: child_ln,
+                            });
                             continue;
                         }
                         flex_children.push(FlexChild {
@@ -1799,7 +2047,7 @@ pub fn compute_layout(node: &VNode, viewport_w: i32, viewport_h: i32) -> LayoutN
                             v
                         }
                     });
-                    let parent_definite = containing_w > 0;
+                    let parent_definite = containing.w > 0;
                     let has_definite_cross_size = has_definite_cross(
                         is_column,
                         parent_definite,
@@ -1926,6 +2174,9 @@ pub fn compute_layout(node: &VNode, viewport_w: i32, viewport_h: i32) -> LayoutN
                         } else {
                             UNCONSTRAINED_CROSS_SIZE // indefinite: unconstrained, children use natural size
                         };
+                        // Laid out at the origin: the position is assigned in the
+                        // placement pass below, and the measure pass needs a definite
+                        // offset base rather than a guess.
                         let ln = at(
                             fc.node,
                             0,
@@ -1934,10 +2185,13 @@ pub fn compute_layout(node: &VNode, viewport_w: i32, viewport_h: i32) -> LayoutN
                             child_avail_main as i32,
                             viewport_w,
                             viewport_h,
-                            content_x,
-                            content_y_start,
-                            content_w,
-                            content_h_available,
+                            ContainingBlock {
+                                x: content_x,
+                                y: content_y_start,
+                                w: content_w,
+                                h: content_h_available,
+                                content_w,
+                            },
                             Some(fc.index),
                             root_font_size,
                             my_font_size,
@@ -2448,6 +2702,26 @@ pub fn compute_layout(node: &VNode, viewport_w: i32, viewport_h: i32) -> LayoutN
                                         ln.rect.w = fb;
                                     }
                                 }
+                                // The item's width is final here — main size from the
+                                // flex algorithm, or cross size from stretch — and all
+                                // three of those overwrite whatever `at()` measured, so
+                                // `max-width` has to be re-applied. Doing it before
+                                // `item_cross_size` is read means a capped column item
+                                // is also centred/flex-ended against its real width.
+                                let item_style = flex_children
+                                    .iter()
+                                    .find(|fc| fc.index == items[item_idx].child_index)
+                                    .map(|fc| fc.style)
+                                    .unwrap_or(None);
+                                ln.rect.w = clamp_width_to_max_width(
+                                    ln.rect.w,
+                                    item_style,
+                                    content_w as f32,
+                                    my_font_size,
+                                    root_font_size,
+                                    vw_f,
+                                    vh_f,
+                                );
                                 let item_align = if items[item_idx].align_self == "auto" {
                                     align_items.clone()
                                 } else {
@@ -2507,11 +2781,7 @@ pub fn compute_layout(node: &VNode, viewport_w: i32, viewport_h: i32) -> LayoutN
                                 );
                                 ln.rect.x = resolved_x;
                                 ln.rect.y = resolved_y;
-                                let child_style = flex_children
-                                    .iter()
-                                    .find(|fc| fc.index == items[item_idx].child_index)
-                                    .map(|fc| fc.style)
-                                    .unwrap_or(None);
+                                let child_style = item_style;
                                 apply_relative_position(
                                     child_style,
                                     &mut ln,
@@ -2578,55 +2848,52 @@ pub fn compute_layout(node: &VNode, viewport_w: i32, viewport_h: i32) -> LayoutN
                         let position = style_lookup_str(child_style, "position")
                             .unwrap_or_else(|| "static".to_string());
                         if position == "absolute" || position == "fixed" {
-                            let cb_x = if position == "fixed" {
-                                0
-                            } else {
-                                content_x_scrolled
-                            };
-                            let cb_y = if position == "fixed" {
-                                0
-                            } else {
-                                content_y_scrolled
-                            };
-                            let cb_w = if position == "fixed" {
-                                viewport_w
-                            } else {
-                                content_w
-                            };
-                            let cb_h = if position == "fixed" {
-                                viewport_h
-                            } else {
-                                content_h_available
-                            };
-                            let mut child_ln = at(
-                                c,
-                                cb_x,
-                                cb_y,
-                                cb_w,
-                                cb_h,
+                            // Out of flow: laid out, but it never advances `cur_y` and
+                            // never reaches `max_y_end`, so the parent's height is
+                            // unaffected. `fixed` is pinned to the viewport; `absolute`
+                            // resolves against this element's own containing block.
+                            // Offset resolution is deferred to the shared tail, once
+                            // this element's box is final.
+                            let is_fixed = position == "fixed";
+                            let out_cb = out_of_flow_containing_block(
+                                is_fixed,
+                                descendant_cb,
                                 viewport_w,
                                 viewport_h,
-                                cb_x,
-                                cb_y,
-                                cb_w,
-                                cb_h,
+                            );
+
+                            // The static position (CSS 2.1 §10.3.7) is where the box
+                            // would have landed in flow. A block-level box following an
+                            // open inline line starts a new line, which is the same
+                            // cursor advance the in-flow path does below — computed here
+                            // without moving the cursor, so the following sibling is
+                            // unaffected.
+                            let (static_x, static_y) = if cur_x != content_x_scrolled {
+                                (content_x_scrolled, cur_y + last_bottom_margin.max(line_h))
+                            } else {
+                                (cur_x, cur_y)
+                            };
+
+                            let child_ln = at(
+                                c,
+                                static_x,
+                                static_y,
+                                out_cb.w,
+                                out_cb.h,
+                                viewport_w,
+                                viewport_h,
+                                out_cb,
                                 Some(idx),
                                 root_font_size,
                                 my_font_size,
                             );
-                            apply_absolute_position(
-                                child_style,
-                                &mut child_ln,
-                                cb_x,
-                                cb_y,
-                                cb_w,
-                                cb_h,
-                                my_font_size,
-                                root_font_size,
-                                vw_f,
-                                vh_f,
-                            );
-                            abs_children.push(child_ln);
+                            abs_children.push(PendingAbsolute {
+                                style: child_style.map(str::to_string),
+                                is_fixed,
+                                static_x: child_ln.rect.x,
+                                static_y: child_ln.rect.y,
+                                node: child_ln,
+                            });
                             continue;
                         }
 
@@ -2764,6 +3031,8 @@ pub fn compute_layout(node: &VNode, viewport_w: i32, viewport_h: i32) -> LayoutN
                         // If parent had pt/bt, collapsed == cmt so child at cur_y + cmt as before.
                         let adjusted_cur_y = cur_y + collapsed_margin_top - cmt;
 
+                        // In flow: a static box's containing block is its parent's
+                        // content box, which is what percentages resolve against.
                         let mut child_ln = at(
                             c,
                             cur_x,
@@ -2772,10 +3041,13 @@ pub fn compute_layout(node: &VNode, viewport_w: i32, viewport_h: i32) -> LayoutN
                             content_h_available,
                             viewport_w,
                             viewport_h,
-                            content_x,
-                            content_y_start,
-                            content_w,
-                            content_h_available,
+                            ContainingBlock {
+                                x: content_x,
+                                y: content_y_start,
+                                w: content_w,
+                                h: content_h_available,
+                                content_w,
+                            },
                             Some(idx),
                             root_font_size,
                             my_font_size,
@@ -2927,7 +3199,29 @@ pub fn compute_layout(node: &VNode, viewport_w: i32, viewport_h: i32) -> LayoutN
                 // are positioned from the raw values above, so the stored fields must
                 // match or render/hit-test would disagree. Wheel-driven scrolling
                 // clamps via ScrollState / apply_scroll_offsets instead.
-                laid_children.extend(abs_children);
+                // Out-of-flow children are resolved last, now that `rect_w`/`rect_h`
+                // are final, and appended last so they paint above their in-flow
+                // siblings (velox-renderer sorts by `z_index` within list order).
+                let out_cb = out_of_flow_cb(rect_h);
+                for mut pending in abs_children {
+                    let cb = out_of_flow_containing_block(
+                        pending.is_fixed,
+                        out_cb,
+                        viewport_w,
+                        viewport_h,
+                    );
+                    apply_absolute_position(
+                        pending.style.as_deref(),
+                        &mut pending.node,
+                        cb,
+                        (pending.static_x, pending.static_y),
+                        my_font_size,
+                        root_font_size,
+                        vw_f,
+                        vh_f,
+                    );
+                    laid_children.push(pending.node);
+                }
                 LayoutNode {
                     rect: Rect {
                         x: elem_x,
@@ -2950,6 +3244,8 @@ pub fn compute_layout(node: &VNode, viewport_w: i32, viewport_h: i32) -> LayoutN
             }
         }
     }
+    // The initial containing block is the viewport, so that is what an out-of-flow
+    // box with no positioned ancestor resolves against (CSS 2.1 §10.1).
     at(
         node,
         0,
@@ -2958,10 +3254,13 @@ pub fn compute_layout(node: &VNode, viewport_w: i32, viewport_h: i32) -> LayoutN
         viewport_h,
         viewport_w,
         viewport_h,
-        0,
-        0,
-        viewport_w,
-        viewport_h,
+        ContainingBlock {
+            x: 0,
+            y: 0,
+            w: viewport_w,
+            h: viewport_h,
+            content_w: viewport_w,
+        },
         None,
         DEFAULT_ROOT_FONT_SIZE,
         DEFAULT_ROOT_FONT_SIZE,
