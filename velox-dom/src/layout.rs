@@ -3,6 +3,10 @@ use crate::{Length, VNode};
 /// Default font size for root element (used for rem calculations)
 const DEFAULT_ROOT_FONT_SIZE: f32 = 16.0;
 
+/// Font family used for text measurement when a caller has no stylesheet
+/// context to name one. Matches the family `text_wrap::wrap_text` assumes.
+pub const DEFAULT_TEXT_FAMILY: &str = "system-ui";
+
 /// Sentinel value for unconstrained cross-size in flex layout (fit-content)
 /// CSS Flexbox spec: when cross-size is indefinite, children lay out at natural size
 const UNCONSTRAINED_CROSS_SIZE: f32 = i32::MAX as f32;
@@ -11,18 +15,48 @@ const UNCONSTRAINED_CROSS_SIZE: f32 = i32::MAX as f32;
 pub struct FontMetrics {
     pub char_width: f32,
     pub line_height: f32,
+    /// Distance above the baseline of the font's typographic ascent, and below
+    /// the baseline of its typographic descent.
+    ///
+    /// Unlike the per-run `ascent`/`descent` on `text_wrap::MeasuredText`, these
+    /// do not depend on the characters being drawn: they are the *strut*, the
+    /// height every line box must be at least as tall as. They are an
+    /// approximation, because the layout path has no font backend of its own —
+    /// the measurer registered through `text_wrap::set_skia_measurer` is the only
+    /// source of real font metrics, and what it reports is a run's ink extent.
+    ///
+    /// `heuristic_vertical` is the single definition of that approximation; the
+    /// text seam's no-measurer fallback calls it too, so the two cannot drift.
+    pub ascent: f32,
+    pub descent: f32,
 }
 
 impl FontMetrics {
+    /// The documented approximation for a run's vertical extent when no font
+    /// backend is registered (CSS `normal`-ish ratios: 0.8em up, 0.4em down).
+    ///
+    /// The SPLIT is a guess and is labelled as one — a real Latin face has an
+    /// ascent of roughly 0.75-0.93em and a descent of roughly 0.21-0.25em, so the
+    /// descent here is deliberately deeper than any of them. The TOTAL is not a
+    /// guess: 0.8 + 0.4 is 1.2, which is exactly the `line_height`
+    /// `from_font_size` has always produced, so a headless line box keeps the
+    /// height it had before vertical metrics existed.
+    pub fn heuristic_vertical(font_size_px: f32) -> (f32, f32) {
+        (font_size_px * 0.8, font_size_px * 0.4)
+    }
+
     pub fn from_font_size(font_size_px: f32) -> Self {
         // Approximate character width ratio for typical fonts
         // '0' (zero) is roughly 0.6 * font_size for most fonts
         let char_width = font_size_px * 0.6;
         // Line height is typically 1.2 * font_size
         let line_height = font_size_px * 1.2;
+        let (ascent, descent) = Self::heuristic_vertical(font_size_px);
         Self {
             char_width,
             line_height,
+            ascent,
+            descent,
         }
     }
 }
@@ -1121,7 +1155,20 @@ fn text_dimensions(t: &str, font_size_px: f32) -> (i32, i32) {
     } else {
         0
     };
-    let h = metrics.line_height.round() as i32;
+    // The height follows the run, through the same seam the wrapped-lines path
+    // uses. The WIDTH above is deliberately still the 0.6 heuristic: this run
+    // was never measured, and switching it to the seam would change every text
+    // width in a Skia run. Height was a fixed multiplier, so changing it is the
+    // point of the task.
+    let h = {
+        let run = crate::text_wrap::measure_text_metrics(
+            t,
+            font_size_px,
+            DEFAULT_TEXT_FAMILY,
+            crate::text_wrap::current_scale(),
+        );
+        (run.ascent + run.descent).round() as i32
+    };
     (w, h)
 }
 

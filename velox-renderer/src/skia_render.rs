@@ -7,6 +7,7 @@
 #![allow(unused)]
 
 use velox_dom::VNode;
+use velox_dom::text_wrap::MeasuredText;
 use velox_style::{Stylesheet, apply_with_cascade};
 
 #[cfg(feature = "skia-native")]
@@ -990,24 +991,48 @@ pub mod skia_impl {
         /// Measure the width (in px) of `text` rendered at `size` using the cached typeface.
         /// Measurement is at DPI-snapped size so layout and render agree (no wrap mismatch).
         pub fn measure_text(&mut self, family: &str, size: f32, text: &str) -> f32 {
+            self.measure_run(family, size, text).width
+        }
+
+        /// Measure `text`'s advance width *and* its vertical extent.
+        ///
+        /// `font.measure_str` already returned the ink bounds and this code threw
+        /// them away (`_bounds`); they are the vertical answer. Skia reports those
+        /// bounds with the baseline at y = 0, so the run's reach above the
+        /// baseline is `-top` and its reach below is `bottom`.
+        ///
+        /// A run with no ink — a blank one, or a space — measures a zero-height
+        /// rectangle, which is a true statement about ink and a useless one about
+        /// a line box, so that case is left for the seam to answer from the
+        /// documented approximation rather than propagated. `.max(0.0)` also maps
+        /// a NaN bound to 0.0, which lands in that same case. Both numbers are
+        /// left in the raw device units Skia measured in, exactly as the width has
+        /// always been: there is one rounding authority in this project and it is
+        /// not here.
+        pub fn measure_run(&mut self, family: &str, size: f32, text: &str) -> MeasuredText {
             let font = self.font(family, size);
             let mut p = sk::Paint::default();
             p.set_anti_alias(true);
-            let (w, _bounds) = font.measure_str(text, Some(&p));
-            w
+            let (w, bounds) = font.measure_str(text, Some(&p));
+            MeasuredText {
+                width: w,
+                ascent: (-bounds.top).max(0.0),
+                descent: bounds.bottom.max(0.0),
+            }
         }
     }
 
     /// Public measure helper for layout unify: snapped size, scale-aware.
-    /// Consumes: text, font_size (logical), font_family, scale -> logical px width (snapped).
-    pub fn measure_text(text: &str, font_size: f32, font_family: &str, scale: f32) -> f32 {
+    /// Consumes: text, font_size (logical), font_family, scale -> logical px width
+    /// (snapped) plus the run's ascent and descent.
+    pub fn measure_text(text: &str, font_size: f32, font_family: &str, scale: f32) -> MeasuredText {
         let snapped = if scale.is_finite() && scale > 0.0 {
             (font_size * scale).round() / scale
         } else {
             font_size
         };
         let mut fc = FontCache::new_with_scale(scale);
-        fc.measure_text(font_family, snapped, text)
+        fc.measure_run(font_family, snapped, text)
     }
 
     fn load_default_typeface() -> Option<sk::Typeface> {
@@ -1507,6 +1532,166 @@ pub mod skia_impl {
         use velox_dom::h;
         use velox_style::Stylesheet;
 
+        // ------------------------------------------------------------------
+        // The measurement seam, against a real font backend.
+        //
+        // These need `--features skia-native`; without it the crate's fallback
+        // measurer is registered instead and there is no font to measure.
+        // ------------------------------------------------------------------
+
+        const SEAM_FAMILY: &str = "system-ui";
+        const SEAM_SIZE: f32 = 16.0;
+
+        /// Heights of the text line boxes `vnode` lays out, in order.
+        fn seam_line_heights(vnode: &VNode) -> Vec<i32> {
+            let laid = velox_dom::layout::compute_layout(vnode, 300, 300);
+            let mut out = vec![laid.rect.h];
+            for child in &laid.children {
+                if child.children.is_empty() {
+                    out.push(child.rect.h);
+                } else {
+                    for grandchild in &child.children {
+                        out.push(grandchild.rect.h);
+                    }
+                }
+            }
+            out
+        }
+
+        /// A div whose only child is one text node, wrapping only at explicit
+        /// newlines, so each line's content is known exactly.
+        fn seam_pre_text_div(text: &str) -> VNode {
+            let style = format!("width:240px;font-size:{SEAM_SIZE}px;white-space:pre");
+            h(
+                "div",
+                vec![("style", style.as_str())],
+                vec![VNode::Text(text.to_string())],
+            )
+        }
+
+        #[test]
+        fn measured_run_vertical_metrics_come_from_the_glyphs_not_a_constant() {
+            let caps = measure_text("H", SEAM_SIZE, SEAM_FAMILY, 1.0);
+            let lower = measure_text("x", SEAM_SIZE, SEAM_FAMILY, 1.0);
+            let mixed = measure_text("Hg", SEAM_SIZE, SEAM_FAMILY, 1.0);
+
+            // The load-bearing assertion. A fabricated `descent = 0.4em` gives
+            // every run the same descent, including a capital, which has none.
+            assert_eq!(
+                caps.descent,
+                0.0,
+                "a capital has no descender in any real face; got {} \
+                 (0.4em would be {})",
+                caps.descent,
+                SEAM_SIZE * 0.4
+            );
+            assert!(
+                mixed.descent > 0.0,
+                "a run containing a descender must report one, got {}",
+                mixed.descent
+            );
+            assert!(
+                mixed.descent > caps.descent,
+                "descent must depend on the glyphs, not the font"
+            );
+
+            // Likewise a fabricated `ascent = 0.8em` gives every run the same
+            // ascent, but cap height is taller than x-height in every real face.
+            assert!(
+                caps.ascent > lower.ascent,
+                "cap height ({}) must exceed x-height ({}); 0.8em would make both {}",
+                caps.ascent,
+                lower.ascent,
+                SEAM_SIZE * 0.8
+            );
+            assert!(
+                mixed.ascent > lower.ascent,
+                "a run with a capital must reach higher than one without"
+            );
+
+            // In a Latin face the ascent dominates the descent.
+            assert!(
+                mixed.ascent > mixed.descent,
+                "ascent {} must exceed descent {} for Latin text",
+                mixed.ascent,
+                mixed.descent
+            );
+            assert!(
+                mixed.line_extent() > lower.line_extent(),
+                "the total extent must follow the content: {} vs {}",
+                mixed.line_extent(),
+                lower.line_extent()
+            );
+            assert!(
+                mixed.width != SEAM_SIZE * 0.5 * 2.0,
+                "width {} is exactly the 0.5em-per-char heuristic, so this is not \
+                 a real proportional font",
+                mixed.width
+            );
+        }
+
+        #[test]
+        fn line_box_height_under_real_metrics_follows_the_run_in_it() {
+            velox_dom::text_wrap::set_skia_measurer(measure_text);
+            let heights = seam_line_heights(&seam_pre_text_div("Hg\nxxx"));
+            assert_eq!(heights.len(), 3, "root, div, two line boxes: {heights:?}");
+
+            for (line_text, got) in [("Hg", heights[1]), ("xxx", heights[2])] {
+                let run = measure_text(line_text, SEAM_SIZE, SEAM_FAMILY, 1.0);
+                assert_eq!(
+                    got,
+                    run.line_extent().round() as i32,
+                    "line {line_text:?} should be the round of its own run's extent \
+                     {} + {} = {}",
+                    run.ascent,
+                    run.descent,
+                    run.line_extent()
+                );
+            }
+            assert_ne!(
+                heights[1], heights[2],
+                "two lines of different content must get different heights: {heights:?}"
+            );
+            let nominal = (SEAM_SIZE * 1.2).round() as i32;
+            assert!(
+                heights.iter().all(|h| *h != nominal),
+                "no line box may still be the fixed 1.2em multiplier: {heights:?}"
+            );
+        }
+
+        #[test]
+        fn a_blank_run_does_not_collapse_its_line_box_under_real_metrics() {
+            velox_dom::text_wrap::set_skia_measurer(measure_text);
+            // A space really has no ink, so Skia reports a zero-height rectangle
+            // for it. Passing that on as a line box would be a zero-height line.
+            let blank = measure_text(" ", SEAM_SIZE, SEAM_FAMILY, 1.0);
+            assert_eq!(
+                blank.line_extent(),
+                0.0,
+                "precondition: a blank run really does measure zero ink"
+            );
+            let heights = seam_line_heights(&seam_pre_text_div(" "));
+            assert!(
+                heights.iter().all(|h| *h > 0),
+                "a line box collapsed to {heights:?}"
+            );
+            assert_eq!(
+                heights[1],
+                (SEAM_SIZE * 1.2).round() as i32,
+                "with no usable vertical measurement the documented approximation applies"
+            );
+        }
+
+        #[test]
+        fn a_nan_vertical_bound_cannot_escape_the_seam() {
+            // `f32::max` maps a NaN bound to 0.0, which is the same
+            // zero-extent case the seam already handles. Asserted here because
+            // the sanitising happens in the measurer, far from the guard that
+            // consumes it, and the two must stay in step.
+            assert_eq!(f32::NAN.max(0.0), 0.0);
+            assert_eq!((-f32::NAN).max(0.0), 0.0);
+        }
+
         #[test]
         #[ignore = "requires skia-native feature and GPU hardware"]
         fn render_overflow_hidden_clips_children() {
@@ -1681,7 +1866,25 @@ pub mod skia_impl {
     /// Heuristic fallback when skia-native not compiled — still snapped, but uses
     /// fixed 0.5 ratio so divergence test (0.6) triggers while wrap parity holds
     /// via same fallback in both crates headless.
-    pub fn measure_text(text: &str, font_size: f32, _font_family: &str, scale: f32) -> f32 {
+    ///
+    /// UNREACHABLE TODAY: `lib.rs` gates this entire file behind
+    /// `feature = "skia-native"`, so this `cfg(not(...))` module is in no current
+    /// build. The non-Skia width that *is* compiled is `text.rs`'s
+    /// `measure_with_scale` fallback branch, which evaluates the same expression
+    /// below. This copy is kept correct rather than deleted so ungating the module
+    /// cannot hand layout a half-updated seam.
+    ///
+    /// There is no font backend here, so the vertical half is the approximation
+    /// `FontMetrics::heuristic_vertical` documents, not a measurement. It is
+    /// deliberately not zero: a zero ascent and descent would collapse every line
+    /// box on this path to zero height, which is a silent, catastrophic wrong
+    /// answer on the path that is easiest to reach in a test.
+    pub fn measure_text(
+        text: &str,
+        font_size: f32,
+        _font_family: &str,
+        scale: f32,
+    ) -> MeasuredText {
         let snapped = if scale.is_finite() && scale > 0.0 {
             (font_size * scale).round() / scale
         } else {
@@ -1689,7 +1892,12 @@ pub mod skia_impl {
         };
         // Use slightly different ratio than old 0.6 to prove divergence (>0.5) but
         // stable for wrap parity when skia not available.
-        snapped * 0.5 * text.chars().count() as f32
+        let (ascent, descent) = velox_dom::layout::FontMetrics::heuristic_vertical(snapped);
+        MeasuredText {
+            width: snapped * 0.5 * text.chars().count() as f32,
+            ascent,
+            descent,
+        }
     }
 }
 

@@ -30,7 +30,37 @@ fn measure_heuristic(text: &str, font_size_px: f32, scale: f32) -> f32 {
 }
 
 use std::sync::RwLock;
-static SKIA_MEASURER: RwLock<Option<fn(&str, f32, &str, f32) -> f32>> = RwLock::new(None);
+
+/// One measured run of text: how wide it advances, and how far it reaches above
+/// and below its own baseline.
+///
+/// `ascent` and `descent` are the extent of *this run's ink*, so they are a
+/// property of the characters, not of the font: a run of "xxx" stops at
+/// x-height and measures a smaller ascent than a run of "Hg". A font's
+/// typographic ascent/descent — the strut a line box may not be shorter than —
+/// are the separate `ascent`/`descent` on `crate::layout::FontMetrics`.
+///
+/// The vertical split is a fact the measurer now *reports* where a real font
+/// backend is registered. It is not yet the fact a line box is built from: the
+/// height of a line is still `ascent + descent` of its own run, with no strut
+/// floor. That floor, line boxes, baseline alignment and inline-block all belong
+/// to the inline formatting context, not here.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct MeasuredText {
+    pub width: f32,
+    pub ascent: f32,
+    pub descent: f32,
+}
+
+impl MeasuredText {
+    /// Total vertical extent of the run: the full height of its ink.
+    #[inline]
+    pub fn line_extent(&self) -> f32 {
+        self.ascent + self.descent
+    }
+}
+
+static SKIA_MEASURER: RwLock<Option<fn(&str, f32, &str, f32) -> MeasuredText>> = RwLock::new(None);
 static CURRENT_SCALE: RwLock<f32> = RwLock::new(1.0);
 
 /// Set the current viewport scale for layout text measure (single rounding point remains Viewport).
@@ -47,8 +77,10 @@ pub fn current_scale() -> f32 {
     CURRENT_SCALE.read().ok().map(|g| *g).unwrap_or(1.0)
 }
 
-/// Register a Skia-backed measurer (called by velox-renderer at init).
-pub fn set_skia_measurer(f: fn(&str, f32, &str, f32) -> f32) {
+/// Register a measurer backed by a real font backend (called by velox-renderer
+/// at init). It reports the run's advance width *and* its vertical extent, so
+/// layout can size a line box from the content instead of from a multiplier.
+pub fn set_skia_measurer(f: fn(&str, f32, &str, f32) -> MeasuredText) {
     if let Ok(mut g) = SKIA_MEASURER.write() {
         *g = Some(f);
     }
@@ -57,15 +89,62 @@ pub fn set_skia_measurer(f: fn(&str, f32, &str, f32) -> f32) {
 fn measure_text_internal(text: &str, font_size_px: f32, font_family: &str, scale: f32) -> f32 {
     if let Ok(g) = SKIA_MEASURER.read() {
         if let Some(f) = *g {
-            return f(text, font_size_px, font_family, scale);
+            return f(text, font_size_px, font_family, scale).width;
         }
     }
     measure_heuristic(text, font_size_px, scale)
 }
 
+/// Measure one run's vertical extent as well as its width, through the same seam
+/// the width-only path uses.
+///
+/// With no measurer registered the vertical half is the documented approximation
+/// on `FontMetrics` — `FontMetrics::heuristic_vertical` — so it is never zero and
+/// a line box never collapses. A registered measurer that reports no usable
+/// vertical extent (an all-whitespace run, which really has no ink) also falls
+/// back, but only for the vertical half: its width is a real measurement and is
+/// kept. Falling back rather than propagating zero is what stops a blank run from
+/// silently producing a zero-height line.
+pub fn measure_text_metrics(
+    text: &str,
+    font_size_px: f32,
+    font_family: &str,
+    scale: f32,
+) -> MeasuredText {
+    let (ascent, descent) = FontMetrics::heuristic_vertical(snapped_size(font_size_px, scale));
+    if let Ok(g) = SKIA_MEASURER.read() {
+        if let Some(f) = *g {
+            let m = f(text, font_size_px, font_family, scale);
+            if m.ascent.is_finite() && m.descent.is_finite() && m.line_extent() > 0.0 {
+                return m;
+            }
+            return MeasuredText {
+                width: m.width,
+                ascent,
+                descent,
+            };
+        }
+    }
+    MeasuredText {
+        width: measure_heuristic(text, font_size_px, scale),
+        ascent,
+        descent,
+    }
+}
+
 /// Public measure for tests / layout: snapped, family-aware (family ignored in heuristic).
 pub fn measure_text(text: &str, font_size_px: f32, font_family: &str, scale: f32) -> f32 {
     measure_text_internal(text, font_size_px, font_family, scale)
+}
+
+/// Height of a line box whose only content is this run.
+///
+/// This is the run's own extent with no strut floor: two lines whose runs reach
+/// different heights get different heights. It is the same sum the heuristic
+/// path has always produced (`font_size * 0.8 + font_size * 0.4` ≈
+/// `font_size * 1.2`), so nothing moves until a real font backend is registered.
+fn line_box_height(m: &MeasuredText) -> i32 {
+    m.line_extent().round() as i32
 }
 
 /// Legacy heuristic width single-char estimate for divergence test — old 0.6 ratio.
@@ -295,12 +374,19 @@ pub fn wrap_text(text: &str, max_width: i32, font_size_px: f32) -> Vec<TextLine>
             height: line_height,
         }];
     }
+    let snapped = snapped_size(font_size_px, scale);
     measured
         .into_iter()
-        .map(|(s, w)| TextLine {
-            text: s,
-            width: w.round() as i32,
-            height: line_height,
+        .map(|(s, w)| {
+            // The line's height comes from the run that is actually in it, not
+            // from the font's nominal line height: two lines whose text reaches
+            // different heights get different heights.
+            let run = measure_text_metrics(&s, snapped, "system-ui", scale);
+            TextLine {
+                text: s,
+                width: w.round() as i32,
+                height: line_box_height(&run),
+            }
         })
         .collect()
 }
@@ -327,6 +413,7 @@ pub fn wrap_text_with_options(
     );
     let metrics = FontMetrics::from_font_size(snapped_size(font_size_px, scale));
     let line_height = metrics.line_height.round() as i32;
+    let snapped = snapped_size(font_size_px, scale);
     if measured.is_empty() {
         return vec![TextLine {
             text: String::new(),
@@ -336,10 +423,13 @@ pub fn wrap_text_with_options(
     }
     measured
         .into_iter()
-        .map(|(s, w)| TextLine {
-            text: s,
-            width: w.round() as i32,
-            height: line_height,
+        .map(|(s, w)| {
+            let run = measure_text_metrics(&s, snapped, font_family, scale);
+            TextLine {
+                text: s,
+                width: w.round() as i32,
+                height: line_box_height(&run),
+            }
         })
         .collect()
 }

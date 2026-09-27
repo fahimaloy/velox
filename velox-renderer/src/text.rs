@@ -160,7 +160,8 @@ impl TextMeasurer {
         }
         let snapped = Self::snapped_size(config.font_size, scale);
         #[cfg(feature = "skia-native")]
-        let width = crate::skia_render::measure_text(text, snapped, &config.font_family, scale);
+        let width =
+            crate::skia_render::measure_text(text, snapped, &config.font_family, scale).width;
         #[cfg(not(feature = "skia-native"))]
         let width = snapped * 0.5 * text.chars().count() as f32;
         let height = config.line_height.to_pixels(snapped);
@@ -273,6 +274,60 @@ mod tests {
 
         assert!(w > 0.0);
         assert_eq!(h, 19.2); // 1.2 * 16.0
+    }
+
+    /// `test_text_measurement` above asserts `w > 0.0`, which is a shape
+    /// assertion: it holds for any non-zero width whatsoever. Falsification
+    /// showed it does not notice the non-Skia branch's 0.5 ratio moving to
+    /// 0.55, so the formula itself needs a pin or nothing guards it.
+    #[cfg(not(feature = "skia-native"))]
+    #[test]
+    fn the_non_skia_measured_width_is_half_an_em_per_character_at_the_snapped_size() {
+        for text in ["", "a", "Hg", "Hello", "not positive"] {
+            for size in [1.0f32, 11.0, 16.0, 16.5, 33.0, 47.25] {
+                for scale in [1.0f32, 1.25, 1.5, 2.0] {
+                    let config = TextRenderConfig::new("Arial", size);
+                    let (w, _) = TextMeasurer::measure_with_scale(text, &config, scale);
+                    let snapped = if scale.is_finite() && scale > 0.0 && scale != 1.0 {
+                        (size * scale).round() / scale
+                    } else {
+                        size
+                    };
+                    assert_eq!(
+                        w,
+                        snapped * 0.5 * text.chars().count() as f32,
+                        "non-Skia width for {text:?} at {size}px scale {scale} \
+                         is not 0.5em per char at the snapped size"
+                    );
+                }
+            }
+        }
+    }
+
+    /// The renderer and the layout seam must agree on the width of the same
+    /// run at the same size, or layout reserves one width and the renderer
+    /// draws another. This is the relationship R-5b will lean on, and it is
+    /// only checkable with a real measurer registered.
+    #[cfg(feature = "skia-native")]
+    #[test]
+    fn the_renderer_and_the_layout_seam_measure_a_run_identically() {
+        velox_dom::text_wrap::set_skia_measurer(crate::skia_render::measure_text);
+        for text in ["Hg", "Wg", "iii", "Hello, world"] {
+            for size in [12.0f32, 16.0, 33.0] {
+                let config = TextRenderConfig::new("system-ui", size);
+                let (w, _) = TextMeasurer::measure_with_scale(text, &config, 1.0);
+                let seam = velox_dom::text_wrap::measure_text(text, size, "system-ui", 1.0);
+                assert_eq!(
+                    w, seam,
+                    "renderer and layout seam disagree on {text:?} at {size}px"
+                );
+                assert_ne!(
+                    w,
+                    size * 0.5 * text.chars().count() as f32,
+                    "a real proportional font must not measure 0.5em per char"
+                );
+            }
+        }
     }
 
     #[test]
