@@ -88,6 +88,11 @@ struct InlinePiece {
     /// and no width; it exists so the line filler can see the break the
     /// tokenizer found.
     hard_break: bool,
+    /// An atomic's laid-out box, with its own children and its own layout. It is
+    /// moved into place once the line is filled, not rebuilt: laying it out again
+    /// at the final position could reach a different result, since its width
+    /// depends on the space left on the line.
+    node: Option<LayoutNode>,
 }
 
 /// A token of a flattened run, before measurement.
@@ -430,6 +435,8 @@ struct MergedRun {
     y: i32,
     /// Height of this merged run's box.
     h: i32,
+    /// An atomic's own box, moved into place rather than rebuilt.
+    node: Option<LayoutNode>,
 }
 
 /// A slot in the per-line `LayoutNode` tree.
@@ -475,6 +482,20 @@ fn build_inline_slots(merged: &[MergedRun], run: &[InlineRunItem<'_>]) -> Vec<In
     root
 }
 
+/// Move a box and everything under it by `(dx, dy)`. Clips travel with their
+/// owner, so a scrolled descendant does not leave its clip behind.
+fn translate_inline_box(node: &mut LayoutNode, dx: i32, dy: i32) {
+    node.rect.x += dx;
+    node.rect.y += dy;
+    if let Some(clip) = node.clip.as_mut() {
+        clip.x += dx;
+        clip.y += dy;
+    }
+    for child in node.children.iter_mut() {
+        translate_inline_box(child, dx, dy);
+    }
+}
+
 fn inline_slots_to_nodes(
     slots: &[InlineSlot],
     merged: &[MergedRun],
@@ -488,6 +509,18 @@ fn inline_slots_to_nodes(
             InlineSlot::Empty => {}
             InlineSlot::Leaf(mi) => {
                 let m = &merged[*mi];
+                if let Some(mut node) = m.node.clone() {
+                    // An atomic is laid out before its position on the line is
+                    // known, so it is MOVED here rather than rebuilt: its own
+                    // layout already decided where its children go, relative to
+                    // it, and laying it out again at the final x could reach a
+                    // different result, because its width depends on the space
+                    // left on the line.
+                    let (from_x, from_y) = (node.rect.x, node.rect.y);
+                    translate_inline_box(&mut node, m.x - from_x, m.y - from_y);
+                    out.push(node);
+                    continue;
+                }
                 out.push(inline_leaf_node(
                     Rect {
                         x: m.x,
@@ -584,6 +617,7 @@ fn flush_inline_run(
                             strut_a: 0.0,
                             strut_d: 0.0,
                             hard_break: true,
+                            node: None,
                         });
                         continue;
                     }
@@ -609,6 +643,7 @@ fn flush_inline_run(
                         strut_a: leaf_strut.ascent,
                         strut_d: leaf_strut.descent,
                         hard_break: false,
+                        node: None,
                     });
                 }
             }
@@ -627,6 +662,7 @@ fn flush_inline_run(
                     strut_a: 0.0,
                     strut_d: 0.0,
                     hard_break: false,
+                    node: None,
                 });
             }
             InlineRunItem::Atomic {
@@ -649,6 +685,7 @@ fn flush_inline_run(
                     strut_a: strut.ascent,
                     strut_d: strut.descent,
                     hard_break: false,
+                    node: Some(laid),
                 });
             }
         }
@@ -720,16 +757,28 @@ fn flush_inline_run(
         let mut max_d = strut.descent;
         for &pi in line {
             let p = &pieces[pi];
+            // A space has no ink, so it contributes its FONT's content area
+            // instead -- which is what a browser's inline content area is, and
+            // which the strut is a floor for. This matters because the seam
+            // refuses a measurer that reports no vertical extent and substitutes
+            // the labelled fallback, so a space's "ink" is really the fallback
+            // guess, and taking it as a run's extent would let one space make a
+            // line taller than the font that owns it.
+            let (ink_a, ink_d) = if p.is_space && !p.atomic {
+                (p.strut_a, p.strut_d)
+            } else {
+                (p.ascent, p.descent)
+            };
             match align_of(p.item) {
                 VerticalAlign::Baseline => {
-                    max_a = max_a.max(p.ascent);
-                    max_d = max_d.max(p.descent);
+                    max_a = max_a.max(ink_a);
+                    max_d = max_d.max(ink_d);
                 }
                 // CSS 2.1 §10.8.1: the box's vertical midpoint goes to the parent's
                 // baseline plus half the parent's x-height.
                 VerticalAlign::Middle => {
                     let half = strut.x_height / 2.0;
-                    let h = p.ascent + p.descent;
+                    let h = ink_a + ink_d;
                     max_a = max_a.max(h / 2.0 - half);
                     max_d = max_d.max(h / 2.0 + half);
                 }
@@ -820,6 +869,7 @@ fn flush_inline_run(
                     is_atomic: true,
                     y: top,
                     h: box_h,
+                    node: p.node.clone(),
                 });
             } else if let Some(last) = merged
                 .last_mut()
@@ -843,6 +893,7 @@ fn flush_inline_run(
                     is_atomic: false,
                     y: top,
                     h: box_h,
+                    node: None,
                 });
             }
             x += p.width;
@@ -869,6 +920,7 @@ fn flush_inline_run(
                 is_atomic: false,
                 y,
                 h: height,
+                node: None,
             });
         }
         merged.sort_by_key(|m| m.item);

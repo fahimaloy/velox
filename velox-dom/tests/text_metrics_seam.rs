@@ -9,73 +9,21 @@
 //! whatever the seam reports, and nothing else.
 //!
 //! `set_skia_measurer` writes a process-global with no unregister, so this binary
-//! registers exactly ONE measurer, once, shared by every test. Two tests
-//! registering two different functions would race, and the loser would assert
-//! against a measurer it did not install — which is precisely what a first
-//! draft of this file did. The fallback has its own binary,
+//! registers exactly ONE measurer, once, shared by every test -- `common::register_synthetic`.
+//! Two tests registering two different functions would race, and the loser would
+//! assert against a measurer it did not install, which is precisely what a
+//! first draft of this file did. The fallback has its own binary,
 //! `text_metrics_fallback.rs`.
 
-use std::sync::Once;
+mod common;
 
+use common::register_synthetic as register;
 use velox_dom::h;
 use velox_dom::layout::compute_layout;
-use velox_dom::text_wrap::{MeasuredText, measure_text, measure_text_metrics, set_skia_measurer};
+use velox_dom::text_wrap::{measure_text, measure_text_metrics};
 
 const FAMILY: &str = "system-ui";
 const FONT_SIZE: f32 = 16.0;
-
-/// True for glyphs that rise above x-height in a Latin face.
-fn has_ascender(run: &str) -> bool {
-    run.chars()
-        .any(|c| "bdfhkltABCDEFGHIJKLMNOPQRSTUVWXYZ".contains(c))
-}
-
-/// True for glyphs that drop below the baseline in a Latin face.
-fn has_descender(run: &str) -> bool {
-    run.chars().any(|c| "gjpqy".contains(c))
-}
-
-/// A stand-in for a font backend: real width behaviour (0.5em per char, so line
-/// breaking is unchanged) and content-dependent vertical metrics.
-///
-/// An all-whitespace run reports no vertical extent at all, which is what a real
-/// font backend reports for it — a space has no ink. That is the one case where
-/// "the measurer's answer" is a true statement and a useless one.
-fn test_measurer(text: &str, font_size: f32, _family: &str, scale: f32) -> MeasuredText {
-    let snapped = if scale.is_finite() && scale > 0.0 && scale != 1.0 {
-        (font_size * scale).round() / scale
-    } else {
-        font_size
-    };
-    let width = snapped * 0.5 * text.chars().count() as f32;
-    if text.chars().all(char::is_whitespace) {
-        return MeasuredText {
-            width,
-            ascent: 0.0,
-            descent: 0.0,
-        };
-    }
-    MeasuredText {
-        width,
-        ascent: if has_ascender(text) {
-            snapped * 2.0
-        } else {
-            snapped * 0.30
-        },
-        descent: if has_descender(text) {
-            snapped * 0.5
-        } else {
-            0.0
-        },
-    }
-}
-
-/// Install the one measurer this binary uses. Idempotent, so every test calls it
-/// and no test can be run against someone else's measurer.
-fn register() {
-    static ONCE: Once = Once::new();
-    ONCE.call_once(|| set_skia_measurer(test_measurer));
-}
 
 /// The heights of the text line boxes `vnode` lays out, in order.
 fn line_heights(vnode: &velox_dom::VNode) -> Vec<i32> {
