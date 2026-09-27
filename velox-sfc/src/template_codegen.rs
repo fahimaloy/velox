@@ -418,7 +418,6 @@ pub fn compile_template_to_rs_full_with_mode(
         fields: &props_fields,
         root: props_root,
         state_fields: &fields,
-        script_declared: script_setup.is_some(),
         children: &child_props,
     };
 
@@ -1239,21 +1238,6 @@ struct PropsChannel<'a> {
     /// the one predicate that owns the answer, `answerable`, the question it
     /// already knows how to answer.
     state_fields: &'a [String],
-    /// Did this component declare a `<script setup>` at all?
-    ///
-    /// This decides whether codegen may REFUSE a name, and it is the difference
-    /// between a defect and a choice. The script is the whole inventory of what
-    /// a component has, so with one declared that inventory is closed and a
-    /// `v-for` collection outside it is a name nothing in this file can supply.
-    /// With no script there IS no inventory: every name in the template,
-    /// collections included, is the caller's to bind through the `resolve`
-    /// closure — which is what a script-less `render_with` template is for, and
-    /// why codegen reports it and must not refuse to build it.
-    ///
-    /// It rides here because [`Self::state_fields`] already does, for the same
-    /// reason: this is the context a fatal diagnostic reasons over, and a
-    /// separate parameter would be a sixth one.
-    script_declared: bool,
     /// What each child component declares, keyed by its tag name, so a parent
     /// builds that child's `PropsArg` with the types that child asked for.
     children: &'a [(String, Vec<PropField>)],
@@ -1300,6 +1284,32 @@ impl<'a> PropsChannel<'a> {
     /// a louder and more precise failure than anything said here.
     fn holds_collection(&self, name: &str) -> bool {
         self.declares_vec_field(name) || self.state_fields.iter().any(|f| f == name)
+    }
+
+    /// Is this component's inventory of names it can be SUPPLIED closed, so that
+    /// a name outside it is provably unanswerable and refusing to compile is
+    /// sound?
+    ///
+    /// A component that declares a `Props` interface has one. Only its declared
+    /// fields can be handed to it, so a `v-for` over a name that is not one of
+    /// them can never be answered by anything, and
+    /// [`unrenderable_collection_error`] is the right response.
+    ///
+    /// A component with NO declared `Props` does not. Its generated
+    /// `render_with` entry point takes a caller closure `|name| String`, and
+    /// that closure can answer any name at all — the inventory is open, and the
+    /// caller's closure is a legitimate supplier. This is not a loophole: it is
+    /// the documented shape of a `render_with` template, and `velox init`
+    /// scaffolds exactly this (a root component that has a `<script setup>` and
+    /// is rendered by the caller). Treating presence-of-script as "the
+    /// inventory is closed" refused those working templates, which is the exact
+    /// mirror of the silent-hole defect this gate exists to close: instead of
+    /// shipping a hole it made a working template unbuildable.
+    ///
+    /// So the question is never whether a `<script setup>` is present but whether
+    /// this component's own declaration bounds what can be supplied to it.
+    fn inventory_is_closed(&self) -> bool {
+        !self.fields.is_empty()
     }
 
     /// The field `name` of the child component tagged `comp_name`, if that
@@ -4585,22 +4595,28 @@ fn collect_resolver_keys(
         // refused, because the component is not broken.
         //
         // What is left is a name the component's own declaration does not
-        // contain. Then nothing can supply it, the loop counts zero items, and
-        // its body never runs — which fails the build rather than shipping a
-        // component with a hole where its list should be. But only where the
-        // declaration can be held against that name: see `script_declared`.
+        // contain. Whether that is a mistake or the caller's business turns on
+        // whether the component's inventory of supplyable names is CLOSED, and
+        // that is what decides fatal from reported.
         if props.holds_collection(&family.collection) {
             warnings.push(held_collection_loop_warning(&family.collection, props));
-        } else if props.script_declared {
+        } else if props.inventory_is_closed() {
+            // Closed inventory: only this component's declared `Props` fields
+            // can be supplied, and this name is not one of them, so no arm can
+            // ever answer it. The loop counts zero items and its body never
+            // runs — a list-shaped hole with nothing in the output to show for
+            // it. A warning on stderr does not stop that from shipping; the
+            // `Err` does, so this is where refusing is sound.
             errors.push(unrenderable_collection_error(&family.collection, props));
         } else {
-            // No script means no inventory, so a name outside it is not a
-            // mistake — it is the caller's, supplied through the `resolve`
-            // closure at run time. That is exactly why this cannot be fatal,
-            // and it is also why it cannot fall silent: the loop may still be
-            // unanswered, and this is the one place that says so. So the
-            // pre-existing report stands unchanged, for the same reason it was
-            // written: the loop counts zero items and the body never runs.
+            // Open inventory: the generated `render_with` entry point takes a
+            // caller closure `|name| String` that can supply ANY name, so a
+            // name outside this component's declaration is not a typo — it is
+            // the caller's, bound at run time through that closure. Refusing
+            // here would make a working template unbuildable, which is the
+            // exact mirror of the defect this gate exists to close, so the
+            // pre-existing report stands unchanged: the loop may still go
+            // unanswered, and this is the one place that says so.
             warnings.push(resolve_loop_warning(family, methods));
         }
     }
@@ -4663,7 +4679,6 @@ mod tests {
             fields: &[],
             root: "props",
             state_fields,
-            script_declared: false,
             children: &[],
         }
     }

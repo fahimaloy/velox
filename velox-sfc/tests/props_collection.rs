@@ -171,11 +171,15 @@ impl State {
 </template>
 "#;
 
-/// A component whose `State` declares a collection the template never names, so
-/// the script is present and `State` is otherwise well-formed. The collection
-/// these loops reach for is deliberately NOT declared anywhere: it is the
-/// absence the refusals below are about, and the presence of a script is what
-/// makes an absence a mistake rather than the caller's business.
+/// A component with a real `<script setup>` and NO `Props` interface, whose
+/// `v-for` collection is in neither `State` nor any declared field.
+///
+/// Its inventory is OPEN, which is the whole point: a component like this is
+/// rendered by the caller through `render_with(|name| String)`, and that closure
+/// can answer any name. So the collection is not an absence to refuse, it is the
+/// caller's to supply. `PROPS_WITHOUT_THE_COLLECTION` is the closed-inventory
+/// counterpart where refusal IS sound; the pair is what keeps the rule from
+/// cutting both ways.
 const STATE_WITHOUT_THE_COLLECTION: &str = r#"
 pub struct Todo {
     pub text: String,
@@ -211,6 +215,67 @@ pub struct State {
 impl State {
     pub fn new() -> Self {
         State { props: Props { rows: String::new() } }
+    }
+}
+"#;
+
+/// A component that declares a `Props` interface but whose `v-for` reaches for
+/// a name that is in none of it. Declaring `Props` is what closes the
+/// inventory: from then on the ONLY things a parent can bind are the declared
+/// fields, so a name outside them can never be answered and refusing to compile
+/// is sound. This is the props-path case the fatal rule exists for, and it is
+/// what the refusals below are raised against — the component holds `title`,
+/// and the loop asks for `todos`.
+const PROPS_WITHOUT_THE_COLLECTION: &str = r#"
+pub struct Todo {
+    pub text: String,
+}
+
+pub struct Props {
+    pub title: String,
+}
+
+pub struct State {
+    pub props: Props,
+}
+
+impl State {
+    pub fn new() -> Self {
+        State { props: Props { title: String::new() } }
+    }
+}
+"#;
+
+/// A component that DECLARES `Props` and holds the collection there, so its
+/// inventory is closed but the loop's collection is still a name it has.
+///
+/// This is the case the two halves of the rule meet, and it is the only
+/// combination that tells them apart: closed inventory is what makes a refusal
+/// sound, and holding the collection is what makes the loop render. A component
+/// like this is closed AND supplied, so it must be reported and never refused.
+/// The `State` field of the same name is required because every component emits
+/// a `render_with_state` body, and that body reads the collection out of `State`.
+const PROPS_WITH_THE_COLLECTION: &str = r#"
+#[derive(Clone)]
+pub struct Row {
+    pub label: String,
+}
+
+pub struct Props {
+    pub rows: Vec<Row>,
+}
+
+pub struct State {
+    pub props: Props,
+    pub rows: std::rc::Rc<velox_core::signal::Signal<Vec<Row>>>,
+}
+
+impl State {
+    pub fn new() -> Self {
+        State {
+            props: Props { rows: Vec::new() },
+            rows: std::rc::Rc::new(velox_core::signal::Signal::new(Vec::new())),
+        }
     }
 }
 "#;
@@ -293,8 +358,14 @@ const FIXTURE_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures")
 /// cross-component `Props` handoff rather than a test-local shortcut.
 const PARENT_ALIAS: &str = "use super::props_child as PropsChild;";
 
-/// Compile one `.vx` source into the module file a build would write.
-fn generate(source: &str, name: &str, base: &std::path::Path) -> String {
+/// Compile one `.vx` source into the module file a build would write, in `mode`.
+///
+/// The mode is a parameter because the fixtures are compiler output and one
+/// component can only be emitted in one way. Every fixture here is a `State`
+/// component, which is what `State` mode is for; the caller-supplied path is
+/// covered without a fixture of its own, for the reason recorded on
+/// [`a_scripted_component_with_no_props_is_not_refused_for_its_collection`].
+fn generate(source: &str, name: &str, base: &std::path::Path, mode: RenderMode) -> String {
     let sfc = parse_sfc(source).unwrap_or_else(|e| panic!("{name}: parse failed: {e}"));
     let script_setup = sfc.script_setup.as_ref().map(|s| s.content.as_str());
     let tpl = sfc
@@ -312,7 +383,7 @@ fn generate(source: &str, name: &str, base: &std::path::Path) -> String {
         Some(&mut resolver),
         script_setup,
         None,
-        RenderMode::State,
+        mode,
     )
     .unwrap_or_else(|e| panic!("{name}: template compilation failed: {e}"));
     let mut module = to_stub_rs_unwrapped(&sfc, name, Some(base));
@@ -345,12 +416,13 @@ fn fixture_path(name: &str) -> std::path::PathBuf {
     std::path::Path::new(FIXTURE_DIR).join(format!("{name}.rs"))
 }
 
-fn fixture_sources() -> Vec<(&'static str, &'static str)> {
+/// The committed fixtures, each with the mode a build emits it in.
+fn fixture_sources() -> Vec<(&'static str, &'static str, RenderMode)> {
     vec![
-        ("props_child", PROPS_CHILD),
-        ("rows_props_child", ROWS_PROPS_CHILD),
-        ("rows_state_child", ROWS_STATE_CHILD),
-        ("list_parent", LIST_PARENT),
+        ("props_child", PROPS_CHILD, RenderMode::State),
+        ("rows_props_child", ROWS_PROPS_CHILD, RenderMode::State),
+        ("rows_state_child", ROWS_STATE_CHILD, RenderMode::State),
+        ("list_parent", LIST_PARENT, RenderMode::State),
     ]
 }
 
@@ -358,8 +430,8 @@ fn fixture_sources() -> Vec<(&'static str, &'static str)> {
 fn fixtures_are_current() {
     let base = vx_tree();
     let mut stale = Vec::new();
-    for (name, source) in fixture_sources() {
-        let generated = generate(source, name, &base);
+    for (name, source, mode) in fixture_sources() {
+        let generated = generate(source, name, &base, mode);
         let path = fixture_path(name);
         let Ok(committed) = std::fs::read_to_string(&path) else {
             panic!(
@@ -658,21 +730,29 @@ fn a_parent_binding_covers_every_declared_props_field() {
 /// A `v-for` over a collection this component's own declaration does not contain
 /// must REFUSE, not warn.
 ///
-/// The script is present, so it is the whole inventory of what the component
-/// has, and `todos` is in none of it. Nothing can answer the resolver for it, the
-/// count is zero, and the body never runs — a list-shaped hole in the rendered
-/// tree with nothing in the output to show for it. A warning on stderr does not
-/// stop that from shipping; the `Err` does.
+/// The component declares a `Props` interface, so its inventory is CLOSED: a
+/// parent can bind exactly the declared fields and nothing else. `todos` is in
+/// none of them, so no caller can supply it, the count is zero and the body never
+/// runs — a list-shaped hole in the rendered tree with nothing in the output to
+/// show for it. A warning on stderr does not stop that from shipping; the `Err`
+/// does.
+///
+/// The closed inventory is what makes the refusal sound. Without a declared
+/// `Props` the generated `render_with` takes a caller closure that can answer any
+/// name at all, and refusing there would make a working component unbuildable —
+/// see `a_caller_supplied_v_for_collection_still_compiles` for that case, which
+/// is the mirror image of this one.
 #[test]
 fn a_v_for_over_a_collection_the_component_does_not_declare_is_refused() {
     let verdict = resolve_mode_verdict(
         r#"<ul><li v-for="todo in todos">{{ todo.text }}</li></ul>"#,
-        STATE_WITHOUT_THE_COLLECTION,
+        PROPS_WITHOUT_THE_COLLECTION,
     );
     let Err(refusal) = verdict else {
         panic!(
-            "a `v-for` over a collection this component does not declare must be refused, \
-             and a component that renders no list at all must not compile. It compiled."
+            "a `v-for` over a collection a `Props` component does not declare must be \
+             refused, and a component that renders no list at all must not compile. \
+             It compiled."
         );
     };
     assert!(
@@ -744,21 +824,52 @@ fn a_collection_held_as_a_state_field_is_not_refused() {
     );
 }
 
+/// A component that holds the collection AND closes its inventory is reported,
+/// not refused.
+///
+/// This is the pair the two halves of the rule are told apart by, and the only
+/// test that holds them against each other: `PROPS_WITH_THE_COLLECTION`
+/// declares a `Props` interface, so its inventory IS closed, and it also holds
+/// `rows` there, so the loop has something to read. Closed is what makes a
+/// refusal sound; holding the collection is what makes the loop render. Both
+/// hold here, so the answer is the report — refuse it and a component that
+/// renders through `render_with_props` becomes unbuildable.
+#[test]
+fn a_held_collection_in_a_closed_inventory_component_is_reported_not_refused() {
+    let verdict = resolve_mode_verdict(
+        r#"<ul><li v-for="row in rows">{{ row.label }}</li></ul>"#,
+        PROPS_WITH_THE_COLLECTION,
+    );
+    assert!(
+        verdict.is_ok(),
+        "this component closes its inventory AND holds the collection, so it is \
+         reported, not refused. `holds_collection` is what tells the two apart and \
+         it must be consulted before the closed-inventory test. It was refused with:\n{:?}",
+        verdict.err()
+    );
+}
+
 /// Every unrenderable collection is listed, not just the first.
 ///
 /// Two loops, two independent mistakes in the same template, and the author who
 /// is told about one and builds again meets the other a build later. The crate's
 /// existing fatal path for template validation already reports its whole list for
 /// this reason, so this is the crate's convention rather than a new one.
+///
+/// The component declares `Props`, so both names are genuinely unsupplyable and
+/// both refusals are sound.
 #[test]
 fn every_unrenderable_collection_is_listed_not_only_the_first() {
     let verdict = resolve_mode_verdict(
         r#"<div><ul><li v-for="todo in todos">{{ todo.text }}</li></ul>\
            <ul><li v-for="task in tasks">{{ task.title }}</li></ul></div>"#,
-        STATE_WITHOUT_THE_COLLECTION,
+        PROPS_WITHOUT_THE_COLLECTION,
     );
     let Err(refusal) = verdict else {
-        panic!("two collections this component does not declare must be refused together");
+        panic!(
+            "two collections a `Props` component does not declare must be refused \
+             together"
+        );
     };
     for collection in ["todos", "tasks"] {
         assert!(
@@ -798,5 +909,102 @@ fn a_script_less_component_is_never_refused_for_its_collection() {
          `resolve` closure, so codegen has no inventory to call the name missing \
          and must not refuse. It was refused with:\n{:?}",
         verdict.err()
+    );
+}
+
+/// A component WITH a real `<script setup>` still binds its collection through
+/// the caller, so it must not be refused either.
+///
+/// This is the case a script is not the test of. The rule once read "the script
+/// is present, therefore the inventory is closed, therefore the collection is
+/// missing" — and that refused the root component `velox init` scaffolds, which
+/// declares a `<script setup>` and is rendered by the caller through
+/// `render_with(|name| String)`. The closure answers any name, so the inventory
+/// is open and the collection is the caller's to supply. Refusing it made a
+/// working template unbuildable, which is the exact mirror of the silent hole
+/// this rule was added to close.
+///
+/// A script is not a declaration of Props. Only a declared `Props` interface
+/// closes the inventory, and only there is a refusal sound.
+///
+/// This asserts the compiler's real verdict rather than a rendered tree, and the
+/// reason is worth recording rather than papering over: a component shaped like
+/// this cannot produce a *compiling* generated module at all, so there is no
+/// fixture that could show it rendering. Codegen emits a `render_with_state`
+/// body for every component whether or not anyone calls it, and that body reads
+/// the collection out of `State` — so a component whose `State` has no such
+/// field yields `state.todos.get()` and `rustc` rejects it. That is pre-existing
+/// and out of scope here; it was already the case at the commit before the
+/// narrowing. The only way to make such a fixture compile is to declare the
+/// collection in `State`, which flips `holds_collection` to true and makes the
+/// refusal fire never — at which point the test would no longer cover the
+/// over-refusal at all. So the over-refusal is proven where it actually lives,
+/// in the compiler's verdict, and the caller's rows reaching the tree is proven
+/// separately by
+/// [`a_caller_supplied_v_for_collection_renders_the_callers_rows_end_to_end`].
+#[test]
+fn a_scripted_component_with_no_props_is_not_refused_for_its_collection() {
+    let verdict = resolve_mode_verdict(
+        r#"<ul><li v-for="todo in todos">{{ todo.text }}</li></ul>"#,
+        STATE_WITHOUT_THE_COLLECTION,
+    );
+    assert!(
+        verdict.is_ok(),
+        "a component with a `<script setup>` but no `Props` interface is rendered by the \
+         caller through `render_with(|name| String)`, which can answer any name, so the \
+         collection is the caller's to supply and must not be refused. It was refused \
+         with:\n{:?}",
+        verdict.err()
+    );
+}
+
+/// The caller's rows are the ones that render, end to end.
+///
+/// [`a_scripted_component_with_no_props_is_not_refused_for_its_collection`]
+/// checks the compiler's verdict for a scripted component that holds no
+/// collection. This one checks what actually comes out of a caller-supplied
+/// loop, because the verdict alone cannot: the counted `render_with` arm asks
+/// the closure for the collection and for each item in turn, so if codegen
+/// compiled but the rows were empty this would catch it — and an empty list is
+/// precisely the failure the whole rule exists to prevent.
+///
+/// Stated plainly so nobody mistakes this for the I1 discriminator: this test
+/// passes before and after the narrowing, because `rows_state_child` declares
+/// `rows` in its `State` and so takes the `holds_collection` branch either way.
+/// It is here to prove the caller's rows really do reach the tree through that
+/// closure, not to detect the over-refusal. Only the verdict test above does
+/// that, and it does it by observing the compiler's real `Ok`.
+#[test]
+fn a_caller_supplied_v_for_collection_renders_the_callers_rows_end_to_end() {
+    // `rows_state_child` emits both a counted `render_with` and a
+    // `render_with_state`. This drives the counted one, which is the entry
+    // point `velox init` wires a root component to: the closure is handed the
+    // count and then each item, and `State` is never consulted.
+    let caller_rows = ["alpha", "beta", "gamma"];
+    let rendered = rows_state_child::render_with(|name| match name {
+        "heading" => String::from("caller supplied"),
+        // The count: one comma-separated entry per row, which is what the
+        // generated loop counts.
+        "rows" => caller_rows.join(","),
+        _ => match name.strip_prefix("rows[").and_then(|rest| {
+            rest.strip_suffix("].label")
+                .and_then(|idx| idx.parse::<usize>().ok())
+        }) {
+            Some(idx) => caller_rows.get(idx).copied().unwrap_or("").to_string(),
+            None => String::new(),
+        },
+    });
+
+    let expected = caller_rows
+        .iter()
+        .enumerate()
+        .map(|(idx, label)| format!("{label}@{idx}"))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        list_item_texts(&rendered),
+        expected,
+        "every row the caller supplied must appear, in order, and nothing else may. \
+         A component that renders no list at all is the defect this rule exists to \
+         prevent, so an empty or short list is a failure, not a pass."
     );
 }
