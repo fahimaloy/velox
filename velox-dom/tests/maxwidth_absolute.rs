@@ -155,6 +155,224 @@ fn absolute_resolves_against_positioned_ancestor_or_initial_containing_block() {
     assert_ne!(positioned_rect, no_ancestor_rect);
 }
 
+/// A percentage `position: relative` offset is a percentage of the PARENT's content
+/// width (CSS 2.1 §10.1: that is the containing block of an in-flow box), and the
+/// box it displaces carries that same displacement into the containing block it
+/// establishes for its own absolutely positioned descendants.
+///
+/// The child's own movement is asserted alongside the grandchild's, because the
+/// child's own movement was already right before the fix: the parent's child pass
+/// always had the parent's content width to hand. Only the grandchild's position
+/// could disagree, which is why a test that stopped at the child passed for as long
+/// as every relative offset in the suite was in `px`.
+///
+/// The numbers are chosen so the two bases cannot be confused. The relative box is
+/// 50 wide inside a 200-wide parent, so the horizontal base is 200 (10% is 20) and
+/// the wrong base is the element's own 50 (10% is 5) — a 15px difference. Vertically
+/// the parent is 100 tall and the relative box 20, so the base is 100 (10% is 10) and
+/// the wrong base is 20 (10% is 2).
+///
+/// The grandchild's expected origin is the relative box's own origin and NOT that
+/// origin plus the offset again: the containing block's x is `elem_x + rel_dx`, and
+/// `elem_x` is the box's position BEFORE the displacement, so the sum is exactly the
+/// box's final x. The defect showed up precisely because the two halves disagreed —
+/// the box landed at 20 while the containing block stayed at 5.
+#[test]
+fn a_percentage_relative_offset_moves_the_containing_block_it_establishes_by_the_same_amount() {
+    let tree = |parent_extra: &str, rel_extra: &str| {
+        h(
+            "div",
+            Props::new().set(
+                "style",
+                format!("width: 200px; height: 100px; {parent_extra}"),
+            ),
+            vec![h(
+                "div",
+                Props::new().set(
+                    "style",
+                    format!("position: relative; width: 50px; height: 20px; {rel_extra}"),
+                ),
+                vec![h(
+                    "div",
+                    Props::new().set(
+                        "style",
+                        "position: absolute; left: 0; top: 0; width: 10px; height: 10px;",
+                    ),
+                    vec![],
+                )],
+            )],
+        )
+    };
+
+    // The control: the same tree with the offsets in `px`, which is the shape every
+    // pre-existing relative test used and which agrees with the percentage case.
+    let control = compute_layout(&tree("", "left: 20px; top: 10px;"), 400, 300);
+    let pct = compute_layout(&tree("", "left: 10%; top: 10%;"), 400, 300);
+
+    for (label, lt) in [("px", &control), ("%", &pct)] {
+        let rel = child_at(&lt, 0);
+        assert_eq!(
+            rel.rect,
+            Rect {
+                x: 20,
+                y: 10,
+                w: 50,
+                h: 20
+            },
+            "{label}: 10% of the 200px parent and of its 100px height is 20 and 10, \
+             and so is the explicit px pair"
+        );
+        assert_eq!(
+            child_at(rel, 0).rect,
+            Rect {
+                x: 20,
+                y: 10,
+                w: 10,
+                h: 10
+            },
+            "{label}: the absolute grandchild resolves against the DISPLACED padding \
+             box, so left:0/top:0 puts it on the relative box's own origin, (20, 10). \
+             If the displacement were computed against the box's own 50px width and \
+             20px height instead, the box would still land at 20 while the containing \
+             block stayed at (5, 2) — the grandchild 15px and 8px out"
+        );
+    }
+}
+
+/// The far edge of the box: `right` and `bottom` resolve percentages against the
+/// same parent content box as `left` and `top`, and displace the same amount. CSS
+/// 2.1 §10.3.7 for the vertical case: an over-constrained absolutely positioned
+/// box ignores `bottom` in preference to `top`, but the *percentage basis* of a
+/// `bottom` on an in-flow relative box is still its containing block's box.
+#[test]
+fn a_percentage_relative_offset_from_the_far_edge_uses_the_same_parent_base() {
+    let tree = |rel_extra: &str| {
+        h(
+            "div",
+            Props::new().set("style", "width: 200px; height: 100px;"),
+            vec![h(
+                "div",
+                Props::new().set(
+                    "style",
+                    format!("position: relative; width: 50px; height: 20px; {rel_extra}"),
+                ),
+                vec![h(
+                    "div",
+                    Props::new().set(
+                        "style",
+                        "position: absolute; left: 0; top: 0; width: 10px; height: 10px;",
+                    ),
+                    vec![],
+                )],
+            )],
+        )
+    };
+    let control = compute_layout(&tree("right: 20px; bottom: 10px;"), 400, 300);
+    let pct = compute_layout(&tree("right: 10%; bottom: 10%;"), 400, 300);
+    for (label, lt) in [("px", &control), ("%", &pct)] {
+        let rel = child_at(&lt, 0);
+        assert_eq!(
+            rel.rect.x, -20,
+            "{label}: right: 10% displaces leftwards by 20 (10% of the 200px parent \
+             content width), matching right: 20px. Measured against the box's own 50px \
+             width it would displace by 5 and land at -5"
+        );
+        assert_eq!(
+            rel.rect.y, -10,
+            "{label}: bottom: 10% displaces upwards by 10 (10% of the parent's 100px \
+             height), matching bottom: 10px. Measured against the box's own 20px \
+             height it would displace by 2 and land at -2"
+        );
+        assert_eq!(
+            child_at(rel, 0).rect.x,
+            -20,
+            "{label}: and the containing block it establishes moves with it, so the \
+             grandchild is on the box's own origin at -20 and not at -5"
+        );
+    }
+}
+
+/// The flex path resolves the same percentage base, because the flex placement pass
+/// hands `apply_relative_position` the container's `content_w` exactly as the block
+/// child pass does. One item in a `flex-start` row sits at the container's content
+/// origin, so there is no free-space redistribution to confuse the reading and the
+/// assertions never touch a sibling.
+///
+/// ## What this test deliberately does NOT assert
+///
+/// It compares the percentage tree against the `px` tree rather than against an
+/// absolute number for the grandchild, and the reason is a SEPARATE PRE-EXISTING
+/// DIVERGENCE that this round did not introduce and is not fixing.
+///
+/// In the flex path the relative item is laid out at the origin (CSS Flexbox §9.2:
+/// the static position of a flex item is the flex container's content-box start) and
+/// the placement pass then displaces it, so an absolute grandchild is positioned
+/// against a containing block at the item's UN-displaced origin and the item's
+/// displacement is applied to the finished subtree on top of it. The grandchild
+/// therefore ends up one offset further out than the item: at (40, 20) while the item
+/// is at (20, 10), where a browser would put it at (20, 10). Verified by probe, with
+/// the grandchild's own `apply_absolute_position` computing the correct 20 and
+/// something later in the flex placement adding the 20 again. The same divergence is
+/// present with `px` offsets, so it is not the percentage-base defect this round
+/// fixed, and pinning its number here would put a wrong number into the suite behind
+/// a confident assertion.
+///
+/// Comparing against the `px` control instead is what this round's change actually
+/// governs, and it is sensitive: before the fix, `left: 10%` moved the item 5px
+/// (10% of its own 50) while `left: 20px` moved it 20px, and this test failed.
+#[test]
+fn a_percentage_relative_offset_in_a_flex_container_uses_the_containers_content_width() {
+    let tree = |rel_extra: &str| {
+        h(
+            "div",
+            Props::new().set(
+                "style",
+                "display: flex; justify-content: flex-start; \
+                 width: 200px; height: 100px;",
+            ),
+            vec![h(
+                "div",
+                Props::new().set(
+                    "style",
+                    format!("position: relative; width: 50px; height: 20px; {rel_extra}"),
+                ),
+                vec![h(
+                    "div",
+                    Props::new().set(
+                        "style",
+                        "position: absolute; left: 0; top: 0; width: 10px; height: 10px;",
+                    ),
+                    vec![],
+                )],
+            )],
+        )
+    };
+    let control = compute_layout(&tree("left: 20px; top: 10px;"), 400, 300);
+    let pct = compute_layout(&tree("left: 10%; top: 10%;"), 400, 300);
+    let c = child_at(&control, 0);
+    let p = child_at(&pct, 0);
+    assert_eq!(
+        p.rect.x,
+        c.rect.x,
+        "10% of the 200px flex container's content width and an explicit 20px must \
+         move the item by the same amount. 10% of the item's own 50px would move it \
+         5px instead, leaving it at {} rather than {}",
+        c.rect.x,
+        c.rect.x - 15
+    );
+    assert_eq!(
+        p.rect.y, c.rect.y,
+        "and the same vertically: 10% of the container's 100px height is 10, matching \
+         top: 10px, not 10% of the item's own 20px"
+    );
+    assert_eq!(
+        child_at(p, 0).rect,
+        child_at(c, 0).rect,
+        "the absolute grandchild moves with whichever base the item was displaced by, \
+         so the percentage tree and the px tree agree on it"
+    );
+}
+
 /// The containing block is the ancestor's PADDING box, not its content box and
 /// not its border box. `left: 0; top: 0` therefore puts the child on the padding
 /// edge — outside the padding, inside the border.
@@ -781,14 +999,18 @@ fn max_width_clamps_a_block_box() {
     }
 }
 
-/// An absent, `auto` or negative `max-width` imposes no constraint at all. Each
-/// case is compared against the identical tree with the declaration removed.
+/// An absent, `auto` or percentage `max-width` that is not a cap imposes no
+/// constraint at all, and neither does one that is. Each case is compared against
+/// the identical tree with the declaration removed.
+///
+/// A NEGATIVE `max-width` is deliberately not in this list. It is a known
+/// divergence and has its own test, `negative_max_width_is_a_known_divergence`,
+/// because it is not the same class of fact as absent or `auto`.
 #[test]
-fn absent_or_auto_max_width_changes_nothing() {
+fn absent_or_non_binding_max_width_changes_nothing() {
     for style in [
         "width: 200px;",
         "width: 200px; max-width: auto;",
-        "width: 200px; max-width: -50px;",
         "width: 200px; max-width: 100vw;",
     ] {
         let root = h("div", Props::new().set("style", style), vec![]);
@@ -799,6 +1021,69 @@ fn absent_or_auto_max_width_changes_nothing() {
              max-width:100vw is not a cap here"
         );
     }
+}
+
+/// KNOWN DIVERGENCE, not a rule. This test exists so the wrong number is
+/// discoverable from the suite rather than only from a comment nobody opens, and so
+/// nobody "fixes" it by accident without reading this label.
+///
+/// Velox treats a negative `max-width` as imposing no constraint at all, leaving the
+/// width unconstrained. A reviewer reported that browsers instead clamp
+/// `max-width` into the non-negative range, collapsing the used width to 0, and that
+/// claim could not be pinned to a citation. The reading this engine implements —
+/// drop the declaration — is what CSS 2.1 §10.4's grammar implies, since `max-width`
+/// takes `<'max-width'> = none | <length> | <percentage>` and `<length>` is
+/// non-negative, so a negative value is an invalid declaration and is ignored. The
+/// behaviour is therefore left alone on the strength of a reading nobody has
+/// confirmed against an engine, and that is exactly why it is labelled rather than
+/// asserted as correct.
+#[test]
+fn negative_max_width_is_a_known_divergence() {
+    for style in [
+        "width: 200px; max-width: -50px;",
+        "width: 200px; max-width: -1%;",
+        "width: 200px; max-width: -0.5px;",
+    ] {
+        let root = h("div", Props::new().set("style", style), vec![]);
+        assert_eq!(
+            compute_layout(&root, 400, 300).rect.w,
+            200,
+            "KNOWN DIVERGENCE: `{style}` currently imposes no constraint, and a \
+             browser may clamp the used width to 0 instead. If this assertion is \
+             failing, the clamp behaviour was implemented — update this label and \
+             the deviation list in the same change."
+        );
+    }
+}
+
+/// KNOWN DIVERGENCE, not a rule, for the same reason and with the same label
+/// requirement as `negative_max_width_is_a_known_divergence`.
+///
+/// `min-width` is honoured on the flex main axis only. There is no block-flow
+/// `min-width` clamp anywhere in the engine, so `min-width: 200px; max-width: 100px`
+/// on a block box yields 100 where a browser yields 200 — the `max-width` cap is
+/// applied and then nothing raises it back.
+///
+/// A correct block-flow `min-width` has to answer the same percentage-basis
+/// question the out-of-flow rule answers, and that basis is now decided once, for
+/// both properties, in `ContainingBlock`. The follow-up is blocked on that, not on
+/// size. The brief for this task forbade adding `min-width` support, so this test
+/// records the current number instead of changing it.
+#[test]
+fn min_width_is_a_known_divergence_on_a_block_box() {
+    let root = h(
+        "div",
+        Props::new().set("style", "width: 500px; min-width: 200px; max-width: 100px;"),
+        vec![],
+    );
+    assert_eq!(
+        compute_layout(&root, 400, 300).rect.w,
+        100,
+        "KNOWN DIVERGENCE: a block box has no min-width clamp, so the 100px \
+         max-width stands where a browser would use the 200px min-width. If this \
+         assertion is failing, block-flow min-width was implemented — update this \
+         label and the deviation list in the same change."
+    );
 }
 
 /// A percentage `max-width` resolves against the containing block, so it tracks
@@ -994,11 +1279,32 @@ fn max_width_clamps_a_column_flex_item_cross_size() {
 /// The cap is expressed in the same box the element's `width` is, so under the
 /// default `content-box` sizing the padding and border sit outside it and the
 /// border box is `max-width + padding` wide.
-/// A positioned ancestor's PADDING box is the containing block for offsets, but
-/// percentages resolve against its CONTENT box. The two differ as soon as the
-/// positioned ancestor has horizontal padding, so one number cannot serve both.
+///
+/// # The rule, with its citation
+///
+/// A percentage length resolves against the containing block, and the size of the
+/// containing block depends on whether the box is in flow:
+///
+/// * **Out of flow** (CSS 2.1 §10.3.7): *"For absolutely positioned elements whose
+///   containing block is based on a block container element, the percentage is
+///   calculated with respect to the width of the **padding box** of that element.
+///   This is a change from CSS1, where the percentage width was always calculated
+///   with respect to the content box of the parent element."* §10.1 is what makes
+///   the padding box the containing block in the first place, so the offsets and the
+///   percentages come out of the *same* box. A browser confirms it: `position:
+///   absolute; width: 100%` inside `position: relative; padding: 50px; width: 250px`
+///   is 350px wide.
+/// * **In flow** (§10.1): the containing block of a static block container's child is
+///   that container's **content** box, so a percentage is a percentage of the
+///   content width.
+///
+/// So the basis differs between the two paths, and the ancestor's padding box
+/// (240) is a different number from its content box (200) precisely when it has
+/// padding. The first half of this test is the in-flow rule and the second half is
+/// the out-of-flow rule, asserted in the same tree so the two cannot be satisfied
+/// by one global choice of basis.
 #[test]
-fn percentages_resolve_against_the_containing_blocks_content_width() {
+fn percentages_resolve_against_the_padding_box_when_out_of_flow_and_the_content_box_when_in_flow() {
     let build = |ancestor_position: &'static str| {
         h(
             "div",
@@ -1038,14 +1344,15 @@ fn percentages_resolve_against_the_containing_blocks_content_width() {
         assert_eq!(
             child_at(ancestor, 0).rect.w,
             100,
-            "with {position}, max-width: 50% is half the 200px CONTENT width. \
-             Half the 240px padding box would be 120"
+            "with {position} this child is IN FLOW, so the basis is the parent's \
+             CONTENT width (CSS 2.1 §10.1): 50% of 200 is 100. The 240px padding \
+             box would give 120, and that is the out-of-flow rule asserted below"
         );
     }
 
-    // Percentage padding resolves against the same content width. This only
-    // becomes observable for an OUT-OF-FLOW child, because that is the only
-    // child whose containing block is a padding box rather than a content box.
+    // Percentage padding on an OUT-OF-FLOW child. Its containing block is the
+    // ancestor's PADDING box (§10.1), so the basis is that same padding box
+    // (§10.3.7).
     let padded_ancestor = h(
         "div",
         Props::new().set("style", "width: 400px;"),
@@ -1073,16 +1380,17 @@ fn percentages_resolve_against_the_containing_blocks_content_width() {
         Rect {
             x: 0,
             y: 0,
-            w: 120,
+            w: 124,
             h: 10
         },
-        "10% horizontal padding is 20px of the 200px content width, so the 100px \
-         declared width is 120 wide. 10% of the 240px padding box would be 24px, \
-         making it 124 wide"
+        "OUT OF FLOW, so the basis is the ancestor's PADDING box: 10% of 240 is \
+         24px of padding, and 100px of declared width makes the box 124 wide \
+         (CSS 2.1 §10.3.7). 10% of the 200px content width would be 20px, making \
+         it 120 wide"
     );
 
-    // The same split for max-width: an out-of-flow child's containing block is a
-    // padding box, but its percentages are still measured against the content box.
+    // The same basis for `max-width`: an out-of-flow child's percentages are
+    // percentages of the padding box, the same box its offsets resolve against.
     let capped_abs = h(
         "div",
         Props::new().set("style", "width: 400px;"),
@@ -1110,11 +1418,12 @@ fn percentages_resolve_against_the_containing_blocks_content_width() {
         Rect {
             x: 0,
             y: 0,
-            w: 100,
+            w: 120,
             h: 10
         },
-        "max-width: 50% is half the 200px content width, so the 200px declared \
-         width is capped to 100. Half the 240px padding box would be 120"
+        "OUT OF FLOW: max-width: 50% is half the 240px PADDING box (CSS 2.1 \
+         §10.3.7), so the 200px declared width is capped to 120. Half the 200px \
+         content width would be 100"
     );
 }
 

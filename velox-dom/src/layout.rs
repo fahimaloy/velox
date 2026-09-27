@@ -244,12 +244,14 @@ fn cap_to_max_width(
     (rect_w - edges).min(max_w).max(0) + edges
 }
 
-/// Clamp an already-computed border-box width to the element's own `max-width`.
+/// Clamp an already-computed border-box width to the element's own `max-width`,
+/// re-reading the box model out of the style string.
 ///
-/// Both width writers go through here so the box model for the cap is decided in
-/// exactly one place: `at()` for every box, and the flex cross/main-size pass
-/// for flex items whose width the sizing algorithm overwrites after `at()`
-/// returned.
+/// This is the flex placement pass's entry point and its only one: an item's
+/// `is_border_box` and sides are not in scope there, because the flex algorithm
+/// overwrites `rect.w` after `at()` returned. `at()` itself calls `cap_to_max_width`
+/// directly with the `is_border_box` and sides it already has, so this runs once per
+/// flex item rather than once per box of every layout.
 #[allow(clippy::too_many_arguments)]
 fn clamp_width_to_max_width(
     rect_w: i32,
@@ -299,18 +301,35 @@ fn clamp_width_to_max_width(
 /// the nearest positioned ancestor, because a padding box is what CSS makes a
 /// positioned ancestor establish. For the initial containing block these are the
 /// viewport rectangle, which is what the top-level `compute_layout` call passes.
+///
+/// ## ONE box serves both the offsets and the percentages, because the spec says so
+///
+/// §10.1 makes the padding box the containing block, which is what these four
+/// fields are. §10.3.7 then makes the percentages resolve against that same padding
+/// box: *"For absolutely positioned elements whose containing block is based on a
+/// block container element, the percentage is calculated with respect to the width
+/// of the padding box of that element. This is a change from CSS1, where the
+/// percentage width was always calculated with respect to the content box of the
+/// parent element."* Confirmed in a browser: `position: absolute; width: 100%` inside
+/// `position: relative; padding: 50px; width: 250px` is 350px wide — 100% of the
+/// 350px padding box, not of the 250px content box. Yoga matches web here.
+///
+/// An earlier revision of this engine carried a second field for the containing
+/// block's content width and resolved percentages against it. That made one
+/// containing block be two different boxes depending on which question was asked of
+/// it, and the half that was wrong was the half with no citation on it, so it read
+/// as settled. There is no `content_w` field any more.
+///
+/// For an IN-FLOW box these same four fields are the parent's CONTENT box, which is
+/// what a static block container's in-flow child resolves percentages against
+/// (§10.1), and both call sites below pass exactly that. So one number per box is
+/// correct on both paths; they differ between paths only because CSS says they do.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct ContainingBlock {
     x: i32,
     y: i32,
     w: i32,
     h: i32,
-    /// Width of the containing block's CONTENT box, which is what percentages
-    /// resolve against. It is only distinct from `w` for a positioned ancestor
-    /// that has horizontal padding or border: that ancestor's PADDING box is the
-    /// containing block, but a descendant's `width: 50%` is half the content
-    /// width, not half the padding-box width.
-    content_w: i32,
 }
 
 /// Whether a box's `position` makes it establish a containing block for its
@@ -341,7 +360,6 @@ fn out_of_flow_containing_block(
             y: 0,
             w: viewport_w,
             h: viewport_h,
-            content_w: viewport_w,
         }
     } else {
         descendant_cb
@@ -857,10 +875,18 @@ fn style_box_sides(style: Option<&str>, base: &str) -> (i32, i32, i32, i32) {
 /// The displacement `position: relative` / `position: sticky` applies to a box,
 /// derived from the style alone.
 ///
-/// `apply_relative_position` moves the box by it, and a positioned element's
-/// PADDING box after that move is the containing block for its absolutely
-/// positioned descendants — so the same offset has to be added to that padding
-/// box, and both read it from here so they cannot drift apart.
+/// `base_w`/`base_h` are the percentages' basis, and they are the PARENT's content
+/// box, not this element's own. `apply_relative_position` is handed the parent's
+/// `content_w` and `content_h_available` and passes them straight here, and
+/// `at()` hands the same two numbers as `containing.w`/`containing.h`; the two
+/// therefore resolve a percentage offset identically, which they did not when
+/// `at()` used its own content width.
+///
+/// A positioned element's PADDING box after this move is the containing block for
+/// its absolutely positioned descendants, so the same offset has to be added to
+/// that padding box too. Both reads come from here, which is the point of the
+/// extraction — but extraction only stops drift if the BASE is threaded the same
+/// way too, and that was the half that drifted.
 fn relative_offset_delta(
     style: Option<&str>,
     base_w: i32,
@@ -1542,7 +1568,7 @@ pub fn compute_layout(node: &VNode, viewport_w: i32, viewport_h: i32) -> LayoutN
                 let (ml, mr, mt, mb) = style_box_sides_full(
                     style,
                     "margin",
-                    containing.content_w as f32,
+                    containing.w as f32,
                     parent_font_size,
                     root_font_size,
                     vw_f,
@@ -1551,7 +1577,7 @@ pub fn compute_layout(node: &VNode, viewport_w: i32, viewport_h: i32) -> LayoutN
                 let (pl, pr, pt, pb) = style_box_sides_full(
                     style,
                     "padding",
-                    containing.content_w as f32,
+                    containing.w as f32,
                     parent_font_size,
                     root_font_size,
                     vw_f,
@@ -1559,7 +1585,7 @@ pub fn compute_layout(node: &VNode, viewport_w: i32, viewport_h: i32) -> LayoutN
                 );
                 let (bl, br, bt, bb) = style_border_widths(
                     style,
-                    containing.content_w as f32,
+                    containing.w as f32,
                     parent_font_size,
                     root_font_size,
                     vw_f,
@@ -1698,7 +1724,13 @@ pub fn compute_layout(node: &VNode, viewport_w: i32, viewport_h: i32) -> LayoutN
                 // scroll metrics are derived from once the child tree exists. A
                 // clamp placed after the child pass would move the box without
                 // moving anything inside it.
-                let rect_w = clamp_width_to_max_width(
+                // `is_border_box` and the four sides are already in scope — they are
+                // the arguments to `content_size_for` immediately above — so the cap
+                // is expressed with them directly rather than by re-reading the style
+                // string on every box of every layout. `clamp_width_to_max_width` does
+                // that re-read and exists only for the flex placement pass, where the
+                // item's box model is genuinely not in scope.
+                let rect_w = cap_to_max_width(
                     content_size_for(
                         declared_w,
                         avail_w,
@@ -1712,12 +1744,19 @@ pub fn compute_layout(node: &VNode, viewport_w: i32, viewport_h: i32) -> LayoutN
                         is_viewport_filling,
                         legacy_pair,
                     ),
-                    style,
-                    containing.content_w as f32,
-                    my_font_size,
-                    root_font_size,
-                    vw_f,
-                    vh_f,
+                    used_max_width(
+                        style,
+                        containing.w as f32,
+                        my_font_size,
+                        root_font_size,
+                        vw_f,
+                        vh_f,
+                    ),
+                    is_border_box,
+                    pl,
+                    pr,
+                    bl,
+                    br,
                 );
 
                 // For viewport-height elements, use viewport height as the base, otherwise box-sizing adjusted
@@ -1844,19 +1883,32 @@ pub fn compute_layout(node: &VNode, viewport_w: i32, viewport_h: i32) -> LayoutN
                 // `rect_h` exists, is what offsets are resolved against. They differ
                 // only in height, because a positioned ancestor with an auto height
                 // has no height until its children have been laid out.
-                let (rel_dx, rel_dy) = if position == "relative" {
-                    relative_offset_delta(
-                        style,
-                        content_w,
-                        content_h_available,
-                        my_font_size,
-                        root_font_size,
-                        vw_f,
-                        vh_f,
-                    )
-                } else {
-                    (0, 0)
-                };
+                //
+                // The residual the double read leaves, stated here because it is
+                // invisible from the tail alone: an absolutely positioned child's own
+                // IN-FLOW content is measured against the provisional available
+                // height and is not re-laid-out against the final one. It is reachable
+                // only through a percentage or `100%` height inside an absolutely
+                // positioned box under an auto-height positioned ancestor.
+                //
+                // The base is the PARENT's content box, which is what `containing.w`
+                // and `containing.h` are — the same two numbers the parent's child
+                // pass hands `apply_relative_position`. This element's own `content_w`
+                // is not the base: using it made `left: 10%` mean one thing when the
+                // parent's child pass moved the box and another when this read moved
+                // the box it establishes, and the box only ever moved one of the two
+                // ways. `relative_offset_delta` early-returns for anything that is
+                // not relative or sticky, so `establishes_containing_block` below
+                // stays the only place that decides which positions are special.
+                let (rel_dx, rel_dy) = relative_offset_delta(
+                    style,
+                    containing.w,
+                    containing.h,
+                    my_font_size,
+                    root_font_size,
+                    vw_f,
+                    vh_f,
+                );
                 let out_of_flow_cb = |border_box_h: i32| -> ContainingBlock {
                     if establishes_containing_block(&position) {
                         ContainingBlock {
@@ -1864,7 +1916,6 @@ pub fn compute_layout(node: &VNode, viewport_w: i32, viewport_h: i32) -> LayoutN
                             y: elem_y + bt + rel_dy,
                             w: (rect_w - bl - br).max(0),
                             h: (border_box_h - bt - bb).max(0),
-                            content_w: (rect_w - pl - pr - bl - br).max(0),
                         }
                     } else {
                         containing
@@ -2237,7 +2288,6 @@ pub fn compute_layout(node: &VNode, viewport_w: i32, viewport_h: i32) -> LayoutN
                                 y: content_y_start,
                                 w: content_w,
                                 h: content_h_available,
-                                content_w,
                             },
                             Some(fc.index),
                             root_font_size,
@@ -3093,7 +3143,6 @@ pub fn compute_layout(node: &VNode, viewport_w: i32, viewport_h: i32) -> LayoutN
                                 y: content_y_start,
                                 w: content_w,
                                 h: content_h_available,
-                                content_w,
                             },
                             Some(idx),
                             root_font_size,
@@ -3306,7 +3355,6 @@ pub fn compute_layout(node: &VNode, viewport_w: i32, viewport_h: i32) -> LayoutN
             y: 0,
             w: viewport_w,
             h: viewport_h,
-            content_w: viewport_w,
         },
         None,
         DEFAULT_ROOT_FONT_SIZE,
