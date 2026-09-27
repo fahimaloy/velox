@@ -1069,9 +1069,12 @@ fn negative_max_width_is_dropped_as_an_invalid_declaration() {
 
 /// KNOWN DIVERGENCE, not a rule, and the OPPOSITE case to
 /// `negative_max_width_is_dropped_as_an_invalid_declaration`: that one asserts
-/// spec-conforming behaviour that no engine has been checked against, while this one
-/// asserts behaviour a browser demonstrably does not have. They share a labelling
-/// requirement, so this stays explicit about which is which.
+/// spec-conforming behaviour that no engine has been checked against, while this
+/// one asserts behaviour the specs REQUIRE — CSS 2.1 §10.4's three-step algorithm,
+/// and css-sizing-3 §3.1's "the minimum size constraint is always the strongest
+/// constraint", both give 200px here — which this engine does not produce. Neither
+/// case is a browser measurement, and neither is claimed to be one. They share a
+/// labelling requirement, so this stays explicit about which is which.
 ///
 /// `min-width` is honoured on the flex main axis only. There is no block-flow
 /// `min-width` clamp anywhere in the engine, so `min-width: 200px; max-width: 100px`
