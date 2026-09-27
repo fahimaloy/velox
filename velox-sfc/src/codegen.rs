@@ -205,13 +205,23 @@ fn to_stub_rs_inner(
                 out.push_str(&format!("{inner_indent}}}\n"));
             }
         }
-
         out.push_str(&format!("{indent}}}\n"));
     }
+
+    // The name a parent writes this component's props with.
+    //
+    // A component that declares `pub struct Props` gets that struct, so a parent
+    // builds it as a struct literal and `rustc` checks every field it binds: a
+    // missing prop is a compile error rather than a value nobody asked for. A
+    // component that declares no `Props` gets an empty stand-in, so a parent
+    // that binds nothing to it still compiles, and one that binds something
+    // cannot.
+    out.push_str(&generate_props_arg(ss, indent));
 
     // Always generate render_with_callbacks so a parent can pass event callbacks
     // regardless of whether this component declares emits.
     let render_cb = generate_render_with_callbacks_inside_module();
+
     // The template has 4-space indentation; adjust to indent level
     for line in render_cb.lines() {
         let stripped = line.strip_prefix("    ").unwrap_or(line);
@@ -504,6 +514,30 @@ fn generate_component_emit_helpers() -> String {
     .to_string()
 }
 
+/// Generate the name a parent writes this component's props with.
+///
+/// A component that declares `pub struct Props` gets an alias for that struct, so
+/// a parent builds it as a struct literal and `rustc` checks every field it
+/// binds. A component that declares no `Props` gets a stand-in with no fields of
+/// its own: a parent that binds nothing to it still compiles, and one that binds
+/// something cannot. Its `values` map is still readable, because a component
+/// with no `Props` struct and no way to receive an attribute has nothing else to
+/// resolve a read from.
+fn generate_props_arg(ss: &str, indent: &str) -> String {
+    if crate::script_index::extract_props_fields(ss).is_empty() {
+        return format!(
+            "{indent}/// This component declares no `Props` struct, so a parent binds nothing to it.\n\
+             {indent}pub struct PropsArg {{\n\
+             {indent}    pub values: std::collections::HashMap<String, String>,\n\
+             {indent}}}\n"
+        );
+    }
+    format!(
+        "{indent}/// The typed channel across this component's boundary.\n\
+         {indent}pub type PropsArg = script_rs::Props;\n"
+    )
+}
+
 /// Generate `render_with_callbacks` function that accepts callbacks from a parent.
 /// Also generates `render_with_slots` overloads for components that accept slots.
 /// This goes INSIDE the module (before the closing brace).
@@ -512,7 +546,7 @@ fn generate_render_with_callbacks_inside_module() -> String {
     /// Render this component with callbacks from a parent component.
     /// The callbacks map event names to parent handler method names.
     pub fn render_with_callbacks(
-        props: std::collections::HashMap<&str, String>,
+        props: PropsArg,
         callbacks: &std::collections::HashMap<&'static str, &'static str>,
         _handler_names: &[&'static str],
     ) -> velox_dom::VNode {
@@ -528,7 +562,7 @@ fn generate_render_with_callbacks_inside_module() -> String {
     /// The callbacks map event names to parent handler method names.
     /// The slots map slot names to pre-rendered VNode trees.
     pub fn render_with_slots(
-        props: std::collections::HashMap<&str, String>,
+        props: PropsArg,
         callbacks: &std::collections::HashMap<&'static str, &'static str>,
         _handler_names: &[&'static str],
         slots: &std::collections::HashMap<&str, velox_dom::VNode>,
@@ -549,7 +583,7 @@ fn generate_render_with_slots_only_inside_module() -> String {
     /// Render this component with slot content from a parent component.
     /// The slots map maps slot names to pre-rendered VNode trees.
     pub fn render_with_slots(
-        props: std::collections::HashMap<&str, String>,
+        props: PropsArg,
         slots: &std::collections::HashMap<&str, velox_dom::VNode>,
     ) -> velox_dom::VNode {
         set_slots(slots);

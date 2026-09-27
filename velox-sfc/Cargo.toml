@@ -13,5 +13,12 @@ pest         = "2.8"
 pest_derive  = "2.8"
 
 [dev-dependencies]
+# A dev-dependency only, and only so the tests in `tests/` can EXECUTE generated
+# code instead of shelling out to a second `cargo`. Generated code's first line is
+# `use velox_core::...` for any component whose script uses a `Signal`, and this
+# crate's only dependencies are `pest` and `pest_derive`, so a test crate could
+# not name `velox_core` at all. This adds no third-party code: it is an existing
+# workspace crate, already the runtime every generated app links against.
+velox-core = { path = "../velox-core" }
 velox-dom = { path = "../velox-dom" }
 velox-renderer = { path = "../velox-renderer" }

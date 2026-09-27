@@ -51,9 +51,9 @@ pub fn make_on_event(state: std::sync::Arc<script_rs::State>) -> impl FnMut(&str
     }
 }
 
-pub fn render_with_props(props: std::collections::HashMap<&str, String>) -> velox_dom::VNode {
+pub fn render_with_props(props: PropsArg) -> velox_dom::VNode {
     let resolve_props = |key: &str| -> String {
-        props.get(key).cloned().unwrap_or_default()
+        props.values.get(key).cloned().unwrap_or_default()
     };
     render_with(resolve_props)
 }

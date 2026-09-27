@@ -67,27 +67,76 @@ pub fn extract_state_methods(script: &str) -> Vec<StateMethod> {
     out
 }
 
+/// One declared field of a component's `Props` struct.
+///
+/// The type is carried as the text the script wrote, e.g. `Vec<Row>`. Codegen
+/// reads it to build the child's props with the type the child asked for; it is
+/// not parsed into a type tree, because a `.vx` script is emitted verbatim and
+/// may name types from anywhere.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PropField {
+    /// The field name as declared, e.g. `items`.
+    pub name: String,
+    /// The declared type as written, e.g. `String` or `Vec<Row>`.
+    pub ty: String,
+}
+
 /// Extract field names from the `pub struct State { ... }` block.
 pub fn extract_state_fields(script: &str) -> Vec<String> {
-    let mut out: Vec<String> = Vec::new();
-    let mut in_state = false;
+    extract_struct_fields(script, "State")
+        .into_iter()
+        .map(|(name, _)| name)
+        .collect()
+}
+
+/// Extract the declared fields of the `pub struct Props { ... }` block, each with
+/// the type the script wrote for it.
+///
+/// Empty when the script declares no `Props` struct. That emptiness is a signal
+/// in its own right: a component with no `Props` struct has no typed channel a
+/// `v-for` collection could be read out of, so nothing may claim one does.
+pub fn extract_props_fields(script: &str) -> Vec<PropField> {
+    extract_struct_fields(script, "Props")
+        .into_iter()
+        .map(|(name, ty)| PropField { name, ty })
+        .collect()
+}
+
+/// Extract the field names declared by `pub struct {name} { ... }`, paired with
+/// the type text that follows the `:`.
+///
+/// The struct name must end on a word boundary, so `pub struct PropsList` is not
+/// read as a `Props` declaration. The scan itself is line-based and otherwise
+/// unchanged from the `State` version it generalises: it tracks brace depth so
+/// nested blocks inside the struct do not end it early, and it takes the text
+/// before the first `:` on each line as the field name.
+fn extract_struct_fields(script: &str, name: &str) -> Vec<(String, String)> {
+    let mut out: Vec<(String, String)> = Vec::new();
+    let mut in_struct = false;
     let mut depth = 0usize;
     for line in script.lines() {
         let trimmed = line.trim();
-        if !in_state {
-            if trimmed.starts_with("pub struct State") || trimmed.starts_with("struct State") {
-                in_state = true;
+        if !in_struct {
+            if let Some(rest) = strip_prefix_ignore(trimmed, "pub struct ")
+                .or_else(|| strip_prefix_ignore(trimmed, "struct "))
+                && rest.starts_with(name)
+                && rest[name.len()..]
+                    .chars()
+                    .next()
+                    .is_none_or(|c| !is_ident_char(c))
+            {
+                in_struct = true;
                 depth = count_char(trimmed, '{');
-                // `struct State;` unit struct — no fields.
+                // `struct Name;` unit struct — no fields.
                 if trimmed.contains(";") && !trimmed.contains('{') {
-                    in_state = false;
+                    in_struct = false;
                 }
             }
             continue;
         }
         depth += count_char(trimmed, '{');
         if depth == 0 {
-            in_state = false;
+            in_struct = false;
             continue;
         }
         depth = depth.saturating_sub(count_char(trimmed, '}'));
@@ -96,16 +145,34 @@ pub fn extract_state_fields(script: &str) -> Vec<String> {
             .map(str::trim_start)
             .unwrap_or(trimmed);
         if let Some(colon) = stripped.find(':') {
-            let name = stripped[..colon].trim();
-            if is_ident(name) {
-                out.push(name.to_string());
+            let field = stripped[..colon].trim();
+            let ty = stripped[colon + 1..].trim();
+            if is_ident(field) {
+                let ty = strip_type_comment(ty);
+                // `pub todo: String,` — the separator is the field's, not the
+                // type's, so the type it declared is `String`.
+                let ty = ty.strip_suffix(',').unwrap_or(ty).trim_end();
+                out.push((field.to_string(), ty.to_string()));
             }
         }
         if depth == 0 {
-            in_state = false;
+            in_struct = false;
         }
     }
     out
+}
+
+/// Drop a trailing line comment, and the separator after the type, from a type
+/// written on a field line.
+///
+/// Only a `//` comment is handled: a `//` inside a string literal type is not a
+/// thing a `.vx` script writes, and stopping short of full comment parsing is
+/// what keeps this a line-based scan.
+fn strip_type_comment(ty: &str) -> &str {
+    match ty.find("//") {
+        Some(at) => ty[..at].trim_end(),
+        None => ty,
+    }
 }
 
 /// Resolve a template key to the actual method name declared on `State`.
@@ -221,6 +288,16 @@ fn is_ident(s: &str) -> bool {
         _ => return false,
     }
     chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+/// One character of a Rust identifier.
+///
+/// Deliberately the same predicate `codegen.rs` uses, not a narrower one: a
+/// narrower predicate would turn a struct name that used to match into one that
+/// does not, and `extract_state_fields` matching `pub struct StateExtra` is a
+/// measured behaviour, not an accident to tidy away.
+fn is_ident_char(ch: char) -> bool {
+    ch.is_ascii_alphanumeric() || ch == '_'
 }
 
 #[cfg(test)]
