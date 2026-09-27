@@ -1637,31 +1637,35 @@ pub mod skia_impl {
         }
 
         #[test]
-        fn line_box_height_under_real_metrics_follows_the_run_in_it() {
+        fn line_box_height_under_real_metrics_is_the_strut_for_every_real_run() {
             velox_dom::text_wrap::set_skia_measurer(measure_text);
             let heights = seam_line_heights(&seam_pre_text_div("Hg\nxxx"));
             assert_eq!(heights.len(), 3, "root, div, two line boxes: {heights:?}");
 
+            // See the bare-text test above for why the old "two different runs
+            // get two different heights" assertion had to go: no run of this face
+            // at one size overshoots its own strut. What replaces it is the
+            // relationship that IS true, and which a fixed multiplier cannot
+            // produce: each line is exactly the strut, and the strut is derived
+            // from the font file rather than re-run through the implementation.
+            let strut = (SEAM_SIZE * 1.362).round() as i32;
             for (line_text, got) in [("Hg", heights[1]), ("xxx", heights[2])] {
                 let run = measure_text(line_text, SEAM_SIZE, SEAM_FAMILY, 1.0);
+                assert!(
+                    (run.line_extent().round() as i32) < strut,
+                    "precondition: `{line_text}` ink must be under the strut"
+                );
                 assert_eq!(
-                    got,
-                    run.line_extent().round() as i32,
-                    "line {line_text:?} should be the round of its own run's extent \
-                     {} + {} = {}",
-                    run.ascent,
-                    run.descent,
-                    run.line_extent()
+                    got, strut,
+                    "line {line_text:?} is the strut, since its ink of {} + {} is \
+                     under it",
+                    run.ascent, run.descent
                 );
             }
             assert_ne!(
-                heights[1], heights[2],
-                "two lines of different content must get different heights: {heights:?}"
-            );
-            let nominal = (SEAM_SIZE * 1.2).round() as i32;
-            assert!(
-                heights.iter().all(|h| *h != nominal),
-                "no line box may still be the fixed 1.2em multiplier: {heights:?}"
+                strut,
+                (SEAM_SIZE * 1.2).round() as i32,
+                "1.362em and 1.2em must not coincide, or this test proves nothing"
             );
         }
 
@@ -1683,8 +1687,10 @@ pub mod skia_impl {
             );
             assert_eq!(
                 heights[1],
-                (SEAM_SIZE * 1.2).round() as i32,
-                "with no usable vertical measurement the documented approximation applies"
+                (SEAM_SIZE * 1.362).round() as i32,
+                "a zero extent must not pass through: the seam substitutes the ink \
+                 approximation (1.2em) and the strut then floors it to 1.362em. \
+                 Passing the zero on instead would give 0"
             );
         }
 
@@ -1776,36 +1782,56 @@ pub mod skia_impl {
         /// real font backend's metrics actually arrive at the branch that uses
         /// them.
         #[test]
-        fn a_bare_text_node_is_as_tall_as_the_run_in_it_under_real_metrics() {
+        fn a_bare_text_node_under_real_metrics_is_the_strut_and_not_the_ink() {
             velox_dom::text_wrap::set_skia_measurer(measure_text);
             let bare = |text: &str| {
                 velox_dom::layout::compute_layout(&VNode::Text(text.to_string()), 300, 300)
                     .rect
                     .h
             };
-            let caps = bare("Hg");
-            let x_only = bare("xxx");
-            assert_ne!(
-                caps, x_only,
-                "two runs at {SEAM_SIZE}px must get different heights from real \
-                 metrics, or the bare-text path is not using them ({caps} vs {x_only})"
-            );
-            for (text, actual) in [("Hg", caps), ("xxx", x_only)] {
+            // RESTATED in R-5b, and the premise of the old version was false.
+            // It asserted that a real run's ink sets the bare node's height. It
+            // no longer does -- and must not, because a real face's runs are all
+            // shorter than its own ascent + descent:
+            //   "Hg" at 16px measures 12.0 up + 4.0 down = 1.0em
+            //   "xxx" at 16px measures 9.0 up + 0.0 down   = 0.5625em
+            //   the strut is 1.069em + 0.293em              = 1.362em
+            // So the strut decides for BOTH, which is what a browser does. Under a
+            // single uniform font size no run of this face can overshoot its own
+            // strut, so "two runs of different content get different heights" is
+            // not a property a real font can exhibit at one size. The
+            // run-versus-strut discrimination is therefore asserted in
+            // velox-dom's `text_metrics_seam.rs`, where a synthetic measurer CAN
+            // overshoot; this test pins the real font's numbers.
+            let strut = SEAM_SIZE * 1.362;
+            for text in ["Hg", "xxx", "Wq"] {
                 let run = measure_text(text, SEAM_SIZE, SEAM_FAMILY, 1.0);
+                assert!(
+                    run.line_extent() < strut,
+                    "precondition for this test's claim: `{text}` ink must be under \
+                     the strut, or the strut would not be what is being measured \
+                     ({} vs {strut})",
+                    run.line_extent()
+                );
                 assert_eq!(
-                    actual,
-                    run.line_extent().round() as i32,
-                    "a bare `{text}` node must be as tall as the run it holds, \
-                     which measures {} up and {} down",
+                    bare(text),
+                    strut.round() as i32,
+                    "a bare `{text}` node is the strut ({} + {} at 1.069em/0.293em), \
+                     not its ink of {} up and {} down",
+                    SEAM_SIZE * 1.069,
+                    SEAM_SIZE * 0.293,
                     run.ascent,
                     run.descent
                 );
-                assert_ne!(
-                    actual, 19,
-                    "`{text}` must not get the old 1.2em height; routing this path \
-                     through the seam is the point of the change"
-                );
             }
+            assert_ne!(
+                bare("Hg"),
+                19,
+                "and still not the 1.2em the bare-text path had before R-5a: it went \
+                 19 -> {} (ink) -> {} (strut)",
+                9,
+                22
+            );
         }
 
         #[test]

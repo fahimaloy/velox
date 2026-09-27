@@ -58,12 +58,12 @@ fn test_measurer(text: &str, font_size: f32, _family: &str, scale: f32) -> Measu
     MeasuredText {
         width,
         ascent: if has_ascender(text) {
-            snapped * 0.55
+            snapped * 2.0
         } else {
             snapped * 0.30
         },
         descent: if has_descender(text) {
-            snapped * 0.20
+            snapped * 0.5
         } else {
             0.0
         },
@@ -108,8 +108,8 @@ fn pre_text_div(text: &str) -> velox_dom::VNode {
 fn a_registered_measurers_vertical_metrics_reach_the_seam() {
     register();
     let caps = measure_text_metrics("Hg", FONT_SIZE, FAMILY, 1.0);
-    assert_eq!(caps.ascent, 8.8, "0.55em above the baseline");
-    assert_eq!(caps.descent, 3.2, "0.20em below it");
+    assert_eq!(caps.ascent, 32.0, "2.0em above the baseline");
+    assert_eq!(caps.descent, 8.0, "0.5em below it");
     let x_only = measure_text_metrics("xxx", FONT_SIZE, FAMILY, 1.0);
     assert_eq!(x_only.ascent, 4.8, "x-height, not cap height");
     assert_eq!(x_only.descent, 0.0, "no descender in the run");
@@ -142,15 +142,24 @@ fn a_line_box_is_as_tall_as_the_run_in_it_and_not_the_fonts_nominal_line_height(
     let heights = line_heights(&pre_text_div("Hg\nxxx"));
     assert_eq!(
         &heights[1..],
-        &[12, 5],
-        "each line box is the round of its own run's ascent+descent \
-         (Hg: 8.8+3.2 = 12, xxx: 4.8+0 = 5)"
+        &[40, 22],
+        "one line box per line, and the two differ: \"Hg\" ink (2.5em = 40px) \
+         clears the 1.362em strut so the RUN sets its height, \"xxx\" ink \
+         (0.30em = 4.8px) does not, so the STRUT does"
     );
-    let nominal = (FONT_SIZE * 1.2).round() as i32;
-    assert_eq!(nominal, 19);
-    assert!(
-        heights.iter().all(|h| *h != nominal),
-        "no line box may still be the fixed 1.2em multiplier: {heights:?}"
+    // The strut: 1.069em + 0.293em from the default face's typo metrics, 21.8px
+    // at 16px. Derived from the font file, NOT by re-running the implementation.
+    let nominal = (FONT_SIZE * 1.362).round() as i32;
+    assert_eq!(nominal, 22, "the strut at 16px");
+    assert_ne!(
+        heights[1], nominal,
+        "the \"Hg\" line's ink is 2.5em, over the 1.362em strut, so the RUN \
+         must set that line's height"
+    );
+    assert_eq!(
+        heights[2], nominal,
+        "the \"xxx\" line's ink is 0.30em, under the strut, so the STRUT must \
+         set that line's height -- two lines, one decided by each"
     );
 }
 
@@ -179,8 +188,10 @@ fn a_run_with_no_ink_does_not_collapse_its_line_box() {
     );
     assert_eq!(
         heights[1],
-        (FONT_SIZE * 1.2).round() as i32,
-        "with no usable vertical measurement the documented approximation applies"
+        (FONT_SIZE * 1.362).round() as i32,
+        "a zero extent must not pass through: the seam substitutes the ink \
+         approximation (1.2em) and the STRUT then floors it to 1.362em. Were the \
+         zero passed through instead, this would be 0"
     );
 }
 
@@ -195,8 +206,8 @@ fn an_inkless_run_keeps_its_real_width() {
         FONT_SIZE * 0.5 * 2.0,
         "the registered measurer's width must be used verbatim"
     );
-    assert_eq!(m.ascent, FONT_SIZE * 0.55);
-    assert_eq!(m.descent, FONT_SIZE * 0.2);
+    assert_eq!(m.ascent, FONT_SIZE * 2.0);
+    assert_eq!(m.descent, FONT_SIZE * 0.5);
     let blank = measure_text_metrics(" ", FONT_SIZE, FAMILY, 1.0);
     assert_eq!(blank.width, FONT_SIZE * 0.5, "width of a blank run is real");
     assert_eq!(blank.ascent, FONT_SIZE * 0.8, "vertical fell back");
@@ -234,21 +245,28 @@ fn bare_text_height(text: &str) -> i32 {
 fn a_bare_text_node_is_as_tall_as_the_run_in_it() {
     let caps = bare_text_height("Hg");
     let x_only = bare_text_height("xxx");
-    assert_eq!(caps, 12, "\"Hg\": 0.55em + 0.20em = 12.0px from the seam");
-    assert_eq!(x_only, 5, "\"xxx\": 0.30em + 0 = 4.8px from the seam");
+    assert_eq!(caps, 40, "\"Hg\": 2.0em + 0.5em = 40px, over the strut");
+    assert_eq!(
+        x_only, 22,
+        "\"xxx\": 0.30em = 4.8px is UNDER the 1.362em strut, so the strut decides"
+    );
     assert_ne!(
         caps, x_only,
         "two runs at the same size must get different heights, or the height is \
          not following the content at all"
     );
-    for text in ["Hg", "xxx"] {
-        assert_ne!(
-            bare_text_height(text),
-            19,
-            "`{text}` must not get the old 1.2em height, which is the whole point of \
-             routing this path through the seam"
-        );
-    }
+    // "Hg" is 40, above every constant in play. "xxx" is 22, which happens to
+    // equal the old 1.2em: that is coincidence, not the old code, because the
+    // bare-text path went 19 -> 9 (ink) -> 22 (strut) and both edges are asserted
+    // above. Asserted here so the collision is visible rather than implied.
+    assert_eq!(
+        caps, 40,
+        "\"Hg\" ink still clears the strut on the bare-text path"
+    );
+    assert_ne!(
+        caps, 22,
+        "if \"Hg\" also came out 22 the bare-text path would be ignoring the run"
+    );
 }
 
 /// The width of a bare text node is still the 0.6 heuristic, and stays that way.
@@ -262,7 +280,10 @@ fn a_bare_text_nodes_width_half_is_still_the_heuristic_not_the_seam() {
     register();
     // 0.6em per char at 16px is 9.6px; the seam's 0.5em would be 8.0px.
     let laid = compute_layout(&velox_dom::VNode::Text("Hg".to_string()), 300, 300);
-    assert_eq!(laid.rect.w, 19, "2 chars * 0.6em * 16px, rounded");
+    assert_eq!(
+        laid.rect.w, 19,
+        "2 chars * 0.6em * 16px, rounded — width is NOT the strut's business"
+    );
     assert_ne!(
         laid.rect.w, 16,
         "if this is 16 the width went through the seam, which is not what R-5a \

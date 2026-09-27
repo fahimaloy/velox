@@ -25,8 +25,24 @@ pub struct FontMetrics {
     /// the measurer registered through `text_wrap::set_skia_measurer` is the only
     /// source of real font metrics, and what it reports is a run's ink extent.
     ///
-    /// `heuristic_vertical` is the single definition of that approximation; the
-    /// text seam's no-measurer fallback calls it too, so the two cannot drift.
+    /// These are the STRUT, and they are the font's typographic metrics, not a
+    /// run's ink: a line box is at least as tall as the container's own font
+    /// would make it, whatever the characters on the line happen to be. That is
+    /// why a line of "xxx" is as tall as a line of "Hg" in a browser, and it is
+    /// the floor `text_wrap::line_box_height` applies.
+    ///
+    /// The values are the `typo` metrics of the default face,
+    /// `NotoSans-Regular.ttf` (unitsPerEm 1000): typoAscender 1069,
+    /// typoDescender -293, typoLineGap 0, and `fsSelection = 0x00C0` with bit 7
+    /// (`USE_TYPO_METRICS`) SET, so these are the numbers a browser's strut uses
+    /// for this face — not one of two candidates. `hhea` agrees (1069/293); the
+    /// `usWin` pair (1.124em + 0.395em) is what Windows-style GDI would pick and
+    /// is deliberately not used, for that reason.
+    ///
+    /// This is a DIFFERENT quantity from `heuristic_vertical`, which approximates
+    /// the ink of a run with no font backend. Confining the ink guess to the
+    /// function that names it as a guess is the point: the strut is measured, the
+    /// fallback is labelled.
     pub ascent: f32,
     pub descent: f32,
 }
@@ -62,7 +78,11 @@ impl FontMetrics {
         let char_width = font_size_px * 0.6;
         // Line height is typically 1.2 * font_size
         let line_height = font_size_px * 1.2;
-        let (ascent, descent) = Self::heuristic_vertical(font_size_px);
+        // The STRUT, from the face's own typographic metrics: 1.069em + 0.293em
+        // = 1.362em. NOT `heuristic_vertical`, which is the guess at a run's ink
+        // and is used only where there is no font backend to ask.
+        let ascent = font_size_px * 1.069;
+        let descent = font_size_px * 0.293;
         Self {
             char_width,
             line_height,
@@ -1208,6 +1228,10 @@ fn text_dimensions(t: &str, font_size_px: f32) -> (i32, i32) {
     // exactly how the next task's strut would reach the wrapping path and not this
     // one. The height is built from the run's measured extent here for the same
     // reason and by the same call.
+    // One function builds every line box, and it is the one the strut lives in.
+    // This used to re-derive the formula inline, which meant a strut added to
+    // `line_box_height` would have reached the wrapped-text path and silently
+    // skipped this one. It is the same call the wrapping path makes.
     let h = {
         let run = crate::text_wrap::measure_text_metrics(
             t,
@@ -1215,7 +1239,7 @@ fn text_dimensions(t: &str, font_size_px: f32) -> (i32, i32) {
             DEFAULT_TEXT_FAMILY,
             crate::text_wrap::current_scale(),
         );
-        run.line_extent().round() as i32
+        crate::text_wrap::line_box_height(&run, &metrics)
     };
     (w, h)
 }

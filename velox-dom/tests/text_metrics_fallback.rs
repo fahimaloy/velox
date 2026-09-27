@@ -22,9 +22,33 @@ fn heuristic_vertical_is_the_documented_approximation() {
 
 #[test]
 fn font_metrics_carries_the_approximation_on_both_its_new_fields() {
+    // RENAMED IN R-5b, and the rename is the point: these two fields used to
+    // carry `heuristic_vertical`, the labelled guess at a RUN'S INK. They are the
+    // STRUT now -- the font's own typographic metrics -- because a line box is
+    // floored by the container's font, not by the characters on it.
+    //
+    // 1.069em and 0.293em are NotoSans-Regular.ttf's typoAscender and
+    // typoDescender at unitsPerEm 1000, read out of the font file. `fsSelection =
+    // 0x00C0` has USE_TYPO_METRICS set, so these are what a browser's strut uses
+    // for this face, not one of two candidates. `heuristic_vertical` is unchanged
+    // and still serves as the ink fallback; `a_fallback_run_measures_to_the_
+    // documented_approximation` below still pins it.
     let m = FontMetrics::from_font_size(16.0);
-    assert_eq!(m.ascent, 12.8);
-    assert_eq!(m.descent, 6.4);
+    assert_eq!(
+        m.ascent,
+        16.0 * 1.069,
+        "the strut, from the face's typo metrics"
+    );
+    assert_eq!(
+        m.descent,
+        16.0 * 0.293,
+        "the strut, from the face's typo metrics"
+    );
+    assert_eq!(
+        m.ascent + m.descent,
+        16.0 * 1.362,
+        "1.362em is the strut a browser builds for this face"
+    );
 }
 
 #[test]
@@ -85,7 +109,7 @@ fn the_approximation_leaves_every_line_height_exactly_where_it_was() {
 }
 
 #[test]
-fn a_wrapped_line_is_as_tall_on_the_fallback_path_as_it_always_was() {
+fn a_wrapped_line_on_the_fallback_path_is_the_strut_and_its_width_is_unchanged() {
     let lines = wrap_text_with_options(
         "Hg",
         200,
@@ -96,7 +120,10 @@ fn a_wrapped_line_is_as_tall_on_the_fallback_path_as_it_always_was() {
         TextOverflow::Clip,
     );
     assert_eq!(lines.len(), 1);
-    assert_eq!(lines[0].height, 19, "16 * 1.2 rounded, unchanged");
+    // Was 19 (1.2em). The strut is 1.362em and now decides, because the ink
+    // fallback's 1.2em is below it. This is R-5b Requirement B, and the height
+    // moving is the intended effect, not a regression: 19 -> 9 (R-5a's ink) -> 22.
+    assert_eq!(lines[0].height, 22, "the strut, 1.362em at 16px, not 1.2em");
     assert_eq!(lines[0].width, 16, "0.5em per char, unchanged");
 }
 
@@ -181,9 +208,9 @@ fn a_bare_text_node_on_the_fallback_path_is_unchanged_and_non_zero() {
             "bare text width stays the 0.6em heuristic: {text:?} at 16px"
         );
         assert_eq!(
-            laid.rect.h, 19,
-            "on the fallback the seam's 0.8em + 0.4em total is 1.2em, so the \
-             height is the same for every run — {text:?} included"
+            laid.rect.h, 22,
+            "the strut, 1.362em at 16px, and it is the same for every run because \
+             the ink fallback's 1.2em is under it — {text:?} included"
         );
     }
 }

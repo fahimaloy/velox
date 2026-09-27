@@ -137,20 +137,26 @@ pub fn measure_text(text: &str, font_size_px: f32, font_family: &str, scale: f32
     measure_text_internal(text, font_size_px, font_family, scale)
 }
 
-/// Height of a line box whose only content is this run.
+/// Height of a line box containing this run, floored by the container's strut.
 ///
-/// This is the run's own extent with no strut floor: two lines whose runs reach
-/// different heights get different heights.
+/// This is THE line box height. Every path that turns a run into a box calls it:
+/// `wrap_text`, `wrap_text_with_options`, and `layout::text_dimensions` (the bare
+/// `VNode::Text` arm). It was private once, and `text_dimensions` re-derived the
+/// formula inline, so a strut added here would have reached the wrapping paths and
+/// skipped that one.
 ///
-/// On the heuristic path that total is `font_size * 0.8 + font_size * 0.4` ≈
-/// `font_size * 1.2`, which is what this function has always returned, so nothing
-/// moves THERE. But a real font backend IS registered in the shipping renderer,
-/// so in a Skia build this is where behaviour does change: a run of "xxx" now
-/// yields roughly x-height where it used to yield 1.2em. `heuristic_vertical` says
-/// what is still a guess. A browser's line box comes from the FONT's ascent +
-/// descent via a strut, which this does not apply yet — the floor goes here.
-fn line_box_height(m: &MeasuredText) -> i32 {
-    m.line_extent().round() as i32
+/// The floor is `strut.ascent + strut.descent` — 1.362em at the default size,
+/// from the face's own typographic metrics. It is what makes a line of "xxx" the
+/// same height as a line of "Hg", which is what a browser does and what this did
+/// not. A run that overshoots the strut (a tall run, or a large `font-size`)
+/// still sets the height itself.
+///
+/// With no measurer registered the run's own extent is 1.2em, below the strut, so
+/// the strut decides — headless and Skia builds then agree, which they do not
+/// today. Where a measurer is registered the two can disagree: real "xxx" ink at
+/// 16px is about 9px, so the strut is doing the work there too.
+pub(crate) fn line_box_height(m: &MeasuredText, strut: &FontMetrics) -> i32 {
+    m.line_extent().max(strut.ascent + strut.descent).round() as i32
 }
 
 /// Legacy heuristic width single-char estimate for divergence test — old 0.6 ratio.
@@ -391,7 +397,7 @@ pub fn wrap_text(text: &str, max_width: i32, font_size_px: f32) -> Vec<TextLine>
             TextLine {
                 text: s,
                 width: w.round() as i32,
-                height: line_box_height(&run),
+                height: line_box_height(&run, &metrics),
             }
         })
         .collect()
@@ -434,7 +440,7 @@ pub fn wrap_text_with_options(
             TextLine {
                 text: s,
                 width: w.round() as i32,
-                height: line_box_height(&run),
+                height: line_box_height(&run, &metrics),
             }
         })
         .collect()
