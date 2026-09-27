@@ -137,43 +137,113 @@ fn the_width_only_entry_point_is_a_projection_of_the_registered_measurer() {
     }
 }
 
+/// The auto height of a div holding exactly one line, in a parent that does not
+/// constrain it.
+///
+/// A block container's height is the sum of its line boxes', so a div with one
+/// line IS that line box's height. This is the observable that lets a line box
+/// be measured at all: a text fragment's own box is the line's font content box,
+/// which is the same height on every line, and its top sits below the line box's
+/// top by however far the run's ink overshoots the strut. A line box's extent is
+/// therefore read from its CONTAINER, never recomputed from the alignment pass
+/// that produced it.
+fn one_line_height(text: &str) -> i32 {
+    register();
+    let style = format!("font-size:{FONT_SIZE}px;white-space:pre");
+    let outer = h(
+        "div",
+        vec![],
+        vec![h(
+            "div",
+            vec![("style", style.as_str())],
+            vec![velox_dom::VNode::Text(text.to_string())],
+        )],
+    );
+    compute_layout(&outer, 600, 600).children[0].rect.h
+}
+
 #[test]
 fn a_line_box_is_as_tall_as_the_run_in_it_and_not_the_fonts_nominal_line_height() {
+    // RESTATED for the inline formatting context. This test used to read the
+    // line box's height off a text node's own `rect.h`. That conflated two
+    // different boxes, and the inline formatting context is what separates them:
+    //
+    //   * a text FRAGMENT's box is its own font's content box -- ascent +
+    //     descent, CSS 2.1 §10.8.1 -- so it is the STRUT's height for every
+    //     fragment on a line, whatever ink the run has;
+    //   * the LINE BOX is the union of the fragments on it, so a run whose ink
+    //     overshoots the strut makes the LINE taller without making its own box
+    //     taller.
+    //
+    // Both halves are asserted: the fragments' boxes, and the lines' extents.
     let heights = line_heights(&pre_text_div("Hg\nxxx"));
-    assert_eq!(
-        &heights[1..],
-        &[40, 22],
-        "one line box per line, and the two differ: \"Hg\" ink (2.5em = 40px) \
-         clears the 1.362em strut so the RUN sets its height, \"xxx\" ink \
-         (0.30em = 4.8px) does not, so the STRUT does"
-    );
     // The strut: 1.069em + 0.293em from the default face's typo metrics, 21.8px
     // at 16px. Derived from the font file, NOT by re-running the implementation.
     let nominal = (FONT_SIZE * 1.362).round() as i32;
     assert_eq!(nominal, 22, "the strut at 16px");
-    assert_ne!(
-        heights[1], nominal,
-        "the \"Hg\" line's ink is 2.5em, over the 1.362em strut, so the RUN \
-         must set that line's height"
+    assert_eq!(
+        heights[1..],
+        [22, 22],
+        "every text fragment's box is the line's font content box -- the strut -- \
+         whatever the run's ink: {heights:?}"
+    );
+    // "Hg" ink is 2.0em + 0.5em = 2.5em = 40px, over the 21.8px strut, so the
+    // RUN sets that line box's height. "xxx" ink is 0.30em = 4.8px, under the
+    // strut, so the STRUT sets that one's.
+    assert_eq!(
+        one_line_height("Hg"),
+        40,
+        "the \"Hg\" run's ink is 2.5em, over the 1.362em strut, so the RUN \
+         must set that line box's height"
     );
     assert_eq!(
-        heights[2], nominal,
-        "the \"xxx\" line's ink is 0.30em, under the strut, so the STRUT must \
-         set that line's height -- two lines, one decided by each"
+        one_line_height("xxx"),
+        nominal,
+        "the \"xxx\" run's ink is 0.30em, under the strut, so the STRUT must \
+         set that line box's height"
     );
 }
 
 #[test]
 fn two_lines_of_different_content_get_different_heights() {
-    let heights = line_heights(&pre_text_div("Hg\nxxx"));
-    assert_eq!(heights.len(), 3, "root, div, two line boxes: {heights:?}");
+    // RESTATED with the same distinction as the test above: the two LINE boxes
+    // differ, and each fragment's own box does not. They are separated by
+    // measuring each line in a container of its own, which is also what keeps
+    // the assertion independent of the alignment pass that produced them.
+    let first = one_line_height("Hg");
+    let second = one_line_height("xxx");
     assert_ne!(
-        heights[1], heights[2],
-        "line box height must follow the content, not a per-font constant: {heights:?}"
+        first, second,
+        "line box height must follow the content, not a per-font constant: \
+         {first} then {second}"
     );
     assert!(
-        heights[1] > heights[2],
-        "the run with a descender is taller"
+        first > second,
+        "the run with a descender is taller: {first} then {second}"
+    );
+    // Two lines in ONE container must come to exactly the sum of the two
+    // measured apart. That is what says the line boxes are independent -- that
+    // the second is not inheriting the first's height -- rather than a block
+    // container reporting one height for everything inside it.
+    let both = {
+        register();
+        let style = format!("font-size:{FONT_SIZE}px;white-space:pre");
+        let outer = h(
+            "div",
+            vec![],
+            vec![h(
+                "div",
+                vec![("style", style.as_str())],
+                vec![velox_dom::VNode::Text("Hg\nxxx".to_string())],
+            )],
+        );
+        compute_layout(&outer, 600, 600).children[0].rect.h
+    };
+    assert_eq!(
+        both,
+        first + second,
+        "a block container's height is the sum of its line boxes: {both} \
+         against {first} + {second}"
     );
 }
 

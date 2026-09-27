@@ -1,3 +1,4 @@
+use crate::style::{VerticalAlign, WhiteSpace};
 use crate::{Length, VNode};
 
 /// Default font size for root element (used for rem calculations)
@@ -6,6 +7,886 @@ const DEFAULT_ROOT_FONT_SIZE: f32 = 16.0;
 /// Font family used for text measurement when a caller has no stylesheet
 /// context to name one. Matches the family `text_wrap::wrap_text` assumes.
 pub const DEFAULT_TEXT_FAMILY: &str = "system-ui";
+
+// ===== INLINE FORMATTING CONTEXT =========================================
+//
+// A `display: inline` box has no box of its own: its text participates in the
+// line boxes of the BLOCK that contains it, not in a line box of its own. That
+// is the whole of requirement 1, and two consequences shape everything below.
+//
+// 1. An inline run is FLATTENED before it is laid out. `<b>one</b> two` becomes
+//    one ordered list of text leaves, so a line may break between "one" and
+//    "two" and the two are still one paragraph and one line box. It cannot be
+//    had any other way: lay the inline element out on its own first and the
+//    break opportunity at its trailing edge is gone before anything can use it.
+//
+// 2. The emitted `LayoutNode` tree still MIRRORS the `VNode` tree level for
+//    level. The renderer resolves `source_index` against the VNode children at
+//    each level (`children.get(src_idx)`) and skips any LayoutNode it cannot
+//    resolve, so a synthetic wrapper node would take its whole subtree with it
+//    -- there is no way to represent a flattened fragment without one. An inline
+//    element therefore still gets a LayoutNode: a degenerate one, since it has no
+//    box, whose only job is to keep the mirroring. Its text children hang off it
+//    carrying the real line geometry. An inline element fragmented across two
+//    lines appears on both, which is what a browser does too.
+
+/// A member of an inline run, addressed by its index path from the block
+/// container's `children`.
+enum InlineRunItem<'a> {
+    /// An inline-level element that contributes no box. Its text is flattened
+    /// into the run.
+    Fragment {
+        path: Vec<usize>,
+        node: &'a VNode,
+        font_size: f32,
+        font_family: String,
+        align: VerticalAlign,
+        /// Whether this element's subtree contains any text. An inline element
+        /// with none -- an empty `<span>`, an `<img>`, which has no box in this
+        /// engine -- still gets a box, because a box of zero size is still a box,
+        /// and the `LayoutNode` tree has to mirror the `VNode` tree for the
+        /// renderer to be able to reach it at all.
+        has_text: bool,
+    },
+    /// `display: inline-block`: one unbreakable box that establishes its own
+    /// block formatting context, so it is never flattened and never split.
+    Atomic {
+        path: Vec<usize>,
+        node: &'a VNode,
+        font_size: f32,
+        font_family: String,
+        align: VerticalAlign,
+    },
+}
+
+/// One unbreakable piece of a flattened inline run, already measured.
+///
+/// Splitting happens on whitespace RUNS and never inside a word. The split is
+/// per leaf, so a break can land between two leaves exactly as easily as it can
+/// inside one; that is what makes wrapping across an inline boundary work.
+struct InlinePiece {
+    /// Index into the run's items, so the emitter can recover the path.
+    item: usize,
+    text: String,
+    width: i32,
+    /// Ink above and below this piece's own baseline, from the seam. Zero for a
+    /// whitespace piece, which has no ink -- it is still placed, and it still
+    /// occupies width.
+    ascent: f32,
+    descent: f32,
+    is_space: bool,
+    /// The leaf this piece came from, for an `Atomic` item's baseline.
+    atomic: bool,
+    /// The line's own font's typographic ascent and descent. A text fragment's
+    /// BOX is this tall -- a browser's inline content area is the font's
+    /// ascent + descent, not the ink -- so `vertical-align` moves the box
+    /// without changing its height, which is what makes the alignment legible
+    /// in the geometry at all.
+    strut_a: f32,
+    strut_d: f32,
+    /// A forced break, from a newline in `pre` or `pre-wrap`. It carries no text
+    /// and no width; it exists so the line filler can see the break the
+    /// tokenizer found.
+    hard_break: bool,
+}
+
+/// A token of a flattened run, before measurement.
+enum InlineToken {
+    Word(String),
+    /// A whitespace run. In a collapsing mode the text is the single space a
+    /// browser collapses to; in a preserving mode it is the author's own run.
+    Space(String),
+    /// A forced break, from a newline in `pre` / `pre-wrap`.
+    Break,
+}
+
+/// Where the inline run ended, and how tall it was.
+struct InlineRunResult {
+    /// Right edge of the last line's ink, for the block loop's `cur_x`.
+    cur_x: i32,
+    /// `cur_y` after the run.
+    cur_y: i32,
+    /// Height of the last line, for the block loop's `line_h`.
+    line_h: i32,
+    max_y_end: i32,
+}
+
+/// Resolve an element's `font-size`, in the same px-only convention the rest of
+/// the layout path uses. `em`/`%` are not resolved and inherit instead.
+fn inline_font_size(style: Option<&str>, inherited: f32) -> f32 {
+    style_lookup_str(style, "font-size")
+        .and_then(|v| {
+            v.trim()
+                .strip_suffix("px")
+                .and_then(|n| n.trim().parse::<f32>().ok())
+        })
+        .unwrap_or(inherited)
+}
+
+fn inline_font_family(style: Option<&str>, inherited: &str) -> String {
+    style_lookup_str(style, "font-family").unwrap_or_else(|| inherited.to_string())
+}
+
+/// Read `vertical-align` off a style string, falling back to the inherited
+/// value when absent. An unparseable value leaves the inherited value in place
+/// rather than being read as `baseline`.
+fn inline_vertical_align(style: Option<&str>, inherited: VerticalAlign) -> VerticalAlign {
+    style_lookup_str(style, "vertical-align")
+        .and_then(|v| VerticalAlign::parse(&v))
+        .unwrap_or(inherited)
+}
+
+/// Whether a child belongs to the enclosing block's inline run.
+///
+/// An inline-level box in flow. `display: inline-block` is INCLUDED, as an
+/// atomic: it is inline-level, so it sits in a line box, but it is not
+/// flattened, because it establishes a block formatting context of its own.
+/// `inline-flex` and `inline-grid` are excluded deliberately -- they are block
+/// containers and the flex path owns them, and routing them into the inline run
+/// is the one thing that must not happen to it.
+fn is_inline_run_member(node: &VNode) -> bool {
+    match node {
+        VNode::Text(t) => !t.is_empty(),
+        VNode::Element { .. } => {
+            // `inline-flex` and `inline-grid` ARE inline-level boxes (CSS Display 3
+            // §2.1), and they are also block containers. They keep routing to the
+            // flex path, which is the one real layout engine in this crate, so they
+            // are excluded here: flattening one would put its children in the
+            // enclosing block's line boxes and lose the flex layout entirely.
+            if matches!(
+                explicit_display(node).as_deref(),
+                Some("inline-flex" | "inline-grid")
+            ) {
+                return false;
+            }
+            is_inline_level_box(node) && !is_out_of_flow(node)
+        }
+    }
+}
+
+/// Whether a subtree contains any non-empty text, at any depth.
+fn subtree_has_text(node: &VNode) -> bool {
+    match node {
+        VNode::Text(t) => !t.is_empty(),
+        VNode::Element { children, .. } => children.iter().any(subtree_has_text),
+    }
+}
+
+/// Flatten `node` and its inline descendants into `out`.
+///
+/// Returns `false` when the node is not an inline run member at all, in which
+/// case nothing was pushed and the caller must lay the child out as a block.
+fn collect_inline_run<'a>(
+    node: &'a VNode,
+    path: &mut Vec<usize>,
+    inherited_size: f32,
+    inherited_family: &str,
+    inherited_align: VerticalAlign,
+    out: &mut Vec<InlineRunItem<'a>>,
+) -> bool {
+    match node {
+        VNode::Text(t) => {
+            if t.is_empty() {
+                return false;
+            }
+            let (size, family, align) = match out.last() {
+                Some(InlineRunItem::Fragment {
+                    font_size,
+                    font_family,
+                    align,
+                    ..
+                }) => (*font_size, font_family.clone(), *align),
+                Some(InlineRunItem::Atomic {
+                    font_size,
+                    font_family,
+                    align,
+                    ..
+                }) => (*font_size, font_family.clone(), *align),
+                None => (
+                    inherited_size,
+                    inherited_family.to_string(),
+                    inherited_align,
+                ),
+            };
+            out.push(InlineRunItem::Fragment {
+                path: path.clone(),
+                node,
+                font_size: size,
+                font_family: family,
+                align,
+                has_text: true,
+            });
+            true
+        }
+        VNode::Element {
+            props, children, ..
+        } => {
+            if !is_inline_run_member(node) {
+                return false;
+            }
+            let style = props.attrs.get("style").map(|s| s.as_str());
+            let size = inline_font_size(style, inherited_size);
+            let family = inline_font_family(style, inherited_family);
+            let align = inline_vertical_align(style, inherited_align);
+            let item = usize::from(is_atomic_inline_box(node));
+            let boxed = family.clone();
+            out.push(if item == 1 {
+                InlineRunItem::Atomic {
+                    path: path.clone(),
+                    node,
+                    font_size: size,
+                    font_family: boxed.clone(),
+                    align,
+                }
+            } else {
+                InlineRunItem::Fragment {
+                    path: path.clone(),
+                    node,
+                    font_size: size,
+                    font_family: boxed,
+                    align,
+                    has_text: children.iter().any(subtree_has_text),
+                }
+            });
+            // An atomic's children are its own block content, not this line's.
+            if item == 0 {
+                for (i, c) in children.iter().enumerate() {
+                    path.push(i);
+                    collect_inline_run(c, path, size, &family, align, out);
+                    path.pop();
+                }
+            }
+            true
+        }
+    }
+}
+
+/// Split one leaf's text into tokens.
+///
+/// `preserving` keeps the author's whitespace verbatim and turns a newline into
+/// a forced break. Otherwise every whitespace run collapses to the single space
+/// a browser collapses to. There is no `break-word` behaviour: a word too long
+/// for a line overflows it rather than being split, which is the CSS default
+/// (`overflow-wrap: normal`).
+fn tokenize_inline(text: &str, preserving: bool, out: &mut Vec<InlineToken>) {
+    // In a preserving mode the author's own run is emitted verbatim; otherwise
+    // every run collapses to the single space a browser collapses to. `\n` is
+    // only a forced break when whitespace is preserved, because a browser
+    // collapses it to a space in the other modes.
+    let emit_space = |space: &mut String, out: &mut Vec<InlineToken>| {
+        if !space.is_empty() {
+            let t = if preserving {
+                space.clone()
+            } else {
+                " ".to_string()
+            };
+            out.push(InlineToken::Space(t));
+            space.clear();
+        }
+    };
+    let mut word = String::new();
+    let mut space = String::new();
+    for ch in text.chars() {
+        if ch == '\n' && preserving {
+            emit_space(&mut space, out);
+            if !word.is_empty() {
+                out.push(InlineToken::Word(std::mem::take(&mut word)));
+            }
+            out.push(InlineToken::Break);
+        } else if ch.is_whitespace() {
+            if !word.is_empty() {
+                out.push(InlineToken::Word(std::mem::take(&mut word)));
+            }
+            if preserving {
+                space.push(ch);
+            } else {
+                emit_space(&mut space, out);
+                out.push(InlineToken::Space(" ".to_string()));
+            }
+        } else {
+            emit_space(&mut space, out);
+            word.push(ch);
+        }
+    }
+    if !word.is_empty() {
+        out.push(InlineToken::Word(word));
+    }
+    emit_space(&mut space, out);
+}
+
+/// `compute_layout`'s recursive box worker, as a plain function pointer.
+type LayoutFn = fn(
+    &VNode,
+    i32,
+    i32,
+    i32,
+    i32,
+    i32,
+    i32,
+    ContainingBlock,
+    Option<usize>,
+    f32,
+    f32,
+) -> LayoutNode;
+
+/// The context the inline formatting context takes from its block container.
+struct InlineContext<'a> {
+    /// `compute_layout`'s recursive worker, passed in as a pointer because it is
+    /// a nested function and this code is not.
+    at: LayoutFn,
+    content_x: i32,
+    line_limit: i32,
+    font_size: f32,
+    text_align: &'a str,
+    ws: WhiteSpace,
+    scale: f32,
+    viewport_w: i32,
+    viewport_h: i32,
+    cb: ContainingBlock,
+    root_font_size: f32,
+}
+
+/// An empty `LayoutNode` carrying only a rect and a source index, which is all
+/// a fragment of an inline run is. Spelled out rather than derived from
+/// `Default` so a field added to `LayoutNode` cannot silently take a default here.
+fn inline_leaf_node(rect: Rect, source_index: usize, children: Vec<LayoutNode>) -> LayoutNode {
+    LayoutNode {
+        rect,
+        z_index: 0,
+        display_none: false,
+        source_index: Some(source_index),
+        scroll_x: 0,
+        scroll_y: 0,
+        clip: None,
+        stacking_context: false,
+        scroll_height: 0,
+        max_scroll_y: 0,
+        scrollable: false,
+        children,
+    }
+}
+
+/// Lay one `inline-block` out and return `(width, height, baseline offset)`.
+///
+/// Shrink-to-fit is CSS 2.1 §10.3.5: `min(max(preferred minimum, available),
+/// preferred)`. The crate has no intrinsic-size helper, so `preferred` is taken
+/// as the max-content width -- what the box wants when nothing constrains it --
+/// by laying it out against the full line limit. When that overflows, it is laid
+/// out a second time against the space actually left on the line. The
+/// preferred-MINIMUM term is not modelled: a box whose content cannot shrink
+/// below its widest unbreakable piece gets the available width instead, which for
+/// a single text child is the same number.
+fn lay_out_atomic(
+    node: &VNode,
+    font_size: f32,
+    ctx: &InlineContext<'_>,
+    line_width_used: i32,
+    y: i32,
+) -> LayoutNode {
+    let available = (ctx.line_limit - line_width_used).max(0);
+    let mut laid = (ctx.at)(
+        node,
+        ctx.content_x,
+        y,
+        ctx.line_limit,
+        ctx.cb.h,
+        ctx.viewport_w,
+        ctx.viewport_h,
+        ctx.cb,
+        None,
+        ctx.root_font_size,
+        font_size,
+    );
+    if laid.rect.w > available {
+        laid = (ctx.at)(
+            node,
+            ctx.content_x,
+            y,
+            available,
+            ctx.cb.h,
+            ctx.viewport_w,
+            ctx.viewport_h,
+            ctx.cb,
+            None,
+            ctx.root_font_size,
+            font_size,
+        );
+    }
+    laid
+}
+
+/// A piece of one line, merged back into the single `LayoutNode` the renderer
+/// expects for that VNode on that line.
+struct MergedRun {
+    item: usize,
+    text: String,
+    x: i32,
+    w: i32,
+    ascent: f32,
+    descent: f32,
+    is_atomic: bool,
+    /// Top of this merged run's box, which is NOT the line's top unless the run
+    /// is `vertical-align: top`.
+    y: i32,
+    /// Height of this merged run's box.
+    h: i32,
+}
+
+/// A slot in the per-line `LayoutNode` tree.
+///
+/// `Leaf` is a real box. `Node` is an inline element: it has no box of its own
+/// and exists only so the tree keeps mirroring the `VNode` tree, which is what
+/// the renderer requires. `Empty` is a child index the line does not reach --
+/// a sibling of different display type, or a dropped whitespace node -- and is
+/// skipped without disturbing the indices around it.
+#[derive(Clone)]
+enum InlineSlot {
+    Empty,
+    Leaf(usize),
+    Node(Vec<InlineSlot>),
+}
+
+/// Arrange the merged runs of one line back into the `VNode` tree's shape.
+fn build_inline_slots(merged: &[MergedRun], run: &[InlineRunItem<'_>]) -> Vec<InlineSlot> {
+    let mut root: Vec<InlineSlot> = Vec::new();
+    for (mi, m) in merged.iter().enumerate() {
+        let path = match &run[m.item] {
+            InlineRunItem::Fragment { path, .. } | InlineRunItem::Atomic { path, .. } => path,
+        };
+        let mut cur = &mut root;
+        for &idx in &path[..path.len() - 1] {
+            if cur.len() <= idx {
+                cur.resize(idx + 1, InlineSlot::Empty);
+            }
+            if !matches!(cur[idx], InlineSlot::Node(_)) {
+                cur[idx] = InlineSlot::Node(Vec::new());
+            }
+            cur = match &mut cur[idx] {
+                InlineSlot::Node(v) => v,
+                _ => unreachable!("just replaced with a Node"),
+            };
+        }
+        let last = path[path.len() - 1];
+        if cur.len() <= last {
+            cur.resize(last + 1, InlineSlot::Empty);
+        }
+        cur[last] = InlineSlot::Leaf(mi);
+    }
+    root
+}
+
+fn inline_slots_to_nodes(
+    slots: &[InlineSlot],
+    merged: &[MergedRun],
+    line_top: i32,
+    line_h: i32,
+) -> Vec<LayoutNode> {
+    let _ = line_h;
+    let mut out: Vec<LayoutNode> = Vec::new();
+    for (idx, slot) in slots.iter().enumerate() {
+        match slot {
+            InlineSlot::Empty => {}
+            InlineSlot::Leaf(mi) => {
+                let m = &merged[*mi];
+                out.push(inline_leaf_node(
+                    Rect {
+                        x: m.x,
+                        y: m.y,
+                        w: m.w,
+                        h: m.h,
+                    },
+                    idx,
+                    Vec::new(),
+                ));
+            }
+            InlineSlot::Node(kids) => {
+                let kids = inline_slots_to_nodes(kids, merged, line_top, line_h);
+                if kids.is_empty() {
+                    continue;
+                }
+                // An inline box is a SPAN, not a block box: CSS 2.1 §9.4.2 gives it
+                // no box, so this rect is the union of its fragments on this line
+                // and nothing more. It is what lets the renderer reach a text node
+                // inside an inline element, which it does by index.
+                let x = kids.iter().map(|k| k.rect.x).min().unwrap_or(line_top);
+                let right = kids.iter().map(|k| k.rect.x + k.rect.w).max().unwrap_or(x);
+                let top = kids.iter().map(|k| k.rect.y).min().unwrap_or(line_top);
+                out.push(inline_leaf_node(
+                    Rect {
+                        x,
+                        y: top,
+                        w: right - x,
+                        h: line_h,
+                    },
+                    idx,
+                    kids,
+                ));
+            }
+        }
+    }
+    out
+}
+
+/// Lay out one inline run and append its line boxes to `laid_children`.
+///
+/// `cur_y` is where the run starts. The returned `cur_x` is the right edge of
+/// the last line's ink, which the block loop needs so a following block child
+/// knows a line was used.
+#[allow(clippy::too_many_arguments)]
+fn flush_inline_run(
+    run: &mut Vec<InlineRunItem<'_>>,
+    ctx: &InlineContext<'_>,
+    laid_children: &mut Vec<LayoutNode>,
+    cur_y: i32,
+) -> InlineRunResult {
+    if run.is_empty() {
+        return InlineRunResult {
+            cur_x: ctx.content_x,
+            cur_y,
+            line_h: 0,
+            max_y_end: cur_y,
+        };
+    }
+    // The run is CONSUMED: it is taken, not copied, because leaving it populated
+    // would make the next flush lay out everything again on top of the new
+    // content, and because the emission below still needs to read the items'
+    // index paths.
+    let run = std::mem::take(run);
+    let preserving = matches!(ctx.ws, WhiteSpace::Pre | WhiteSpace::PreWrap);
+    let wrapping = matches!(
+        ctx.ws,
+        WhiteSpace::Normal | WhiteSpace::PreWrap | WhiteSpace::PreLine
+    );
+
+    // --- measure every piece of the run -------------------------------------
+    let mut pieces: Vec<InlinePiece> = Vec::new();
+    for (ii, item) in run.iter().enumerate() {
+        match item {
+            InlineRunItem::Fragment {
+                node: VNode::Text(t),
+                font_size,
+                font_family,
+                ..
+            } => {
+                let leaf_strut = FontMetrics::from_font_size(*font_size);
+                let mut tokens = Vec::new();
+                tokenize_inline(t, preserving, &mut tokens);
+                for token in tokens {
+                    if let InlineToken::Break = token {
+                        pieces.push(InlinePiece {
+                            item: ii,
+                            text: String::new(),
+                            width: 0,
+                            ascent: 0.0,
+                            descent: 0.0,
+                            is_space: false,
+                            atomic: false,
+                            strut_a: 0.0,
+                            strut_d: 0.0,
+                            hard_break: true,
+                        });
+                        continue;
+                    }
+                    let (text, is_space) = match token {
+                        InlineToken::Word(w) => (w, false),
+                        InlineToken::Space(s) => (s, true),
+                        InlineToken::Break => unreachable!("handled above"),
+                    };
+                    let m = crate::text_wrap::measure_text_metrics(
+                        &text,
+                        *font_size,
+                        font_family,
+                        ctx.scale,
+                    );
+                    pieces.push(InlinePiece {
+                        item: ii,
+                        text,
+                        width: m.width.round() as i32,
+                        ascent: m.ascent,
+                        descent: m.descent,
+                        is_space,
+                        atomic: false,
+                        strut_a: leaf_strut.ascent,
+                        strut_d: leaf_strut.descent,
+                        hard_break: false,
+                    });
+                }
+            }
+            InlineRunItem::Fragment { .. } => {
+                // An inline element with no text of its own still needs to appear
+                // in the run so the tree keeps mirroring, but it contributes
+                // nothing to the line.
+                pieces.push(InlinePiece {
+                    item: ii,
+                    text: String::new(),
+                    width: 0,
+                    ascent: 0.0,
+                    descent: 0.0,
+                    is_space: false,
+                    atomic: false,
+                    strut_a: 0.0,
+                    strut_d: 0.0,
+                    hard_break: false,
+                });
+            }
+            InlineRunItem::Atomic {
+                node,
+                font_size,
+                align: _,
+                ..
+            } => {
+                let strut = FontMetrics::from_font_size(*font_size);
+                let laid = lay_out_atomic(node, *font_size, ctx, 0, cur_y);
+                let ascent = strut.ascent.min(laid.rect.h as f32);
+                pieces.push(InlinePiece {
+                    item: ii,
+                    text: String::new(),
+                    width: laid.rect.w,
+                    ascent,
+                    descent: (laid.rect.h as f32 - ascent).max(0.0),
+                    is_space: false,
+                    atomic: true,
+                    strut_a: strut.ascent,
+                    strut_d: strut.descent,
+                    hard_break: false,
+                });
+            }
+        }
+    }
+
+    // --- fill lines ---------------------------------------------------------
+    let mut lines: Vec<Vec<usize>> = vec![Vec::new()];
+    let mut line_w: Vec<i32> = vec![0];
+    for (pi, p) in pieces.iter().enumerate() {
+        if p.hard_break {
+            // A break at the start of a line would make an empty line, which has
+            // no piece to hang a box on and so cannot be represented; a leading
+            // break is dropped, exactly as a leading collapsible space is.
+            if !lines.last().is_some_and(Vec::is_empty) {
+                lines.push(Vec::new());
+                line_w.push(0);
+            }
+            continue;
+        }
+        match p.is_space && !p.atomic {
+            true => {
+                // A line never starts with a COLLAPSIBLE space: the break that
+                // produced the line consumed it, which is what CSS 2.1 §16.6 means
+                // by it. A PRESERVED space is not collapsible and so is not
+                // removed, which is the whole difference `pre` makes.
+                if !preserving && lines.last().is_some_and(Vec::is_empty) {
+                    continue;
+                }
+                if wrapping && line_w.last().is_some_and(|w| w + p.width > ctx.line_limit) {
+                    lines.push(Vec::new());
+                    line_w.push(0);
+                    continue;
+                }
+                lines.last_mut().expect("one line").push(pi);
+                *line_w.last_mut().expect("one width") += p.width;
+            }
+            false => {
+                let cur_empty = lines.last().is_some_and(Vec::is_empty);
+                if wrapping
+                    && !cur_empty
+                    && line_w.last().is_some_and(|w| w + p.width > ctx.line_limit)
+                {
+                    lines.push(Vec::new());
+                    line_w.push(0);
+                }
+                lines.last_mut().expect("one line").push(pi);
+                *line_w.last_mut().expect("one width") += p.width;
+            }
+        }
+    }
+    if lines.last().is_some_and(Vec::is_empty) && lines.len() > 1 {
+        lines.pop();
+        line_w.pop();
+    }
+
+    // --- place each line ----------------------------------------------------
+    let strut = FontMetrics::from_font_size(ctx.font_size);
+    let align_of = |item: usize| match &run[item] {
+        InlineRunItem::Fragment { align, .. } | InlineRunItem::Atomic { align, .. } => *align,
+    };
+    let mut y = cur_y;
+    let mut cur_x = ctx.content_x;
+    let mut line_h = 0;
+    let mut max_y_end = cur_y;
+    for (li, line) in lines.iter().enumerate() {
+        // The line box's extents. The strut is a floor, so a run of "xxx" -- whose
+        // ink is well under it -- still gets a full line.
+        let mut max_a = strut.ascent;
+        let mut max_d = strut.descent;
+        for &pi in line {
+            let p = &pieces[pi];
+            match align_of(p.item) {
+                VerticalAlign::Baseline => {
+                    max_a = max_a.max(p.ascent);
+                    max_d = max_d.max(p.descent);
+                }
+                // CSS 2.1 §10.8.1: the box's vertical midpoint goes to the parent's
+                // baseline plus half the parent's x-height.
+                VerticalAlign::Middle => {
+                    let half = strut.x_height / 2.0;
+                    let h = p.ascent + p.descent;
+                    max_a = max_a.max(h / 2.0 - half);
+                    max_d = max_d.max(h / 2.0 + half);
+                }
+                _ => {}
+            }
+        }
+        // `top` and `bottom` are defined against the line box's own edges, which
+        // the baseline items have just fixed -- genuinely circular. Resolved in
+        // one pass: they are placed against the extents the strut and the
+        // baseline items produced, and the line grows by exactly the amount
+        // needed to hold them. Two items of these alignments that would each
+        // need the other to move first are the one case where this differs from
+        // CSS's cycle, and it is recorded as a known limit.
+        let (base_a, base_d) = (max_a, max_d);
+        for &pi in line {
+            let p = &pieces[pi];
+            let h = p.ascent + p.descent;
+            match align_of(p.item) {
+                VerticalAlign::Top => max_d = max_d.max((h - base_a).max(0.0)),
+                VerticalAlign::Bottom => max_a = max_a.max((h - base_d).max(0.0)),
+                _ => {}
+            }
+        }
+        let extents = crate::text_wrap::MeasuredText {
+            width: 0.0,
+            ascent: max_a,
+            descent: max_d,
+        };
+        let height = crate::text_wrap::line_box_height(&extents, &strut);
+
+        // A space at the very end of a line hangs past it and does not count
+        // towards the line's width for `text-align`.
+        let mut ink = line_w[li];
+        if line
+            .last()
+            .is_some_and(|pi| pieces[*pi].is_space && !pieces[*pi].atomic)
+        {
+            ink -= pieces[line[line.len() - 1]].width;
+        }
+        let left = match ctx.text_align {
+            "center" => ctx.content_x + ((ctx.line_limit - ink).max(0) / 2),
+            "right" => ctx.content_x + (ctx.line_limit - ink).max(0),
+            // `justify` is not implemented; it falls back to left, as it did
+            // before the inline formatting context existed.
+            _ => ctx.content_x,
+        };
+        let baseline_y = y as f32 + max_a;
+        let x_height_half = strut.x_height / 2.0;
+        let mut x = left;
+        let mut merged: Vec<MergedRun> = Vec::new();
+        for &pi in line {
+            let p = &pieces[pi];
+            let box_h = p.strut_a + p.strut_d;
+            // An atomic's box is itself. A text fragment's box is the line's own
+            // font's content box, and `vertical-align` is what moves it off the
+            // baseline -- the ink's own extent plays no part in where the box
+            // sits, which is why a run of "xxx" and a run of "Hg" get boxes of
+            // the same height on the same line.
+            let (top, box_h) = if p.atomic {
+                let ink_h = p.ascent + p.descent;
+                let t = match align_of(p.item) {
+                    VerticalAlign::Baseline => baseline_y - p.ascent,
+                    VerticalAlign::Middle => baseline_y - (ink_h / 2.0 - x_height_half),
+                    VerticalAlign::Top => y as f32,
+                    VerticalAlign::Bottom => y as f32 + height as f32 - ink_h,
+                };
+                (
+                    t.round() as i32,
+                    p.ascent.round() as i32 + p.descent.round() as i32,
+                )
+            } else {
+                let t = match align_of(p.item) {
+                    VerticalAlign::Baseline => baseline_y - p.strut_a,
+                    VerticalAlign::Middle => baseline_y - (box_h / 2.0 - x_height_half),
+                    VerticalAlign::Top => y as f32,
+                    VerticalAlign::Bottom => y as f32 + height as f32 - box_h,
+                };
+                (t.round() as i32, box_h.round() as i32)
+            };
+            if p.atomic {
+                merged.push(MergedRun {
+                    item: p.item,
+                    text: String::new(),
+                    x,
+                    w: p.width,
+                    ascent: p.ascent,
+                    descent: p.descent,
+                    is_atomic: true,
+                    y: top,
+                    h: box_h,
+                });
+            } else if let Some(last) = merged
+                .last_mut()
+                .filter(|m| m.item == p.item && !m.is_atomic)
+            {
+                // Consecutive pieces of one text VNode are ONE LayoutNode. Two
+                // nodes pointing at the same text VNode would make the renderer
+                // draw the same string twice.
+                last.text.push_str(&p.text);
+                last.w = x + p.width - last.x;
+                last.ascent = last.ascent.max(p.ascent);
+                last.descent = last.descent.max(p.descent);
+            } else if !p.text.is_empty() {
+                merged.push(MergedRun {
+                    item: p.item,
+                    text: p.text.clone(),
+                    x,
+                    w: p.width,
+                    ascent: p.ascent,
+                    descent: p.descent,
+                    is_atomic: false,
+                    y: top,
+                    h: box_h,
+                });
+            }
+            x += p.width;
+        }
+        // An inline element whose subtree has no text at all -- an empty
+        // `<span>`, an `<img>` -- contributes no measurable piece, so it never
+        // reached `merged` and would be missing from the tree. It still needs a
+        // box, or the renderer could not resolve its index and the whole subtree
+        // beneath it would be skipped.
+        for (ii, item) in run.iter().enumerate() {
+            let InlineRunItem::Fragment { has_text, .. } = item else {
+                continue;
+            };
+            if *has_text || merged.iter().any(|m| m.item == ii) {
+                continue;
+            }
+            merged.push(MergedRun {
+                item: ii,
+                text: String::new(),
+                x: left,
+                w: 0,
+                ascent: 0.0,
+                descent: 0.0,
+                is_atomic: false,
+                y,
+                h: height,
+            });
+        }
+        merged.sort_by_key(|m| m.item);
+        let slots = build_inline_slots(&merged, &run);
+        let mut nodes = inline_slots_to_nodes(&slots, &merged, y, height);
+        laid_children.append(&mut nodes);
+        y += height;
+        max_y_end = max_y_end.max(y);
+        cur_x = left + ink;
+        line_h = height;
+    }
+    InlineRunResult {
+        cur_x,
+        cur_y: y,
+        line_h,
+        max_y_end,
+    }
+}
 
 /// Sentinel value for unconstrained cross-size in flex layout (fit-content)
 /// CSS Flexbox spec: when cross-size is indefinite, children lay out at natural size
@@ -45,6 +926,11 @@ pub struct FontMetrics {
     /// fallback is labelled.
     pub ascent: f32,
     pub descent: f32,
+    /// Distance from the baseline to the top of a lowercase `x` (OS/2 `sxHeight`).
+    /// Approximated from the default face's 0.536em, for the same reason the
+    /// typographic ascent and descent are. `vertical-align: middle` is defined as
+    /// half of it.
+    pub x_height: f32,
 }
 
 impl FontMetrics {
@@ -88,6 +974,7 @@ impl FontMetrics {
             line_height,
             ascent,
             descent,
+            x_height: font_size_px * 0.536,
         }
     }
 }
@@ -760,27 +1647,19 @@ pub const INLINE_BY_DEFAULT_TAGS: &[&str] = &[
     "strong", "sub", "sup", "time", "u", "var", "wbr",
 ];
 
-/// Elements that are `inline-block` in browsers (`input, button { display:
-/// inline-block; }` in the HTML rendering section; `select` and `textarea` in
-/// the browser UA sheets) and so are *inline-level* for the whitespace rules
-/// below, but which Velox deliberately leaves defaulting to `block`.
-///
-/// This table answers exactly one question — "would this neighbour share a line
-/// with a sibling in a browser?" — and nothing else. It is disjoint from
-/// [`INLINE_BY_DEFAULT_TAGS`] (a tag is never in both), and these elements get
-/// no UA `display` rule: claiming `display: inline` for them would be a false
-/// parity claim, and `inline-block` has no layout implementation yet.
-///
-/// The known cost, recorded so it is not mistaken for a bug in the table:
-/// until inline layout exists these elements lay out as block boxes in Velox,
-/// so a preserved space beside one produces a vertical gap a browser would not
-/// have. Dropping the space instead would be worse — it is the same trade-off
-/// the `inline` elements already make, and it is what the task's negative
-/// control forbids.
-const INLINE_BLOCK_BY_DEFAULT_TAGS: &[&str] = &["button", "input", "select", "textarea"];
-
 /// The `display` an element gets when neither the cascade nor an author rule
 /// specifies one.
+///
+/// `button`, `input`, `select` and `textarea` are `inline-block` in a browser's
+/// UA sheet. Velox does not reproduce that: they get no `display` rule, and this
+/// function answers `block` for them. The deviation is deliberate and was
+/// recorded for a long time in an `INLINE_BLOCK_BY_DEFAULT_TAGS` table that
+/// answered a second, subtly different question ("would this neighbour share a
+/// line in a browser?") from this one. Two answers to the same question is the
+/// defect, so the table is gone and this is the single place the deviation is
+/// decided. An author who wants the browser's behaviour writes
+/// `display: inline-block` on the element, and now gets a real atomic inline
+/// box.
 fn default_display_for_tag(tag: &str) -> &'static str {
     if INLINE_BY_DEFAULT_TAGS.contains(&tag.to_ascii_lowercase().as_str()) {
         "inline"
@@ -789,49 +1668,99 @@ fn default_display_for_tag(tag: &str) -> &'static str {
     }
 }
 
-/// Whether an element with no explicit `display` is inline-level, i.e. it
-/// would sit in an inline formatting context next to its siblings.
-fn is_inline_level_by_default(tag: &str) -> bool {
-    let tag = tag.to_ascii_lowercase();
-    INLINE_BY_DEFAULT_TAGS.contains(&tag.as_str())
-        || INLINE_BLOCK_BY_DEFAULT_TAGS.contains(&tag.as_str())
+/// A node's EXPLICIT `display`, trimmed and lowercased. `None` when it has none,
+/// which is not the same as `"block"`: the initial value of `display` depends on
+/// the element, and `default_display_for_tag` is the one place that knows it.
+///
+/// Every `display` test in the layout path reads the declaration through this,
+/// so the trimming, the lowercasing and the absent case are decided once.
+pub fn explicit_display(node: &VNode) -> Option<String> {
+    match node {
+        VNode::Text(_) => None,
+        VNode::Element { props, .. } => {
+            let style = props.attrs.get("style").map(|s| s.as_str());
+            style_lookup_str(style, "display").map(|value| value.trim().to_ascii_lowercase())
+        }
+    }
+}
+
+/// Whether `position` takes the box out of flow.
+pub fn is_out_of_flow(node: &VNode) -> bool {
+    match node {
+        VNode::Text(_) => false,
+        VNode::Element { props, .. } => {
+            let style = props.attrs.get("style").map(|s| s.as_str());
+            style_lookup_str(style, "position")
+                .map(|value| value.trim().to_ascii_lowercase())
+                .is_some_and(|p| p == "absolute" || p == "fixed")
+        }
+    }
+}
+
+/// Whether a box is INLINE-LEVEL: it sits in a line box beside its siblings
+/// rather than establishing a block formatting context next to them.
+///
+/// This is the display classification alone. It says nothing about flow, which
+/// is what `is_inline_formatting_participant` adds, and it distinguishes the
+/// ATOMIC inline-level boxes from the ones that contribute only text, which is
+/// what `is_atomic_inline_box` adds.
+///
+/// `inline-flex` and `inline-grid` ARE inline-level, and are answered `true`
+/// here, because that is what CSS says. They are routed to the flex and grid
+/// paths unchanged by the caller, which is a decision about which engine owns
+/// them, not about what level they sit at.
+pub fn is_inline_level_box(node: &VNode) -> bool {
+    match node {
+        VNode::Text(_) => false,
+        VNode::Element { tag, .. } => match explicit_display(node).as_deref() {
+            // Block-level: each establishes a block formatting context and is a
+            // SIBLING of the inline run, never a member of it. `flex` and `grid`
+            // are here because a block container is block-level whatever it does
+            // with its own children.
+            Some("block") | Some("flex") | Some("grid") | Some("flow-root") => false,
+            Some("inline") | Some("inline-block") | Some("inline-flex") | Some("inline-grid") => {
+                true
+            }
+            // Any other explicit display (`none`, `table`, `list-item`, an
+            // unrecognised keyword) is not inline-level. `none` in particular
+            // means the box is not generated at all.
+            Some(_) => false,
+            // No `display` declared: the element's own initial value decides,
+            // and `default_display_for_tag` is where that lives.
+            None => default_display_for_tag(tag) == "inline",
+        },
+    }
+}
+
+/// Whether a box is an ATOMIC inline-level box: inline-level, but establishing
+/// its own block formatting context, so a line box places it whole and its
+/// contents do not join the surrounding line. `display: inline-block` is the
+/// only value with that shape here.
+///
+/// An element with no `display` is never atomic. `button`, `input`, `select` and
+/// `textarea` are `inline-block` in a browser's UA sheet and Velox makes them
+/// blocks instead; see `default_display_for_tag` for why that deviation lives
+/// there and not here.
+pub fn is_atomic_inline_box(node: &VNode) -> bool {
+    explicit_display(node).as_deref() == Some("inline-block")
 }
 
 fn is_inline_formatting_participant(node: &VNode) -> bool {
     match node {
         VNode::Text(text) => !text.chars().all(|c| c.is_whitespace()),
-        VNode::Element { tag, props, .. } => {
-            let style = props.attrs.get("style").map(|s| s.as_str());
-            let display =
-                style_lookup_str(style, "display").map(|value| value.trim().to_ascii_lowercase());
-            let position = style_lookup_str(style, "position")
-                .map(|value| value.trim().to_ascii_lowercase())
-                .unwrap_or_else(|| "static".to_string());
-            if position == "absolute" || position == "fixed" || display.as_deref() == Some("none") {
-                return false;
-            }
-            match display.as_deref() {
-                Some("inline") | Some("inline-block") | Some("inline-flex")
-                | Some("inline-grid") => true,
-                Some(_) => false,
-                None => is_inline_level_by_default(tag),
-            }
-        }
+        VNode::Element { .. } => is_inline_level_box(node) && !is_out_of_flow(node),
     }
 }
 
 fn is_formatting_participant(node: &VNode) -> bool {
     match node {
         VNode::Text(text) => !text.chars().all(|c| c.is_whitespace()),
-        VNode::Element { props, .. } => {
-            let style = props.attrs.get("style").map(|s| s.as_str());
-            let display = style_lookup_str(style, "display")
-                .map(|value| value.trim().to_ascii_lowercase())
-                .unwrap_or_else(|| "static".to_string());
-            let position = style_lookup_str(style, "position")
-                .map(|value| value.trim().to_ascii_lowercase())
-                .unwrap_or_else(|| "static".to_string());
-            display != "none" && position != "absolute" && position != "fixed"
+        VNode::Element { .. } => {
+            // Any box that is generated and in flow, whatever its display: a
+            // block box is a formatting participant too, and
+            // `should_drop_collapsible_whitespace` has to see past one to find
+            // the inline box on the other side.
+            explicit_display(node).as_deref() != Some("none") && !is_out_of_flow(node)
         }
     }
 }
@@ -2998,6 +3927,23 @@ pub fn compute_layout(node: &VNode, viewport_w: i32, viewport_h: i32) -> LayoutN
                     let mut cur_y = content_y_scrolled;
                     let mut last_bottom_margin = 0;
                     let mut line_h = 0;
+                    // The inline run's own settings, read once: every text child
+                    // and every inline descendant inherits them unless it sets its
+                    // own. `WhiteSpace::parse` is the single definition of the
+                    // keyword mapping, not a second hand-rolled match.
+                    let container_font_size =
+                        style_lookup_font_size(style, my_font_size, root_font_size, (vw_f, vh_f))
+                            .unwrap_or(my_font_size);
+                    let container_font_family = style_lookup_str(style, "font-family")
+                        .unwrap_or_else(|| DEFAULT_TEXT_FAMILY.to_string());
+                    let container_align = inline_vertical_align(style, VerticalAlign::Baseline);
+                    let container_text_align = style_lookup_str(style, "text-align")
+                        .map(|v| v.trim().to_ascii_lowercase())
+                        .unwrap_or_else(|| "left".to_string());
+                    let container_ws = style_lookup_str(style, "white-space")
+                        .and_then(|v| WhiteSpace::parse(&v))
+                        .unwrap_or_default();
+                    let mut inline_run: Vec<InlineRunItem<'_>> = Vec::new();
                     for (idx, c) in children.iter().enumerate() {
                         let is_text = matches!(c, VNode::Text(_));
                         if should_drop_collapsible_whitespace(children, idx, style) {
@@ -3012,6 +3958,53 @@ pub fn compute_layout(node: &VNode, viewport_w: i32, viewport_h: i32) -> LayoutN
                         let child_display = style_lookup_str(child_style, "display")
                             .unwrap_or_else(|| "block".to_string());
                         if child_display == "none" {
+                            continue;
+                        }
+                        // Inline-level content is COLLECTED into a run and laid out
+                        // by the inline formatting context, which is what decides
+                        // where lines break -- including across the edge of an
+                        // inline element. The run is flushed before anything that
+                        // is not inline-level, so `cur_x`, `line_h` and an
+                        // out-of-flow child's static position all see the real end
+                        // of the text that precedes them.
+                        //
+                        // The run is flushed only when the child is NOT part of
+                        // it. Flushing unconditionally would give every inline
+                        // child a line box of its own, which is the flattening
+                        // requirement 2 exists to prevent.
+                        if !is_inline_run_member(c) && !inline_run.is_empty() {
+                            let flushed = flush_inline_run(
+                                &mut inline_run,
+                                &InlineContext {
+                                    at,
+                                    content_x: content_x_scrolled,
+                                    line_limit: content_w,
+                                    font_size: container_font_size,
+                                    text_align: &container_text_align,
+                                    ws: container_ws,
+                                    scale: crate::text_wrap::current_scale(),
+                                    viewport_w,
+                                    viewport_h,
+                                    cb: descendant_cb,
+                                    root_font_size,
+                                },
+                                &mut laid_children,
+                                cur_y,
+                            );
+                            cur_x = flushed.cur_x;
+                            cur_y = flushed.cur_y;
+                            line_h = flushed.line_h;
+                            max_y_end = max_y_end.max(flushed.max_y_end);
+                        }
+                        let mut child_path = vec![idx];
+                        if collect_inline_run(
+                            c,
+                            &mut child_path,
+                            container_font_size,
+                            &container_font_family,
+                            container_align,
+                            &mut inline_run,
+                        ) {
                             continue;
                         }
                         let position = style_lookup_str(child_style, "position")
@@ -3069,103 +4062,11 @@ pub fn compute_layout(node: &VNode, viewport_w: i32, viewport_h: i32) -> LayoutN
                         if !is_text && cur_x != content_x_scrolled {
                             cur_y += last_bottom_margin.max(line_h); // Consider bottom margin of last child
                             cur_x = content_x_scrolled;
-                            line_h = 0;
-                        }
-
-                        if is_text && let VNode::Text(t) = c {
-                            // Use inherited font-size, resolved with full unit support
-                            let font_sz = style_lookup_font_size(
-                                style,
-                                my_font_size,
-                                root_font_size,
-                                (vw_f, vh_f),
-                            )
-                            .unwrap_or(my_font_size);
-
-                            // Parse text-align from container style
-                            let text_align = style
-                                .and_then(|s| {
-                                    for decl in s.split(';') {
-                                        let d = decl.trim();
-                                        if d.is_empty() {
-                                            continue;
-                                        }
-                                        if let Some((k, v)) = d.split_once(':')
-                                            && k.trim() == "text-align"
-                                        {
-                                            return Some(v.trim().to_lowercase());
-                                        }
-                                    }
-                                    None
-                                })
-                                .unwrap_or_else(|| "left".to_string());
-
-                            let line_limit = content_w;
-                            // Thread white-space, text-overflow, font-family, scale into wrap (CX-06)
-                            let ws_str = style_lookup_str(style, "white-space")
-                                .unwrap_or_else(|| "normal".to_string());
-                            let ws = match ws_str.trim().to_ascii_lowercase().as_str() {
-                                "nowrap" => crate::style::WhiteSpace::Nowrap,
-                                "pre" => crate::style::WhiteSpace::Pre,
-                                "pre-wrap" => crate::style::WhiteSpace::PreWrap,
-                                "pre-line" => crate::style::WhiteSpace::PreLine,
-                                _ => crate::style::WhiteSpace::Normal,
-                            };
-                            let to_str = style_lookup_str(style, "text-overflow")
-                                .unwrap_or_else(|| "clip".to_string());
-                            let to = if to_str.trim().eq_ignore_ascii_case("ellipsis") {
-                                crate::style::TextOverflow::Ellipsis
-                            } else {
-                                crate::style::TextOverflow::Clip
-                            };
-                            let fam = style_lookup_str(style, "font-family")
-                                .unwrap_or_else(|| "system-ui".to_string());
-                            let scale = crate::text_wrap::current_scale();
-                            let wrapped = crate::text_wrap::wrap_text_with_options(
-                                t, line_limit, font_sz, &fam, scale, ws, to,
-                            );
-
-                            for line in &wrapped {
-                                // Calculate x offset based on text-align
-                                let line_x = match text_align.as_str() {
-                                    "center" => {
-                                        content_x_scrolled + ((content_w - line.width).max(0) / 2)
-                                    }
-                                    "right" => content_x_scrolled + (content_w - line.width).max(0),
-                                    "justify" => {
-                                        // Justify: stretch to fill (handled during rendering)
-                                        // For layout, use left alignment with full width
-                                        content_x_scrolled
-                                    }
-                                    _ => content_x_scrolled, // left
-                                };
-
-                                let child_ln = LayoutNode {
-                                    rect: Rect {
-                                        x: line_x,
-                                        y: cur_y,
-                                        w: line.width,
-                                        h: line.height,
-                                    },
-                                    z_index: 0,
-                                    display_none: false,
-                                    source_index: Some(idx),
-                                    scroll_x: 0,
-                                    scroll_y: 0,
-                                    clip: None,
-                                    stacking_context: false,
-                                    scroll_height: line.height,
-                                    max_scroll_y: 0,
-                                    scrollable: false,
-                                    children: vec![],
-                                };
-                                cur_y += line.height;
-                                line_h = line_h.max(line.height);
-                                max_y_end = max_y_end.max(cur_y);
-                                laid_children.push(child_ln);
-                            }
-
-                            continue;
+                            // `line_h` is deliberately NOT cleared here. It is
+                            // assigned afresh at the top of every iteration, by the
+                            // inline run's flush or by nothing at all, and the next
+                            // time this branch is taken `cur_x` has already been
+                            // reset, so no value written here is ever read.
                         }
 
                         // Get child's margins for collapsing
@@ -3271,6 +4172,33 @@ pub fn compute_layout(node: &VNode, viewport_w: i32, viewport_h: i32) -> LayoutN
                             max_y_end = max_y_end.max(child_ln.rect.y + child_ln.rect.h);
                             laid_children.push(child_ln);
                         }
+                    }
+                    // A run left open at the end of the children is the last
+                    // thing in the block, so it is flushed after the loop. Only
+                    // `cur_y` and `max_y_end` are read from the result: a block
+                    // loop that ends here has no following child to inherit a
+                    // `cur_x` or a `line_h`.
+                    if !inline_run.is_empty() {
+                        let flushed = flush_inline_run(
+                            &mut inline_run,
+                            &InlineContext {
+                                at,
+                                content_x: content_x_scrolled,
+                                line_limit: content_w,
+                                font_size: container_font_size,
+                                text_align: &container_text_align,
+                                ws: container_ws,
+                                scale: crate::text_wrap::current_scale(),
+                                viewport_w,
+                                viewport_h,
+                                cb: descendant_cb,
+                                root_font_size,
+                            },
+                            &mut laid_children,
+                            cur_y,
+                        );
+                        cur_y = flushed.cur_y;
+                        max_y_end = max_y_end.max(flushed.max_y_end);
                     }
                     if line_h > 0 {
                         max_y_end = max_y_end.max(cur_y + line_h);

@@ -550,6 +550,42 @@ impl TextAlign {
     }
 }
 
+/// How an inline-level box is aligned within its line box.
+///
+/// `Baseline` is the initial value and the only one CSS 2.1 §10.8.1 defines for
+/// a line box's own text. `Top`, `Bottom` and `Middle` are real and are honoured
+/// in the line box. `Sub` and `Super` are NOT here: they are defined as a shift
+/// the font's own metrics supply (`sub` may shift by "the font's own subscript
+/// offset"), and the seam reports a run's INK, not the font's subscript offset, so
+/// any value here would be a made-up number. An unparseable value falls back to
+/// `Baseline` rather than being dropped, because the layout path reads this
+/// straight off a style string with no cascade to fall back to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum VerticalAlign {
+    #[default]
+    Baseline,
+    Top,
+    Bottom,
+    Middle,
+}
+
+impl VerticalAlign {
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.trim().to_lowercase().as_str() {
+            "baseline" => Some(VerticalAlign::Baseline),
+            "top" => Some(VerticalAlign::Top),
+            "bottom" => Some(VerticalAlign::Bottom),
+            "middle" => Some(VerticalAlign::Middle),
+            // A LENGTH or PERCENTAGE is a legal `vertical-align` value in CSS and
+            // is meaningful, so it must not be silently read as `baseline`. It is
+            // also not something the line box can honour without the strut's
+            // coordinates relative to a baseline it does not have yet, so it is
+            // rejected here and `parse` returning None leaves the inherited value.
+            _ => None,
+        }
+    }
+}
+
 /// Font weight enum
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub enum FontWeight {
@@ -1215,6 +1251,8 @@ pub struct ComputedStyle {
     pub line_height: Option<f32>,
     pub letter_spacing: Length,
     pub text_align: TextAlign,
+    /// Inherited (CSS 2.1 §10.8.1), so it is in `velox_style`'s `INHERITABLE`.
+    pub vertical_align: VerticalAlign,
     pub text_decoration: TextDecoration,
     pub overflow: Overflow,
     pub overflow_x: Overflow,
@@ -1494,6 +1532,11 @@ impl ComputedStyle {
                     self.text_align = ta;
                 }
             }
+            "vertical-align" => {
+                if let Some(va) = VerticalAlign::parse(value) {
+                    self.vertical_align = va;
+                }
+            }
             "text-decoration" => {
                 if let Some(td) = TextDecoration::parse(value) {
                     self.text_decoration = td;
@@ -1712,6 +1755,7 @@ impl Default for ComputedStyle {
             line_height: None,
             letter_spacing: Length::default(),
             text_align: TextAlign::default(),
+            vertical_align: VerticalAlign::default(),
             text_decoration: TextDecoration::default(),
             overflow: Overflow::default(),
             overflow_x: Overflow::default(),

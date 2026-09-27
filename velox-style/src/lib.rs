@@ -635,8 +635,9 @@ where
 /// Properties that inherit to descendants, per browser CSS behavior.
 /// The original filter carried `color`, `font-size`, `font-weight`,
 /// `text-decoration`, `line-height`; this set only ADDS properties
-/// (font-family, font-style, letter-spacing, text-align, visibility,
-/// cursor) — `text-decoration` is retained to avoid regressing behavior.
+/// (font-family, font-style, letter-spacing, text-align, vertical-align,
+/// visibility, cursor) — `text-decoration` is retained to avoid regressing
+/// behavior.
 const INHERITABLE: &[&str] = &[
     "color",
     "font-size",
@@ -646,6 +647,10 @@ const INHERITABLE: &[&str] = &[
     "line-height",
     "letter-spacing",
     "text-align",
+    // `vertical-align` is an inherited property (CSS 2.1 §10.8.1): it aligns an
+    // inline-level box within its line box, and the line box belongs to the
+    // parent block, so a value set on an ancestor is the one that applies.
+    "vertical-align",
     "visibility",
     "cursor",
     "text-decoration",
