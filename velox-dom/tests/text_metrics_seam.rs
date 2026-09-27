@@ -202,3 +202,70 @@ fn an_inkless_run_keeps_its_real_width() {
     assert_eq!(blank.ascent, FONT_SIZE * 0.8, "vertical fell back");
     assert_eq!(blank.descent, FONT_SIZE * 0.4);
 }
+
+// ===== the bare `VNode::Text` path in `at()`, not the wrapped-lines path =====
+//
+// Every other test in this file drives a text node through `wrap_text_*`, so
+// they all exercise `text_wrap::line_box_height`. `text_dimensions` serves a
+// different path: `at()`'s own `VNode::Text` arm, taken when a text node is the
+// laid-out node itself rather than a child a container wraps. R-5a changed its
+// height and nothing tested it, so this is the only place the change is
+// verified at the seam it actually happens on.
+
+/// The height `at()`'s bare `VNode::Text` arm gives a run, which is the path
+/// `text_dimensions` serves.
+fn bare_text_height(text: &str) -> i32 {
+    register();
+    compute_layout(&velox_dom::VNode::Text(text.to_string()), 300, 300)
+        .rect
+        .h
+}
+
+/// A bare text node's height comes from the registered measurer, not from a
+/// fixed `font_size * 1.2`.
+///
+/// This is the test that makes R-5a's change to `text_dimensions` observable at
+/// all. The old height was `16 * 1.2 = 19` for every run, so an assertion that
+/// merely checks the height is 19 would pass against the code before R-5a too;
+/// this one checks that two runs of the same size get different heights, and
+/// that each equals the extent the seam reports for it, and neither of those can
+/// be true of a 1.2em multiplier.
+#[test]
+fn a_bare_text_node_is_as_tall_as_the_run_in_it() {
+    let caps = bare_text_height("Hg");
+    let x_only = bare_text_height("xxx");
+    assert_eq!(caps, 12, "\"Hg\": 0.55em + 0.20em = 12.0px from the seam");
+    assert_eq!(x_only, 5, "\"xxx\": 0.30em + 0 = 4.8px from the seam");
+    assert_ne!(
+        caps, x_only,
+        "two runs at the same size must get different heights, or the height is \
+         not following the content at all"
+    );
+    for text in ["Hg", "xxx"] {
+        assert_ne!(
+            bare_text_height(text),
+            19,
+            "`{text}` must not get the old 1.2em height, which is the whole point of \
+             routing this path through the seam"
+        );
+    }
+}
+
+/// The width of a bare text node is still the 0.6 heuristic, and stays that way.
+///
+/// `text_dimensions` deliberately measures only its HEIGHT through the seam: its
+/// width is `chars * font_size * 0.6`, which is a different formula from the
+/// seam's 0.5-per-char, and switching it would change every text width in a Skia
+/// run. This pins that the half that was left alone really was left alone.
+#[test]
+fn a_bare_text_nodes_width_is_still_the_heuristic_and_not_the_seams() {
+    register();
+    // 0.6em per char at 16px is 9.6px; the seam's 0.5em would be 8.0px.
+    let laid = compute_layout(&velox_dom::VNode::Text("Hg".to_string()), 300, 300);
+    assert_eq!(laid.rect.w, 19, "2 chars * 0.6em * 16px, rounded");
+    assert_ne!(
+        laid.rect.w, 16,
+        "if this is 16 the width went through the seam, which is not what R-5a \
+         decided and would change every text width in a Skia run"
+    );
+}

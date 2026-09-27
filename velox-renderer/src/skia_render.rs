@@ -1005,10 +1005,16 @@ pub mod skia_impl {
         /// rectangle, which is a true statement about ink and a useless one about
         /// a line box, so that case is left for the seam to answer from the
         /// documented approximation rather than propagated. `.max(0.0)` also maps
-        /// a NaN bound to 0.0, which lands in that same case. Both numbers are
-        /// left in the raw device units Skia measured in, exactly as the width has
-        /// always been: there is one rounding authority in this project and it is
-        /// not here.
+        /// a NaN bound to 0.0, which lands in that same case.
+        ///
+        /// Both numbers are in LOGICAL px, not device px. `font()` builds the
+        /// `sk::Font` at `snapped_size(size)`, which is `device / self.scale`, so
+        /// `measure_str` reports at the logical size the caller asked for — the
+        /// same units `measure_heuristic` and `velox_dom`'s own snap point work in,
+        /// and the same units the width has always been in. Dividing these by
+        /// `scale` would be the bug, not the fix: it would scale every line box by
+        /// the device factor. There is one rounding authority in this project and it
+        /// is not here, so nothing below rounds.
         pub fn measure_run(&mut self, family: &str, size: f32, text: &str) -> MeasuredText {
             let font = self.font(family, size);
             let mut p = sk::Paint::default();
@@ -1680,6 +1686,88 @@ pub mod skia_impl {
                 (SEAM_SIZE * 1.2).round() as i32,
                 "with no usable vertical measurement the documented approximation applies"
             );
+        }
+
+        /// `measure_run` passes Skia's bounds through unmodified.
+        ///
+        /// Every other test in this module is self-consistent: it asks the seam
+        /// what a run measures and then checks that the layout path used that
+        /// same number, so a uniform error applied to the measured VALUE — a
+        /// stray scale factor, a flipped sign, the descent taken from
+        /// `bounds.top` — is invisible to all of them. Falsification confirmed
+        /// exactly that: scaling `measure_run`'s ascent by 0.7 left all 30 of
+        /// these tests green.
+        ///
+        /// So this one does not go through `measure_run`'s callers. It takes the
+        /// typeface, calls `measure_str` itself, and requires the production
+        /// path to have extracted precisely the same numbers. The duplication is
+        /// deliberate and is the whole point: independence from the code under
+        /// test. The typeface and DPI snap are shared with production because
+        /// those are not what is under test.
+        #[test]
+        fn measure_run_passes_skias_bounds_through_unmodified() {
+            let mut cache = FontCache::new_with_scale(1.0);
+            for text in ["Hg", "H", "x", "W", "Ag", " "] {
+                for size in [16.0f32, 33.0] {
+                    let (w, bounds) = {
+                        let font = cache.font(SEAM_FAMILY, size);
+                        let mut paint = sk::Paint::default();
+                        paint.set_anti_alias(true);
+                        font.measure_str(text, Some(&paint))
+                    };
+                    let run = cache.measure_run(SEAM_FAMILY, size, text);
+                    assert_eq!(run.width, w, "advance width for {text:?} at {size}px");
+                    assert_eq!(
+                        run.ascent,
+                        (-bounds.top).max(0.0),
+                        "ascent for {text:?} at {size}px: Skia puts the baseline at y=0 \
+                         with the top negative above it, so the ascent is -top"
+                    );
+                    assert_eq!(
+                        run.descent,
+                        bounds.bottom.max(0.0),
+                        "descent for {text:?} at {size}px: below the baseline is positive"
+                    );
+                }
+            }
+        }
+
+        /// `at()`'s bare `VNode::Text` arm, under real font metrics. This is
+        /// the one path R-5a changed that the velox-dom tests cannot reach: they
+        /// all install a synthetic measurer, so what is verified here is that a
+        /// real font backend's metrics actually arrive at the branch that uses
+        /// them.
+        #[test]
+        fn a_bare_text_node_is_as_tall_as_the_run_in_it_under_real_metrics() {
+            velox_dom::text_wrap::set_skia_measurer(measure_text);
+            let bare = |text: &str| {
+                velox_dom::layout::compute_layout(&VNode::Text(text.to_string()), 300, 300)
+                    .rect
+                    .h
+            };
+            let caps = bare("Hg");
+            let x_only = bare("xxx");
+            assert_ne!(
+                caps, x_only,
+                "two runs at {SEAM_SIZE}px must get different heights from real \
+                 metrics, or the bare-text path is not using them ({caps} vs {x_only})"
+            );
+            for (text, actual) in [("Hg", caps), ("xxx", x_only)] {
+                let run = measure_text(text, SEAM_SIZE, SEAM_FAMILY, 1.0);
+                assert_eq!(
+                    actual,
+                    run.line_extent().round() as i32,
+                    "a bare `{text}` node must be as tall as the run it holds, \
+                     which measures {} up and {} down",
+                    run.ascent,
+                    run.descent
+                );
+                assert_ne!(
+                    actual, 19,
+                    "`{text}` must not get the old 1.2em height; routing this path \
+                     through the seam is the point of the change"
+                );
+            }
         }
 
         #[test]

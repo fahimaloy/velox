@@ -35,12 +35,23 @@ impl FontMetrics {
     /// The documented approximation for a run's vertical extent when no font
     /// backend is registered (CSS `normal`-ish ratios: 0.8em up, 0.4em down).
     ///
-    /// The SPLIT is a guess and is labelled as one — a real Latin face has an
-    /// ascent of roughly 0.75-0.93em and a descent of roughly 0.21-0.25em, so the
-    /// descent here is deliberately deeper than any of them. The TOTAL is not a
-    /// guess: 0.8 + 0.4 is 1.2, which is exactly the `line_height`
-    /// `from_font_size` has always produced, so a headless line box keeps the
-    /// height it had before vertical metrics existed.
+    /// The SPLIT is a guess and is labelled as one. Measured off the hhea and OS/2
+    /// tables of `NotoSans-Regular.ttf` (unitsPerEm 1000, the face these tests
+    /// load): ascent 1.069em, descent 0.293em, lineGap 0, capHeight 0.714em,
+    /// xHeight 0.536em; usWinAscent 1.124em and usWinDescent 0.395em. So 0.8em up
+    /// is well short of this face's ascent, and 0.4em down is deeper than its
+    /// descent. Neither number is a claim about a typical Latin face, because a
+    /// range would be a guess wearing the clothes of a measurement; these are the
+    /// numbers for the one face the tests actually use.
+    ///
+    /// The TOTAL is not a guess, but it is not a parity claim either: 0.8 + 0.4 is
+    /// 1.2, which is exactly the `line_height` `from_font_size` has always
+    /// produced, so a headless line box keeps the height it had before vertical
+    /// metrics existed. That preserves VELOX's own prior behaviour and nothing
+    /// more. A browser's strut comes from the FONT's ascent + descent, which for
+    /// this face is 1.362em by hhea or 1.519em by usWin metrics — so 1.2em is
+    /// closer to the old engine than to a browser. A strut floor is what closes
+    /// that gap, and it is not this function's job.
     pub fn heuristic_vertical(font_size_px: f32) -> (f32, f32) {
         (font_size_px * 0.8, font_size_px * 0.4)
     }
@@ -1190,6 +1201,13 @@ fn text_dimensions(t: &str, font_size_px: f32) -> (i32, i32) {
     // was never measured, and switching it to the seam would change every text
     // width in a Skia run. Height was a fixed multiplier, so changing it is the
     // point of the task.
+    //
+    // `line_extent` is the seam's own sum of the two numbers, not a re-derivation
+    // of it. `text_wrap::line_box_height` is the same expression as this is, but it
+    // is private, and a second copy of a line-box formula in a different module is
+    // exactly how the next task's strut would reach the wrapping path and not this
+    // one. The height is built from the run's measured extent here for the same
+    // reason and by the same call.
     let h = {
         let run = crate::text_wrap::measure_text_metrics(
             t,
@@ -1197,7 +1215,7 @@ fn text_dimensions(t: &str, font_size_px: f32) -> (i32, i32) {
             DEFAULT_TEXT_FAMILY,
             crate::text_wrap::current_scale(),
         );
-        (run.ascent + run.descent).round() as i32
+        run.line_extent().round() as i32
     };
     (w, h)
 }

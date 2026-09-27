@@ -5,7 +5,9 @@
 //! binary that registers one can no longer observe the no-measurer path, and
 //! which of the two tests ran first would otherwise decide the answer.
 
+use velox_dom::VNode;
 use velox_dom::layout::FontMetrics;
+use velox_dom::layout::compute_layout;
 use velox_dom::style::{TextOverflow, WhiteSpace};
 use velox_dom::text_wrap::{measure_text, measure_text_metrics, wrap_text_with_options};
 
@@ -146,5 +148,39 @@ fn the_fallback_width_is_exactly_half_an_em_per_character_at_the_snapped_size() 
                 );
             }
         }
+    }
+}
+
+/// `at()`'s bare `VNode::Text` arm, on the fallback path.
+///
+/// ## This test is NOT evidence that the seam is used, and must never be read as such
+///
+/// With no measurer registered the seam's answer is the documented approximation,
+/// whose 0.8em + 0.4em total is 1.2em — the same `line_height` the old
+/// fixed-multiplier code produced. `round(0.8s + 0.4s) == round(1.2s)` is pinned
+/// across 400 sizes elsewhere in this file. So on this path a bare text node
+/// cannot tell "routed through the seam" apart from "still a 1.2em multiplier",
+/// and any assertion here passes either way. There is nothing this path can be
+/// made to prove about seam usage, and saying so is the honest outcome; the
+/// sensitive version of this test is in `text_metrics_seam.rs`, where a
+/// measurer is registered and the two possibilities give different answers.
+///
+/// What it does guard is real, if narrower: that `text_dimensions` still produces
+/// a non-zero height here, that the two runs still get the same height on the
+/// fallback, and that the width half of the same function is untouched. A change
+/// that collapsed the bare-text height, or moved its width, would fail here.
+#[test]
+fn a_bare_text_node_on_the_fallback_path_is_unchanged_and_non_zero() {
+    for (text, expected_w) in [("Hg", 19), ("xxx", 29), ("iiiiiiiii", 86)] {
+        let laid = compute_layout(&VNode::Text(text.to_string()), 400, 300);
+        assert_eq!(
+            laid.rect.w, expected_w,
+            "bare text width stays the 0.6em heuristic: {text:?} at 16px"
+        );
+        assert_eq!(
+            laid.rect.h, 19,
+            "on the fallback the seam's 0.8em + 0.4em total is 1.2em, so the \
+             height is the same for every run — {text:?} included"
+        );
     }
 }
