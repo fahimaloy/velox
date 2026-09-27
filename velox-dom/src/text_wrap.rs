@@ -140,9 +140,15 @@ pub fn measure_text(text: &str, font_size_px: f32, font_family: &str, scale: f32
 /// Height of a line box whose only content is this run.
 ///
 /// This is the run's own extent with no strut floor: two lines whose runs reach
-/// different heights get different heights. It is the same sum the heuristic
-/// path has always produced (`font_size * 0.8 + font_size * 0.4` ≈
-/// `font_size * 1.2`), so nothing moves until a real font backend is registered.
+/// different heights get different heights.
+///
+/// On the heuristic path that total is `font_size * 0.8 + font_size * 0.4` ≈
+/// `font_size * 1.2`, which is what this function has always returned, so nothing
+/// moves THERE. But a real font backend IS registered in the shipping renderer,
+/// so in a Skia build this is where behaviour does change: a run of "xxx" now
+/// yields roughly x-height where it used to yield 1.2em. `heuristic_vertical` says
+/// what is still a guess. A browser's line box comes from the FONT's ascent +
+/// descent via a strut, which this does not apply yet — the floor goes here.
 fn line_box_height(m: &MeasuredText) -> i32 {
     m.line_extent().round() as i32
 }

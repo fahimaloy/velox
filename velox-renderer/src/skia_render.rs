@@ -1732,6 +1732,44 @@ pub mod skia_impl {
             }
         }
 
+        /// A measured run's vertical extent is a LOGICAL quantity, so it must not
+        /// move when the scale does.
+        ///
+        /// `measure_run`'s doc says its bounds are logical px rather than the raw
+        /// device units Skia produced, and warns that dividing by `scale` would be
+        /// the bug rather than the fix. That correction was documentation with
+        /// nothing behind it: `measure_run_passes_skias_bounds_through_unmodified`
+        /// shares `font()` and `snapped_size` with the code it checks, so it cannot
+        /// tell a logical reading from a device one — it only anchors the extraction.
+        ///
+        /// This is the check that can. `FontCache::snapped_size` divides the device
+        /// size by the scale and `font()` builds the typeface at THAT size, so a
+        /// correct implementation measures the same extent at scale 1.0 and 2.0. A
+        /// device-unit reading doubles at scale 2.0 instead, and a
+        /// double-divided one halves. Five assertions, and it is the only test here
+        /// that reaches the snap rather than the extraction.
+        #[test]
+        fn a_runs_vertical_extent_is_logical_and_does_not_move_with_scale() {
+            let mut at_one = FontCache::new_with_scale(1.0);
+            let mut at_two = FontCache::new_with_scale(2.0);
+            for text in ["Hg", "xxx", "Wq"] {
+                for size in [16.0f32, 33.0] {
+                    let one = at_one.measure_run(SEAM_FAMILY, size, text);
+                    let two = at_two.measure_run(SEAM_FAMILY, size, text);
+                    assert_eq!(
+                        one.line_extent(),
+                        two.line_extent(),
+                        "{text:?} at {size}px measures a different extent at scale 2.0 \
+                         than at 1.0, so these are device px, not logical"
+                    );
+                    assert_eq!(
+                        one.width, two.width,
+                        "the advance width must be logical too: {text:?} at {size}px"
+                    );
+                }
+            }
+        }
+
         /// `at()`'s bare `VNode::Text` arm, under real font metrics. This is
         /// the one path R-5a changed that the velox-dom tests cannot reach: they
         /// all install a synthetic measurer, so what is verified here is that a

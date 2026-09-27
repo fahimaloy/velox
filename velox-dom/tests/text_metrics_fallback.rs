@@ -160,15 +160,18 @@ fn the_fallback_width_is_exactly_half_an_em_per_character_at_the_snapped_size() 
 /// fixed-multiplier code produced. `round(0.8s + 0.4s) == round(1.2s)` is pinned
 /// across 400 sizes elsewhere in this file. So on this path a bare text node
 /// cannot tell "routed through the seam" apart from "still a 1.2em multiplier",
-/// and any assertion here passes either way. There is nothing this path can be
+/// and the HEIGHT assertion below passes either way. Nothing this path can be
 /// made to prove about seam usage, and saying so is the honest outcome; the
-/// sensitive version of this test is in `text_metrics_seam.rs`, where a
-/// measurer is registered and the two possibilities give different answers.
+/// sensitive version of the height is in `text_metrics_seam.rs`, where a measurer
+/// is registered and the two possibilities give different answers.
 ///
-/// What it does guard is real, if narrower: that `text_dimensions` still produces
-/// a non-zero height here, that the two runs still get the same height on the
-/// fallback, and that the width half of the same function is untouched. A change
-/// that collapsed the bare-text height, or moved its width, would fail here.
+/// The WIDTH assertions are not in that position, and this comment used to imply
+/// they were by saying "any assertion here". They are pinned formulas, and
+/// falsification shows they bite: moving `FontMetrics::char_width`'s 0.6 ratio to
+/// 0.62 fails the first one with `left: 20 right: 19`, because the width here is
+/// `chars * 0.6em` straight out of `text_dimensions` and never reaches the seam.
+/// So the honest scope is: this test cannot show the HEIGHT comes from the seam,
+/// and can show the WIDTH does not.
 #[test]
 fn a_bare_text_node_on_the_fallback_path_is_unchanged_and_non_zero() {
     for (text, expected_w) in [("Hg", 19), ("xxx", 29), ("iiiiiiiii", 86)] {

@@ -258,7 +258,7 @@ fn a_bare_text_node_is_as_tall_as_the_run_in_it() {
 /// seam's 0.5-per-char, and switching it would change every text width in a Skia
 /// run. This pins that the half that was left alone really was left alone.
 #[test]
-fn a_bare_text_nodes_width_is_still_the_heuristic_and_not_the_seams() {
+fn a_bare_text_nodes_width_half_is_still_the_heuristic_not_the_seam() {
     register();
     // 0.6em per char at 16px is 9.6px; the seam's 0.5em would be 8.0px.
     let laid = compute_layout(&velox_dom::VNode::Text("Hg".to_string()), 300, 300);
