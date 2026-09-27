@@ -1193,10 +1193,18 @@ fn condition_unresolvable_warning(
 
 fn vmodel_loop_write_warning(expr: &str) -> String {
     format!(
-        "v-model=\"{expr}\" on a `v-for` item cannot be written — the event dispatcher resolves \
-         `on:input` handler names against `State`, which has no handle on a loop item, so the \
-         input renders the item's value but typing does not change it. Write the field from a \
-         real handler on the item, or bind `:value` plus an `@input` that reaches it."
+        "v-model=\"{expr}\" on a `v-for` item cannot be written, and no template syntax \
+         reaches it — the read works, so the input shows the item's value, but typing does \
+         not change it. Both hops of every write path break: the loop body iterates a \
+         DETACHED COPY, because `Signal::get` returns `T` by value rather than a handle, \
+         and the event dispatcher is `FnMut(&str, Option<&str>)` — a name and a payload, \
+         with no index — so a write to \"the third item\" cannot even be NAMED. Two routes \
+         do work: bind `v-model` on a `State` field instead of on the loop item, where the \
+         generated `__vmodel_set_<field>` setter is dispatched and writes through the \
+         signal; or render this component through `render_with_state` and do the write in \
+         a `State` method the component calls itself, since that is the only place the \
+         index still exists. This is a limitation of `v-model` on a loop item, not a typo \
+         to work around: a `v-for` item is read-only by design."
     )
 }
 
@@ -1802,13 +1810,27 @@ fn v_for_scope<'a>(attrs: &'a [TemplateAttr]) -> Option<VForInfo> {
 /// Whether a `v-model` expression is rooted at a `v-for` loop variable.
 ///
 /// A loop-rooted `v-model` is a read the loop item can answer — `todo.text` is a
-/// real field read in State mode — but its write has nowhere to go: the event
-/// dispatcher resolves a handler name against `State`, which has no handle on a
-/// loop item. `extract_vmodel` therefore emits the read and no handler, and
-/// `collect_resolver_keys` reports the missing write instead of emitting an arm
-/// that cannot compile. The predicate is [`expr_reads_root`] over the loop
-/// variables in scope — the same test the read path uses to decide it can
-/// answer the expression.
+/// real field read in State mode — but its write has nowhere to go. This is
+/// READ-ONLY BY DESIGN, and the two structural facts below are why. Neither is
+/// a gap a smarter template could close:
+///
+/// 1. `Signal::get` returns `T` BY VALUE (`velox-core/src/signal.rs`), so the
+///    loop body iterates a DETACHED CLONE. `item` is a value, not a handle, and
+///    there is nothing to write through.
+/// 2. The event dispatcher is `FnMut(&str, Option<&str>)` — a static name plus an
+///    optional payload, with no index — so a write to "the third item" cannot be
+///    named, let alone routed.
+///
+/// Lifting this would take handle semantics for `Signal`, which is a redesign of
+/// the reactivity core and out of scope for this programme. Do not read this as a
+/// small codegen gap to close later; a future attempt should start at
+/// `velox-core/src/signal.rs`.
+///
+/// `extract_vmodel` therefore emits the read and no handler, and
+/// `collect_resolver_keys` reports the missing write ([`vmodel_loop_write_warning`])
+/// instead of emitting an arm that cannot compile. The predicate is
+/// [`expr_reads_root`] over the loop variables in scope — the same test the read
+/// path uses to decide it can answer the expression.
 fn vmodel_is_loop_rooted(expr: &str, item_name: Option<&str>, idx_name: Option<&str>) -> bool {
     let roots: Vec<&str> = [item_name, idx_name].into_iter().flatten().collect();
     !roots.is_empty() && expr_reads_roots(expr, &roots)
@@ -1834,8 +1856,12 @@ fn vmodel_setter_name(expr: &str) -> String {
 /// expression gets the value bind only: its read is a direct field read of the
 /// loop item — the shape State mode already emits for a loop-rooted binding — and
 /// there is no handler to name, because a write to a loop item cannot be routed
-/// through the `State`-rooted dispatcher. `collect_resolver_keys` reports that
-/// case; see [`vmodel_is_loop_rooted`].
+/// through the `State`-rooted dispatcher. This is deliberate, not a missing arm:
+/// a loop item is read-only by design, and [`vmodel_is_loop_rooted`] records the
+/// two structural facts (value-semantics `Signal::get`, an index-less dispatcher)
+/// that make it so, plus what lifting it would cost.
+/// `collect_resolver_keys` reports the case as
+/// [`vmodel_loop_write_warning`].
 fn extract_vmodel(
     attrs: &[TemplateAttr],
     item_name: Option<&str>,
@@ -6563,12 +6589,27 @@ impl State {
             // second warning about its write would only repeat it.
             if matches!(mode, RenderMode::State) {
                 assert_eq!(warnings.len(), 1, "{:?}", warnings);
-                assert!(
-                    warnings[0].contains(r#"v-model="item.name""#)
-                        && warnings[0].contains("cannot be written"),
-                    "{}",
-                    warnings[0]
-                );
+                // Pinned on the two routes that actually WORK, not only on the
+                // fact that the write fails. A warning that names no remedy is
+                // half the message, and the whole point of R-2 is that a user
+                // can act on it, so the actionable half is what is asserted.
+                for expected in [
+                    r#"v-model="item.name""#,
+                    "cannot be written",
+                    // the two structural facts that make it unfixable here
+                    "DETACHED COPY",
+                    "no index",
+                    // the two routes that work
+                    "render_with_state",
+                    "__vmodel_set_",
+                ] {
+                    assert!(
+                        warnings[0].contains(expected),
+                        "the warning must mention {expected:?} so the message is actionable, \
+                         but it read:\n{}",
+                        warnings[0]
+                    );
+                }
             } else {
                 assert_eq!(warnings.len(), 1, "{:?}", warnings);
                 assert!(
