@@ -1465,6 +1465,13 @@ where
         // the unfocused defaults. Injected anyway so the attr contract holds on
         // frame one and paint never has to special-case absence.
         let vnode = crate::inject_input_caret_attrs(&vnode, None);
+        // Publish the pre-loop frame so a click or keystroke that arrives before
+        // the first RedrawRequested is handled against real layout/value data
+        // rather than an empty `last_vnode`. Without this, `apply_click_focus`
+        // and `apply_edit_to_focused` see `None` and either drop the edit or put
+        // the caret at 0 — the regression the HMR loop already guards against
+        // by assigning `last_vnode` here.
+        last_vnode = Some(vnode.clone());
         let mut layout = velox_dom::layout::compute_layout(&vnode, vw as i32, vh as i32);
         {
             let mut path = Vec::new();
@@ -2058,9 +2065,11 @@ where
     let mut click_targets: Vec<crate::events::ClickTarget> = Vec::new();
     let mut hover_targets: Vec<crate::events::HoverTarget> = Vec::new();
     let mut input_targets: Vec<crate::events::InputTarget> = Vec::new();
-    // Renamed from `_last_vnode`: the HMR loop had NO `focused_input` at all, so
-    // typing, Backspace and Return were dead under HMR. Keeping the last vnode
-    // under a real name is what makes the ported input handling possible.
+    // Was `_last_vnode` until 5cc4a4f, which renamed it and made it live. The
+    // earlier HMR-deadlock fix (7585674) introduced this binding *unused*, so
+    // typing, Backspace and Return stayed dead under HMR; 5cc4a4f is what
+    // actually fixed them, by giving the value a real name and wiring it into
+    // the ported input handling.
     let mut last_vnode: Option<velox_dom::VNode> = None;
     // Path (child source indices) to the focused text input, if any.
     // Mirrors the plain loop's state so the two loops stay behaviourally equal.
@@ -3414,5 +3423,401 @@ mod resize_state_tests {
         assert!(removed_calls.borrow().is_empty());
         assert_eq!(&*retained_calls.borrow(), &[(200, 150)]);
         cleanup_component(retained_id);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Task 5.6a — characterisation tests for the text-input edit and focus path.
+//
+// `apply_click_focus`, `apply_edit_to_focused` and `edit_action_for_key` are the
+// three functions both copies of the event loop call into, and until this
+// module landed none of them had any test coverage at all. A dedup that dropped
+// or re-pointed an arm would have shipped silently, which is the failure mode
+// these tests exist to prevent.
+//
+// They live here rather than in `tests/` because all three are *private* `fn`s
+// behind `#[cfg(feature = "skia-native")]`; an integration test can only reach
+// the crate's public API.
+#[cfg(all(test, feature = "skia-native"))]
+mod edit_focus_tests {
+    use super::{
+        apply_click_focus, apply_edit_to_focused, edit_action_for_key, inject_input_caret_attrs,
+        recompute_targets, style_vnode_with_hover,
+    };
+    use crate::events::{EditAction, InputTarget};
+    use velox_dom::{Props, VNode};
+    use winit::event::VirtualKeyCode as K;
+
+    const W: i32 = 400;
+    const H: i32 = 300;
+    /// Absolutely positioned so the field's rect is known exactly: the click
+    /// tests below use literal coordinates and must not depend on layout order.
+    const FIELD_STYLE: &str = "position:absolute;left:20px;top:20px;width:200px;height:40px;font-size:15px;padding-left:2px";
+    const VALUE: &str = "hello";
+    const HANDLER: &str = "set_value";
+    /// The field spans x 20..220, y 20..60; its text starts at x 20 + 2px padding.
+    const TEXT_X: f32 = 22.0;
+    const TEXT_Y: f32 = 40.0;
+    const EMPTY_X: f32 = 350.0;
+    const EMPTY_Y: f32 = 250.0;
+
+    /// `(handler, value)` pairs handed to the app, in dispatch order.
+    type Dispatches = Vec<(String, Option<String>)>;
+
+    /// One text input on a page, built through the frame order the loops use:
+    /// style cascade, caret-attr injection, layout, then target collection.
+    /// Going through the real pipeline is the point — a hand-assembled target
+    /// vector would not exercise the `path`/`rect` plumbing these functions read.
+    struct Scene {
+        /// `None` models the window before the first `RedrawRequested`, when the
+        /// loop has painted a frame but has not published it as `last_vnode`.
+        vnode: Option<VNode>,
+        inputs: Vec<InputTarget>,
+    }
+
+    fn scene(attrs: &[(&str, &str)]) -> Scene {
+        let mut p = Props::new()
+            .set("type", "text")
+            .set("style", FIELD_STYLE)
+            .set("value", VALUE)
+            .set("on:input", HANDLER);
+        for (k, v) in attrs.iter().copied() {
+            p = p.set(k, v);
+        }
+        let raw = VNode::Element {
+            tag: "div".into(),
+            props: Props::new().set("style", "background:#000000"),
+            children: vec![VNode::Element {
+                tag: "input".into(),
+                props: p,
+                children: vec![],
+            }],
+        };
+        let sheet = velox_style::Stylesheet::default();
+        let styled = style_vnode_with_hover(&raw, &sheet, &|_tag: &str, _p: &Props| false);
+        let vnode = inject_input_caret_attrs(&styled, None);
+        let layout = velox_dom::layout::compute_layout(&vnode, W, H);
+        let mut clicks: Vec<crate::events::ClickTarget> = Vec::new();
+        let mut hovers: Vec<crate::events::HoverTarget> = Vec::new();
+        let mut inputs: Vec<InputTarget> = Vec::new();
+        recompute_targets(&vnode, &layout, &mut clicks, &mut hovers, &mut inputs);
+        assert_eq!(inputs.len(), 1, "fixture must yield exactly one text input");
+        Scene {
+            vnode: Some(vnode),
+            inputs,
+        }
+    }
+
+    impl Scene {
+        /// Focus the field with the caret `cursor` chars in.
+        fn focused_at(mut self, cursor: usize) -> Self {
+            self.inputs[0].focused = true;
+            self.inputs[0].cursor = cursor;
+            self
+        }
+    }
+
+    /// Run one edit, returning whether the caller must repaint and everything
+    /// dispatched to the app. Asserting on the dispatch log, not just the
+    /// caret, is the point: a caret that moves while the handler is never
+    /// called is precisely the silent-typing failure this suite must not miss.
+    fn run_edit(s: &mut Scene, action: EditAction) -> (bool, Dispatches) {
+        let mut log: Dispatches = Vec::new();
+        let repaint = {
+            let mut sink = |name: &str, data: Option<&str>| {
+                log.push((name.to_string(), data.map(str::to_string)))
+            };
+            apply_edit_to_focused(&mut s.inputs, action, &s.vnode, &mut sink)
+        };
+        (repaint, log)
+    }
+
+    /// Click at (x, y), returning whether the caller must repaint. The
+    /// `focused_input` out-param is deliberately never asserted on anywhere in
+    /// this module: nothing reads it, and asserting on it would make its
+    /// eventual removal look like a behaviour change.
+    fn run_click(s: &mut Scene, x: f32, y: f32) -> bool {
+        let mut focused_input: Option<Vec<usize>> = None;
+        apply_click_focus(&mut s.inputs, &s.vnode, &mut focused_input, x, y, 1.0)
+    }
+
+    // -- apply_edit_to_focused ------------------------------------------------
+
+    #[test]
+    fn insert_at_caret_dispatches_new_value_and_advances_caret() {
+        let mut s = scene(&[]).focused_at(5);
+        let (repaint, log) = run_edit(&mut s, EditAction::Insert('X'));
+        assert!(repaint, "an inserted char must repaint");
+        assert_eq!(log, vec![(HANDLER.to_string(), Some("helloX".into()))]);
+        assert_eq!(s.inputs[0].cursor, 6);
+    }
+
+    #[test]
+    fn insert_lands_at_the_caret_not_at_the_end() {
+        let mut s = scene(&[]).focused_at(0);
+        let (repaint, log) = run_edit(&mut s, EditAction::Insert('X'));
+        assert!(repaint);
+        assert_eq!(log, vec![(HANDLER.to_string(), Some("Xhello".into()))]);
+        assert_eq!(s.inputs[0].cursor, 1);
+    }
+
+    #[test]
+    fn backspace_removes_the_char_before_the_caret() {
+        let mut s = scene(&[]).focused_at(5);
+        let (repaint, log) = run_edit(&mut s, EditAction::Backspace);
+        assert!(repaint);
+        assert_eq!(log, vec![(HANDLER.to_string(), Some("hell".into()))]);
+        assert_eq!(s.inputs[0].cursor, 4);
+    }
+
+    #[test]
+    fn submit_dispatches_the_unchanged_value() {
+        let mut s = scene(&[]).focused_at(5);
+        let (repaint, log) = run_edit(&mut s, EditAction::Submit);
+        assert!(
+            repaint,
+            "submit must repaint even though the text is unchanged"
+        );
+        assert_eq!(
+            log,
+            vec![(HANDLER.to_string(), Some("hello".into()))],
+            "a submit with no selection must still reach the handler"
+        );
+        assert_eq!(s.inputs[0].cursor, 5);
+    }
+
+    #[test]
+    fn caret_move_repaints_without_announcing_a_text_change() {
+        let mut s = scene(&[]).focused_at(3);
+        let (repaint, log) = run_edit(&mut s, EditAction::MoveLeft { shift: false });
+        assert!(repaint, "a caret move is a visual change and must repaint");
+        assert!(
+            log.is_empty(),
+            "a caret move must not dispatch a value change"
+        );
+        assert_eq!(s.inputs[0].cursor, 2);
+    }
+
+    #[test]
+    fn shift_caret_move_anchors_a_selection() {
+        let mut s = scene(&[]).focused_at(3);
+        let (repaint, log) = run_edit(&mut s, EditAction::MoveLeft { shift: true });
+        assert!(repaint);
+        assert!(log.is_empty());
+        assert_eq!(s.inputs[0].cursor, 2);
+        assert_eq!(
+            s.inputs[0].anchor,
+            Some(3),
+            "a shift-move must anchor at the caret's old position"
+        );
+    }
+
+    #[test]
+    fn no_focused_input_is_a_no_op() {
+        let mut s = scene(&[]);
+        assert!(!s.inputs[0].focused);
+        let (repaint, log) = run_edit(&mut s, EditAction::Insert('X'));
+        assert!(!repaint, "an edit with nothing focused must not repaint");
+        assert!(log.is_empty());
+    }
+
+    #[test]
+    fn backspace_at_caret_zero_changes_nothing() {
+        let mut s = scene(&[]).focused_at(0);
+        let (repaint, log) = run_edit(&mut s, EditAction::Backspace);
+        assert!(!repaint, "backspace at index 0 is a no-op, not a repaint");
+        assert!(log.is_empty(), "backspace at index 0 must not dispatch");
+        assert_eq!(s.inputs[0].cursor, 0);
+    }
+
+    /// The target holds no value of its own — the tree does. This is the coupling
+    /// that makes an unpublished frame (below) a correctness problem rather than
+    /// a cosmetic one.
+    #[test]
+    fn dispatch_uses_the_value_in_the_tree_not_the_target() {
+        let mut s = scene(&[("value", "world")]).focused_at(5);
+        let (repaint, log) = run_edit(&mut s, EditAction::Backspace);
+        assert!(repaint);
+        assert_eq!(log, vec![(HANDLER.to_string(), Some("worl".into()))]);
+    }
+
+    // -- edit_action_for_key --------------------------------------------------
+
+    /// Every key the two loops route to the editor. This is the mapping a dedup
+    /// could silently transpose, and `Back`/`Delete`/`Return` are exactly the
+    /// keys whose mis-wiring stays invisible until someone types.
+    #[test]
+    fn editing_keys_map_to_their_actions() {
+        use EditAction::*;
+        let cases: &[(K, bool, EditAction)] = &[
+            (K::Left, false, MoveLeft { shift: false }),
+            (K::Left, true, MoveLeft { shift: true }),
+            (K::Right, false, MoveRight { shift: false }),
+            (K::Right, true, MoveRight { shift: true }),
+            (K::Home, false, Home { shift: false }),
+            (K::Home, true, Home { shift: true }),
+            (K::End, false, End { shift: false }),
+            (K::End, true, End { shift: true }),
+            (K::Back, false, Backspace),
+            (K::Delete, false, Delete),
+            (K::Return, false, Submit),
+        ];
+        for (key, shift, want) in cases {
+            assert_eq!(
+                edit_action_for_key(*key, *shift),
+                Some(*want),
+                "{key:?} with shift={shift}"
+            );
+        }
+    }
+
+    /// A printable key must map to `None`: characters reach the editor through
+    /// `ReceivedCharacter`, so claiming one here would insert it twice.
+    #[test]
+    fn non_editing_keys_produce_no_action() {
+        for key in [
+            K::A,
+            K::R,
+            K::Key1,
+            K::Space,
+            K::Escape,
+            K::Tab,
+            K::Up,
+            K::Down,
+        ] {
+            assert_eq!(
+                edit_action_for_key(key, false),
+                None,
+                "{key:?} is not an editing key"
+            );
+        }
+    }
+
+    // -- apply_click_focus ----------------------------------------------------
+
+    #[test]
+    fn focus_gain_puts_the_caret_at_the_end_of_the_value() {
+        let mut s = scene(&[]);
+        assert_eq!(s.inputs[0].cursor, 0);
+        assert!(run_click(&mut s, TEXT_X + 1.0, TEXT_Y));
+        assert!(s.inputs[0].focused);
+        assert_eq!(
+            s.inputs[0].cursor, 5,
+            "focus gain must put the caret at the end, so typing appends"
+        );
+    }
+
+    #[test]
+    fn click_into_a_focused_field_repositions_the_caret() {
+        let mut s = scene(&[]).focused_at(5);
+        assert!(run_click(&mut s, TEXT_X + 1.0, TEXT_Y));
+        assert!(s.inputs[0].focused);
+        assert_eq!(
+            s.inputs[0].cursor, 0,
+            "clicking the first glyph must move the caret there, not leave it at the end"
+        );
+    }
+
+    #[test]
+    fn clicking_empty_space_blurs_clears_the_selection_and_keeps_the_caret() {
+        let mut s = scene(&[]).focused_at(5);
+        s.inputs[0].anchor = Some(1);
+        assert!(
+            run_click(&mut s, EMPTY_X, EMPTY_Y),
+            "a blur is a visual change"
+        );
+        assert!(!s.inputs[0].focused);
+        assert_eq!(
+            s.inputs[0].anchor, None,
+            "a stale highlight must not survive a blur"
+        );
+        assert_eq!(
+            s.inputs[0].cursor, 5,
+            "blur keeps the caret, so re-entering the field restores position"
+        );
+    }
+
+    #[test]
+    fn clicking_empty_space_with_nothing_focused_changes_nothing() {
+        let mut s = scene(&[]);
+        assert!(
+            !run_click(&mut s, EMPTY_X, EMPTY_Y),
+            "a click on empty space with nothing focused is not a change"
+        );
+    }
+
+    // -- the `last_vnode` window ----------------------------------------------
+    //
+    // Both loops declare `last_vnode` as `None` and only assign it on
+    // `RedrawRequested`, so before the loop's first redraw it is empty. The HMR
+    // loop additionally publishes its pre-loop frame; these tests pin what the
+    // plain loop must do to match, and what happens if it does not.
+
+    /// With no published frame there is nothing to measure or to read a value
+    /// from, so focus gain leaves the caret at 0 — which turns "click a field
+    /// and type" into a *prepend*.
+    #[test]
+    fn focus_gain_with_no_published_frame_puts_the_caret_at_zero() {
+        let mut s = scene(&[]);
+        s.vnode = None;
+        assert!(run_click(&mut s, TEXT_X + 1.0, TEXT_Y));
+        assert!(s.inputs[0].focused);
+        assert_eq!(
+            s.inputs[0].cursor, 0,
+            "with no frame to measure, focus gain leaves the caret at 0 and typing prepends"
+        );
+    }
+
+    /// The other half of the same window: the edit mutates the caret, reports
+    /// "repaint", and reaches the app not at all. The keystroke is lost and the
+    /// caret is left corrupted — the value reads as `""`, so the caret is
+    /// clamped to 0 before the insert and lands at 1 rather than 6.
+    #[test]
+    fn insert_with_no_published_frame_is_silently_dropped() {
+        let mut s = scene(&[]).focused_at(5);
+        s.vnode = None;
+        let (repaint, log) = run_edit(&mut s, EditAction::Insert('X'));
+        assert!(
+            repaint,
+            "the edit still reports a repaint, so the loop schedules a frame for nothing"
+        );
+        assert!(
+            log.is_empty(),
+            "no dispatch at all: the app never sees the keystroke, yet the caret moved"
+        );
+        assert_eq!(
+            s.inputs[0].cursor, 1,
+            "the caret is clamped to an empty value and corrupted, not advanced to 6"
+        );
+    }
+
+    /// `last_vnode` is what the two functions above read, so both loops must
+    /// publish the frame they render *before* they start dispatching input, not
+    /// only once the first `RedrawRequested` arrives. Structural — the loops need
+    /// a live window — but it is the only thing that binds the requirement to the
+    /// loops themselves rather than to one call site.
+    #[test]
+    fn both_loops_publish_their_pre_loop_frame_before_they_start() {
+        let src = include_str!("lib.rs");
+        // Assembled from two halves on purpose: `include_str!` reads this test
+        // module too, and a needle written out in full would match its own
+        // source and look like a third loop.
+        let decl = format!("last_vnode: Option<{}::VNode> = None;", "velox_dom");
+        let mut loops = 0usize;
+        let mut rest = src;
+        while let Some(at) = rest.find(decl.as_str()) {
+            loops += 1;
+            let body = &rest[at..];
+            let run_at = body
+                .find("event_loop.run(")
+                .unwrap_or_else(|| panic!("loop {loops} has no `event_loop.run(`"));
+            assert!(
+                body[..run_at].contains("last_vnode = Some("),
+                "loop {loops} must assign last_vnode in its pre-loop frame; until it does, every \
+                 click and keystroke before the first redraw is handled against an empty value"
+            );
+            rest = &body[run_at..];
+        }
+        assert_eq!(loops, 2, "expected the plain loop and the HMR loop");
     }
 }
