@@ -1678,6 +1678,36 @@ fn clamp_width_to_max_width(
     cap_to_max_width(rect_w, Some(max_w), is_border_box, pl, pr, bl, br)
 }
 
+/// Clamp a used main size by the item's definite min/max main size properties
+/// (css-flexbox-1 §9.2.3 for the hypothetical main size, §9.7.3 for the target
+/// main size). The flex resolve calls this at both seams; keeping one
+/// implementation is what stops the two from drifting apart.
+///
+/// `None` means the property imposes no constraint: absent, `auto`, or negative.
+/// The main axis reads `min` and `max` as `Option` precisely so the two
+/// absences are distinguishable — folding an absent `min` to `0` silently
+/// removes the floor, and folding an absent `max` to a finite number silently
+/// adds a cap.
+///
+/// The order is floor-then-cap, which is what the previous inline
+/// `.max(min).min(max)` at the grow and shrink seams did, so this is a pure
+/// refactor of that expression and changes no result on its own.
+///
+/// NOTE a known divergence, deliberately NOT changed here: when `min > max`,
+/// the floor is applied first and the cap then wins, but css-sizing-3 §3.2 makes
+/// the minimum win, and the block flow already implements that
+/// ([`floor_to_min_width`] applied after [`cap_to_max_width`], guarded by
+/// `block_min_width_overrides_max_width`). Flex and block flow therefore
+/// disagree on `min-width: 200px; max-width: 100px` in a flex container: block
+/// flow gives 200, flex gives 100. Reordering the two lines here would fix it
+/// but would also change flex sizing on every existing `min > max` item, which
+/// is a separate change from the unconditional clamp this helper exists for.
+/// Filed, not folded in.
+fn clamp_to_min_max(v: f32, min: Option<f32>, max: Option<f32>) -> f32 {
+    let floored = min.map_or(v, |lo| v.max(lo));
+    max.map_or(floored, |hi| floored.min(hi))
+}
+
 /// The CSS containing block for out-of-flow descendants (CSS 2.1 §10.1).
 ///
 /// `x`/`y` are the PADDING-edge origin and `w`/`h` the padding-box dimensions of
@@ -3989,15 +4019,41 @@ pub fn compute_layout(node: &VNode, viewport_w: i32, viewport_h: i32) -> LayoutN
                     };
 
                     // Step 1: Compute flex-basis for each child
+                    //
+                    // The three main sizes css-flexbox-1 §9.2 defines are three
+                    // SEPARATE quantities, and this used to alias all of them
+                    // into one `flex_basis` field that grow/shrink overwrote in
+                    // place. That aliasing is what made correctness depend on
+                    // every read site remembering to re-clamp: the clamping ones
+                    // were right, the three that read the value after the
+                    // if/else chain (the line's main size, the cursor advance,
+                    // and the final `rect.w`) silently consumed whatever
+                    // survived, including an unclamped base. Splitting the
+                    // field makes each quantity a name you cannot read by
+                    // accident.
                     struct FlexItem {
                         child_index: usize,
                         layout_node: Option<LayoutNode>,
-                        flex_basis: f32,
+                        /// §9.2 — the flex BASE size, NOT min/max clamped. §9.7.1
+                        /// scales the shrink distribution by the base, so
+                        /// clamping here would redistribute space between items.
+                        flex_base_size: f32,
+                        /// §9.2 — the base size clamped by min/max. This, not the
+                        /// base, is what the line-breaking loop and the free
+                        /// space computation consume.
+                        hypothetical_main_size: f32,
+                        /// §9.3 / §9.7.3 — the RESOLVED used main size: base →
+                        /// grow/shrink → clamp. Written unconditionally at the
+                        /// end of the resolve, so every later read gets the
+                        /// clamped value without each site having to remember.
+                        target_main_size: f32,
                         flex_grow: f32,
                         flex_shrink: f32,
                         align_self: String,
-                        min_main_size: f32,
-                        max_main_size: f32,
+                        /// `None` = the property imposes no constraint (absent,
+                        /// `auto`, or negative) — NOT zero.
+                        min_main_size: Option<f32>,
+                        max_main_size: Option<f32>,
                     }
 
                     // L-H4: order support — stable sort flex children by `order`
@@ -4382,6 +4438,12 @@ pub fn compute_layout(node: &VNode, viewport_w: i32, viewport_h: i32) -> LayoutN
                             ln.rect.w as f32
                         };
 
+                        // A negative `min`/`max` main size is an invalid
+                        // declaration (CSS 2.1 §10.4), so it constrains nothing —
+                        // same rule `used_max_width` applies on the block flow.
+                        // Absent and `auto` are `None` for the same reason: no
+                        // constraint, and reading them as `0` would delete the
+                        // floor that every item without a `min-*` relies on.
                         let min_main = style_lookup_len_full(
                             fc.style,
                             if is_column { "min-height" } else { "min-width" },
@@ -4391,8 +4453,9 @@ pub fn compute_layout(node: &VNode, viewport_w: i32, viewport_h: i32) -> LayoutN
                             vw_f,
                             vh_f,
                         )
-                        .unwrap_or(0) as f32;
-                        let max_main_val = style_lookup_len_full(
+                        .filter(|&v| v >= 0)
+                        .map(|v| v as f32);
+                        let max_main = style_lookup_len_full(
                             fc.style,
                             if is_column { "max-height" } else { "max-width" },
                             main_size as f32,
@@ -4400,16 +4463,34 @@ pub fn compute_layout(node: &VNode, viewport_w: i32, viewport_h: i32) -> LayoutN
                             root_font_size,
                             vw_f,
                             vh_f,
-                        );
-                        let max_main = match max_main_val {
-                            Some(v) if v >= 0 => v as f32,
-                            _ => f32::MAX,
-                        };
+                        )
+                        .filter(|&v| v >= 0)
+                        .map(|v| v as f32);
 
+                        // §9.2: the hypothetical main size is the base size
+                        // CLAMPED by min/max. It is what the line-breaking loop
+                        // and the free-space sum consume — NOT what the item
+                        // finally gets, which is the target.
+                        let hypothetical_main_size =
+                            clamp_to_min_max(flex_basis, min_main, max_main);
                         items.push(FlexItem {
                             child_index: fc.index,
                             layout_node: Some(ln),
-                            flex_basis,
+                            flex_base_size: flex_basis,
+                            hypothetical_main_size,
+                            // §9.7.3 starts the target at the BASE, not at the
+                            // hypothetical, and grow/shrink distribute from there.
+                            // The clamp that makes the target spec-legal is the
+                            // UNCONDITIONAL pass after the grow/shrink chain
+                            // below, not here — starting the target at the
+                            // already-clamped hypothetical would fix the
+                            // degenerate branches here instead, but that pass
+                            // would then be provably dead code, and it would
+                            // silently change what every growing item starts
+                            // from. Keeping the base here makes the pass the
+                            // load-bearing fix and leaves the grow/shrink
+                            // arithmetic identical to what it was.
+                            target_main_size: flex_basis,
                             flex_grow,
                             flex_shrink,
                             align_self: style_lookup_str(fc.style, "align-self")
@@ -4445,10 +4526,7 @@ pub fn compute_layout(node: &VNode, viewport_w: i32, viewport_h: i32) -> LayoutN
                         };
                         #[allow(clippy::needless_range_loop)]
                         for i in 0..items.len() {
-                            let item_size = items[i]
-                                .flex_basis
-                                .max(items[i].min_main_size)
-                                .min(items[i].max_main_size);
+                            let item_size = items[i].hypothetical_main_size;
                             let gap_to_add = if current_line.items.is_empty() {
                                 0.0
                             } else {
@@ -4495,15 +4573,14 @@ pub fn compute_layout(node: &VNode, viewport_w: i32, viewport_h: i32) -> LayoutN
                     // Two-pass flex layout: pass 1 distributes flex + justify + computes per-line cross sizes
                     let pre_lines_len = lines.len();
                     for line in &mut lines {
+                        // §9.7.1: the free space is computed from the sum of the
+                        // HYPOTHETICAL main sizes (base clamped by min/max), not
+                        // from the sum of the raw bases. A sum site, so it reads
+                        // the hypothetical rather than assigning one.
                         let total_basis: f32 = line
                             .items
                             .iter()
-                            .map(|&i| {
-                                items[i]
-                                    .flex_basis
-                                    .max(items[i].min_main_size)
-                                    .min(items[i].max_main_size)
-                            })
+                            .map(|&i| items[i].hypothetical_main_size)
                             .sum();
                         let total_gap = if line.items.len() > 1 {
                             (line.items.len() as i32 - 1) as f32
@@ -4523,32 +4600,75 @@ pub fn compute_layout(node: &VNode, viewport_w: i32, viewport_h: i32) -> LayoutN
                                 for &idx in &line.items {
                                     let grow_amount =
                                         (items[idx].flex_grow / total_grow) * free_space;
-                                    items[idx].flex_basis = (items[idx].flex_basis + grow_amount)
-                                        .max(items[idx].min_main_size)
-                                        .min(items[idx].max_main_size);
+                                    items[idx].target_main_size = clamp_to_min_max(
+                                        items[idx].target_main_size + grow_amount,
+                                        items[idx].min_main_size,
+                                        items[idx].max_main_size,
+                                    );
                                 }
                             }
                         } else if free_space < 0.0 {
+                            // §9.7.1: the shrink distribution is scaled by the
+                            // BASE size, not the hypothetical and not the
+                            // partially-updated target. Reading `flex_base_size`
+                            // here is what makes the loop order-independent —
+                            // reading a mutating field would make each item's
+                            // factor depend on which items were already shrunk.
                             let total_shrink: f32 = line
                                 .items
                                 .iter()
-                                .map(|&i| items[i].flex_shrink * items[i].flex_basis)
+                                .map(|&i| items[i].flex_shrink * items[i].flex_base_size)
                                 .sum();
                             if total_shrink > 0.0 {
                                 for &idx in &line.items {
                                     let shrink_factor = items[idx].flex_shrink
-                                        * items[idx].flex_basis
+                                        * items[idx].flex_base_size
                                         / total_shrink;
                                     let shrink_amount = shrink_factor * free_space.abs();
-                                    items[idx].flex_basis = (items[idx].flex_basis - shrink_amount)
-                                        .max(items[idx].min_main_size)
-                                        .min(items[idx].max_main_size);
+                                    items[idx].target_main_size = clamp_to_min_max(
+                                        items[idx].target_main_size - shrink_amount,
+                                        items[idx].min_main_size,
+                                        items[idx].max_main_size,
+                                    );
                                 }
                             }
                         }
-                        line.main_size =
-                            line.items.iter().map(|&i| items[i].flex_basis).sum::<f32>()
-                                + total_gap;
+                        // THE FIX. css-flexbox-1 §9.7.3 step 4 clamps the target
+                        // main size by min/max, and it does so for the resolved
+                        // value regardless of how resolution went. Both clamps
+                        // above sit INSIDE `if total_grow > 0.0` /
+                        // `if total_shrink > 0.0`, so three paths reached the
+                        // line sum below with nothing clamped at all:
+                        //
+                        //   1. `free_space < 0.0` and `total_shrink == 0.0` —
+                        //      every `flex-shrink: 0`, or every base is `0` so
+                        //      `flex_shrink * flex_base_size` sums to `0`;
+                        //   2. `free_space > 0.0` and `total_grow == 0.0`;
+                        //   3. `free_space == 0.0` exactly, so neither `> 0.0`
+                        //      nor `< 0.0` holds and the whole chain is skipped.
+                        //
+                        // Case 1 is the ordinary shape: `flex: 1 1 0` with a
+                        // `min-width` wider than the container. The base is 0,
+                        // `total_shrink` is `1 * 0 == 0`, and the unclamped base
+                        // is what reached `rect.w` — a `min-width` silently
+                        // dropped. Re-clamping inside either branch would be a
+                        // no-op (it already happens there); the pass has to be
+                        // unconditional and OUTSIDE the if/else chain, which is
+                        // why it is here. It is idempotent over the two branches
+                        // above, so it is not a second application of anything.
+                        for &idx in &line.items {
+                            items[idx].target_main_size = clamp_to_min_max(
+                                items[idx].target_main_size,
+                                items[idx].min_main_size,
+                                items[idx].max_main_size,
+                            );
+                        }
+                        line.main_size = line
+                            .items
+                            .iter()
+                            .map(|&i| items[i].target_main_size)
+                            .sum::<f32>()
+                            + total_gap;
                         if line.items.is_empty() {
                             line.main_positions = Vec::new();
                             line.cross_size = 0.0;
@@ -4601,8 +4721,10 @@ pub fn compute_layout(node: &VNode, viewport_w: i32, viewport_h: i32) -> LayoutN
                         for &item_idx in &line.items {
                             let pos = cursor;
                             mpos.push((item_idx, pos));
-                            cursor =
-                                pos + items[item_idx].flex_basis + gap_val as f32 + extra_for_gap;
+                            cursor = pos
+                                + items[item_idx].target_main_size
+                                + gap_val as f32
+                                + extra_for_gap;
                         }
                         line.main_positions = mpos;
                         // Compute line cross size
@@ -4751,16 +4873,17 @@ pub fn compute_layout(node: &VNode, viewport_w: i32, viewport_h: i32) -> LayoutN
                             if let Some(mut ln) = items[item_idx].layout_node.take() {
                                 let pre_x = ln.rect.x;
                                 let pre_y = ln.rect.y;
-                                // The resolved flex basis IS the item's used main size.
-                                // Gating this write on `grow > 0 || shrink > 0` meant
-                                // `flex: 0 0 20px` and `flex: none` — both grow 0,
-                                // shrink 0 — kept whatever `at()` measured instead,
-                                // which for a width-less block child is the full
-                                // available width. The basis was computed correctly
-                                // and then thrown away. Grow and shrink mutate
-                                // `flex_basis` in place in the pass above, so
-                                // writing it unconditionally is what lands those too.
-                                let fb = items[item_idx].flex_basis.round() as i32;
+                                // The resolved target main size IS the item's used
+                                // main size. Gating this write on
+                                // `grow > 0 || shrink > 0` meant `flex: 0 0 20px`
+                                // and `flex: none` — both grow 0, shrink 0 — kept
+                                // whatever `at()` measured instead, which for a
+                                // width-less block child is the full available
+                                // width. The basis was computed correctly and then
+                                // thrown away. Grow and shrink write
+                                // `target_main_size` in the pass above, so writing
+                                // it unconditionally is what lands those too.
+                                let fb = items[item_idx].target_main_size.round() as i32;
                                 if is_column {
                                     ln.rect.h = fb;
                                 } else {
