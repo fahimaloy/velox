@@ -3645,6 +3645,18 @@ pub fn compute_layout(node: &VNode, viewport_w: i32, viewport_h: i32) -> LayoutN
                         } else {
                             UNCONSTRAINED_CROSS_SIZE // indefinite: unconstrained, children use natural size
                         };
+                        // `at` takes (avail_w, avail_h) in the child's own axes, so
+                        // main and cross have to be routed by direction. A ROW
+                        // container's main axis is horizontal, so the MAIN size is
+                        // the width and the CROSS size is the height; a COLUMN
+                        // container is the other way round. Passing main and cross
+                        // straight through regardless of direction is what handed a
+                        // row item its container's cross (vertical) size as a width.
+                        let (child_avail_w, child_avail_h) = if is_column {
+                            (child_avail_cross, child_avail_main as f32)
+                        } else {
+                            (child_avail_main as f32, child_avail_cross)
+                        };
                         // Laid out at the origin: the position is assigned in the
                         // placement pass below, and the measure pass needs a definite
                         // offset base rather than a guess.
@@ -3652,8 +3664,8 @@ pub fn compute_layout(node: &VNode, viewport_w: i32, viewport_h: i32) -> LayoutN
                             fc.node,
                             0,
                             0,
-                            child_avail_cross as i32,
-                            child_avail_main as i32,
+                            child_avail_w as i32,
+                            child_avail_h as i32,
                             viewport_w,
                             viewport_h,
                             ContainingBlock {
@@ -3735,6 +3747,103 @@ pub fn compute_layout(node: &VNode, viewport_w: i32, viewport_h: i32) -> LayoutN
                             && flex_shrink == 1.0
                             && shorthand_basis.is_none(); // flex: auto case handled else
 
+                        // An auto-sized flex item's base size is its CONTENT
+                        // size (CSS Flexbox §9.2.3), not the width it happens to
+                        // fill. `at` lays a block out at whatever width it is
+                        // given and a block with no declared `width` FILLS it,
+                        // so the measurement above reported the line's main size
+                        // straight back. Every such item then claimed the whole
+                        // row, the line summed to more than it had, and shrink
+                        // took the space back out of the one item not allowed to
+                        // shrink -- which is why a `flex: 1` sibling collapsed to
+                        // zero while a plain sibling ate the row.
+                        //
+                        // This has to happen BEFORE the basis ladder, because the
+                        // ladder's content arms read `ln.rect` and would otherwise
+                        // read the fill.
+                        //
+                        // Re-measure at a probe wide enough that the content
+                        // cannot wrap and read the content width back off, the
+                        // same probe-then-clamp `lay_out_atomic` documents. The
+                        // probe is capped at `i32::MAX / 4` and the result is
+                        // clamped to the available main size, so this can neither
+                        // overflow nor exceed the line.
+                        let basis_is_content = shorthand_basis_px.is_none()
+                            && flex_basis_val.is_none()
+                            && explicit_main.is_none();
+                        let ln = if basis_is_content {
+                            let (pad_l, pad_r, pad_t, pad_b) = style_box_sides_full(
+                                fc.style,
+                                "padding",
+                                main_size as f32,
+                                my_font_size,
+                                root_font_size,
+                                vw_f,
+                                vh_f,
+                            );
+                            let (bor_l, bor_r, bor_t, bor_b) = style_border_widths(
+                                fc.style,
+                                main_size as f32,
+                                my_font_size,
+                                root_font_size,
+                                vw_f,
+                                vh_f,
+                            );
+                            let inset = if is_column {
+                                pad_t + pad_b + bor_t + bor_b
+                            } else {
+                                pad_l + pad_r + bor_l + bor_r
+                            };
+                            let keep_w = child_avail_w as i32;
+                            let keep_h = child_avail_h as i32;
+                            let probe = (main_size as i32)
+                                .saturating_mul(4)
+                                .max(4096)
+                                .saturating_add(inset)
+                                .min(i32::MAX / 4);
+                            let probe_layout = at(
+                                fc.node,
+                                0,
+                                0,
+                                if is_column { keep_w } else { probe },
+                                if is_column { probe } else { keep_h },
+                                viewport_w,
+                                viewport_h,
+                                ContainingBlock {
+                                    x: content_x,
+                                    y: content_y_start,
+                                    w: content_w,
+                                    h: content_h_available,
+                                },
+                                Some(fc.index),
+                                root_font_size,
+                                my_font_size,
+                            );
+                            let target = max_content_width(&probe_layout)
+                                .min(main_size as i32)
+                                .saturating_add(inset)
+                                .max(0);
+                            at(
+                                fc.node,
+                                0,
+                                0,
+                                if is_column { keep_w } else { target },
+                                if is_column { target } else { keep_h },
+                                viewport_w,
+                                viewport_h,
+                                ContainingBlock {
+                                    x: content_x,
+                                    y: content_y_start,
+                                    w: content_w,
+                                    h: content_h_available,
+                                },
+                                Some(fc.index),
+                                root_font_size,
+                                my_font_size,
+                            )
+                        } else {
+                            ln
+                        };
                         // Determine effective basis:
                         // - shorthand_basis_px if explicit
                         // - else flex_basis_val longhand
@@ -3776,7 +3885,25 @@ pub fn compute_layout(node: &VNode, viewport_w: i32, viewport_h: i32) -> LayoutN
                         }) {
                             // flex shorthand present without basis token => 0%
                             // unless it's `auto` / `none` / `initial` handled above
-                            if raw == "auto" || raw == "none" || raw == "initial" {
+                            //
+                            // The content keywords can also arrive as the THIRD
+                            // token (`flex: 0 0 auto`), so compare against the
+                            // last whitespace-separated token rather than the
+                            // whole declaration. `flex: 0 0 auto` and
+                            // `flex: 0 0 content` used to fall into the `else`
+                            // below and get a 0px base size.
+                            let basis_token =
+                                raw.split_whitespace().next_back().unwrap_or_default();
+                            if matches!(
+                                basis_token,
+                                "auto"
+                                    | "none"
+                                    | "initial"
+                                    | "content"
+                                    | "max-content"
+                                    | "min-content"
+                                    | "fit-content"
+                            ) {
                                 if is_column {
                                     ln.rect.h as f32
                                 } else {
@@ -4162,15 +4289,20 @@ pub fn compute_layout(node: &VNode, viewport_w: i32, viewport_h: i32) -> LayoutN
                             if let Some(mut ln) = items[item_idx].layout_node.take() {
                                 let pre_x = ln.rect.x;
                                 let pre_y = ln.rect.y;
-                                let has_flex = items[item_idx].flex_grow > 0.0
-                                    || items[item_idx].flex_shrink > 0.0;
-                                if has_flex {
-                                    let fb = items[item_idx].flex_basis.round() as i32;
-                                    if is_column {
-                                        ln.rect.h = fb;
-                                    } else {
-                                        ln.rect.w = fb;
-                                    }
+                                // The resolved flex basis IS the item's used main size.
+                                // Gating this write on `grow > 0 || shrink > 0` meant
+                                // `flex: 0 0 20px` and `flex: none` — both grow 0,
+                                // shrink 0 — kept whatever `at()` measured instead,
+                                // which for a width-less block child is the full
+                                // available width. The basis was computed correctly
+                                // and then thrown away. Grow and shrink mutate
+                                // `flex_basis` in place in the pass above, so
+                                // writing it unconditionally is what lands those too.
+                                let fb = items[item_idx].flex_basis.round() as i32;
+                                if is_column {
+                                    ln.rect.h = fb;
+                                } else {
+                                    ln.rect.w = fb;
                                 }
                                 // The item's width is final here — main size from the
                                 // flex algorithm, or cross size from stretch — and all

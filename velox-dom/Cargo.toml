@@ -8,4 +8,20 @@ authors = ["fahimaloy"]
 repository = "https://github.com/fahimaloy/velox"
 publish = false
 
+[features]
+# Headless pixel proofs for layout live in `tests/`. They need the renderer's
+# Skia backend, which is heavy, so they stay behind a feature and are opt-in:
+#   cargo test -p velox-dom --features skia-native
+# Everything else in `tests/` runs by default with no features.
+skia-native = ["velox-renderer/skia-native"]
+
 [dependencies]
+
+# Dev-only. `velox-renderer` depends on `velox-dom`, so this is a dev-dependency
+# cycle -- legal in Cargo, because dev-dependencies are only resolved for the
+# test/bench/example targets of this crate and never for a downstream build of
+# `velox-dom` itself. It exists so the pixel proofs in `tests/` can go through
+# the real cascade + `compute_layout` path (`render_vnode_to_rgba`).
+[dev-dependencies]
+velox-renderer = { path = "../velox-renderer" }
+velox-style = { path = "../velox-style" }
