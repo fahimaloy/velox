@@ -28,7 +28,7 @@
 //!   cargo test -p velox-renderer --features skia-native \
 //!     --test frame_cost_bench -- --ignored --nocapture
 //!
-//! Two caveats on reading the numbers:
+//! Three caveats on reading the numbers:
 //!   * Stylesheet selectors here are class-only. The compiled `.vx` output
 //!     scopes with `.foo[data-v-<hash>]`, which adds a second simple-selector
 //!     term per rule. Selector matching is O(rules) per node either way, so
@@ -36,6 +36,13 @@
 //!   * `render_vnode_to_rgba` builds a fresh raster surface per call, which the
 //!     real loop does not; it therefore OVERSTATES total frame cost relative to
 //!     the steady-state loop.
+//!   * Stronger still: `render_vnode_to_rgba` has ZERO `src/` callers. The live
+//!     loop never calls it, so the "full frame" and "fps ceiling" rows below
+//!     describe a headless test harness, not the product's frame rate. It also
+//!     allocates a 1.92 MB zeroed buffer at 800x600 and copies it back out via
+//!     `read_pixels` on every call. The `cascade` and `layout` rows call the
+//!     real functions directly and are unaffected; they are the only two rows
+//!     here that say anything about the live loop.
 
 #![cfg(all(feature = "skia-native", unix))]
 
