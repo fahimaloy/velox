@@ -441,6 +441,11 @@ mod tests {
     /// as a weak subscriber, so the next `set()` re-enqueues it. Pruning by
     /// "not queued" or "not in storage" would let it run again; only pruning
     /// by "no longer alive" is correct.
+    ///
+    /// One entry, so no prune ever fires here. That half of the predicate —
+    /// retaining the tombstones of effects that are still alive *across* a
+    /// prune — is guarded separately by
+    /// `a_prune_keeps_the_tombstone_of_a_stopped_but_live_effect`.
     #[test]
     fn a_stopped_effect_whose_handle_is_still_held_does_not_run_again() {
         let sig = Rc::new(Signal::new(0u32));
@@ -468,5 +473,80 @@ mod tests {
         );
 
         drop(handle);
+    }
+
+    /// A prune must keep the tombstone of a stopped effect that is still alive.
+    ///
+    /// This is the half of `mark_stopped`'s predicate that the other two tests
+    /// leave uncovered, and it is the subtle half. Both
+    /// `stopped_effects_store_stays_bounded` and
+    /// `a_stopped_effect_whose_handle_is_still_held_does_not_run_again` pass
+    /// against a predicate that discards *everything* on prune: the first never
+    /// reads a tombstone after a prune has fired, and the second only ever holds
+    /// a single entry, so `stopped.len() > STOPPED_EFFECTS_PRUNE_AT` is never
+    /// true and no prune happens at all. A `stopped.clear()` predicate would
+    /// therefore ship a scheduler that forgets stopped effects the moment the
+    /// store crosses the threshold.
+    ///
+    /// The shape here is the only one that can catch that: a stopped-but-alive
+    /// effect whose tombstone must still be *present and readable* after the
+    /// prune that ran. The sentinel is stopped first, so its tombstone is in
+    /// the map before any churn, and it is still alive — its `EffectHandle` is
+    /// held to the end of the test — so a correct predicate retains it.
+    #[test]
+    fn a_prune_keeps_the_tombstone_of_a_stopped_but_live_effect() {
+        // The sentinel: stopped, but alive, and still a weak subscriber of `sig`.
+        let sig = Rc::new(Signal::new(0u32));
+        let runs = Rc::new(Cell::new(0u32));
+
+        let s = sig.clone();
+        let r = runs.clone();
+        let sentinel = effect(move || {
+            s.get();
+            r.set(r.get() + 1);
+        });
+        assert_eq!(runs.get(), 1, "the effect runs once on registration");
+
+        // Record the sentinel while the store is still far below the threshold,
+        // so its tombstone is present before anything can prune.
+        sentinel.stop();
+
+        // Churn past the threshold. Each churned effect gets its own signal and
+        // its handle is dropped immediately, so every one of them dies before
+        // the next iteration and is a legitimate prune candidate. None of them
+        // can disturb the sentinel: they never touch `sig`.
+        for _ in 0..=STOPPED_EFFECTS_PRUNE_AT {
+            let churn_sig = Rc::new(Signal::new(0u32));
+            let c = churn_sig.clone();
+            let handle = effect(move || {
+                c.get();
+            });
+            drop(handle);
+        }
+
+        // A prune has therefore certainly fired: `STOPPED_EFFECTS_PRUNE_AT + 1`
+        // effects were stopped on top of the sentinel, so a store that only ever
+        // grew would hold more entries than the threshold allows.
+        let len = STOPPED_EFFECTS.with(|stopped| stopped.borrow().len());
+        assert!(
+            len <= STOPPED_EFFECTS_PRUNE_AT,
+            "expected a prune to have fired, but the store still holds {len} entries \
+             after {} stops (threshold {STOPPED_EFFECTS_PRUNE_AT})",
+            STOPPED_EFFECTS_PRUNE_AT + 2
+        );
+
+        // The sentinel is still alive and still subscribed, so this `set`
+        // re-enqueues it. The only thing that can stop it running is its
+        // tombstone, which is the entry the prune had to keep.
+        sig.set(1);
+        assert_eq!(
+            runs.get(),
+            1,
+            "the prune discarded the tombstone of a stopped effect that was still \
+             alive, so it ran again: {} runs",
+            runs.get()
+        );
+
+        drop(sentinel);
     }
 }
