@@ -1329,6 +1329,16 @@ impl<'a> PropsChannel<'a> {
             .and_then(|(_, fields)| fields.iter().find(|f| f.name == name))
     }
 
+    /// Every field `comp_name` declares, in declaration order, or an empty
+    /// slice when this component cannot see that child.
+    fn child_fields(&self, comp_name: &str) -> &'a [PropField] {
+        self.children
+            .iter()
+            .find(|(tag, _)| tag == comp_name)
+            .map(|(_, fields)| fields.as_slice())
+            .unwrap_or(&[])
+    }
+
     /// Does the child component tagged `comp_name` declare a `Props` struct at
     /// all?
     ///
@@ -2317,8 +2327,18 @@ fn component_props_arg(
 ) -> (bool, String) {
     match props.child_declares_props(comp_name) {
         // A child that declares no `Props` struct has no named fields to bind,
-        // so the only literal that names anything is one it does not have.
-        Some(false) => return (false, format!("{comp_name}::PropsArg {{}}")),
+        // so the only literal that names anything is one it does not have. What
+        // it DOES have is a `values` map (the struct `generate_props_arg` emits
+        // on that branch), and a struct literal is exhaustive: leaving `values`
+        // out is E0063. An empty map is the honest reading of "this parent
+        // binds nothing" and still leaves the child able to accept a binding —
+        // the field is the boundary, not an accident.
+        Some(false) => {
+            return (
+                false,
+                format!("{comp_name}::PropsArg {{ values: std::collections::HashMap::new() }}"),
+            );
+        }
         Some(true) => {}
         // A child this component cannot see has no declaration to check
         // against, so its attributes are passed as the name/value form every
@@ -2343,6 +2363,7 @@ fn component_props_arg(
         }
     }
     let mut fields: Vec<String> = Vec::new();
+    let mut bound: Vec<String> = Vec::new();
     for a in clean_attrs {
         if let AttrKind::Bind = a.kind {
             let expr = a.value.clone().unwrap_or_else(|| a.name.clone());
@@ -2356,11 +2377,23 @@ fn component_props_arg(
                 // compile — which is the honest outcome, not a missing prop.
                 None => value,
             };
+            bound.push(a.name.clone());
             fields.push(format!("{}: {}", a.name, value));
         }
     }
-    if fields.is_empty() {
-        return (false, format!("{comp_name}::PropsArg {{}}"));
+    // A field the child declares but the parent never bound is still a field
+    // that literal must name: a Rust struct literal is exhaustive, so omitting
+    // it is E0063 on the child. The parent's template simply did not say what
+    // this prop is, and `Default::default()` is the one value that says so
+    // without inventing one — a type with no `Default` names itself in the
+    // error, which beats a silent substitute that means something else.
+    //
+    // This is also why the empty case cannot be special-cased below: a child
+    // that requires props and receives none still has fields to be given.
+    for declared in props.child_fields(comp_name) {
+        if !bound.contains(&declared.name) {
+            fields.push(format!("{}: Default::default()", declared.name));
+        }
     }
     (
         true,
