@@ -651,6 +651,12 @@ const INHERITABLE: &[&str] = &[
     // inline-level box within its line box, and the line box belongs to the
     // parent block, so a value set on an ancestor is the one that applies.
     "vertical-align",
+    // `white-space` is an inherited property (CSS 2.1 §16.6): it describes how
+    // a box's inline content is wrapped, and a nested element's own content is
+    // wrapped by the same rules as the text that flows into it. Without this,
+    // a `white-space: pre` on an ancestor is dropped at the first element
+    // boundary between the ancestor and its nested text.
+    "white-space",
     "visibility",
     "cursor",
     "text-decoration",
