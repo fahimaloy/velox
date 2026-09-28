@@ -1,39 +1,98 @@
 // velox-core/src/signal.rs
 
 use std::cell::{Cell, RefCell};
-use std::collections::{HashSet, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::rc::{Rc, Weak};
+use std::sync::atomic::{AtomicU64, Ordering};
 
-/// Type alias for reactive effect closures.
-type Effect = Rc<RefCell<Box<dyn FnMut()>>>;
+/// An effect closure plus the identity the scheduler uses to track it.
+///
+/// The `id` used to be the effect's heap address (`Rc::as_ptr`), which was not
+/// an identity at all: once an effect was dropped its `Rc` allocation was free
+/// to be handed to the next effect, so a new effect could inherit a dead
+/// effect's id and be silently skipped by the scheduler forever. Ids are now
+/// handed out by `NEXT_EFFECT_ID` and are never reused.
+struct EffectInner {
+    id: u64,
+    body: RefCell<Box<dyn FnMut()>>,
+}
 
-type WeakEffect = Weak<RefCell<Box<dyn FnMut()>>>;
+type Effect = Rc<EffectInner>;
+
+type WeakEffect = Weak<EffectInner>;
+
+/// Source of the monotonic effect ids in `EffectInner::id`.
+///
+/// Global rather than thread-local so that two effects created on different
+/// threads can never be handed the same number, even though every map keyed by
+/// it is thread-local. That keeps a future `Send`-ification of `Signal` from
+/// inheriting an id-aliasing bug. `Relaxed` is the right ordering: this only has
+/// to be unique, and nothing publishes an id across a thread boundary.
+static NEXT_EFFECT_ID: AtomicU64 = AtomicU64::new(1);
+
+/// Hand out the id for a newly created effect.
+fn next_effect_id() -> u64 {
+    NEXT_EFFECT_ID.fetch_add(1, Ordering::Relaxed)
+}
 
 // Holds the currently running/collecting effect during dependency tracking.
 thread_local! {
-    static CURRENT_EFFECT: RefCell<Option<Effect>> = RefCell::new(None);
+    static CURRENT_EFFECT: RefCell<Option<Effect>> = const { RefCell::new(None) };
 
     // Simple microtask-style scheduler queue and guards.
-    #[allow(clippy::type_complexity)]
-    static EFFECT_QUEUE: RefCell<VecDeque<Effect>> = RefCell::new(VecDeque::new());
-    static QUEUED: RefCell<HashSet<usize>> = RefCell::new(HashSet::new());
+    static EFFECT_QUEUE: RefCell<VecDeque<Effect>> = const { RefCell::new(VecDeque::new()) };
+    static QUEUED: RefCell<HashSet<u64>> = RefCell::new(HashSet::new());
     static IS_FLUSHING: Cell<bool> = const { Cell::new(false) };
 
     // Keep effects alive - they clean themselves up when dropped
-    static EFFECT_STORAGE: RefCell<Vec<Effect>> = RefCell::new(Vec::new());
+    static EFFECT_STORAGE: RefCell<Vec<Effect>> = const { RefCell::new(Vec::new()) };
 
-    // Track stopped effect IDs so they can be skipped in flush_queue
-    static STOPPED_EFFECTS: RefCell<HashSet<usize>> = RefCell::new(HashSet::new());
+    // Track stopped effect IDs so they can be skipped in flush_queue.
+    //
+    // The `Weak` alongside each id is what makes pruning possible: it answers
+    // "does this effect still exist?" without keeping it alive itself. See
+    // `mark_stopped`.
+    static STOPPED_EFFECTS: RefCell<HashMap<u64, WeakEffect>> = RefCell::new(HashMap::new());
 }
 
-fn ptr_id(eff: &Effect) -> usize {
-    eff.as_ptr() as usize
+/// Stop tracking the effects that no longer exist, once the set has grown past
+/// this size.
+///
+/// Effects are stopped far more often than they are looked up, and every stop
+/// adds an entry that nothing ever removes, so an app that mounts and unmounts
+/// components repeatedly grew this set without bound. 1024 is several orders of
+/// magnitude more than a live effect count and a prune is a linear pass over a
+/// thousand `Weak`s, so paying for one occasionally is cheaper than the memory.
+const STOPPED_EFFECTS_PRUNE_AT: usize = 1024;
+
+/// Record that `eff` has been stopped, so `flush_queue` will skip it, and keep
+/// the set from growing without bound.
+///
+/// The `Weak` is only a liveness probe. An entry is dropped when the effect it
+/// names is gone, which is the one predicate that is always safe — and note
+/// *which* obvious predicates are not:
+/// - "is it still in `EFFECT_QUEUE`?" is too eager. A stopped effect whose
+///   `EffectHandle` the caller still holds stays registered as a `WeakEffect` in
+///   its signals' subscriber lists, so a later `Signal::set` re-enqueues it and
+///   it is only skipped because its id is still recorded here.
+/// - "is it still in `EFFECT_STORAGE`?" is worse than too eager, it is simply
+///   wrong: `stop` and `Drop` remove the effect from storage in the same breath
+///   that they record it here, so a stopped effect is by definition absent from
+///   `EFFECT_STORAGE` and every live entry would be pruned away.
+fn mark_stopped(eff: &Effect) {
+    STOPPED_EFFECTS.with(|stopped| {
+        let mut stopped = stopped.borrow_mut();
+        stopped.insert(eff.id, Rc::downgrade(eff));
+        if stopped.len() > STOPPED_EFFECTS_PRUNE_AT {
+            stopped.retain(|_, weak| weak.strong_count() > 0);
+        }
+    });
 }
 
 fn enqueue_effect(eff: Effect) {
     EFFECT_QUEUE.with(|q| {
         QUEUED.with(|set| {
-            let id = ptr_id(&eff);
+            let id = eff.id;
             let mut set_b = set.borrow_mut();
             if set_b.insert(id) {
                 q.borrow_mut().push_back(eff);
@@ -53,7 +112,7 @@ fn flush_queue() {
         let next = EFFECT_QUEUE.with(|q| q.borrow_mut().pop_front());
         let Some(eff) = next else { break };
 
-        let id = ptr_id(&eff);
+        let id = eff.id;
 
         // Mark as not queued before running, so re-enqueues are allowed.
         QUEUED.with(|set| {
@@ -61,14 +120,14 @@ fn flush_queue() {
         });
 
         // Skip if this effect has been stopped
-        let is_stopped = STOPPED_EFFECTS.with(|stopped| stopped.borrow().contains(&id));
+        let is_stopped = STOPPED_EFFECTS.with(|stopped| stopped.borrow().contains_key(&id));
         if is_stopped {
             continue;
         }
 
         // Run the effect directly without replacing it
         CURRENT_EFFECT.with(|cur| *cur.borrow_mut() = Some(eff.clone()));
-        eff.borrow_mut()();
+        eff.body.borrow_mut()();
         CURRENT_EFFECT.with(|cur| *cur.borrow_mut() = None);
     }
 
@@ -87,13 +146,11 @@ impl EffectHandle {
         if self.active.get() {
             self.active.set(false);
             // Mark the effect as stopped so it won't run in flush_queue
-            let id = ptr_id(&self.effect);
-            STOPPED_EFFECTS.with(|stopped| {
-                stopped.borrow_mut().insert(id);
-            });
+            let id = self.effect.id;
+            mark_stopped(&self.effect);
             // Clean up from storage to prevent memory leak
             EFFECT_STORAGE.with(|storage| {
-                storage.borrow_mut().retain(|e| ptr_id(e) != id);
+                storage.borrow_mut().retain(|e| e.id != id);
             });
         }
     }
@@ -107,12 +164,10 @@ impl EffectHandle {
 impl Drop for EffectHandle {
     fn drop(&mut self) {
         // When handle is dropped, mark as stopped and clean up resources
-        let id = ptr_id(&self.effect);
-        STOPPED_EFFECTS.with(|stopped| {
-            stopped.borrow_mut().insert(id);
-        });
+        let id = self.effect.id;
+        mark_stopped(&self.effect);
         EFFECT_STORAGE.with(|storage| {
-            storage.borrow_mut().retain(|e| ptr_id(e) != id);
+            storage.borrow_mut().retain(|e| e.id != id);
         });
     }
 }
@@ -157,8 +212,10 @@ where
         CURRENT_EFFECT.with(|current| {
             if let Some(effect_rc) = current.borrow().as_ref() {
                 let mut subs = self.subscribers.borrow_mut();
-                // Prune dead weak references first
-                subs.retain(|w| w.upgrade().is_some());
+                // Prune dead weak references first. `strong_count` asks the same
+                // question as `upgrade().is_some()` but without materialising a
+                // temporary `Rc` to answer it.
+                subs.retain(|w| w.strong_count() > 0);
                 // Check if already subscribed
                 let already_subscribed = subs
                     .iter()
@@ -232,7 +289,10 @@ pub fn effect<F>(f: F) -> EffectHandle
 where
     F: FnMut() + 'static,
 {
-    let eff = Rc::new(RefCell::new(Box::new(f) as Box<dyn FnMut()>));
+    let eff = Rc::new(EffectInner {
+        id: next_effect_id(),
+        body: RefCell::new(Box::new(f) as Box<dyn FnMut()>),
+    });
 
     let handle = EffectHandle {
         effect: eff.clone(),
@@ -248,7 +308,7 @@ where
     CURRENT_EFFECT.with(|current| *current.borrow_mut() = Some(eff.clone()));
 
     // Run the effect without replacing it (unlike flush_queue which needs swap pattern)
-    eff.borrow_mut()();
+    eff.body.borrow_mut()();
 
     CURRENT_EFFECT.with(|current| *current.borrow_mut() = None);
 
@@ -288,4 +348,125 @@ where
     *signal._effect_handle.borrow_mut() = Some(handle);
 
     signal
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::cell::Cell;
+    use std::rc::Rc;
+
+    /// The regression guard for unbounded growth in `STOPPED_EFFECTS`.
+    ///
+    /// Every stopped effect added an entry and nothing ever removed one, so
+    /// this store was a pure leak: a UI that mounts and unmounts components
+    /// added one entry per effect for the lifetime of the process. The number
+    /// of effects churned here is several times the prune threshold, so
+    /// without `mark_stopped`'s pruning the store would hold all of them; with
+    /// it, every effect here is dead by the time the loop ends, so the
+    /// store stays near-empty.
+    ///
+    /// This test is deliberately *not* in `velox-core/tests/`: the store is
+    /// private, and exposing it as `pub` (or adding a `pub fn` diagnostic
+    /// accessor) purely so a test could read it would widen the public API of
+    /// `velox-core` — a worse trade than an in-file test. `ergonomics.rs` sets
+    /// the precedent for a private-state test living next to the code.
+    #[test]
+    fn stopped_effects_store_stays_bounded() {
+        const CHURN: usize = STOPPED_EFFECTS_PRUNE_AT * 4;
+
+        // Every handle is held alive until the whole batch has been created, and
+        // this detail is load-bearing. Creating and dropping one effect per
+        // iteration lets the allocator hand back the *same* address every time,
+        // and a set keyed by those addresses then collapses to a single entry —
+        // so the pre-fix leak becomes invisible and the test passes against the
+        // broken code. Keeping the batch alive forces CHURN distinct identities,
+        // which is what makes this a real regression guard.
+        let mut handles = Vec::with_capacity(CHURN);
+        for _ in 0..CHURN {
+            let sig = Rc::new(Signal::new(0u32));
+            let s = sig.clone();
+            handles.push(effect(move || {
+                s.get();
+            }));
+        }
+
+        // Dropping the batch runs `Drop for EffectHandle` for each one, which is
+        // what records the id. By this point every earlier effect is dead, so
+        // `mark_stopped`'s prune can reclaim them.
+        drop(handles);
+
+        let len = STOPPED_EFFECTS.with(|stopped| stopped.borrow().len());
+        assert!(
+            len <= STOPPED_EFFECTS_PRUNE_AT,
+            "STOPPED_EFFECTS held {len} entries after stopping {CHURN} effects; \
+             the prune threshold is {STOPPED_EFFECTS_PRUNE_AT}"
+        );
+    }
+
+    /// Ids come from a monotonic counter, so a fresh effect can never inherit a
+    /// dead effect's identity. This is the property the whole fix exists to
+    /// establish, and it is deterministic — no allocator behaviour involved,
+    /// unlike a test that tries to provoke address reuse.
+    #[test]
+    fn effect_ids_are_unique_and_increasing() {
+        let sig = Rc::new(Signal::new(0u32));
+
+        let s1 = sig.clone();
+        let first = effect(move || {
+            s1.get();
+        });
+        let first_id = first.effect.id;
+
+        let s2 = sig.clone();
+        let second = effect(move || {
+            s2.get();
+        });
+        let second_id = second.effect.id;
+
+        assert_ne!(first_id, second_id, "two live effects must not share an id");
+        assert!(
+            second_id > first_id,
+            "ids should increase: got {first_id} then {second_id}"
+        );
+
+        drop((first, second));
+    }
+
+    /// A stopped effect whose `EffectHandle` is still held must stay stopped.
+    ///
+    /// This is the guard on `mark_stopped`'s pruning predicate. The effect is
+    /// no longer in `EFFECT_STORAGE` (that is what stopping does) and may not
+    /// be in `EFFECT_QUEUE` either, but it is still alive and still registered
+    /// as a weak subscriber, so the next `set()` re-enqueues it. Pruning by
+    /// "not queued" or "not in storage" would let it run again; only pruning
+    /// by "no longer alive" is correct.
+    #[test]
+    fn a_stopped_effect_whose_handle_is_still_held_does_not_run_again() {
+        let sig = Rc::new(Signal::new(0u32));
+        let runs = Rc::new(Cell::new(0u32));
+
+        let s = sig.clone();
+        let r = runs.clone();
+        let handle = effect(move || {
+            s.get();
+            r.set(r.get() + 1);
+        });
+        assert_eq!(runs.get(), 1, "the effect runs once on registration");
+
+        handle.stop();
+        assert!(!handle.is_active());
+
+        // The handle is still alive, so the effect still exists and is still
+        // subscribed to `sig`. Setting the signal must not revive it.
+        sig.set(1);
+        assert_eq!(
+            runs.get(),
+            1,
+            "a stopped effect ran again: {} runs",
+            runs.get()
+        );
+
+        drop(handle);
+    }
 }
