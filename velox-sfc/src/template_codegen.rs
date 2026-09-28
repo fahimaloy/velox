@@ -123,16 +123,15 @@ fn resolve_loop_item_expr(expr: &str, for_info: &VForInfo) -> Option<String> {
             idx = for_info.index_name
         ));
     }
-    if let Some(path) = expr.strip_prefix(&for_info.item_name) {
-        if let Some(path) = path.strip_prefix('.') {
-            if is_field_path(path) {
-                return Some(format!(
-                    r#"resolve(&format!("{}[{{}}].{path}", {idx}))"#,
-                    for_info.expr,
-                    idx = for_info.index_name
-                ));
-            }
-        }
+    if let Some(path) = expr.strip_prefix(&for_info.item_name)
+        && let Some(path) = path.strip_prefix('.')
+        && is_field_path(path)
+    {
+        return Some(format!(
+            r#"resolve(&format!("{}[{{}}].{path}", {idx}))"#,
+            for_info.expr,
+            idx = for_info.index_name
+        ));
     }
     None
 }
@@ -756,8 +755,6 @@ fn generate_make_on_event(
 
     let mut arms = String::new();
     let mut used: HashSet<String> = HashSet::new();
-    #[allow(unused_variables, unused_assignments)]
-    let mut _uses_payload = false;
 
     // Known event modifiers — reserved for future modifier codegen (currently inlined)
     let _modifier_handlers: HashMap<&str, &str> = [
@@ -777,7 +774,6 @@ fn generate_make_on_event(
                 "        \"{name}\" => {{ if let Some(p) = payload {{ state.{name}(p); }} }},\n",
                 name = h
             ));
-            _uses_payload = true;
         } else if let Some(eh) = extra_by_name.get(h.as_str())
             && let Some(owner) = eh.owner.as_deref()
         {
@@ -787,7 +783,6 @@ fn generate_make_on_event(
                     "        \"{name}\" => {{ if let Some(p) = payload {{ state.{owner}.{method}(p); }} }},\n",
                     name = h, owner = owner, method = eh.name
                 ));
-                _uses_payload = true;
             } else {
                 arms.push_str(&format!(
                     "        \"{name}\" => {{ state.{owner}.{method}(); }},\n",
@@ -819,7 +814,6 @@ fn generate_make_on_event(
                     method = method,
                     mod_code = mod_code
                 ));
-                _uses_payload = true;
             } else {
                 // Zero-arg handler with modifier
                 let mod_code = match modifier.as_deref() {
@@ -857,7 +851,6 @@ fn generate_make_on_event(
                 "        \"{name}\" => {{ if let Some(p) = payload {{ state.{owner}.{method}(p); }} }},\n",
                 name = eh.name, owner = owner, method = eh.name
             ));
-            _uses_payload = true;
         } else {
             arms.push_str(&format!(
                 "        \"{name}\" => {{ state.{owner}.{method}(); }},\n",
@@ -868,8 +861,19 @@ fn generate_make_on_event(
         }
     }
 
+    // The allow below is emitted onto the generated dispatch function itself, and
+    // deliberately not at module level: a component's hand-written `<script>`
+    // lands in the same generated module, so a module-level allow would also mask a
+    // genuine `single_match` in the user's own code. Scoping it to this one shim
+    // silences only the dispatch shape we generate. The lint fires because a
+    // component with exactly one handler produces a one-armed `match` whose
+    // wildcard arm does nothing. Rewriting that as an `if name == "..."` would
+    // silence it without an allow, but the shape of this dispatch is the contract
+    // the generated-code tests read back (see `vmodel_dispatch_arms` in
+    // velox-sfc/tests/vmodel_tests.rs), so changing it is a codegen decision and
+    // not a lint fix.
     format!(
-        r#"#[allow(clippy::arc_with_non_send_sync)]
+        r#"#[allow(clippy::arc_with_non_send_sync, clippy::single_match)]
 pub fn make_on_event(state: std::sync::Arc<script_rs::State>) -> impl FnMut(&str, Option<&str>) + 'static {{
     move |name: &str, payload: Option<&str>| {{
         match name {{
@@ -1065,7 +1069,7 @@ fn key_reason(key: &str, is_bare: bool, methods: &[StateMethod], fields: &[Strin
     // The exact declared name only, with no `get_`/`is_`/`has_` fallback: this
     // register names the method the author wrote, so naming a different one here
     // would be a second answer to the same question.
-    let named = methods.iter().find(|m| &m.name == key);
+    let named = methods.iter().find(|m| m.name == key);
     match named {
         Some(m) if m.takes_payload => {
             format!("`{key}` is a payload-taking State method, not a getter")
@@ -1095,7 +1099,7 @@ fn key_reason(key: &str, is_bare: bool, methods: &[StateMethod], fields: &[Strin
 /// `is_path` is the caller's knowledge of the key's shape, as in [`key_reason`].
 /// The arms are frozen wording, reproduced as R-1/R-1c/R-1d/R-3 left them.
 fn root_reason(root: &str, is_path: bool, methods: &[StateMethod], fields: &[String]) -> String {
-    let declared = methods.iter().find(|m| &m.name == root);
+    let declared = methods.iter().find(|m| m.name == root);
     match declared {
         Some(m) if m.takes_payload => {
             format!("`{root}` is a payload-taking State method, not an accessor")
@@ -1809,7 +1813,7 @@ pub(crate) fn rewrite_if_expr(expr: &str) -> String {
 ///
 /// The scope a `v-model` expression is resolved against: the two loop variables
 /// in scope when the element is inside a `v-for` body.
-fn v_for_scope<'a>(attrs: &'a [TemplateAttr]) -> Option<VForInfo> {
+fn v_for_scope(attrs: &[TemplateAttr]) -> Option<VForInfo> {
     attrs
         .iter()
         .find(|a| matches!(a.kind, AttrKind::Directive) && a.name == "for")
@@ -4338,7 +4342,7 @@ fn unrenderable_collection_error(collection: &str, props: &PropsChannel<'_>) -> 
             field.ty
         )
     } else {
-        match answerable(collection, &[], &props.state_fields) {
+        match answerable(collection, &[], props.state_fields) {
             // `answerable` has already named the mistake and the fix; the fix
             // sentence is lifted whole, so this reports the same defect the same
             // way every other gate does.
@@ -4414,14 +4418,26 @@ fn collect_resolver_keys(
     // collection has a resolver arm depends on every key collected in the tree.
     let mut resolve_loops: Vec<ResolveLoopFamily> = Vec::new();
 
+    // The `v-for` bindings in scope for a node: the two loop variables the
+    // emitted bindings read directly, and the parse they came from, which
+    // Resolve mode needs to route a loop-rooted bind through the indexed
+    // resolver. They are one value because they are always in scope together —
+    // a node either declares a `v-for` or inherits its parent's — so carrying
+    // them as three parallel `Option`s invited exactly the mixed-scope bugs the
+    // tuple form already made impossible.
+    #[derive(Clone, Copy)]
+    struct LoopScope<'a> {
+        item_name: Option<&'a str>,
+        idx_name: Option<&'a str>,
+        info: Option<&'a VForInfo>,
+    }
+
     fn walk(
         nodes: &[Node],
         methods: &[StateMethod],
         fields: &[String],
         mode: RenderMode,
-        item_name: Option<&str>,
-        idx_name: Option<&str>,
-        loop_info: Option<&VForInfo>,
+        scope: LoopScope<'_>,
         keys: &mut Vec<String>,
         warnings: &mut Vec<String>,
         resolve_loops: &mut Vec<ResolveLoopFamily>,
@@ -4440,14 +4456,19 @@ fn collect_resolver_keys(
                 .find(|a| matches!(a.kind, AttrKind::Directive) && a.name == "for")
                 .and_then(|a| a.value.as_deref())
                 .and_then(parse_v_for);
-            let (item_name, idx_name, loop_info) = match &loop_scope {
-                Some(info) => (
-                    Some(info.item_name.as_str()),
-                    Some(info.index_name.as_str()),
-                    Some(info),
-                ),
-                None => (item_name, idx_name, loop_info),
+            let scope = match &loop_scope {
+                Some(info) => LoopScope {
+                    item_name: Some(info.item_name.as_str()),
+                    idx_name: Some(info.index_name.as_str()),
+                    info: Some(info),
+                },
+                None => scope,
             };
+            let LoopScope {
+                item_name,
+                idx_name,
+                info: loop_info,
+            } = scope;
             // A `v-for` is one whole family: the collection it counts and every
             // value its body reads. It is reported once, below, from that
             // collection's getter alone — not from the collected key set, which
@@ -4612,9 +4633,11 @@ fn collect_resolver_keys(
                 methods,
                 fields,
                 mode,
-                item_name,
-                idx_name,
-                loop_info,
+                LoopScope {
+                    item_name,
+                    idx_name,
+                    info: loop_info,
+                },
                 keys,
                 warnings,
                 resolve_loops,
@@ -4627,9 +4650,11 @@ fn collect_resolver_keys(
         methods,
         fields,
         mode,
-        None,
-        None,
-        None,
+        LoopScope {
+            item_name: None,
+            idx_name: None,
+            info: None,
+        },
         &mut keys,
         &mut warnings,
         &mut resolve_loops,
@@ -4726,6 +4751,33 @@ fn push_unique(out: &mut Vec<String>, key: impl AsRef<str>) {
     if !out.iter().any(|k| k == key) {
         out.push(key.to_string());
     }
+}
+
+/// Generate setter methods on the State struct for v-model fields.
+/// For `v-model="counter"` with State containing `counter: Cell<i32>`,
+/// generates:
+/// ```ignore
+/// pub fn __vmodel_set_counter(&self, payload: &str) {
+///     velox_core::vmodel::VModel::vmodel_set(&self.counter, payload);
+/// }
+/// ```
+pub fn generate_vmodel_setters(vmodels: &[(String, String)]) -> String {
+    if vmodels.is_empty() {
+        return String::new();
+    }
+    let mut out = String::new();
+    for (expr, handler) in vmodels {
+        let field_path = format!("self.{}", expr);
+        out.push_str(&format!(
+            r#"
+    pub fn {handler}(&self, payload: &str) {{
+        velox_core::vmodel::VModel::vmodel_set(&{field_path}, payload);
+    }}"#,
+            handler = handler,
+            field_path = field_path,
+        ));
+    }
+    out
 }
 
 #[cfg(test)]
@@ -7745,31 +7797,4 @@ impl State {
             );
         }
     }
-}
-
-/// Generate setter methods on the State struct for v-model fields.
-/// For `v-model="counter"` with State containing `counter: Cell<i32>`,
-/// generates:
-/// ```ignore
-/// pub fn __vmodel_set_counter(&self, payload: &str) {
-///     velox_core::vmodel::VModel::vmodel_set(&self.counter, payload);
-/// }
-/// ```
-pub fn generate_vmodel_setters(vmodels: &[(String, String)]) -> String {
-    if vmodels.is_empty() {
-        return String::new();
-    }
-    let mut out = String::new();
-    for (expr, handler) in vmodels {
-        let field_path = format!("self.{}", expr);
-        out.push_str(&format!(
-            r#"
-    pub fn {handler}(&self, payload: &str) {{
-        velox_core::vmodel::VModel::vmodel_set(&{field_path}, payload);
-    }}"#,
-            handler = handler,
-            field_path = field_path,
-        ));
-    }
-    out
 }

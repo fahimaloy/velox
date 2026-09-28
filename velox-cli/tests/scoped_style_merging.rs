@@ -408,7 +408,9 @@ fn layer_a_child_rules_are_scoped_in_root_stylesheet() {
     // stops containing one, the coverage this block exists to add would be
     // silently gone, so assert the fixture still exercises it.
     assert!(
-        selectors.iter().any(|sel| compounds(sel).is_some_and(|c| c.len() > 1)),
+        selectors
+            .iter()
+            .any(|sel| compounds(sel).is_some_and(|c| c.len() > 1)),
         "no multi-compound selector in the merged sheet, so the combinator and \
          descendant-scoping checks below are vacuous — this template is expected \
          to contain at least one, e.g. `.todo-item.completed .todo-text`.\n\

@@ -1,9 +1,9 @@
 use velox_dom::{Props, h, layout::compute_layout, text};
 
-fn find_child<'a>(
-    layout: &'a velox_dom::layout::LayoutNode,
+fn find_child(
+    layout: &velox_dom::layout::LayoutNode,
     idx: usize,
-) -> &'a velox_dom::layout::LayoutNode {
+) -> &velox_dom::layout::LayoutNode {
     layout
         .children
         .iter()
@@ -124,7 +124,7 @@ fn repro_space_between_variable_sizes() {
         x0,
         x1
     );
-    assert!((x0 - 0).abs() <= 2, "x0 expected 0 got {}", x0);
+    assert!(x0.abs() <= 2, "x0 expected 0 got {}", x0);
 }
 
 #[test]

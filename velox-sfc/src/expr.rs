@@ -1064,7 +1064,7 @@ fn strip_comments_and_strings(src: &str) -> String {
             b'\'' => {
                 // Char literal ('x', '\n', '\u{1F600}', '"') vs lifetime ('a).
                 if let Some(len) = char_literal_len(&bytes[i..]) {
-                    out.extend(std::iter::repeat(b' ').take(len));
+                    out.extend(std::iter::repeat_n(b' ', len));
                     i += len;
                 } else {
                     out.push(b'\'');
@@ -1160,7 +1160,7 @@ fn char_literal_len(bytes: &[u8]) -> Option<usize> {
             2 + hex_digits(&escape[1..], 4)
         } else {
             // `\n`, `\\`, `\'`, …: backslash plus the escaped character.
-            escape.first().is_some().then_some(2)?
+            (!escape.is_empty()).then_some(2)?
         }
     } else {
         utf8_char_len(*rest.first()?)

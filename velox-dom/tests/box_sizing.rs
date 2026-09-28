@@ -38,7 +38,7 @@ fn border_box_avail_subtracts_correctly() {
         "border-box outer width must be 800, got {}",
         lo.rect.w
     );
-    assert_eq!(lo.children.is_empty(), true);
+    assert!(lo.children.is_empty());
 }
 
 #[test]

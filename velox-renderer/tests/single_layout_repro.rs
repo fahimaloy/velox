@@ -115,7 +115,7 @@ fn single_layout_per_redraw_shares_layout() {
     // collection and a simulated render with the same layout. It will fail if either
     // path recomputes with different rounding.
     use velox_dom::layout::compute_layout;
-    use velox_dom::{Props, VNode, h, text};
+    use velox_dom::{Props, h, text};
 
     let vnode = h(
         "div",

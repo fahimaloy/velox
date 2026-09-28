@@ -27,7 +27,7 @@ fn scoped_btn_data_v_matches() {
     let node2 = h("div", Props::new().set("class", "btn"), vec![]);
     let styled2 = apply_styles(&node2, &ss);
     if let VNode::Element { props, .. } = &styled2 {
-        let no_match = props.attrs.get("style").is_none()
+        let no_match = !props.attrs.contains_key("style")
             || !props.attrs.get("style").unwrap().contains("color: red");
         assert!(
             no_match,

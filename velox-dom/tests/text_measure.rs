@@ -48,7 +48,7 @@ fn snapped_size_uses_scale_round() {
     let lines = wrap_text_measured("a b c", 10.0, 15.0, "system-ui", 1.5);
     // At 15.33 snapped, char ~7.66, space ~? but heuristic per string length;
     // Just ensure it still wraps (multiple lines)
-    assert!(lines.len() >= 1);
+    assert!(!lines.is_empty());
 }
 
 #[test]

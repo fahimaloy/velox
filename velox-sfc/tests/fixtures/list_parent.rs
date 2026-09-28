@@ -188,7 +188,7 @@ pub fn make_resolve(state: std::sync::Arc<script_rs::State>) -> impl FnMut(&str)
     }
 }
 
-#[allow(clippy::arc_with_non_send_sync)]
+#[allow(clippy::arc_with_non_send_sync, clippy::single_match)]
 pub fn make_on_event(state: std::sync::Arc<script_rs::State>) -> impl FnMut(&str, Option<&str>) + 'static {
     move |name: &str, payload: Option<&str>| {
         match name {

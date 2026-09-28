@@ -124,7 +124,7 @@ fn repro_multi_line_cross_via_cross_offset() {
         x0
     );
     assert!(
-        x2 >= 0 && x2 < 50,
+        (0..50).contains(&x2),
         "second line X should be near 0, got {}",
         x2
     );

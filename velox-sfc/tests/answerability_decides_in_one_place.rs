@@ -58,10 +58,10 @@ fn enclosing_fn(lines: &[&str], target: usize) -> Option<String> {
     // predicate's own helpers are a second notion.
     for line in lines.iter().take(target + 1).rev() {
         let trimmed = line.trim_start();
-        if let Some(rest) = trimmed.strip_prefix("pub ") {
-            if rest.starts_with("fn ") {
-                return function_name(rest);
-            }
+        if let Some(rest) = trimmed.strip_prefix("pub ")
+            && rest.starts_with("fn ")
+        {
+            return function_name(rest);
         }
         if let Some(rest) = trimmed.strip_prefix("fn ") {
             return function_name(rest);

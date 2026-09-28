@@ -160,7 +160,7 @@ fn no_flex_item_leaks_the_unconstrained_size_sentinel() {
         let w = laid.children[0].rect.w;
         println!("{child_style:<22} -> width {w}");
         assert!(
-            w >= 0 && w < W,
+            (0..W).contains(&w),
             "`{child_style}` produced width {w}, which is not a real width"
         );
     }

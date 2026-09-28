@@ -60,11 +60,7 @@ fn styled_build(state: &Arc<app::script_rs::State>) -> velox_dom::VNode {
     apply_with_cascade(&build(state), &Stylesheet::parse(app::STYLE))
 }
 
-fn find_layout_rect<'a>(
-    layout: &'a LayoutNode,
-    vnode: &velox_dom::VNode,
-    tag: &str,
-) -> Option<Rect> {
+fn find_layout_rect(layout: &LayoutNode, vnode: &velox_dom::VNode, tag: &str) -> Option<Rect> {
     if let velox_dom::VNode::Element { tag: node_tag, .. } = vnode
         && node_tag == tag
     {
@@ -149,10 +145,7 @@ fn vnode_contains_text(node: &velox_dom::VNode, needle: &str) -> bool {
 /// silently comparing an empty string.
 fn todo_row_keys(node: &velox_dom::VNode, out: &mut Vec<String>) {
     if let velox_dom::VNode::Element {
-        tag,
-        props,
-        children,
-        ..
+        props, children, ..
     } = node
     {
         if props.attrs.get("class").map(String::as_str) == Some("todo-item") {

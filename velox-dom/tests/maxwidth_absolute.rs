@@ -210,7 +210,7 @@ fn a_percentage_relative_offset_moves_the_containing_block_it_establishes_by_the
     let pct = compute_layout(&tree("", "left: 10%; top: 10%;"), 400, 300);
 
     for (label, lt) in [("px", &control), ("%", &pct)] {
-        let rel = child_at(&lt, 0);
+        let rel = child_at(lt, 0);
         assert_eq!(
             rel.rect,
             Rect {
@@ -270,7 +270,7 @@ fn a_percentage_relative_offset_from_the_far_edge_uses_the_same_parent_base() {
     let control = compute_layout(&tree("right: 20px; bottom: 10px;"), 400, 300);
     let pct = compute_layout(&tree("right: 10%; bottom: 10%;"), 400, 300);
     for (label, lt) in [("px", &control), ("%", &pct)] {
-        let rel = child_at(&lt, 0);
+        let rel = child_at(lt, 0);
         assert_eq!(
             rel.rect.x, -20,
             "{label}: right: 10% displaces leftwards by 20 (10% of the 200px parent \

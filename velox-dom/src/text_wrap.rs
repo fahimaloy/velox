@@ -60,7 +60,14 @@ impl MeasuredText {
     }
 }
 
-static SKIA_MEASURER: RwLock<Option<fn(&str, f32, &str, f32) -> MeasuredText>> = RwLock::new(None);
+/// A measurer over one run: `(text, font_size_px, font_family, scale) -> metrics`.
+///
+/// Registered by the renderer against a real font backend through
+/// [`set_skia_measurer`]; `None` means no backend, and layout falls back to
+/// [`measure_heuristic`].
+pub type TextMeasurer = fn(&str, f32, &str, f32) -> MeasuredText;
+
+static SKIA_MEASURER: RwLock<Option<TextMeasurer>> = RwLock::new(None);
 static CURRENT_SCALE: RwLock<f32> = RwLock::new(1.0);
 
 /// Set the current viewport scale for layout text measure (single rounding point remains Viewport).
@@ -80,17 +87,17 @@ pub fn current_scale() -> f32 {
 /// Register a measurer backed by a real font backend (called by velox-renderer
 /// at init). It reports the run's advance width *and* its vertical extent, so
 /// layout can size a line box from the content instead of from a multiplier.
-pub fn set_skia_measurer(f: fn(&str, f32, &str, f32) -> MeasuredText) {
+pub fn set_skia_measurer(f: TextMeasurer) {
     if let Ok(mut g) = SKIA_MEASURER.write() {
         *g = Some(f);
     }
 }
 
 fn measure_text_internal(text: &str, font_size_px: f32, font_family: &str, scale: f32) -> f32 {
-    if let Ok(g) = SKIA_MEASURER.read() {
-        if let Some(f) = *g {
-            return f(text, font_size_px, font_family, scale).width;
-        }
+    if let Ok(g) = SKIA_MEASURER.read()
+        && let Some(f) = *g
+    {
+        return f(text, font_size_px, font_family, scale).width;
     }
     measure_heuristic(text, font_size_px, scale)
 }
@@ -112,18 +119,18 @@ pub fn measure_text_metrics(
     scale: f32,
 ) -> MeasuredText {
     let (ascent, descent) = FontMetrics::heuristic_vertical(snapped_size(font_size_px, scale));
-    if let Ok(g) = SKIA_MEASURER.read() {
-        if let Some(f) = *g {
-            let m = f(text, font_size_px, font_family, scale);
-            if m.ascent.is_finite() && m.descent.is_finite() && m.line_extent() > 0.0 {
-                return m;
-            }
-            return MeasuredText {
-                width: m.width,
-                ascent,
-                descent,
-            };
+    if let Ok(g) = SKIA_MEASURER.read()
+        && let Some(f) = *g
+    {
+        let m = f(text, font_size_px, font_family, scale);
+        if m.ascent.is_finite() && m.descent.is_finite() && m.line_extent() > 0.0 {
+            return m;
         }
+        return MeasuredText {
+            width: m.width,
+            ascent,
+            descent,
+        };
     }
     MeasuredText {
         width: measure_heuristic(text, font_size_px, scale),

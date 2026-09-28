@@ -6,7 +6,6 @@ use velox_style::Stylesheet;
 // Include the generated code from build.rs.
 include!(concat!(env!("OUT_DIR"), "/app.rs"));
 
-#[allow(clippy::arc_with_non_send_sync)]
 fn main() {
     let state = Arc::new(app::script_rs::State::new());
 
