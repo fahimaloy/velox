@@ -1,6 +1,10 @@
 <template>
   <div class="todos">
-    <TodoInput :value="new_todo" @input="on_input" />
+    <TodoInput
+      :value="new_todo"
+      :placeholder="placeholder"
+      @input="on_input"
+    />
     <button class="btn btn-add" @click="add_todo">Add</button>
     <div class="todo-list">
       <TodoItem
@@ -52,6 +56,13 @@ impl State {
 
     pub fn new_todo(&self) -> String {
         self.new_todo.get()
+    }
+
+    // TodoInput declares `placeholder` as a required prop, so this parent has
+    // to supply it. The placeholder text is the parent's to decide, so it
+    // travels into the child the same way `new_todo` does: bound, not assumed.
+    pub fn placeholder(&self) -> String {
+        String::from("What needs to be done?")
     }
 
     pub fn on_input(&self, payload: &str) {
