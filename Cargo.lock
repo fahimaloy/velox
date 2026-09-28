@@ -3020,7 +3020,6 @@ dependencies = [
  "velox-dom",
  "velox-sfc",
  "velox-style",
- "wgpu",
  "wgpu_glyph",
  "winit",
 ]

@@ -3,7 +3,7 @@ name = "velox-renderer"
 version = "0.1.0"
 edition = "2024"
 license = "MIT"
-description = "Rendering backends (Skia, WGPU) for the Velox UI framework"
+description = "Rendering backends (Skia) for the Velox UI framework"
 authors = ["fahimaloy"]
 repository = "https://github.com/fahimaloy/velox"
 publish = false
@@ -13,7 +13,6 @@ publish = false
 default = []
 
 # Optional backends
-wgpu = ["dep:winit", "dep:wgpu"]
 # `skia` enables the API surface; `skia-native` pulls the heavy dependency.
 skia = []
 # Enable platform crates when building the native Skia backend.
@@ -34,7 +33,6 @@ softbuffer = { version = "0.3", optional = true }
 velox-core = { path = "../velox-core" }
 # Optional backends (do NOT compile unless feature enabled)
 winit = { version = "0.28", optional = true }
-wgpu = { version = "0.16", optional = true }
 skia-safe = { version = "0.91.1", features = ["gl", "egl"], optional = true }
 # Note: raw-window-handle, egl, glow, softbuffer are in [target.'cfg(unix)'.dependencies] above
 velox-dom = { path = "../velox-dom" }
