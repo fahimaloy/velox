@@ -2381,18 +2381,27 @@ fn component_props_arg(
             fields.push(format!("{}: {}", a.name, value));
         }
     }
-    // A field the child declares but the parent never bound is still a field
-    // that literal must name: a Rust struct literal is exhaustive, so omitting
-    // it is E0063 on the child. The parent's template simply did not say what
-    // this prop is, and `Default::default()` is the one value that says so
-    // without inventing one — a type with no `Default` names itself in the
-    // error, which beats a silent substitute that means something else.
+    // A field the child declares but the parent never bound is a hole in a
+    // struct literal, and the generator cannot tell an intentional omission
+    // from a mistake: `PropField` is `{ name, ty }` with no `optional` and no
+    // `default` (`script_index::PropField`), and `generate_props_arg` has only
+    // the empty / non-empty branches, so there is no third state to read. A
+    // fill would have to guess, and a wrong guess is a prop that means
+    // something else at run time with nothing to say so — which is how this
+    // shipped once. So the literal refuses instead: `compile_error!` names the
+    // component and the prop, where the bare E0063 that omitting the field
+    // would leave behind points into `OUT_DIR/.../todos.rs` at code the author
+    // never wrote.
     //
-    // This is also why the empty case cannot be special-cased below: a child
-    // that requires props and receives none still has fields to be given.
+    // The `compile_error!` is the field's VALUE rather than a bare omission so
+    // the literal stays exhaustive: rustc then reports exactly these errors,
+    // one per prop, and no E0063 cascade on top.
     for declared in props.child_fields(comp_name) {
         if !bound.contains(&declared.name) {
-            fields.push(format!("{}: Default::default()", declared.name));
+            fields.push(format!(
+                "{}: compile_error!(\"velox: <{comp_name}> declares prop `{}` and this parent did not bind it; bind it on <{comp_name}> or drop the prop from its Props struct\")",
+                declared.name, declared.name
+            ));
         }
     }
     (
