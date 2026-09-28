@@ -1537,14 +1537,77 @@ fn used_max_width(
     .filter(|v| *v >= 0)
 }
 
+/// The used floor from `min-width`, resolved against the containing block's width
+/// so `min-width: 50%` tracks the parent, on the same basis `max-width` uses.
+///
+/// `None` means the property imposes no constraint: it is absent, `auto`, or
+/// negative. `auto` in particular must never be read as `0` — a clamp that did
+/// that would collapse every box relying on the default floor.
+fn used_min_width(
+    style: Option<&str>,
+    containing_w: f32,
+    parent_font_size: f32,
+    root_font_size: f32,
+    viewport_w: f32,
+    viewport_h: f32,
+) -> Option<i32> {
+    style_lookup_len_full(
+        style,
+        "min-width",
+        containing_w,
+        parent_font_size,
+        root_font_size,
+        viewport_w,
+        viewport_h,
+    )
+    // A negative `min-width` is an invalid declaration for the same reason a
+    // negative `max-width` is (CSS 2.1 §10.4), so it is dropped and constrains
+    // nothing. Unlike the cap, the valid value `0` IS meaningful here and is
+    // kept: it is an explicit opt-out, not an absent constraint.
+    .filter(|v| *v >= 0)
+}
+
+/// Clamp a computed border-box width up to an already-resolved `min-width`.
+///
+/// The mirror of [`cap_to_max_width`]: the floor is expressed in the same box
+/// the element's `width` is expressed in, so under `box-sizing: content-box` the
+/// padding and border sit outside it and the border box ends up
+/// `min-width + padding + border` wide.
+///
+/// This is applied *outside* the max-width cap by the caller, not inside it, and
+/// the ordering is the precedence: CSS 2.1 §10.4 resolves the used width by
+/// reapplying the rules with `width` set to `min-width`, and css-sizing-3 §3.1
+/// states that "the minimum size constraint is always the strongest constraint".
+/// Flooring last is what makes `min-width` win over `max-width`.
+fn floor_to_min_width(
+    rect_w: i32,
+    min_w: Option<i32>,
+    is_border_box: bool,
+    pl: i32,
+    pr: i32,
+    bl: i32,
+    br: i32,
+) -> i32 {
+    let Some(min_w) = min_w else {
+        return rect_w;
+    };
+    if is_border_box {
+        return rect_w.max(min_w);
+    }
+    let edges = pl + pr + bl + br;
+    // `min_w` is non-negative by the filter in `used_min_width`, so the content
+    // width cannot go negative here; no `.max(0)` guard is needed, unlike the cap.
+    (rect_w - edges).max(min_w) + edges
+}
+
 /// Clamp a computed border-box width to an already-resolved `max-width`.
 ///
 /// The cap is expressed in the same box the element's `width` is expressed in,
 /// so under `box-sizing: content-box` the padding and border sit *outside* it
 /// and the border box ends up `max-width + padding + border` wide — which is
-/// what a browser renders. `min-width` is not applied here: this engine has no
-/// `min-width` clamp outside the flex main axis, and adding one is a separate
-/// change from closing the `max-width` gap.
+/// what a browser renders. This is a cap only: the `min-width` floor is a
+/// separate, outer step ([`floor_to_min_width`]) so that precedence is decided
+/// by the call site's ordering rather than inside either helper.
 fn cap_to_max_width(
     rect_w: i32,
     max_w: Option<i32>,
@@ -3471,17 +3534,40 @@ pub fn compute_layout(node: &VNode, viewport_w: i32, viewport_h: i32) -> LayoutN
                     bottom: 0,
                     left: ml,
                 };
-                let rect_w = cap_to_max_width(
-                    content_size_for(
-                        declared_w,
-                        avail_w,
+                // The `min-width` floor is applied *outside* the cap, so the
+                // ordering of these two calls IS the precedence rule: css-sizing-3
+                // §3.1 makes the minimum size constraint the strongest one, and
+                // CSS 2.1 §10.4's algorithm re-runs the width rules with `width`
+                // set to `min-width` precisely so a too-small cap loses.
+                // Flooring first and capping second would leave `max-width`
+                // winning, which is the divergence the tripwire in
+                // `tests/maxwidth_absolute.rs` is named for.
+                let rect_w = floor_to_min_width(
+                    cap_to_max_width(
+                        content_size_for(
+                            declared_w,
+                            avail_w,
+                            is_border_box,
+                            &padding,
+                            &margin,
+                            is_viewport_filling,
+                            legacy_pair,
+                        ),
+                        used_max_width(
+                            style,
+                            containing.w as f32,
+                            my_font_size,
+                            root_font_size,
+                            vw_f,
+                            vh_f,
+                        ),
                         is_border_box,
-                        &padding,
-                        &margin,
-                        is_viewport_filling,
-                        legacy_pair,
+                        pl,
+                        pr,
+                        bl,
+                        br,
                     ),
-                    used_max_width(
+                    used_min_width(
                         style,
                         containing.w as f32,
                         my_font_size,

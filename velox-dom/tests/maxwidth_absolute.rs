@@ -1067,27 +1067,31 @@ fn negative_max_width_is_dropped_as_an_invalid_declaration() {
     }
 }
 
-/// KNOWN DIVERGENCE, not a rule, and the OPPOSITE case to
-/// `negative_max_width_is_dropped_as_an_invalid_declaration`: that one asserts
-/// spec-conforming behaviour that no engine has been checked against, while this
-/// one asserts behaviour the specs REQUIRE — CSS 2.1 §10.4's three-step algorithm,
-/// and css-sizing-3 §3.1's "the minimum size constraint is always the strongest
-/// constraint", both give 200px here — which this engine does not produce. Neither
-/// case is a browser measurement, and neither is claimed to be one. They share a
-/// labelling requirement, so this stays explicit about which is which.
+/// A `min-width` floor is applied on the block flow, and it WINS over
+/// `max-width` when the two conflict.
 ///
-/// `min-width` is honoured on the flex main axis only. There is no block-flow
-/// `min-width` clamp anywhere in the engine, so `min-width: 200px; max-width: 100px`
-/// on a block box yields 100 where the two specs cited above require 200 — the
-/// `max-width` cap is applied and then nothing raises it back.
+/// This is a precedence test, not a "a clamp exists" test. It is checking that
+/// `width: 500px; min-width: 200px; max-width: 100px` resolves to 200, which is
+/// only true if the floor is applied AFTER the cap. Splitting this into a
+/// separate min-case and a separate max-case would throw away the only thing it
+/// uniquely checks — that the two constraints are ordered — so it stays as one
+/// assertion on one box. The negative direction (a max alone still capping, and
+/// a min alone still flooring) is covered by the neighbouring max-width tests and
+/// by `block_min_width_*` in this file.
 ///
-/// A correct block-flow `min-width` has to answer the same percentage-basis
-/// question the out-of-flow rule answers, and that basis is now decided once, for
-/// both properties, in `ContainingBlock`. The follow-up is blocked on that, not on
-/// size. The brief for this task forbade adding `min-width` support, so this test
-/// records the current number instead of changing it.
+/// The specs: CSS 2.1 §10.4 resolves the used width with a three-step algorithm
+/// whose final step re-runs the width rules with `width` set to `min-width`, and
+/// css-sizing-3 §3.1 states flatly that "the minimum size constraint is always
+/// the strongest constraint". Both give 200px here.
+///
+/// This is not a browser measurement and is not claimed to be one; it is what the
+/// cited specifications require, which is the same standard
+/// `negative_max_width_is_dropped_as_an_invalid_declaration` is held to. That
+/// test was previously named `min_width_is_a_known_divergence_on_a_block_box` and
+/// asserted 100 — a test named for a divergence that no longer exists is a trap
+/// for the next reader, so it was renamed to say what it now proves.
 #[test]
-fn min_width_is_a_known_divergence_on_a_block_box() {
+fn block_min_width_overrides_max_width() {
     let root = h(
         "div",
         Props::new().set("style", "width: 500px; min-width: 200px; max-width: 100px;"),
@@ -1095,12 +1099,94 @@ fn min_width_is_a_known_divergence_on_a_block_box() {
     );
     assert_eq!(
         compute_layout(&root, 400, 300).rect.w,
-        100,
-        "KNOWN DIVERGENCE: a block box has no min-width clamp, so the 100px \
-         max-width stands where CSS 2.1 s10.4 and css-sizing-3 s3.1 require the \
-         200px min-width. If this \
-         assertion is failing, block-flow min-width was implemented — update this \
-         label and the deviation list in the same change."
+        200,
+        "block-flow min-width must be applied AFTER max-width, so the 200px \
+         min-width overrides the 100px max-width (CSS 2.1 s10.4 and \
+         css-sizing-3 s3.1, 'the minimum size constraint is always the strongest \
+         constraint'). A value of 100 here means the clamp order was inverted: \
+         the cap is being applied last and winning."
+    );
+}
+
+/// An absent or `auto` `min-width` imposes NO constraint. Both of these must
+/// leave the box at its uncapped width.
+///
+/// `auto` parses to `None` in the length table, and `None` means "unconstrained",
+/// never `0`.
+///
+/// HONEST SCOPE — this test does NOT catch a `None`→`0` clamp, and it is not
+/// written as if it did. Falsified: adding `.or(Some(0))` to `used_min_width`'s
+/// filter leaves all 26 tests in this file green, because `floor(300, 0) == 300`
+/// — a floor of 0 cannot raise a non-negative width, so no ordinary box
+/// distinguishes "unconstrained" from "floored at 0". The two are distinguishable
+/// in exactly one narrow window, where the used width is smaller than the box's
+/// own padding+border (probe: `padding: 20px` in a 30px viewport, `rect.w` 30
+/// correct vs 40 under the falsification). No test here pins that, because the
+/// value velox returns there is itself wrong — a browser floors the content width
+/// at 0 and yields a 40px border box — so asserting 30 would enshrine a
+/// `content_size_for` bug as expected behaviour. That is a separate defect,
+/// recorded as DEFERRED in the 4.8a report, not this task's to fix.
+/// The invariant is carried by the types instead: `used_min_width` returns
+/// `Option<i32>` and `floor_to_min_width` returns early on `None`, so there is no
+/// number for `0` to be confused with.
+#[test]
+fn block_min_width_auto_and_absent_leave_the_box_unclamped() {
+    let absent = h("div", Props::new().set("style", "width: 300px;"), vec![]);
+    assert_eq!(
+        compute_layout(&absent, 400, 300).rect.w,
+        300,
+        "an absent min-width must impose no constraint, so the declared 300px \
+         width stands"
+    );
+
+    let auto = h(
+        "div",
+        Props::new().set("style", "width: 300px; min-width: auto;"),
+        vec![],
+    );
+    assert_eq!(
+        compute_layout(&auto, 400, 300).rect.w,
+        300,
+        "`min-width: auto` must impose no constraint, so the declared 300px \
+         width stands. If this is 0, the clamp is reading a `None` from the \
+         length table as zero — `auto` parses to None, and None means \
+         'unconstrained', not '0'."
+    );
+}
+
+/// A plain `min-width` floor with no conflicting `max-width` raises the used
+/// width. Together with the `auto` case above this brackets the clamp: it fires
+/// on a real length, and it stays out of the way otherwise.
+#[test]
+fn block_min_width_raises_the_used_width() {
+    let root = h(
+        "div",
+        Props::new().set("style", "width: 50px; min-width: 200px;"),
+        vec![],
+    );
+    assert_eq!(
+        compute_layout(&root, 400, 300).rect.w,
+        200,
+        "a block box narrower than its min-width is floored up to the 200px \
+         min-width"
+    );
+}
+
+/// A `min-width` below the used width changes nothing — the floor is a floor,
+/// not a preferred size. This is the case a clamp written with the wrong
+/// comparison (or one that always assigned rather than took a max) would break.
+#[test]
+fn block_min_width_below_the_used_width_is_inert() {
+    let root = h(
+        "div",
+        Props::new().set("style", "width: 300px; min-width: 50px;"),
+        vec![],
+    );
+    assert_eq!(
+        compute_layout(&root, 400, 300).rect.w,
+        300,
+        "a min-width below the used width must not shrink the box; the declared \
+         300px width stands"
     );
 }
 
