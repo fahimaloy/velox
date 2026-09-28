@@ -1,5 +1,19 @@
 use crate::template_ast::{AttrKind, Node, TemplateAttr};
 
+/// Hard ceiling on element nesting depth, in unclosed elements.
+///
+/// The parse loop below is iterative and keeps its open elements on a heap
+/// `Vec`, so it cannot blow the native stack the way a recursive-descent parser
+/// would. It still needs a bound for a different reason: without one, a
+/// hostile or hand-mangled `.vx` file — tens of thousands of `<div>` openers —
+/// drives unbounded work (one `Vec` entry, one `open_info` entry, and one
+/// `String` allocation per level) and ends in memory exhaustion or an
+/// arbitrarily long parse, with no error a user could act on. 256 levels is
+/// several times deeper than any hand-written template needs, so hitting this
+/// means the input is machine-generated or malformed rather than merely
+/// elaborate.
+pub const MAX_TEMPLATE_DEPTH: usize = 256;
+
 /// Minimal hand-rolled HTML-ish parser with support for:
 /// - nested elements and self-closing tags (`<input/>`)
 /// - attributes: static (`class="x"`), bind (`:value="expr"`), event (`@click="foo"`)
@@ -223,6 +237,27 @@ fn parse_template_inner(input: &str, warnings: &mut Vec<String>) -> Result<Vec<N
                     },
                 );
             } else {
+                // `stack` holds exactly the elements still awaiting a closing tag,
+                // so its length is the current nesting depth. Bounding it here —
+                // before the push, and only for the branch that grows the stack —
+                // turns a hostile nesting bomb into an actionable error. See
+                // `MAX_TEMPLATE_DEPTH` for why an iterative parser still needs this.
+                if stack.len() >= MAX_TEMPLATE_DEPTH {
+                    let (line, col) = crate::diagnostic::line_col_at(input, open_pos);
+                    let message =
+                        format!("template nesting depth {MAX_TEMPLATE_DEPTH} exceeded at <{tag}>");
+                    let suggestion = format!(
+                        "split the markup into smaller components, or reduce nesting below {MAX_TEMPLATE_DEPTH} levels"
+                    );
+                    return Err(crate::diagnostic::render_parse_error(
+                        input,
+                        line,
+                        col,
+                        tag.len() + 1,
+                        &message,
+                        Some(&suggestion),
+                    ));
+                }
                 open_info.push((tag.clone(), open_pos));
                 stack.push(Node::Element {
                     tag,
