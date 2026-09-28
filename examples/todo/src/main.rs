@@ -6,6 +6,14 @@ use velox_style::Stylesheet;
 // Include the generated code from build.rs.
 include!(concat!(env!("OUT_DIR"), "/app.rs"));
 
+// The generated `script_rs::State` holds `Rc<Signal<T>>` (`velox_core::Ref<T>`),
+// so it is `!Send`/`!Sync` by construction — velox is one thread per window, by
+// design. The `Arc` is not a cross-thread choice: it is the parameter type
+// velox-sfc codegen emits for `render_with_state`/`make_resolve`/`make_on_event`,
+// and `Arc::clone` only hands the same state to several of those calls. Making
+// `State` `Send + Sync` or switching codegen to `Rc<State>` is a codegen-wide API
+// change, not a local fix. Remove this allow if that change is made, or if velox
+// ever drives one window's state from more than one thread.
 #[allow(clippy::arc_with_non_send_sync)]
 fn main() {
     let state = Arc::new(app::script_rs::State::new());

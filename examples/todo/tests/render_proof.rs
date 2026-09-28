@@ -2,6 +2,20 @@
 //!
 //! Rasterizes the compiled `App.vx` tree on the CPU (no window, no compositor)
 //! and writes proof PNGs to `target/velox-render-proof/todo-<W>x<H>.png`.
+
+// `app::script_rs::State` holds `velox_core::Ref<T>` — an `Rc<Signal<T>>` — so it
+// is `!Send` and `!Sync` by construction, matching velox's one-thread-per-window
+// winit model. The `Arc` below is therefore not a cross-thread choice: it is the
+// parameter type velox-sfc codegen emits for `render_with_state` / `make_resolve`
+// / `make_on_event` (velox-sfc/src/template_codegen.rs), and `Arc::clone` is used
+// only to hand the same state to several of those functions. The lint's own
+// remedies — make `State` `Send + Sync`, or emit `Rc<State>` — are a codegen-wide
+// API change rather than a local fix, so the lint is allowed at file level here
+// instead of silenced call-by-call. Drop this allow if velox ever drives one
+// window's state from more than one thread, or if codegen is changed to emit
+// `Rc<State>`; in that case the fix is to change the code, not to keep the allow.
+#![allow(clippy::arc_with_non_send_sync)]
+
 use std::sync::Arc;
 
 use velox_dom::layout::{LayoutNode, Rect, compute_layout};
