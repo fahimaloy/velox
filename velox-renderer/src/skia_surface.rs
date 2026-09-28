@@ -27,6 +27,31 @@ mod native {
 
     impl SkiaSurface {
         /// Create a CPU raster SkiaSurface.
+        ///
+        /// **This is deliberate — do not "optimize" it into a GPU context.**
+        ///
+        /// This is the CPU raster path (`raster_n32_premul`, below), and it is the
+        /// *deterministic reference* the pixel proofs depend on. `velox-dom/tests/
+        /// todo_item_pixels.rs` and `velox-renderer/tests/caret_pixels.rs` assert
+        /// EXACT BYTE equality on rendered pixels; a GPU path with different
+        /// antialiasing, subpixel positioning, or resource-cache-dependent output
+        /// would silently invalidate ~949 tests that currently pass. Determinism was
+        /// chosen over the paint speedup.
+        ///
+        /// There is a second, independent reason: the GPU path is not merely unused,
+        /// it is *unsafe to adopt as-is*. A `GrDirectContext`'s resource cache
+        /// defaults to **256 MB** and can occupy roughly twice that when full, and
+        /// this crate sets no limit (`grep 'resource_cache|set_resource_limit'` → no
+        /// hits). Any future GPU backend must set the limit explicitly and
+        /// implement device-lost handling before it is enabled.
+        ///
+        /// The paint cost that remains on this path is **bandwidth, not allocation**
+        /// — three full-surface touches per frame (`canvas.clear` in `skia_render.rs`,
+        /// `read_pixels` into the reused `rgba` in `presenter.rs`, then a 1.92 MB
+        /// `copy_from_slice` into winit's buffer). That is a damage-limited-repaint
+        /// problem, not a buffer-reuse problem, and buffer reuse is already done.
+        ///
+        /// See `docs/RENDERING.md` for the full decision record.
         pub fn new_raster(width: i32, height: i32) -> Result<Self, String> {
             let viewport = Viewport::from_i32(width, height, 1.0);
             let w = viewport.physical_width_i32();
