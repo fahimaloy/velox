@@ -599,6 +599,23 @@ pub mod skia_impl {
         width: i32,
         height: i32,
     ) -> Result<Vec<u8>, String> {
+        // DELIBERATELY NOT FUNNELLED THROUGH `prepare_frame` (R-8).
+        //
+        // This function builds a raw `raster_n32_premul` surface directly and
+        // never installs `set_current_scale`/`set_skia_measurer`, and it runs no
+        // `compute_layout` at all. `prepare_frame` requires a
+        // `crate::skia_surface::SkiaSurface` and derives the measurer and scale
+        // from that surface's scale factor, so using the funnel here would need
+        // this body rewritten onto a different surface type first. That is a
+        // behaviour change, not a mechanical refactor, so it is deliberately out
+        // of R-8's scope.
+        //
+        // Its own lack of `compute_layout` is the pre-existing invariant-4
+        // false-greener hazard: this path lays out nothing, so it can paint a
+        // tree whose layout was never computed. Migrating its callers to
+        // `render_vnode_to_rgba` / `render_vnode_to_raster_png_with_scale` and
+        // then deleting this is a separate decision and a separate commit.
+        //
         // Apply stylesheet declarations to inline style attrs before drawing,
         // so backgrounds/colors from the sheet are actually painted.
         let styled = apply_with_cascade(vnode, sheet);
@@ -829,6 +846,34 @@ pub mod skia_impl {
         Ok(data.as_bytes().to_vec())
     }
 
+    /// R-8's single render prologue. Every live path that cascades with
+    /// `apply_with_cascade`, installs the scale/measurer globals and lays out
+    /// funnels through here, so the ORDER of those three steps is stated once and
+    /// cannot drift between entry points again.
+    ///
+    /// `logical_w`/`logical_h` are LOGICAL. This function must never multiply them
+    /// by a scale factor: invariant 1 makes `viewport::physical_from_logical` the
+    /// single place a logical size becomes a physical one, and that happens
+    /// exactly once, when the caller constructs the surface it passes in. The
+    /// surface is read only for its scale, never resized here.
+    ///
+    /// The style cascade is applied FIRST because neither of the two steps after
+    /// it can change a style: installing a measurer is global-state assignment and
+    /// `compute_layout` consumes the already-styled tree.
+    pub(crate) fn prepare_frame(
+        vnode: &VNode,
+        sheet: &Stylesheet,
+        logical_w: i32,
+        logical_h: i32,
+        surface: &crate::skia_surface::SkiaSurface,
+    ) -> (VNode, velox_dom::layout::LayoutNode) {
+        let styled = apply_with_cascade(vnode, sheet);
+        velox_dom::text_wrap::set_current_scale(surface.scale_factor());
+        velox_dom::text_wrap::set_skia_measurer(measure_text);
+        let layout = velox_dom::layout::compute_layout(&styled, logical_w, logical_h);
+        (styled, layout)
+    }
+
     /// Render `vnode` into a raw RGBA8888 byte buffer (premultiplied, opaque
     /// alpha) of size `width * height * 4`. Useful for pixel-level assertions
     /// in tests without decoding a PNG.
@@ -838,13 +883,9 @@ pub mod skia_impl {
         width: i32,
         height: i32,
     ) -> Result<Vec<u8>, String> {
-        let styled = apply_with_cascade(vnode, sheet);
-        let vnode = &styled;
         let mut surface = crate::skia_surface::SkiaSurface::new_raster(width, height)?;
-        velox_dom::text_wrap::set_current_scale(surface.scale_factor());
-        velox_dom::text_wrap::set_skia_measurer(measure_text);
-        let layout = velox_dom::layout::compute_layout(vnode, width, height);
-        render_frame(&mut surface, vnode, &layout, sheet)?;
+        let (vnode, layout) = prepare_frame(vnode, sheet, width, height, &surface);
+        render_frame(&mut surface, &vnode, &layout, sheet)?;
 
         let info = sk::ImageInfo::new(
             (width, height),
@@ -890,14 +931,12 @@ pub mod skia_impl {
             i32::try_from(physical_h).unwrap_or(i32::MAX),
         )?;
         surface.set_scale_factor(scale_factor);
-        velox_dom::text_wrap::set_current_scale(scale_factor);
-        velox_dom::text_wrap::set_skia_measurer(measure_text);
-        // The scale helper owns the same one-pass cascade as the unscaled
-        // helpers. Layout and paint both consume this already-styled tree.
-        let styled = apply_with_cascade(vnode, sheet);
-        let vnode = &styled;
-        let layout = velox_dom::layout::compute_layout(vnode, width, height);
-        render_frame(&mut surface, vnode, &layout, sheet)?;
+        // R-8: the prologue is `prepare_frame`, shared with `render_vnode_to_rgba`.
+        // It cascades, installs the scale/measurer globals and lays out, in that
+        // one order, and takes LOGICAL `width`/`height` — the logical-to-physical
+        // conversion above is the only one, and the funnel does not repeat it.
+        let (vnode, layout) = prepare_frame(vnode, sheet, width, height, &surface);
+        render_frame(&mut surface, &vnode, &layout, sheet)?;
         surface.encode_png()
     }
 
