@@ -1,5 +1,9 @@
 use crate::style::{Sides, TextOverflow, VerticalAlign, WhiteSpace};
 use crate::{Length, VNode};
+use std::cell::RefCell;
+use std::collections::HashMap;
+use std::collections::hash_map::Entry;
+use std::rc::Rc;
 
 /// Default font size for root element (used for rem calculations)
 const DEFAULT_ROOT_FONT_SIZE: f32 = 16.0;
@@ -1790,44 +1794,467 @@ fn parse_px(s: &str) -> Option<i32> {
     }
 }
 
-#[allow(dead_code)]
-fn style_lookup(style: Option<&str>, key: &str) -> Option<i32> {
-    let s = style?;
-    for decl in s.split(';') {
-        let d = decl.trim();
-        if d.is_empty() {
-            continue;
+// ===== Style parse memo ===================================================
+//
+// Every `style_*` helper below used to re-split a style string on `;` to find
+// a single declaration. Instrumenting the family showed that split happening
+// 54.2 times per node descent (flat from 0 to 200 todos) and accounting for
+// 84.4-88.3% of `layout_us`.
+//
+// What is memoized here is the PARSE, not the layout. Two layers, with a
+// deliberately different key discipline each:
+//
+//  1. The declaration table, keyed on the style string's CONTENT. Splitting a
+//     style string reads the style string and nothing else -- no containing
+//     block, no font size, no viewport -- so content is a *complete* key by
+//     construction rather than by argument. `StyleTable::build` is the only
+//     place a style string is parsed, and its entire input is that string.
+//
+//  2. Resolved values for the four helpers whose resolution depends on layout
+//     context. Their keys are per-helper structs, each naming exactly the
+//     inputs that helper's resolution reads -- see the doc comment on each
+//     key type, which is the key-coverage argument made executable. Every `f32`
+//     is carried as `to_bits()`, so the key is bit-exact and two contexts that
+//     compare equal but differ in representation cannot alias.
+//
+// Nothing in either layer is derived from tree position, node identity, a
+// frame counter, or a style hash. A style string that changes is a different
+// key by construction, so it can never be served a stale entry.
+
+/// Distinct style strings held before the table cache starts dropping entries.
+const MAX_STYLE_TABLES: usize = 4096;
+
+/// Resolutions held per style table before that resolution memo is dropped.
+///
+/// Deliberately smaller than `MAX_STYLE_TABLES`: a memo's key carries the
+/// layout context as well, so it is bounded by the variety of contexts seen
+/// against one style string, not by the variety of style strings.
+const MAX_TABLE_MEMO: usize = 4096;
+
+/// FxHash: rustc's multiply-and-rotate hash.
+///
+/// Used instead of the default SipHash because every helper call hashes the
+/// style string, and SipHash's per-call setup dominates at this input size
+/// (style strings here are 23-109 bytes, median 72). Dependency-free so this
+/// module keeps its `std`-only build.
+#[derive(Default, Clone, Copy)]
+struct FxHasher {
+    hash: u64,
+}
+
+/// FxHash's multiplier (fractional bits of the golden ratio).
+const FX_SEED: u64 = 0x51_7c_c1_b7_27_22_0a_95;
+
+impl FxHasher {
+    #[inline]
+    fn add(&mut self, word: u64) {
+        self.hash = (self.hash.rotate_left(5) ^ word).wrapping_mul(FX_SEED);
+    }
+}
+
+impl std::hash::Hasher for FxHasher {
+    #[inline]
+    fn write(&mut self, bytes: &[u8]) {
+        let mut rest = bytes;
+        while let Some((chunk, tail)) = rest.split_first_chunk::<8>() {
+            self.add(u64::from_le_bytes(*chunk));
+            rest = tail;
         }
-        if let Some((k, v)) = d.split_once(':')
-            && k.trim() == key
-        {
-            return parse_px(v);
+        if let Some((chunk, tail)) = rest.split_first_chunk::<4>() {
+            self.add(u32::from_le_bytes(*chunk) as u64);
+            rest = tail;
+        }
+        for &b in rest {
+            self.add(b as u64);
         }
     }
-    None
+
+    #[inline]
+    fn finish(&self) -> u64 {
+        self.hash
+    }
+}
+
+/// `BuildHasher` for [`FxHasher`], so the maps below skip SipHash.
+#[derive(Default, Clone, Copy)]
+struct FxBuild;
+
+impl std::hash::BuildHasher for FxBuild {
+    type Hasher = FxHasher;
+    #[inline]
+    fn build_hasher(&self) -> FxHasher {
+        FxHasher::default()
+    }
+}
+
+/// The layout context that length resolution depends on, packed for the keys
+/// below. A plain carrier so each helper's key can be written once and cannot
+/// drift from the argument list it mirrors.
+#[derive(Clone, Copy)]
+struct LenCtx {
+    parent_size: f32,
+    parent_font_size: f32,
+    root_font_size: f32,
+    vw: f32,
+    vh: f32,
+}
+
+/// Key for [`style_lookup_len_full`]'s memo.
+///
+/// `style_lookup_len_full` reads exactly: the style string (carried by *which
+/// table you are in*, since a table is content-addressed and immutable), the
+/// property name (carried by `decl`, the index of that property's first
+/// declaration in the table, which identifies the pair uniquely), and the five
+/// context values its `parse_length_value` call is passed. All five are here.
+/// There is no sixth input.
+#[derive(PartialEq, Eq, Hash)]
+struct LenFullKey {
+    decl: u32,
+    parent_size: u32,
+    parent_font_size: u32,
+    root_font_size: u32,
+    vw: u32,
+    vh: u32,
+}
+
+impl LenFullKey {
+    #[inline]
+    fn new(decl: u32, ctx: &LenCtx) -> Self {
+        Self {
+            decl,
+            parent_size: ctx.parent_size.to_bits(),
+            parent_font_size: ctx.parent_font_size.to_bits(),
+            root_font_size: ctx.root_font_size.to_bits(),
+            vw: ctx.vw.to_bits(),
+            vh: ctx.vh.to_bits(),
+        }
+    }
+}
+
+/// Key for [`style_lookup_font_size`]'s memo.
+///
+/// That helper reads exactly: the style string (carried by the table), the
+/// `font-size` declaration (carried by `decl`), `parent_font_size`,
+/// `root_font_size`, and the viewport. Note what is absent: it has no
+/// `parent_size` parameter, and it passes `parent_font_size` as *both* the
+/// percentage basis and the `em` basis, so four context values is the complete
+/// set, not five.
+#[derive(PartialEq, Eq, Hash)]
+struct FontSizeKey {
+    decl: u32,
+    parent_font_size: u32,
+    root_font_size: u32,
+    vw: u32,
+    vh: u32,
+}
+
+/// Key for [`style_box_sides_full`]'s memo.
+///
+/// That helper reads exactly: the style string (carried by the table), `base`
+/// (carried as content -- it selects which property family is being expanded,
+/// and it differs between a `margin` call and a `padding` call), and the five
+/// context values it forwards to `parse_length_value`. All six are here.
+#[derive(PartialEq, Eq, Hash)]
+struct BoxSidesKey {
+    base: Rc<str>,
+    parent_size: u32,
+    parent_font_size: u32,
+    root_font_size: u32,
+    vw: u32,
+    vh: u32,
+}
+
+impl BoxSidesKey {
+    #[inline]
+    fn new(base: &str, ctx: &LenCtx) -> Self {
+        Self {
+            base: Rc::from(base),
+            parent_size: ctx.parent_size.to_bits(),
+            parent_font_size: ctx.parent_font_size.to_bits(),
+            root_font_size: ctx.root_font_size.to_bits(),
+            vw: ctx.vw.to_bits(),
+            vh: ctx.vh.to_bits(),
+        }
+    }
+}
+
+/// Key for [`style_border_widths`]'s memo.
+///
+/// That helper reads exactly: the style string (carried by the table) and the
+/// five context values it forwards. It takes no `base`: its property names
+/// (`border`, `border-width`, `border-*-width`, `border-left`, ...) are
+/// literals inside the function, so there is no caller-supplied selector to key
+/// on. The cache is per-table precisely so that "no `base`" is a fact about
+/// the function rather than an omission from the key.
+#[derive(PartialEq, Eq, Hash)]
+struct BorderKey {
+    parent_size: u32,
+    parent_font_size: u32,
+    root_font_size: u32,
+    vw: u32,
+    vh: u32,
+}
+
+impl BorderKey {
+    #[inline]
+    fn new(ctx: &LenCtx) -> Self {
+        Self {
+            parent_size: ctx.parent_size.to_bits(),
+            parent_font_size: ctx.parent_font_size.to_bits(),
+            root_font_size: ctx.root_font_size.to_bits(),
+            vw: ctx.vw.to_bits(),
+            vh: ctx.vh.to_bits(),
+        }
+    }
+}
+
+/// One style string, split into declarations exactly once.
+///
+/// Immutable apart from the four resolution memos, which are pure-function
+/// caches over a fixed table: an entry can only ever be re-derived to the same
+/// value, so a stale entry is not representable.
+struct StyleTable {
+    /// The style string, owned so the value ranges below can point into it.
+    src: String,
+    /// Byte range of each declaration's trimmed value, in document order.
+    /// Declaration `i`'s value is `src[values[i].0 .. values[i].1]`. Ranges
+    /// exist because the original code returned a `&str` into a `String`
+    /// the caller's `&str` pointed at; owning `src` keeps those borrows valid
+    /// without copying each value.
+    values: Vec<(u32, u32)>,
+    /// Property name -> index of its FIRST declaration. Every helper except
+    /// `style_margin_auto_sides` returns on the first match, so it reads this.
+    first: HashMap<Rc<str>, u32, FxBuild>,
+    /// Property name -> index of its LAST declaration.
+    /// `style_margin_auto_sides` assigns in its loop instead of returning, so
+    /// a later declaration overwrites an earlier one and it must read this.
+    /// The first/last split is the reason the table keeps both maps rather
+    /// than collapsing them: the two access patterns disagree, and picking one
+    /// for both would silently change the other's result.
+    last: HashMap<Rc<str>, u32, FxBuild>,
+    /// Monotonic insertion counter, used only to order entries for eviction.
+    /// Never a cache key.
+    inserted: u64,
+    font_size: RefCell<HashMap<FontSizeKey, Option<f32>, FxBuild>>,
+    len_full: RefCell<HashMap<LenFullKey, Option<i32>, FxBuild>>,
+    box_sides: RefCell<HashMap<BoxSidesKey, (i32, i32, i32, i32), FxBuild>>,
+    border: RefCell<HashMap<BorderKey, (i32, i32, i32, i32), FxBuild>>,
+}
+
+impl StyleTable {
+    /// Split a style string into its declaration table.
+    ///
+    /// Reproduces the tokenization every helper performed inline, including its
+    /// quirks, because the quirks are observable:
+    ///   - `split(';')` then `trim()`, so leading/trailing `;` and whitespace
+    ///     are inert, and an empty declaration is skipped;
+    ///   - `split_once(':')`, so only the FIRST `:` separates, and a
+    ///     declaration with no `:` is skipped (`background: url(http://x)`
+    ///     yields key `background`, value `url(http://x)`);
+    ///   - `k.trim() == key` is a case-SENSITIVE exact compare, so keys are
+    ///     stored as written and never case-folded;
+    ///   - a declaration whose key is empty is kept, because the original
+    ///     kept it too -- it simply never matched any real property name.
+    fn build(s: &str) -> StyleTable {
+        let mut values: Vec<(u32, u32)> = Vec::new();
+        let mut first: HashMap<Rc<str>, u32, FxBuild> = HashMap::default();
+        let mut last: HashMap<Rc<str>, u32, FxBuild> = HashMap::default();
+        for decl in s.split(';') {
+            let d = decl.trim();
+            if d.is_empty() {
+                continue;
+            }
+            let Some((k, v)) = d.split_once(':') else {
+                continue;
+            };
+            let (k, v) = (k.trim(), v.trim());
+            // `v` is a subslice of `d`, which is a subslice of `s`: `decl`
+            // comes from `s.split(';')` and `trim` only shortens. So this
+            // offset is always in range.
+            let start = (v.as_ptr() as usize - s.as_ptr() as usize) as u32;
+            values.push((start, start + v.len() as u32));
+            let idx = (values.len() - 1) as u32;
+            // Reuse the first map's `Rc` so a repeated property name does not
+            // allocate a second key string.
+            match first.entry(Rc::from(k)) {
+                Entry::Occupied(e) => {
+                    last.insert(e.key().clone(), idx);
+                }
+                Entry::Vacant(e) => {
+                    let key: Rc<str> = e.key().clone();
+                    e.insert(idx);
+                    last.insert(key, idx);
+                }
+            }
+        }
+        StyleTable {
+            src: s.to_string(),
+            values,
+            first,
+            last,
+            inserted: 0,
+            font_size: RefCell::new(HashMap::default()),
+            len_full: RefCell::new(HashMap::default()),
+            box_sides: RefCell::new(HashMap::default()),
+            border: RefCell::new(HashMap::default()),
+        }
+    }
+
+    /// The trimmed value of declaration `i`.
+    #[inline]
+    fn value(&self, i: u32) -> &str {
+        let (start, end) = self.values[i as usize];
+        &self.src[start as usize..end as usize]
+    }
+
+    /// Index of the first declaration of `key`, or `None` if undeclared.
+    #[inline]
+    fn first(&self, key: &str) -> Option<u32> {
+        self.first.get(key).copied()
+    }
+
+    /// Index of the last declaration of `key`, or `None` if undeclared.
+    #[inline]
+    fn last(&self, key: &str) -> Option<u32> {
+        self.last.get(key).copied()
+    }
+}
+
+/// Process-wide, thread-local, style-string -> table cache.
+struct StyleCache {
+    /// Keyed by the style string's CONTENT.
+    tables: HashMap<Rc<str>, Rc<StyleTable>, FxBuild>,
+    /// Monotonic counter; only ever advances, and is never a cache key.
+    seq: u64,
+    /// Most recently returned table, plus the exact content it was built from.
+    ///
+    /// `table_for` is called ~54 times per node descent with the SAME style
+    /// string each time, so the overwhelmingly common case is a repeat of the
+    /// immediately preceding lookup. Comparing CONTENT here (a length check
+    /// plus `memcmp`) avoids re-hashing the whole string into a `HashMap`
+    /// probe 54 times per node. This is keyed on content exactly like
+    /// `tables` is -- not on a position, index or counter -- and two equal
+    /// strings are the same declaration table by construction, because
+    /// `StyleTable::build` is a pure function of the style string.
+    last: Option<(Rc<str>, Rc<StyleTable>)>,
+}
+
+thread_local! {
+    static STYLE_TABLES: RefCell<StyleCache> = RefCell::new(StyleCache {
+        tables: HashMap::default(),
+        seq: 0,
+        last: None,
+    });
+}
+
+/// The parsed table for `style`, built on first sight of this exact string.
+///
+/// The key is the string's content, which is the complete input to parsing.
+/// Callers that want a different result for the same content must pass
+/// different context, and that context is part of the *second* layer's key,
+/// not of this lookup.
+fn table_for(style: &str) -> Rc<StyleTable> {
+    STYLE_TABLES.with(|c| {
+        let mut cache = c.borrow_mut();
+        // Fast path: same content as the last lookup. Byte-compare only.
+        if let Some((k, t)) = &cache.last
+            && &**k == style
+        {
+            return t.clone();
+        }
+        // Clone the value out before assigning to `cache.last`: `cache` is a
+        // `RefMut`, so a borrow from `tables.get` would conflict with it.
+        let hit = cache.tables.get(style).cloned();
+        if let Some(t) = hit {
+            cache.last = Some((Rc::from(style), t.clone()));
+            return t;
+        }
+        if cache.tables.len() >= MAX_STYLE_TABLES {
+            // Drop the oldest half, then cache this entry anyway, matching
+            // `FontCache::remember_advance`. Refusing to insert past the cap
+            // would pin the working set to whatever was seen first and
+            // permanently exclude every style string seen after it.
+            let mut victims: Vec<(u64, Rc<str>)> = cache
+                .tables
+                .iter()
+                .map(|(k, t)| (t.inserted, k.clone()))
+                .collect();
+            victims.sort_unstable_by_key(|(seq, _)| *seq);
+            // `inserted` is unique per insertion and never reused, so this
+            // removes exactly the oldest half.
+            for (_, key) in victims.into_iter().take(MAX_STYLE_TABLES / 2) {
+                cache.tables.remove(&key);
+            }
+        }
+        let seq = cache.seq.wrapping_add(1);
+        cache.seq = seq;
+        let mut built = StyleTable::build(style);
+        built.inserted = seq;
+        let table = Rc::new(built);
+        cache.tables.insert(Rc::from(style), table.clone());
+        // The eviction above can drop a table `last` still points at. That is a
+        // memory question, not a correctness one: the `Rc` keeps it alive and
+        // it is still the table for exactly this content. Re-seeding `last`
+        // here keeps the fast path valid either way.
+        cache.last = Some((Rc::from(style), table.clone()));
+        table
+    })
+}
+
+/// Store a resolution in a per-table memo, dropping the memo if it is full.
+///
+/// Clearing rather than refusing, and this is deliberately *not* the
+/// `FontCache` drop-oldest policy: a memoized resolution here is a cheap
+/// re-derivation from an already-parsed table, so dropping entries costs a
+/// recomputation and nothing else. The advance memo in the renderer is the
+/// opposite case, which is why it keeps its oldest entries and this one does
+/// not.
+fn memo_put<K, V>(cell: &RefCell<HashMap<K, V, FxBuild>>, key: K, value: V)
+where
+    K: std::hash::Hash + Eq,
+{
+    let mut map = cell.borrow_mut();
+    if map.len() >= MAX_TABLE_MEMO {
+        map.clear();
+    }
+    map.insert(key, value);
+}
+
+/// Build `"<base>-<side>"` on the stack, so the four longhand lookups in
+/// `style_box_sides_full` stop allocating a `String` each.
+///
+/// Only called with `base` and `side` that are short compile-time constants at
+/// every call site, so 48 bytes of stack is ample; the buffer is sized to fail
+/// loudly in a debug build rather than truncate silently.
+#[inline]
+fn side_key<'a>(buf: &'a mut [u8; 48], base: &str, side: &str) -> &'a str {
+    let n = base.len() + 1 + side.len();
+    assert!(
+        n <= buf.len(),
+        "side_key buffer too small for {base}-{side}"
+    );
+    buf[..base.len()].copy_from_slice(base.as_bytes());
+    buf[base.len()] = b'-';
+    buf[base.len() + 1..n].copy_from_slice(side.as_bytes());
+    std::str::from_utf8(&buf[..n]).expect("side key is built from strs")
+}
+
+#[allow(dead_code)]
+fn style_lookup(style: Option<&str>, key: &str) -> Option<i32> {
+    let t = table_for(style?);
+    parse_px(t.value(t.first(key)?))
 }
 
 #[allow(dead_code)]
 fn style_lookup_len(style: Option<&str>, key: &str, base: i32) -> Option<i32> {
-    let s = style?;
-    for decl in s.split(';') {
-        let d = decl.trim();
-        if d.is_empty() {
-            continue;
-        }
-        if let Some((k, v)) = d.split_once(':')
-            && k.trim() == key
-        {
-            let val = v.trim();
-            if let Some(p) = val.strip_suffix('%')
-                && let Ok(pct) = p.trim().parse::<f32>()
-            {
-                return Some(((pct / 100.0) * base as f32).round() as i32);
-            }
-            return parse_px(val);
-        }
+    let t = table_for(style?);
+    let val = t.value(t.first(key)?);
+    if let Some(p) = val.strip_suffix('%')
+        && let Ok(pct) = p.trim().parse::<f32>()
+    {
+        return Some(((pct / 100.0) * base as f32).round() as i32);
     }
-    None
+    parse_px(val)
 }
 
 /// Extract font-size from style string, resolving all units to pixels.
@@ -1838,25 +2265,30 @@ fn style_lookup_font_size(
     root_font_size: f32,
     viewport: (f32, f32),
 ) -> Option<f32> {
-    let s = style?;
-    for decl in s.split(';') {
-        let d = decl.trim();
-        if d.is_empty() {
-            continue;
-        }
-        if let Some((k, v)) = d.split_once(':')
-            && k.trim() == "font-size"
-        {
-            return parse_length_value(
-                v.trim(),
-                parent_font_size,
-                parent_font_size,
-                root_font_size,
-                viewport,
-            );
-        }
+    let t = table_for(style?);
+    // `parent_font_size` is passed as BOTH the percentage basis and the `em`
+    // basis below, which is the original call; a `LenCtx` would imply a
+    // separate `parent_size` input that this helper does not have, so the key
+    // is spelled out directly instead of being derived from one.
+    let key = FontSizeKey {
+        decl: t.first("font-size")?,
+        parent_font_size: parent_font_size.to_bits(),
+        root_font_size: root_font_size.to_bits(),
+        vw: viewport.0.to_bits(),
+        vh: viewport.1.to_bits(),
+    };
+    if let Some(hit) = t.font_size.borrow().get(&key).copied() {
+        return hit;
     }
-    None
+    let out = parse_length_value(
+        t.value(key.decl),
+        parent_font_size,
+        parent_font_size,
+        root_font_size,
+        viewport,
+    );
+    memo_put(&t.font_size, key, out);
+    out
 }
 
 /// Resolve a CSS length value with ALL units to pixels.
@@ -1880,27 +2312,42 @@ fn style_lookup_len_full(
     viewport_w: f32,
     viewport_h: f32,
 ) -> Option<i32> {
-    let s = style?;
-    for decl in s.split(';') {
-        let d = decl.trim();
-        if d.is_empty() {
-            continue;
-        }
-        if let Some((k, v)) = d.split_once(':')
-            && k.trim() == key
-        {
-            let val = v.trim();
-            return parse_length_value(
-                val,
-                parent_size,
-                parent_font_size,
-                root_font_size,
-                (viewport_w, viewport_h),
-            )
-            .map(|f| f.round() as i32);
-        }
+    let t = table_for(style?);
+    len_full_in(
+        &t,
+        key,
+        &LenCtx {
+            parent_size,
+            parent_font_size,
+            root_font_size,
+            vw: viewport_w,
+            vh: viewport_h,
+        },
+    )
+}
+
+/// The memoized body of [`style_lookup_len_full`], for callers that already
+/// hold the table. `style_box_sides_full` and `style_border_widths` both
+/// resolve four properties against one style string, and re-hashing that
+/// string once per property was a large part of their cost.
+#[inline]
+fn len_full_in(t: &StyleTable, key: &str, ctx: &LenCtx) -> Option<i32> {
+    // An undeclared property is the common case for the longhand probes, and
+    // it is answered entirely by the table: there is nothing to memoize.
+    let mkey = LenFullKey::new(t.first(key)?, ctx);
+    if let Some(hit) = t.len_full.borrow().get(&mkey).copied() {
+        return hit;
     }
-    None
+    let out = parse_length_value(
+        t.value(mkey.decl),
+        ctx.parent_size,
+        ctx.parent_font_size,
+        ctx.root_font_size,
+        (ctx.vw, ctx.vh),
+    )
+    .map(|f| f.round() as i32);
+    memo_put(&t.len_full, mkey, out);
+    out
 }
 
 /// Parse a single CSS length value string and convert to pixels.
@@ -1993,19 +2440,8 @@ fn parse_length_value(
 }
 
 fn style_lookup_str(style: Option<&str>, key: &str) -> Option<String> {
-    let s = style?;
-    for decl in s.split(';') {
-        let d = decl.trim();
-        if d.is_empty() {
-            continue;
-        }
-        if let Some((k, v)) = d.split_once(':')
-            && k.trim() == key
-        {
-            return Some(v.trim().to_string());
-        }
-    }
-    None
+    let t = table_for(style?);
+    Some(t.value(t.first(key)?).to_string())
 }
 
 /// Elements whose Velox default `display` is `inline`, i.e. the elements that
@@ -2189,45 +2625,22 @@ fn should_drop_collapsible_whitespace(
 }
 
 fn style_lookup_i32(style: Option<&str>, key: &str) -> Option<i32> {
-    let s = style?;
-    for decl in s.split(';') {
-        let d = decl.trim();
-        if d.is_empty() {
-            continue;
-        }
-        if let Some((k, v)) = d.split_once(':')
-            && k.trim() == key
-        {
-            return v.trim().parse::<i32>().ok();
-        }
-    }
-    None
+    let t = table_for(style?);
+    t.value(t.first(key)?).parse::<i32>().ok()
 }
 
 #[allow(dead_code)]
 fn style_box_sides(style: Option<&str>, base: &str) -> (i32, i32, i32, i32) {
     // returns (left, right, top, bottom)
-    let s = style.unwrap_or("");
-    let get = |k: &str| -> Option<i32> {
-        for decl in s.split(';') {
-            let d = decl.trim();
-            if d.is_empty() {
-                continue;
-            }
-            if let Some((kk, vv)) = d.split_once(':')
-                && kk.trim() == k
-            {
-                return parse_px(vv);
-            }
-        }
-        None
-    };
+    let t = table_for(style.unwrap_or(""));
+    let get = |k: &str| -> Option<i32> { parse_px(t.value(t.first(k)?)) };
     let all = get(base).unwrap_or(0);
-    let l = get(&format!("{}-left", base)).unwrap_or(all);
-    let r = get(&format!("{}-right", base)).unwrap_or(all);
-    let t = get(&format!("{}-top", base)).unwrap_or(all);
-    let b = get(&format!("{}-bottom", base)).unwrap_or(all);
-    (l, r, t, b)
+    let mut buf = [0u8; 48];
+    let l = get(side_key(&mut buf, base, "left")).unwrap_or(all);
+    let r = get(side_key(&mut buf, base, "right")).unwrap_or(all);
+    let t_ = get(side_key(&mut buf, base, "top")).unwrap_or(all);
+    let b = get(side_key(&mut buf, base, "bottom")).unwrap_or(all);
+    (l, r, t_, b)
 }
 
 /// The displacement `position: relative` / `position: sticky` applies to a box,
@@ -2628,22 +3041,31 @@ fn style_box_sides_full(
         }
     };
 
+    let Some(t) = style.map(table_for) else {
+        // No style: no shorthand and no longhands, so every side is 0. This
+        // is what the original produced, where the shorthand `and_then` saw
+        // `None` and each `style_lookup_len_full(None, ..)` returned `None`.
+        return (0, 0, 0, 0);
+    };
+    let ctx = LenCtx {
+        parent_size,
+        parent_font_size,
+        root_font_size,
+        vw: viewport_w,
+        vh: viewport_h,
+    };
+    let memo = BoxSidesKey::new(base, &ctx);
+    if let Some(hit) = t.box_sides.borrow().get(&memo).copied() {
+        return hit;
+    }
+
     // Try expanding the shorthand value into individual sides.
     // CSS shorthand rules: 1 val = all, 2 = v h, 3 = t h b, 4 = t r b l
-    let shorthand_sides: Option<(i32, i32, i32, i32)> = style.and_then(|s| {
-        // Find the shorthand declaration (e.g. "padding: 10px 20px")
-        let raw = s.split(';').find_map(|decl| {
-            let d = decl.trim();
-            if d.is_empty() {
-                return None;
-            }
-            let (k, v) = d.split_once(':')?;
-            if k.trim() == base {
-                Some(v.trim())
-            } else {
-                None
-            }
-        })?;
+    let shorthand_sides: Option<(i32, i32, i32, i32)> = (|| {
+        // The first `base` declaration, e.g. "padding: 10px 20px". Written as a
+        // closure so `?` still means "this declaration is not a usable
+        // shorthand", exactly as the original `style.and_then(..)` did.
+        let raw = t.value(t.first(base)?);
         let parts: Vec<&str> = raw.split_whitespace().collect();
         match parts.len() {
             0 => None,
@@ -2654,67 +3076,37 @@ fn style_box_sides_full(
                 Some((h, h, v, v)) // left, right, top, bottom
             }
             3 => {
-                let t = resolve_side(parts[0])?;
+                let top = resolve_side(parts[0])?;
                 let h = resolve_side(parts[1])?;
                 let b = resolve_side(parts[2])?;
-                Some((h, h, t, b))
+                Some((h, h, top, b))
             }
             4 => {
-                let t = resolve_side(parts[0])?;
+                let top = resolve_side(parts[0])?;
                 let r = resolve_side(parts[1])?;
                 let b = resolve_side(parts[2])?;
                 let l = resolve_side(parts[3])?;
-                Some((l, r, t, b))
+                Some((l, r, top, b))
             }
             _ => None,
         }
-    });
+    })();
 
     // Destructure shorthand: (left, right, top, bottom)
     let (sh_l, sh_r, sh_t, sh_b) = shorthand_sides.unwrap_or((0, 0, 0, 0));
 
-    // Individual longhand properties override the shorthand
-    let l = style_lookup_len_full(
-        style,
-        &format!("{}-left", base),
-        parent_size,
-        parent_font_size,
-        root_font_size,
-        viewport_w,
-        viewport_h,
-    )
-    .unwrap_or(sh_l);
-    let r = style_lookup_len_full(
-        style,
-        &format!("{}-right", base),
-        parent_size,
-        parent_font_size,
-        root_font_size,
-        viewport_w,
-        viewport_h,
-    )
-    .unwrap_or(sh_r);
-    let t = style_lookup_len_full(
-        style,
-        &format!("{}-top", base),
-        parent_size,
-        parent_font_size,
-        root_font_size,
-        viewport_w,
-        viewport_h,
-    )
-    .unwrap_or(sh_t);
-    let b = style_lookup_len_full(
-        style,
-        &format!("{}-bottom", base),
-        parent_size,
-        parent_font_size,
-        root_font_size,
-        viewport_w,
-        viewport_h,
-    )
-    .unwrap_or(sh_b);
-    (l, r, t, b)
+    // Individual longhand properties override the shorthand. The four keys are
+    // built on the stack rather than with `format!`, and resolved against the
+    // table we already hold rather than re-hashing the style string per side.
+    let mut buf = [0u8; 48];
+    let out = (
+        len_full_in(&t, side_key(&mut buf, base, "left"), &ctx).unwrap_or(sh_l),
+        len_full_in(&t, side_key(&mut buf, base, "right"), &ctx).unwrap_or(sh_r),
+        len_full_in(&t, side_key(&mut buf, base, "top"), &ctx).unwrap_or(sh_t),
+        len_full_in(&t, side_key(&mut buf, base, "bottom"), &ctx).unwrap_or(sh_b),
+    );
+    memo_put(&t.box_sides, memo, out);
+    out
 }
 
 /// Whether `margin-left` / `margin-right` resolve to `auto` for the given
@@ -2724,34 +3116,29 @@ fn style_margin_auto_sides(style: Option<&str>) -> (bool, bool) {
     let Some(s) = style else {
         return (false, false);
     };
+    let t = table_for(s);
     let is_auto = |tok: &str| tok.trim().eq_ignore_ascii_case("auto");
-    let mut shorthand: Option<(bool, bool)> = None; // (left, right)
-    let mut long_l: Option<bool> = None;
-    let mut long_r: Option<bool> = None;
-    for decl in s.split(';') {
-        let d = decl.trim();
-        if d.is_empty() {
-            continue;
-        }
-        let Some((k, v)) = d.split_once(':') else {
-            continue;
-        };
-        match k.trim() {
-            "margin" => {
-                let parts: Vec<&str> = v.split_whitespace().collect();
-                shorthand = match parts.as_slice() {
-                    [all] => Some((is_auto(all), is_auto(all))),
-                    [_, h] => Some((is_auto(h), is_auto(h))),
-                    [_, h, _] => Some((is_auto(h), is_auto(h))),
-                    [_, right, _, left] => Some((is_auto(left), is_auto(right))),
-                    _ => None,
-                };
+
+    // This helper is the one place in the family that reads the LAST
+    // occurrence rather than the first: its original loop ASSIGNED on every
+    // match instead of returning, so a later declaration overwrote an earlier
+    // one. Hence `last` here and `first` everywhere else. Getting this wrong
+    // would silently change which of two conflicting declarations wins.
+    let shorthand: Option<(bool, bool)> = match t.last("margin") {
+        Some(i) => {
+            let parts: Vec<&str> = t.value(i).split_whitespace().collect();
+            match parts.as_slice() {
+                [all] => Some((is_auto(all), is_auto(all))),
+                [_, h] => Some((is_auto(h), is_auto(h))),
+                [_, h, _] => Some((is_auto(h), is_auto(h))),
+                [_, right, _, left] => Some((is_auto(left), is_auto(right))),
+                _ => None,
             }
-            "margin-left" => long_l = Some(is_auto(v)),
-            "margin-right" => long_r = Some(is_auto(v)),
-            _ => {}
         }
-    }
+        None => None,
+    };
+    let long_l = t.last("margin-left").map(|i| is_auto(t.value(i)));
+    let long_r = t.last("margin-right").map(|i| is_auto(t.value(i)));
     let (sh_l, sh_r) = shorthand.unwrap_or((false, false));
     (long_l.unwrap_or(sh_l), long_r.unwrap_or(sh_r))
 }
@@ -2764,6 +3151,19 @@ fn style_border_widths(
     viewport_w: f32,
     viewport_h: f32,
 ) -> (i32, i32, i32, i32) {
+    let Some(t) = style.map(table_for) else {
+        // No style at all. The original resolved every source to `None` and
+        // therefore returned all zeros; short-circuiting keeps that exact
+        // result instead of building an empty table to derive it.
+        return (0, 0, 0, 0);
+    };
+    let ctx = LenCtx {
+        parent_size,
+        parent_font_size,
+        root_font_size,
+        vw: viewport_w,
+        vh: viewport_h,
+    };
     let resolve = |val: &str| -> Option<i32> {
         parse_length_value(
             val,
@@ -2775,23 +3175,15 @@ fn style_border_widths(
         .map(|f| f.round() as i32)
     };
 
+    let memo = BorderKey::new(&ctx);
+    if let Some(hit) = t.border.borrow().get(&memo).copied() {
+        return hit;
+    }
+
     // default from `border` shorthand first token if it parses as length
     let mut default_border: Option<i32> = None;
-    if let Some(s) = style
-        && let Some(raw) = s.split(';').find_map(|decl| {
-            let d = decl.trim();
-            if d.is_empty() {
-                return None;
-            }
-            let (k, v) = d.split_once(':')?;
-            if k.trim() == "border" {
-                Some(v.trim())
-            } else {
-                None
-            }
-        })
-    {
-        let first = raw.split_whitespace().next().unwrap_or("");
+    if let Some(i) = t.first("border") {
+        let first = t.value(i).split_whitespace().next().unwrap_or("");
         if let Some(v) = resolve(first) {
             default_border = Some(v);
         } else if first == "0" {
@@ -2802,21 +3194,8 @@ fn style_border_widths(
         default_border.map(|v| (v, v, v, v)).unwrap_or((0, 0, 0, 0));
 
     // `border-width` shorthand (1-4 values) overrides `border` default if present
-    let has_border_width = style.is_some_and(|s| {
-        s.split(';').any(|decl| {
-            let d = decl.trim();
-            if d.is_empty() {
-                return false;
-            }
-            if let Some((k, _)) = d.split_once(':') {
-                k.trim() == "border-width"
-            } else {
-                false
-            }
-        })
-    });
-    if has_border_width {
-        let (l, r, t, b) = style_box_sides_full(
+    if t.first("border-width").is_some() {
+        let (l, r, top, b) = style_box_sides_full(
             style,
             "border-width",
             parent_size,
@@ -2827,7 +3206,7 @@ fn style_border_widths(
         );
         bl = l;
         br = r;
-        bt = t;
+        bt = top;
         bb = b;
     }
 
@@ -2838,15 +3217,7 @@ fn style_border_widths(
         ("border-top-width", &mut bt),
         ("border-bottom-width", &mut bb),
     ] {
-        if let Some(v) = style_lookup_len_full(
-            style,
-            key,
-            parent_size,
-            parent_font_size,
-            root_font_size,
-            viewport_w,
-            viewport_h,
-        ) {
+        if let Some(v) = len_full_in(&t, key, &ctx) {
             *target = v;
         }
     }
@@ -2857,28 +3228,17 @@ fn style_border_widths(
         ("border-top", &mut bt),
         ("border-bottom", &mut bb),
     ] {
-        if let Some(s) = style
-            && let Some(raw) = s.split(';').find_map(|decl| {
-                let d = decl.trim();
-                if d.is_empty() {
-                    return None;
-                }
-                let (k, v) = d.split_once(':')?;
-                if k.trim() == key {
-                    Some(v.trim())
-                } else {
-                    None
-                }
-            })
-        {
-            let first = raw.split_whitespace().next().unwrap_or("");
+        if let Some(i) = t.first(key) {
+            let first = t.value(i).split_whitespace().next().unwrap_or("");
             if let Some(v) = resolve(first) {
                 *target = v;
             }
         }
     }
 
-    (bl, br, bt, bb)
+    let out = (bl, br, bt, bb);
+    memo_put(&t.border, memo, out);
+    out
 }
 
 pub fn compute_layout(node: &VNode, viewport_w: i32, viewport_h: i32) -> LayoutNode {
