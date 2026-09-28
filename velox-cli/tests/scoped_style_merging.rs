@@ -68,6 +68,9 @@ struct ScopedComponent {
 }
 
 /// Every `.vx` file under `dir`, recursively, sorted for stable failure output.
+///
+/// This is the raw on-disk set; callers are responsible for intersecting it with
+/// the import graph actually walked by the build (see `layer_a_...`).
 fn vx_files_under(dir: &Path) -> Vec<PathBuf> {
     let mut out = Vec::new();
     let Ok(entries) = fs::read_dir(dir) else {
@@ -163,6 +166,54 @@ fn split_selector_list(list: &str) -> Vec<String> {
     out.into_iter().map(|s| s.trim().to_string()).collect()
 }
 
+/// Split a selector into its COMPOUNDS — the sequences joined by combinators
+/// (whitespace, `>`, `+`, `~`) at depth 0, i.e. outside `[...]` and `(...)`.
+///
+/// `.a .b` -> `[".a", ".b"]`; `.a.b` -> `[".a.b"]` (one compound, two classes);
+/// `div>.card` -> `["div", ".card"]`. `div[title="a>b"]` stays one compound,
+/// because the `>` inside the brackets never reaches depth 0.
+///
+/// `scope_single_selector` appends the component's id to EVERY compound
+/// unconditionally, so this is the granularity at which scoping has to hold.
+fn compounds(sel: &str) -> Option<Vec<String>> {
+    let mut out = Vec::new();
+    let (mut depth, mut current) = (0i32, String::new());
+    for ch in sel.chars() {
+        match ch {
+            '(' | '[' => {
+                depth += 1;
+                current.push(ch);
+            }
+            ')' | ']' => {
+                depth -= 1;
+                current.push(ch);
+            }
+            c if depth == 0 && (c.is_whitespace() || matches!(c, '>' | '+' | '~')) => {
+                if !current.is_empty() {
+                    out.push(std::mem::take(&mut current));
+                }
+            }
+            _ => current.push(ch),
+        }
+    }
+    if !current.is_empty() {
+        out.push(current);
+    }
+    // An empty result means the selector had no content at all. A leading or
+    // trailing combinator collapses silently, but no real stylesheet selector
+    // has one, and the template's are all well-formed.
+    (!out.is_empty()).then_some(out)
+}
+
+/// The trailing `[...]` attribute of `sel`, when it ends with one.
+fn trailing_attr(sel: &str) -> Option<&str> {
+    if !sel.ends_with(']') {
+        return None;
+    }
+    let open = sel.rfind('[')?;
+    Some(&sel[open..])
+}
+
 fn is_css_ident_byte(b: u8) -> bool {
     b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'\\') || b >= 0x80
 }
@@ -245,7 +296,9 @@ fn read_scoped_component(path: &Path) -> ScopedComponent {
 /// LAYER A — assembly regression over the shipped project template.
 ///
 /// The root's merged `STYLE` must carry every component's rules scoped to THAT
-/// component's own id, and ZERO bare selectors.
+/// component's own id, and every compound of every selector in the emitted
+/// sheet must end in a scope attribute — no bare selector, no unscoped
+/// compound.
 ///
 /// Both halves of that contract are derived from the template's own `.vx`
 /// sources rather than hardcoded. A previous version of this test asserted
@@ -264,15 +317,26 @@ fn layer_a_child_rules_are_scoped_in_root_stylesheet() {
     let out_dir = scratch("a");
     let _ = fs::remove_dir_all(&out_dir);
 
-    velox_cli::commands::build::build_vx(&input, Some(out_dir.as_path()))
+    let result = velox_cli::commands::build::build_vx(&input, Some(out_dir.as_path()))
         .expect("build_vx over the shipped template");
 
     let stub = fs::read_to_string(out_dir.join("app.rs")).expect("read generated app.rs");
     let body = style_const_body(&stub);
 
-    // The real template, root and children alike, read straight from disk.
+    // F3: only components REACHABLE from `App.vx` are in scope. A `.vx` file
+    // that happens to sit under `src` but is never imported contributes nothing
+    // to the merged sheet, so asserting on it would fail the test for a reason
+    // that has nothing to do with scoping. `build_vx` returns the import graph it
+    // actually walked, so intersect the on-disk walk with it — the walk supplies
+    // the files, the graph decides which of them this test may judge.
+    let reachable: BTreeSet<PathBuf> = result
+        .vx_files
+        .iter()
+        .map(|p| fs::canonicalize(p).expect("canonicalize a .vx the build read"))
+        .collect();
     let components: Vec<ScopedComponent> = vx_files_under(&src_dir)
         .iter()
+        .filter(|p| reachable.contains(&fs::canonicalize(p).expect("canonicalize .vx")))
         .map(|p| read_scoped_component(p))
         .collect();
 
@@ -316,25 +380,57 @@ fn layer_a_child_rules_are_scoped_in_root_stylesheet() {
         }
     }
 
-    // ZERO bare selectors across every class the template declares: a bare
-    // `.foo` matches every element on the page, which is the leak this whole
-    // file exists to prevent. Note this checks for the ABSENCE of any scope
-    // attribute, not for one specific id — a class may legitimately be declared
-    // by two components, each scoped to itself.
-    for c in &components {
-        for class in &c.declared {
-            let bare: Vec<&str> = body
-                .lines()
-                .filter(|l| l.contains(&format!(".{class}")) && !l.contains("[data-v-"))
-                .collect();
+    // ---- F1 + F2: parse the EMITTED sheet and check it selector by selector.
+    //
+    // The per-class check above derives expectations from the template sources,
+    // which means it only ever sees selectors it can classify. This block goes
+    // the other way: it parses the sheet that `build_vx` actually emitted and
+    // requires EVERY compound of EVERY non-at-rule selector to end in a scope
+    // attribute. That covers what the classifier declines to judge —
+    // `.todo-item.completed .todo-text` (TodoItem.vx:65), descendant/child/
+    // sibling combinators, and type selectors — and it is a parse, not a
+    // substring scan, so it also closes the line-based check's two holes:
+    // `.btn` no longer matches inside `.btn-danger`, and one line may no longer
+    // carry a bare selector next to a scoped one.
+    let known_ids: BTreeSet<&str> = components.iter().map(|c| c.id.as_str()).collect();
+    let selectors: Vec<String> = rule_preludes(&body)
+        .iter()
+        .flat_map(|prelude| split_selector_list(prelude))
+        .filter(|sel| !sel.is_empty())
+        .collect();
+
+    assert!(
+        !selectors.is_empty(),
+        "no selectors parsed out of the merged sheet — the parse went blind, so \
+         every assertion below would pass vacuously.\n--- sheet ---\n{body}"
+    );
+    // F1 is specifically about MULTI-compound selectors. If the template ever
+    // stops containing one, the coverage this block exists to add would be
+    // silently gone, so assert the fixture still exercises it.
+    assert!(
+        selectors.iter().any(|sel| compounds(sel).is_some_and(|c| c.len() > 1)),
+        "no multi-compound selector in the merged sheet, so the combinator and \
+         descendant-scoping checks below are vacuous — this template is expected \
+         to contain at least one, e.g. `.todo-item.completed .todo-text`.\n\
+         --- sheet ---\n{body}"
+    );
+
+    for sel in &selectors {
+        let parts = compounds(sel)
+            .unwrap_or_else(|| panic!("`{sel}` has no compound to check — bad parse"));
+        for part in &parts {
+            let attr = trailing_attr(part).unwrap_or_else(|| {
+                panic!(
+                    "compound `{part}` (in selector `{sel}`) does not end in a \
+                     scope attribute — every compound of a scoped selector must \
+                     carry the component's own `data-v-*`, or it matches \
+                     unscoped across the whole page.\n--- sheet ---\n{body}"
+                )
+            });
             assert!(
-                bare.is_empty(),
-                "found {} bare `.{class}` selector(s) in the merged sheet, declared \
-                 by {}.vx — a bare selector matches every element on the page:\n{}\n\
-                 --- sheet ---\n{body}",
-                bare.len(),
-                c.name,
-                bare.join("\n")
+                attr.starts_with("[data-v-") && known_ids.contains(&attr[1..attr.len() - 1]),
+                "compound `{part}` (in selector `{sel}`) ends in `{attr}`, which is \
+                 not one of this template's scope ids {known_ids:?}.\n--- sheet ---\n{body}"
             );
         }
     }
