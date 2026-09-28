@@ -91,10 +91,33 @@ fn compile_component_tree(
         resolver.parse_imports(&script_setup.content);
     }
 
+    // Compute the CSS scope attribute ONCE and reuse it for BOTH halves of the
+    // scoped-CSS contract: (a) the `data-v-<hash>` attribute attached to every
+    // element this component renders, and (b) the selector rewrite of this
+    // component's own <style> block. If these two ids ever diverge, scoped
+    // selectors match nothing and the component silently renders unstyled, so
+    // they are derived from one binding rather than two derivations.
+    let scope_id = sfc
+        .style
+        .as_ref()
+        .filter(|s| velox_sfc::is_scoped(s))
+        .map(|_| velox_sfc::generate_scope_id(name));
+
     // Collect this component's <style> for merging into the root app STYLE so
     // child-component CSS actually applies (the root only parses app::STYLE).
+    //
+    // A scoped child's rules must be scoped HERE, at collection time. Pushing
+    // the raw text emits bare selectors into one global sheet, so a `.btn`
+    // declared in TodoInput.vx also styles a `<button class="btn">` inside
+    // Todos.vx. The root's own <style> is already scoped by `to_stub_rs`, so
+    // scoping here makes the merged sheet uniformly scoped. Unscoped blocks
+    // stay global by design and pass through untouched.
     if !is_root && let Some(style) = &sfc.style {
-        child_styles.push(style.content.clone());
+        let css = match scope_id.as_deref() {
+            Some(id) => velox_sfc::scope_css(&style.content, id),
+            None => style.content.clone(),
+        };
+        child_styles.push(css);
     }
 
     // First, recursively compile all imported components
@@ -152,18 +175,13 @@ fn compile_component_tree(
         .unwrap_or("");
     let script_src = sfc.script_setup.as_ref().map(|s| s.content.as_str());
 
-    // Compute the CSS scope attribute for this component. When the <style> block
-    // is scoped, every element rendered by this component needs the matching
-    // `data-v-<hash>` attribute so the scoped CSS selectors actually match.
-    let scope_id = sfc
-        .style
-        .as_ref()
-        .filter(|s| velox_sfc::is_scoped(s))
-        .map(|_| velox_sfc::generate_scope_id(name));
-
     // Generated apps render through `render_with_state`, which reads Signal/Ref
     // fields and `v-for` loop items directly, so compile in State mode: bindings
     // that only a resolver cannot satisfy are not reported for them.
+    //
+    // `scope_id` (computed above, before <style> collection) tags every element
+    // this component renders with `data-v-<hash>`, so the scoped CSS rewritten
+    // for the root stylesheet actually matches.
     let render_fn = velox_sfc::compile_template_to_rs_full_with_mode(
         tpl_src,
         name,

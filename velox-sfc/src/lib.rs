@@ -29,6 +29,7 @@ pub use template_parse::{TemplateDiag, parse_template};
 pub use codegen::generate_props_arg;
 pub use codegen::generate_scope_id;
 pub use codegen::is_scoped;
+pub use codegen::scope_css;
 pub use codegen::to_stub_rs;
 pub use codegen::to_stub_rs_unwrapped;
 pub use codegen::to_stub_rs_with_base;

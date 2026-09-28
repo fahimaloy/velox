@@ -29,3 +29,14 @@ velox-renderer = { version = "0.1.0", path = "../velox-renderer" }
 [lib]
 name = "velox_cli"
 path = "src/lib.rs"
+
+[dev-dependencies]
+# Integration tests assert on styled vnodes (`Props`/`VNode`/`h`) and drive the
+# real layout pass, so they need velox-dom directly rather than through
+# velox-style's re-exports.
+velox-dom = { path = "../velox-dom" }
+# `skia-native` is enabled here (not just for a separate CI job) so the
+# pixel-level scoping proof runs in the DEFAULT `cargo test` pass rather than
+# behind `#[ignore]`, which is how the unscoped-merge defect survived a green
+# suite. It is a dev-dependency, so it never reaches a scaffolded app.
+velox-renderer = { path = "../velox-renderer", features = ["skia-native"] }
