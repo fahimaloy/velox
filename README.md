@@ -6,7 +6,7 @@ It provides:
 - **SFC compiler** for `.vx` components (`<template>`, `<script setup>`, `<style>`)
 - **Virtual DOM + layout engine**
 - **CSS parser/cascade engine**
-- **Renderer backends** (`wgpu`, `skia-native`)
+- **Renderer backends** (`skia-native`)
 - **CLI** for scaffolding, building, linting, and running apps
 
 ---
@@ -46,7 +46,7 @@ The Velox repository is organized into modular crates:
 - **`velox-sfc`** — SFC parsing + template codegen + component resolver
 - **`velox-dom`** — VNode types, diffing, layout
 - **`velox-style`** — CSS parsing, selectors, style application
-- **`velox-renderer`** — Rendering + events (`wgpu`, `skia-native` backends)
+- **`velox-renderer`** — Rendering + events (`skia-native` backend)
 - **`velox-cli`** — Developer workflow commands
 
 Plus examples:
@@ -88,17 +88,14 @@ cargo test --workspace --all-targets
 
 ### Build Specific Backends (Optional)
 
-The renderer supports multiple backends:
+The renderer supports two feature levels:
 
 ```bash
-# Build with wgpu backend (GPU rendering)
-cargo build -p velox-renderer --features wgpu
+# Skia API surface only (no native dependencies)
+cargo build -p velox-renderer --features skia
 
-# Build with native skia backend
+# Native Skia backend
 cargo build -p velox-renderer --features skia-native
-
-# Build both
-cargo build -p velox-renderer --all-features
 ```
 
 ---
@@ -566,7 +563,6 @@ cargo build --workspace --release
 cargo test --workspace --all-targets
 
 # Build specific renderer backend
-cargo build -p velox-renderer --features wgpu
 cargo build -p velox-renderer --features skia-native
 
 # Run tests for specific crate
@@ -618,7 +614,7 @@ cargo run -p velox-example-showcase
 - Event binding for common UI events: `click`, `input`, `change`, keyboard, mouse events
 - Hit testing aligned with render order and stacking
 - Multiple renderer backends:
-  - **wgpu** — GPU-accelerated rendering
+  - **skia** — Skia API surface, no native dependencies
   - **skia-native** — Native Skia rendering
 
 ---

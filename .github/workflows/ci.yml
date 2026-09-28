@@ -30,8 +30,6 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
-      - name: Test wgpu feature
-        run: cargo test -p velox-renderer --features wgpu
       - name: Test skia API (no native)
         run: cargo test -p velox-renderer --features skia
       - name: Build skia-native (allowed to fail)

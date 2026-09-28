@@ -21,7 +21,6 @@ Data flows top-down:
 
 ## Backends
 
-- **wgpu**: compiles and tested; serves as a template for a GPU-backed renderer.
 - **skia**: split features — `skia` (API-only stub) and `skia-native` (pulls `skia-safe`; heavy native build).
   - Windowed Skia currently renders to a raster surface and presents via `softbuffer` for Wayland/X11 compatibility.
   - GPU-backed Skia surfaces are experimental on Linux; expect raster fallback unless EGL window surfaces are implemented.
@@ -34,7 +33,7 @@ velox/
 ├── velox-sfc/       # Single File Component compiler
 ├── velox-dom/       # Virtual DOM implementation
 ├── velox-style/     # CSS styling system
-├── velox-renderer/  # Rendering backends (Skia, WGPU)
+├── velox-renderer/  # Rendering backends (Skia)
 ├── velox-cli/       # CLI tools
 └── examples/        # Example applications
 ```
