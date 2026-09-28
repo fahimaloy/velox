@@ -101,12 +101,79 @@ fn enqueue_effect(eff: Effect) {
     });
 }
 
+/// Resets `IS_FLUSHING` on the way out of `flush_queue`, including on unwind.
+///
+/// A panicking effect body unwinds straight out of the flush loop, so the flag
+/// used to be cleared only by falling off the end of that loop. One panic
+/// therefore left it set for the rest of the process, and because *every*
+/// `flush_queue` returns early when it is set, the scheduler was then dead
+/// permanently: effects were still created and enqueued, and nothing ever ran
+/// them again, with no recovery path. `next_tick::FlushGuard` is the existing
+/// precedent for this shape in this crate.
+struct FlushResetGuard;
+
+impl Drop for FlushResetGuard {
+    fn drop(&mut self) {
+        IS_FLUSHING.with(|f| f.set(false));
+    }
+}
+
+/// The scheduler state that must hold while a single effect body runs, restored
+/// when that body returns *or unwinds*.
+///
+/// Both flags were previously restored only on the success path.
+///
+/// - `IS_FLUSHING` is raised so a body that writes a signal it also read cannot
+///   re-enter `flush_queue` and pop the very effect that is currently executing,
+///   borrowing its body a second time while the first borrow is still live.
+///   The *prior* value is restored rather than `false`, because an effect can be
+///   created from inside another effect's body: the inner guard has to put the
+///   enclosing flush's guard back, not clear it.
+/// - `CURRENT_EFFECT` is the dependency-collection target. A stranded one
+///   silently attributes the next read — even one made outside any effect — to a
+///   dead effect, registering a dead weak subscriber on that signal.
+///
+/// Restoring from `Drop` is what makes this unwind-safe, and it is sufficient:
+/// `RefCell` has no poisoning (that is `Mutex`), nothing takes the body out of
+/// `EffectInner`, and `Drop for EffectHandle` never runs it, so there is no path
+/// that needs the body recoverable after a panic.
+struct EffectScopeGuard {
+    was_flushing: bool,
+    previous_effect: Option<Effect>,
+}
+
+impl EffectScopeGuard {
+    /// Enter the body of `eff`: it becomes the dependency target, and the
+    /// re-entrancy guard goes up for the duration.
+    fn enter(eff: &Effect) -> Self {
+        let was_flushing = IS_FLUSHING.with(|f| f.replace(true));
+        let previous_effect = CURRENT_EFFECT.with(|cur| cur.borrow_mut().replace(eff.clone()));
+        Self {
+            was_flushing,
+            previous_effect,
+        }
+    }
+}
+
+impl Drop for EffectScopeGuard {
+    fn drop(&mut self) {
+        let previous = self.previous_effect.take();
+        CURRENT_EFFECT.with(|cur| *cur.borrow_mut() = previous);
+        IS_FLUSHING.with(|f| f.set(self.was_flushing));
+    }
+}
+
 fn flush_queue() {
     // Prevent re-entrant flush; effects scheduled during a flush will be queued
     // and processed by this outer flush.
     if IS_FLUSHING.with(|f| f.replace(true)) {
         return;
     }
+
+    // Only the outermost flush ever reaches this point — every re-entrant call
+    // returned above — so clearing the flag unconditionally here cannot clear a
+    // guard that some enclosing scope is relying on.
+    let _flush_guard = FlushResetGuard;
 
     loop {
         let next = EFFECT_QUEUE.with(|q| q.borrow_mut().pop_front());
@@ -125,13 +192,11 @@ fn flush_queue() {
             continue;
         }
 
-        // Run the effect directly without replacing it
-        CURRENT_EFFECT.with(|cur| *cur.borrow_mut() = Some(eff.clone()));
+        // The dependency target and the re-entrancy guard are both in place for
+        // the run, and both are restored when the body returns or unwinds.
+        let _scope = EffectScopeGuard::enter(&eff);
         eff.body.borrow_mut()();
-        CURRENT_EFFECT.with(|cur| *cur.borrow_mut() = None);
     }
-
-    IS_FLUSHING.with(|f| f.set(false));
 }
 
 /// A handle to stop/dispose a reactive effect.
@@ -305,12 +370,19 @@ where
     });
 
     // Initial run with dependency collection.
-    CURRENT_EFFECT.with(|current| *current.borrow_mut() = Some(eff.clone()));
-
-    // Run the effect without replacing it (unlike flush_queue which needs swap pattern)
-    eff.body.borrow_mut()();
-
-    CURRENT_EFFECT.with(|current| *current.borrow_mut() = None);
+    //
+    // This runs under the same guard as every queued run, and it has to. Without
+    // the re-entrancy guard a body that reads a signal and then writes it
+    // re-enters `flush_queue`, which pops this very effect and borrows its body
+    // a second time while the borrow below is still live — a panic. Deferring
+    // the initial run to the queue instead would break the documented contract
+    // that `effect` runs the body before returning, so the body runs here and a
+    // write it performs is queued for the next flush instead, which is exactly
+    // what a write from inside `flush_queue` already does.
+    {
+        let _scope = EffectScopeGuard::enter(&eff);
+        eff.body.borrow_mut()();
+    }
 
     handle
 }
@@ -548,5 +620,169 @@ mod tests {
         );
 
         drop(sentinel);
+    }
+
+    /// Builds an effect that panics on its second run and never again, plus the
+    /// run counter and the signal it subscribes to.
+    ///
+    /// Panicking on the *second* run is what makes the panic land inside
+    /// `flush_queue` — reached from a later `set` — rather than inside the
+    /// `effect` call itself, which is where `catch_unwind` in the callers sits.
+    /// Panicking exactly once matters too: without it, a resurrected effect in a
+    /// test that expects it *not* to be resurrected would panic again and abort
+    /// the test instead of failing it with a readable assertion.
+    fn panicking_on_second_run() -> (Rc<Signal<u32>>, Rc<Cell<u32>>, EffectHandle) {
+        let sig = Rc::new(Signal::new(0u32));
+        let runs = Rc::new(Cell::new(0u32));
+        let panicked = Rc::new(Cell::new(false));
+
+        let s = sig.clone();
+        let r = runs.clone();
+        let p = panicked.clone();
+        let handle = effect(move || {
+            r.set(r.get() + 1);
+            s.get();
+            if r.get() >= 2 && !p.replace(true) {
+                panic!("effect body panicked on purpose");
+            }
+        });
+
+        assert_eq!(runs.get(), 1, "the effect runs once on registration");
+        (sig, runs, handle)
+    }
+
+    /// A panicking effect body must not leave the scheduler dead.
+    ///
+    /// `IS_FLUSHING` used to be cleared only by falling out of the flush loop, so
+    /// a panicking body unwound past it and left the flag set. Every later
+    /// `flush_queue` then returned immediately, so effects were still created and
+    /// enqueued and nothing ever ran them again — and there was no recovery path.
+    /// This is the reason the flag is restored from a `Drop` guard.
+    ///
+    /// In-file rather than in `velox-core/tests/`: the sibling test below has to
+    /// read and clear `IS_FLUSHING` to isolate `CURRENT_EFFECT`, and that is only
+    /// reachable from inside the module.
+    ///
+    /// Fails deterministically before the fix: the final `other.set(1)` enqueues
+    /// the effect and nothing flushes it, so the run count stays at 1.
+    #[test]
+    fn a_panicking_effect_body_does_not_strand_the_scheduler() {
+        let (sig, _runs, _panicking) = panicking_on_second_run();
+
+        // This `set` flushes the queue, which runs the body; the body panics and
+        // the unwind escapes `flush_queue`.
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            sig.set(1);
+        }));
+        assert!(
+            outcome.is_err(),
+            "the body was supposed to panic during the flush"
+        );
+
+        // The scheduler must still be alive: a fresh, unrelated signal has to
+        // schedule and run a brand new effect.
+        let other = Rc::new(Signal::new(0u32));
+        let other_runs = Rc::new(Cell::new(0u32));
+
+        let o = other.clone();
+        let or = other_runs.clone();
+        let _other_handle = effect(move || {
+            or.set(or.get() + 1);
+            o.get();
+        });
+        assert_eq!(other_runs.get(), 1, "the fresh effect ran on registration");
+
+        other.set(1);
+        assert_eq!(
+            other_runs.get(),
+            2,
+            "the scheduler is still dead: `IS_FLUSHING` was stranded by the unwind, \
+             so this `set` enqueued the effect and nothing ever flushed it"
+        );
+    }
+
+    /// A panicking effect body must not strand `CURRENT_EFFECT`.
+    ///
+    /// A stranded `CURRENT_EFFECT` attributes the next read — even one made
+    /// outside any effect — to the dead effect, registering a dead weak
+    /// subscriber that a later `set` then revives.
+    ///
+    /// `IS_FLUSHING` is cleared by hand here so this test isolates
+    /// `CURRENT_EFFECT` stranding; the test above is the guard on that flag, and
+    /// until both are fixed a stranded flag masks this one by stopping the flush
+    /// that would expose it. After the fix the hand-clear is a no-op.
+    #[test]
+    fn a_panicking_effect_body_does_not_strand_current_effect() {
+        let (sig, runs, _panicking) = panicking_on_second_run();
+
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            sig.set(1);
+        }));
+        assert!(
+            outcome.is_err(),
+            "the body was supposed to panic during the flush"
+        );
+        IS_FLUSHING.with(|f| f.set(false));
+
+        // A read outside any effect body must not be attributed to anything.
+        let fresh = Rc::new(Signal::new(0u32));
+        assert_eq!(
+            fresh.get(),
+            0,
+            "a read outside any effect must not be attributed to a dead effect"
+        );
+
+        // If the unwind stranded `CURRENT_EFFECT`, the read above registered the
+        // dead effect as a subscriber of `fresh`, and this `set` revives it.
+        fresh.set(1);
+        assert_eq!(
+            runs.get(),
+            2,
+            "a stranded `CURRENT_EFFECT` attributed an out-of-effect read to the \
+             dead effect, which then ran again: {} runs",
+            runs.get()
+        );
+    }
+
+    /// An effect whose initial body writes the signal it read must not panic.
+    ///
+    /// This is the reachable double-borrow. `effect` used to run the initial body
+    /// with `CURRENT_EFFECT` set but with the re-entrancy guard *not* raised, so
+    /// a body that read a signal and then wrote it re-entered `flush_queue`,
+    /// which popped the effect currently executing and borrowed its body again
+    /// while the outer borrow was still live. No `#[should_panic]` here: before
+    /// the fix this test simply dies with a `BorrowMutError`.
+    ///
+    /// The write happens only on the first run so the effect converges instead of
+    /// re-enqueueing itself forever — `set` enqueues subscribers unconditionally,
+    /// so a body that always wrote would loop inside the next flush. The
+    /// subscription is still checked afterwards, because raising the guard must
+    /// not cost the effect the dependency it collected.
+    #[test]
+    fn an_initial_body_that_writes_the_signal_it_reads_does_not_panic() {
+        let sig = Rc::new(Signal::new(0u32));
+        let runs = Rc::new(Cell::new(0u32));
+        let wrote = Rc::new(Cell::new(false));
+
+        let s = sig.clone();
+        let r = runs.clone();
+        let w = wrote.clone();
+        let handle = effect(move || {
+            r.set(r.get() + 1);
+            let v = s.get();
+            if !w.replace(true) {
+                s.set(v + 1);
+            }
+        });
+
+        assert_eq!(runs.get(), 1, "the initial run completed without panicking");
+        assert_eq!(sig.get(), 1, "the initial run's write landed");
+
+        // Still subscribed, so a later set still re-runs it.
+        sig.set(5);
+        assert_eq!(runs.get(), 2, "the effect must still be subscribed");
+        assert_eq!(sig.get(), 5);
+
+        drop(handle);
     }
 }
