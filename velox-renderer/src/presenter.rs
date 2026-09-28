@@ -208,6 +208,9 @@ pub struct SoftbufferPresenter {
     /// Legacy aliases — kept in sync with viewport.
     width: u32,
     height: u32,
+    /// Staging buffer for `read_pixels`, in the surface's native `N32` order
+    /// ([B, G, R, A] little-endian), which is already softbuffer's word order.
+    /// Written once per frame and then bulk-copied — no per-pixel work.
     rgba: Vec<u8>,
     /// Once we observe a broken-pipe / compositor-lost error the presenter
     /// degrades to a no-op so the app can keep rendering offscreen without
@@ -282,11 +285,6 @@ impl SoftbufferPresenter {
         })
     }
 
-    /// Whether this presenter has degraded to no-op after a broken-pipe error.
-    pub fn is_degraded(&self) -> bool {
-        self.degraded
-    }
-
     /// Resizes the presenter to new dimensions.
     ///
     /// No-op if dimensions haven't changed. If the presenter has degraded
@@ -325,8 +323,11 @@ impl SoftbufferPresenter {
 
     /// Presents the contents of the Skia surface to the window.
     ///
-    /// Reads pixels from the Skia surface, converts from RGBA to the
-    /// softbuffer format, and presents to the display.
+    /// Reads pixels from the Skia surface into the staging buffer and
+    /// bulk-copies them into the softbuffer buffer, then presents to the
+    /// display. No per-pixel colour conversion is needed: the surface's
+    /// native `N32` order already matches softbuffer's (see the comment at
+    /// the `ImageInfo` below).
     ///
     /// If the compositor connection is broken (EPIPE / broken pipe) the
     /// presenter degrades to a no-op and subsequent calls return `Ok(())`
@@ -349,9 +350,25 @@ impl SoftbufferPresenter {
             return Ok(());
         }
 
+        // Read back in the surface's own `N32` order. The surface is created
+        // with `raster_n32_premul`, and on a little-endian target Skia's
+        // `kN32_SkColorType` is `kBGRA_8888` — i.e. the surface already holds
+        // `[B, G, R, A]` in memory, which is exactly softbuffer's word order.
+        //
+        // Previously this asked for `ColorType::RGBA8888`, which made Skia
+        // swizzle BGRA -> RGBA on the way out, and the per-pixel loop below
+        // then swizzled straight back RGB -> BGR. The two transforms cancelled
+        // out, so the whole per-pixel pass existed only to undo Skia's copy.
+        // Asking for `N32` makes `read_pixels` a straight copy and leaves a
+        // bulk memcpy below.
+        //
+        // This is verified at the byte level by
+        // `tests/presenter_pixel_bytes.rs`, which also pins that N32 really is
+        // BGRA on this target (a build that flipped it would fail there
+        // rather than silently presenting swapped channels).
         let info = skia_safe::ImageInfo::new(
             (self.width as i32, self.height as i32),
-            skia_safe::ColorType::RGBA8888,
+            skia_safe::ColorType::N32,
             skia_safe::AlphaType::Premul,
             None,
         );
@@ -383,16 +400,11 @@ impl SoftbufferPresenter {
                 "softbuffer: buffer smaller than expected".into(),
             ));
         }
-        for (i, pixel) in pixels.iter_mut().take(pixel_count).enumerate() {
-            let base = i * 4;
-            let r = self.rgba[base] as u32;
-            let g = self.rgba[base + 1] as u32;
-            let b = self.rgba[base + 2] as u32;
-            let a = self.rgba[base + 3] as u32;
-            // Softbuffer uses ARGB8888 format (u32: 0xAARRGGBB, memory byte order: BGRA)
-            // Skia outputs RGBA with premultiplied alpha
-            *pixel = (a << 24) | (r << 16) | (g << 8) | b;
-        }
+        // The staging bytes from `read_pixels` are already in softbuffer's
+        // layout (0xAARRGGBB, little-endian memory order [B, G, R, A]), so
+        // this is a straight byte copy rather than a per-pixel swizzle.
+        let dst = bytemuck::cast_slice_mut::<u32, u8>(&mut pixels[..pixel_count]);
+        dst.copy_from_slice(&self.rgba[..pixel_count * 4]);
         if let Err(e) = buffer.present() {
             let msg = e.to_string();
             if is_broken_pipe_error(&msg) {

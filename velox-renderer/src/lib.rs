@@ -163,7 +163,12 @@ fn recompute_targets(
         &mut order,
         hover_targets,
     );
-    input_targets.clear();
+    // Edit state (focus / caret / selection / blink phase) lives on the targets,
+    // and a target rebuild throws it all away. Move the old vector aside and
+    // re-apply it onto the freshly collected targets by tree path, so a
+    // re-render does not silently drop the caret. `std::mem::take` is only a
+    // move — the fresh collection below reuses the same allocation.
+    let previous = std::mem::take(input_targets);
     let mut order = 0;
     let mut path = Vec::new();
     crate::events::collect_input_targets(
@@ -175,6 +180,9 @@ fn recompute_targets(
         &mut order,
         input_targets,
     );
+    crate::events::preserve_input_state(input_targets, &previous, &|p| {
+        input_value_char_len(vnode, p)
+    });
 }
 
 #[cfg(feature = "skia-native")]
@@ -205,18 +213,201 @@ fn with_hover_ids(vnode: &velox_dom::VNode, next_id: &mut u32) -> velox_dom::VNo
     }
 }
 
-/// Apply one character of keyboard input to the focused text input, if any.
-/// Reads the input's current `value` and `on:input` handler from the most
-/// recently built VNode, computes the new value (backspace / character /
-/// enter), and dispatches it so the app state updates.
+/// Caret blink half-period, in milliseconds.
+///
+/// 530 ms is the conventional caret cadence. It is a named const rather than a
+/// literal at the call site because the tick interval, the "solid while
+/// typing" grace window, and the post-key re-arm deadline must all agree.
 #[cfg(feature = "skia-native")]
-fn dispatch_input_to_focused(
-    ch: char,
+const CARET_BLINK_MS: u64 = 530;
+
+/// Default font size (px) assumed for caret hit testing when the cascaded
+/// style carries no `font-size`.
+#[cfg(feature = "skia-native")]
+const DEFAULT_INPUT_FONT_SIZE: f32 = 16.0;
+
+/// Posts a recurring `UserEvent` to the winit event loop so the caret blink has
+/// a clock.
+///
+/// Why there is a thread at all: the loops run with `ControlFlow::Wait`, so they
+/// only wake for real OS events. A bare `Instant::now()` deadline check inside
+/// the event closure would therefore never fire while the user is idle, and the
+/// caret would freeze solid. winit 0.28 has no timer API, so the tick has to
+/// come in as a user event.
+///
+/// Why this is not a shared-state race: the thread owns nothing but an
+/// `EventLoopProxy`, a cloned copy of the tick payload, and an `AtomicBool`
+/// stop flag. It has no reference to `input_targets`, the VNode, the renderer,
+/// or the presenter — it cannot read or write renderer state at all. Every
+/// `blink_on` mutation happens on the event-loop thread, inside the event
+/// closure, where the renderer is already single-threaded. This is exactly the
+/// property a `Mutex<InputState>` design would have had to give up.
+///
+/// The thread is joined in `Drop`, so closing the window does not leave a
+/// detached ticker posting events at a dead loop.
+#[cfg(feature = "skia-native")]
+struct CaretBlinkTicker<T: Clone + Send + 'static> {
+    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    handle: Option<std::thread::JoinHandle<()>>,
+    /// The tick payload is moved into the thread, so the struct itself does
+    /// not otherwise mention `T`. This marker is what ties the type parameter
+    /// to the type; it is zero-sized and owns nothing.
+    _tick: std::marker::PhantomData<fn() -> T>,
+}
+
+#[cfg(feature = "skia-native")]
+impl<T: Clone + Send + 'static> CaretBlinkTicker<T> {
+    /// Start ticking. `tick` is the payload posted on every interval — `()` for
+    /// the plain loop, [`HmrMessage::KeepWindow`] for the HMR loop, whose
+    /// channel is typed.
+    fn start(proxy: winit::event_loop::EventLoopProxy<T>, tick: T) -> Self {
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let stop_thread = std::sync::Arc::clone(&stop);
+        let period = std::time::Duration::from_millis(CARET_BLINK_MS);
+        let handle = std::thread::Builder::new()
+            .name("velox-caret-blink".into())
+            .spawn(move || {
+                while !stop_thread.load(std::sync::atomic::Ordering::Relaxed) {
+                    std::thread::sleep(period);
+                    if stop_thread.load(std::sync::atomic::Ordering::Relaxed) {
+                        break;
+                    }
+                    // winit 0.28's `EventLoopProxy<T>::send_event` takes the
+                    // user-event payload `T` directly — the platform layer wraps
+                    // it into `Event::UserEvent(..)` on delivery. Sending fails
+                    // once the loop is gone, which is the exit condition.
+                    if proxy.send_event(tick.clone()).is_err() {
+                        break;
+                    }
+                }
+            })
+            .ok();
+        Self {
+            stop,
+            handle,
+            _tick: std::marker::PhantomData,
+        }
+    }
+}
+
+#[cfg(feature = "skia-native")]
+impl<T: Clone + Send + 'static> Drop for CaretBlinkTicker<T> {
+    fn drop(&mut self) {
+        self.stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        if let Some(h) = self.handle.take() {
+            let _ = h.join();
+        }
+    }
+}
+
+/// Advance the caret blink phase on a ticker event.
+///
+/// Returns `true` when the phase actually flipped and the frame must be
+/// repainted. A tick that arrives inside the "solid while typing" window set by
+/// a keypress or a focus change does *not* flip: it only re-arms the deadline,
+/// which is what stops the caret from blinking off milliseconds after a
+/// keystroke.
+#[cfg(feature = "skia-native")]
+fn on_caret_blink_tick(
+    input_targets: &mut [crate::events::InputTarget],
+    blink_deadline: &mut Option<std::time::Instant>,
+) -> bool {
+    let Some(idx) = crate::events::focused_input_index(input_targets) else {
+        return false;
+    };
+    let now = std::time::Instant::now();
+    if let Some(d) = *blink_deadline
+        && now < d
+    {
+        return false;
+    }
+    input_targets[idx].blink_on = !input_targets[idx].blink_on;
+    *blink_deadline = Some(now + std::time::Duration::from_millis(CARET_BLINK_MS));
+    true
+}
+
+/// Re-arm the blink grace window after a keypress or focus change.
+///
+/// This is the "caret goes solid while you type" rule: any editing action
+/// defers the next phase flip by one cadence period. Without it a keystroke
+/// landing just before a tick would be blinked off a few milliseconds later,
+/// which reads as flicker rather than as a caret.
+#[cfg(feature = "skia-native")]
+fn arm_blink_deadline(blink_deadline: &mut Option<std::time::Instant>) {
+    *blink_deadline =
+        Some(std::time::Instant::now() + std::time::Duration::from_millis(CARET_BLINK_MS));
+}
+
+/// Read a declaration out of a cascaded `style` attribute (`"a: b; c: d"`).
+#[cfg(feature = "skia-native")]
+fn style_decl<'s>(style: &'s str, key: &str) -> Option<&'s str> {
+    style
+        .split(';')
+        .filter_map(|d| d.split_once(':'))
+        .find(|(k, _)| k.trim() == key)
+        .map(|(_, v)| v.trim())
+}
+
+/// Parse a `px` length, rejecting non-finite and non-positive values.
+#[cfg(feature = "skia-native")]
+fn parse_px(v: &str) -> Option<f32> {
+    let n = v.trim().strip_suffix("px")?.trim().parse::<f32>().ok()?;
+    (n.is_finite() && n > 0.0).then_some(n)
+}
+
+/// Effective font size (px) of a styled element, for caret hit testing.
+#[cfg(feature = "skia-native")]
+fn resolve_font_size(props: &velox_dom::Props) -> f32 {
+    props
+        .attrs
+        .get("style")
+        .and_then(|s| style_decl(s, "font-size"))
+        .and_then(parse_px)
+        .unwrap_or(DEFAULT_INPUT_FONT_SIZE)
+}
+
+/// Left content edge of a text input: the box origin plus `padding-left`.
+/// The click-to-caret mapping is relative to this, so padding shifts the caret
+/// to match the painted glyphs.
+#[cfg(feature = "skia-native")]
+fn resolve_text_origin_x(props: &velox_dom::Props, rect: velox_dom::layout::Rect) -> f32 {
+    let pad = props
+        .attrs
+        .get("style")
+        .and_then(|s| style_decl(s, "padding-left"))
+        .and_then(parse_px)
+        .unwrap_or(0.0);
+    rect.x as f32 + pad
+}
+
+/// The `value` attribute of the element at `path`, if it is an element.
+#[cfg(feature = "skia-native")]
+fn input_value_at(vnode: &VNode, path: &[usize]) -> Option<String> {
+    match find_node_at_path(vnode, path) {
+        Some(VNode::Element { props, .. }) => {
+            Some(props.attrs.get("value").cloned().unwrap_or_default())
+        }
+        _ => None,
+    }
+}
+
+/// Char length of the value at `path`, 0 when there is no such input.
+#[cfg(feature = "skia-native")]
+fn input_value_char_len(vnode: &VNode, path: &[usize]) -> usize {
+    input_value_at(vnode, path)
+        .map(|s| s.chars().count())
+        .unwrap_or(0)
+}
+
+/// Dispatch an explicit new value to the input at `path` via its `on:input`
+/// handler, so the app's state and the next `make_view` see the edit.
+#[cfg(feature = "skia-native")]
+fn dispatch_input_value(
     last_vnode: &Option<VNode>,
-    focused_input: &Option<Vec<usize>>,
+    path: &[usize],
+    new_value: &str,
     on_event: &mut impl FnMut(&str, Option<&str>),
 ) {
-    let Some(path) = focused_input else { return };
     let Some(vnode) = last_vnode else { return };
     let Some(node) = find_node_at_path(vnode, path) else {
         return;
@@ -227,21 +418,236 @@ fn dispatch_input_to_focused(
     let Some(handler) = props.attrs.get("on:input").cloned() else {
         return;
     };
-    let current = props.attrs.get("value").cloned().unwrap_or_default();
-    let new_value = if ch == '\u{8}' {
-        // Backspace: drop the last Unicode scalar.
-        current
-            .chars()
-            .take(current.chars().count().saturating_sub(1))
-            .collect()
-    } else if ch == '\r' || ch == '\n' {
-        current
-    } else {
-        let mut s = current;
-        s.push(ch);
-        s
+    on_event(&handler, Some(new_value));
+}
+
+/// Apply one editing action to the focused input and dispatch any text change.
+///
+/// Shared by both event loops — that shared call is what keeps the HMR loop
+/// from drifting away from the plain one again. Returns `true` when the caller
+/// must repaint.
+#[cfg(feature = "skia-native")]
+fn apply_edit_to_focused(
+    input_targets: &mut [crate::events::InputTarget],
+    action: crate::events::EditAction,
+    last_vnode: &Option<VNode>,
+    on_event: &mut impl FnMut(&str, Option<&str>),
+) -> bool {
+    let Some(idx) = crate::events::focused_input_index(input_targets) else {
+        return false;
     };
-    on_event(&handler, Some(&new_value));
+    let path = input_targets[idx].path.clone();
+    let value = last_vnode
+        .as_ref()
+        .and_then(|v| input_value_at(v, &path))
+        .unwrap_or_default();
+    let res = crate::events::apply_edit(&mut input_targets[idx], &value, action);
+    if res.submit {
+        // Submit always dispatches: with no selection the text is unchanged, and
+        // the handler still has to see the submission.
+        let v = res.value.clone().unwrap_or_else(|| value.clone());
+        dispatch_input_value(last_vnode, &path, &v, on_event);
+    } else if let Some(new_value) = &res.value {
+        dispatch_input_value(last_vnode, &path, new_value, on_event);
+    }
+    res.needs_repaint()
+}
+
+/// Resolve the VirtualKeyCode of a key event into an editing action, honouring
+/// the Shift modifier. Returns `None` for keys that are not editing commands.
+#[cfg(feature = "skia-native")]
+fn edit_action_for_key(
+    keycode: winit::event::VirtualKeyCode,
+    shift: bool,
+) -> Option<crate::events::EditAction> {
+    use crate::events::EditAction;
+    use winit::event::VirtualKeyCode as K;
+    Some(match keycode {
+        K::Left => EditAction::MoveLeft { shift },
+        K::Right => EditAction::MoveRight { shift },
+        K::Home => EditAction::Home { shift },
+        K::End => EditAction::End { shift },
+        K::Back => EditAction::Backspace,
+        K::Delete => EditAction::Delete,
+        K::Return => EditAction::Submit,
+        _ => return None,
+    })
+}
+
+/// Inject the caret/selection/focus contract onto every text input in the tree.
+///
+/// Paint never reads live event state. It reads these five attrs off the styled
+/// VNode, which is what makes the caret headless-testable — a golden can be
+/// produced from a VNode alone, with no event loop running:
+///
+/// - `caret`       — caret position as a char index into the value
+/// - `caret_blink` — `"true"` when the caret bar is visible this frame
+/// - `sel_start`   — selection start char index (== `caret` when collapsed)
+/// - `sel_end`     — selection end char index
+/// - `focused`     — `"true"` when the input holds keyboard focus
+///
+/// Runs *after* `style_vnode_with_hover` (the single style-cascade application
+/// site) and before layout, so it adds no second cascade and no second
+/// rounding. Every text input always carries all five attrs, so paint never has
+/// to invent a default for a missing one.
+#[cfg(feature = "skia-native")]
+fn inject_input_caret_attrs(vnode: &VNode, focused: Option<&crate::events::InputTarget>) -> VNode {
+    /// Descend one level. `on_path` means "this node is an ancestor of (or is)
+    /// the focused input"; `focused_path` is the remainder to match.
+    fn walk(
+        node: &VNode,
+        focused_path: Option<&[usize]>,
+        on_path: bool,
+        focused: Option<&crate::events::InputTarget>,
+    ) -> VNode {
+        match node {
+            VNode::Text(_) => node.clone(),
+            VNode::Element {
+                tag,
+                props,
+                children,
+            } => {
+                let mut new_props = props.clone();
+                if crate::events::is_text_input(tag, props) {
+                    let (is_focused, cursor, blink, sel_start, sel_end) = match focused {
+                        Some(t) if on_path => {
+                            let (a, b) = t.selection().unwrap_or((t.cursor, t.cursor));
+                            (true, t.cursor, t.blink_on, a, b)
+                        }
+                        // Unfocused inputs still get the attrs, so paint reads
+                        // a total contract rather than guessing at absence.
+                        _ => (false, 0, true, 0, 0),
+                    };
+                    new_props = new_props
+                        .set("focused", if is_focused { "true" } else { "false" })
+                        .set("caret", cursor.to_string())
+                        .set("caret_blink", if blink { "true" } else { "false" })
+                        .set("sel_start", sel_start.to_string())
+                        .set("sel_end", sel_end.to_string());
+                }
+                let new_children = children
+                    .iter()
+                    .enumerate()
+                    .map(|(i, child)| {
+                        let child_on_path = on_path
+                            && focused_path
+                                .and_then(|p| p.first())
+                                .map(|first| *first == i)
+                                .unwrap_or(false);
+                        let rest = if child_on_path {
+                            focused_path.map(|p| &p[1..])
+                        } else {
+                            None
+                        };
+                        walk(child, rest, child_on_path, focused)
+                    })
+                    .collect();
+                VNode::Element {
+                    tag: tag.clone(),
+                    props: new_props,
+                    children: new_children,
+                }
+            }
+        }
+    }
+
+    let focused_path = focused.map(|t| t.path.as_slice());
+    walk(vnode, focused_path, true, focused)
+}
+
+/// Effective font family of a styled element, for caret hit testing.
+#[cfg(feature = "skia-native")]
+fn resolve_font_family(props: &velox_dom::Props) -> String {
+    props
+        .attrs
+        .get("style")
+        .and_then(|s| style_decl(s, "font-family"))
+        .filter(|f| !f.is_empty())
+        .unwrap_or("system-ui, sans-serif")
+        .to_string()
+}
+
+/// Move keyboard focus to the text input under the cursor (or drop focus),
+/// and place the caret.
+///
+/// Shared by both event loops for the same reason `apply_edit_to_focused` is:
+/// the HMR loop used to have no focus handling at all, and a second copy of
+/// this is how the drift happened.
+///
+/// Caret placement differs by case, and the difference is deliberate:
+/// - clicking an input that did **not** have focus is a focus *gain*, so the
+///   caret goes to the end of the value (the conventional behaviour, and what
+///   makes "click a field and start typing" replace rather than prepend);
+/// - clicking an input that already had focus is a reposition, so the caret
+///   goes to the clicked glyph via [`crate::events::click_to_char_index`].
+///
+/// Returns `true` when the caller must repaint — i.e. focus actually changed or
+/// the caret moved.
+#[cfg(feature = "skia-native")]
+fn apply_click_focus(
+    input_targets: &mut [crate::events::InputTarget],
+    last_vnode: &Option<VNode>,
+    focused_input: &mut Option<Vec<usize>>,
+    x: f32,
+    y: f32,
+    scale_factor: f32,
+) -> bool {
+    let Some(idx) = crate::events::hit_test_input_index(input_targets, x, y) else {
+        // Clicked empty space: blur. Clearing the selection is what stops a
+        // stale highlight from surviving on a field the user has left. The
+        // caret position is deliberately kept, so re-entering the field
+        // restores where the user was.
+        let mut changed = false;
+        for t in input_targets.iter_mut() {
+            if t.focused || t.anchor.is_some() {
+                t.focused = false;
+                t.anchor = None;
+                t.blink_on = true;
+                changed = true;
+            }
+        }
+        if focused_input.take().is_some() {
+            changed = true;
+        }
+        return changed;
+    };
+
+    let was_focused = input_targets[idx].focused;
+    let rect = input_targets[idx].rect;
+    let path = input_targets[idx].path.clone();
+    let mut caret: Option<usize> = None;
+    let mut value_len: Option<usize> = None;
+    if let Some(vnode) = last_vnode.as_ref()
+        && let Some(VNode::Element { props, .. }) = find_node_at_path(vnode, &path)
+    {
+        let value = props.attrs.get("value").cloned().unwrap_or_default();
+        value_len = Some(value.chars().count());
+        let font_size = resolve_font_size(props);
+        let config = crate::text::TextRenderConfig::new(&resolve_font_family(props), font_size);
+        let origin_x = resolve_text_origin_x(props, rect);
+        // Measure through the renderer's own text stack (single measure path,
+        // skia-aware under `skia-native`) rather than a local heuristic, so the
+        // caret lands on the glyph the paint lane will actually draw.
+        let measure =
+            |s: &str| crate::text::TextMeasurer::measure_with_scale(s, &config, scale_factor).0;
+        caret = Some(crate::events::click_to_char_index(
+            &value, rect, x, origin_x, font_size, &measure,
+        ));
+    }
+
+    input_targets[idx].focused = true;
+    input_targets[idx].blink_on = true;
+    // A plain click is never a selection-extension; it collapses one.
+    input_targets[idx].anchor = None;
+    // `cursor` is a char index, so "the end" is the char count, not `len()`.
+    input_targets[idx].cursor = if was_focused {
+        caret.unwrap_or(input_targets[idx].cursor)
+    } else {
+        // Focus gain: caret to the end of the value.
+        value_len.unwrap_or(input_targets[idx].cursor)
+    };
+    *focused_input = Some(path);
+    true
 }
 
 pub mod event_binding;
@@ -874,12 +1280,12 @@ fn panic_detail(payload: Box<dyn std::any::Any + Send>) -> String {
 /// The renderer calls it:
 /// * once on startup,
 /// * on every `RedrawRequested` / resize / DPI change with the *current* logical `w,h`.
-/// Templates must not ignore `(w,h)` (no `|_w, _h|`). The canonical
-/// responsive pattern is a viewport-filling root:
-/// `width: 100%; min-height: 100vh` on `.app` (see `velox-cli/templates/project/src/App.vx`).
-/// With `width:100%` and `min-height:100vh`, `compute_layout(vnode, w as i32, h as i32)`
-/// reflows visibly on every window resize — no element hidden when it should be visible
-/// (Flutter invariant). Callers may also thread `(w,h)` into style/layout decisions if needed.
+///   Templates must not ignore `(w,h)` (no `|_w, _h|`). The canonical
+///   responsive pattern is a viewport-filling root:
+///   `width: 100%; min-height: 100vh` on `.app` (see `velox-cli/templates/project/src/App.vx`).
+///   With `width:100%` and `min-height:100vh`, `compute_layout(vnode, w as i32, h as i32)`
+///   reflows visibly on every window resize — no element hidden when it should be visible
+///   (Flutter invariant). Callers may also thread `(w,h)` into style/layout decisions if needed.
 ///
 /// ## Root normalization
 ///
@@ -1017,6 +1423,13 @@ where
     let mut input_targets: Vec<crate::events::InputTarget> = Vec::new();
     // Path (child source indices) to the focused text input, if any.
     let mut focused_input: Option<Vec<usize>> = None;
+    // Instant before which the caret must stay solid regardless of tick
+    // timing. Armed by every editing key and by focus changes.
+    let mut blink_deadline: Option<std::time::Instant> = None;
+    // Shift state, latched from `WindowEvent::ModifiersChanged`. winit 0.28
+    // deprecates `KeyboardInput::modifiers` in favour of this event, so the
+    // caret reads the latched value instead of the deprecated field.
+    let mut shift_held = false;
     // Scrollable overflow model: wheel clamping + deepest hit_test
     let mut scroll_offsets: std::collections::HashMap<Vec<usize>, f32> =
         std::collections::HashMap::new();
@@ -1048,6 +1461,10 @@ where
                 .map(|id| Some(id) == hovered_id)
                 .unwrap_or(false)
         });
+        // First frame: no input can be focused yet, so every text input gets
+        // the unfocused defaults. Injected anyway so the attr contract holds on
+        // frame one and paint never has to special-case absence.
+        let vnode = crate::inject_input_caret_attrs(&vnode, None);
         let mut layout = velox_dom::layout::compute_layout(&vnode, vw as i32, vh as i32);
         {
             let mut path = Vec::new();
@@ -1065,10 +1482,10 @@ where
         if let Err(e) = crate::skia_render::skia_impl::render_frame(s, &vnode, &layout, &sheet) {
             log::error!("skia initial render error: {}", e);
         }
-        if let Some(presenter) = presenter.as_mut() {
-            if let Err(e) = presenter.present(s) {
-                log::error!("skia initial present error: {}", e);
-            }
+        if let Some(presenter) = presenter.as_mut()
+            && let Err(e) = presenter.present(s)
+        {
+            log::error!("skia initial present error: {}", e);
         }
     }
 
@@ -1076,6 +1493,13 @@ where
         // The event loop can panic if the display server becomes unreachable
         // (e.g. "Io error: Broken pipe") — catch that and degrade gracefully.
         let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            // Caret blink clock. `EventLoop::new()` is an alias for
+            // `EventLoopBuilder::new().build()`, and that constructor calls
+            // `with_user_event()`, so the user-event channel is already enabled
+            // here and `create_proxy()` needs no builder change. Held in a local
+            // inside the unwind closure so its `Drop` joins the thread when the
+            // loop ends.
+            let _blink_ticker = crate::CaretBlinkTicker::start(event_loop.create_proxy(), ());
             event_loop.run(move |event, _, control_flow| {
                 *control_flow = ControlFlow::Wait;
                 match event {
@@ -1158,15 +1582,20 @@ where
                             },
                         ..
                     } => {
-                        // Text-input focus: clicking a text field focuses it; clicking
-                        // anywhere else drops focus.
-                        if let Some(target) =
-                            crate::events::hit_test_input(&input_targets, mouse_pos.0, mouse_pos.1)
-                        {
-                            focused_input = Some(target.path.clone());
-                        } else {
-                            focused_input = None;
-                        }
+                        // Text-input focus: clicking a text field focuses it and
+                        // places the caret; clicking anywhere else drops focus and
+                        // clears the selection. This runs BEFORE the click-handler
+                        // test and is deliberately independent of it — see the
+                        // redraw hoist at the bottom of this arm.
+                        crate::apply_click_focus(
+                            &mut input_targets,
+                            &last_vnode,
+                            &mut focused_input,
+                            mouse_pos.0,
+                            mouse_pos.1,
+                            scale_factor,
+                        );
+                        let mut handled_click = false;
                         if let Some((handler, payload_opt)) =
                             crate::events::hit_test_click(&click_targets, mouse_pos.0, mouse_pos.1)
                         {
@@ -1193,6 +1622,11 @@ where
                                             .unwrap_or(false)
                                     },
                                 );
+                                let vnode = crate::inject_input_caret_attrs(
+                                    &vnode,
+                                    crate::events::focused_input_index(&input_targets)
+                                        .and_then(|i| input_targets.get(i)),
+                                );
                                 let mut layout =
                                     velox_dom::layout::compute_layout(&vnode, vw as i32, vh as i32);
                                 {
@@ -1212,11 +1646,27 @@ where
                                     &mut input_targets,
                                 );
                             }
-                            if let Some(w) = window_opt.as_ref() {
-                                w.set_title(&get_title());
-                                w.request_redraw();
-                            }
+                            handled_click = true;
                         }
+                        if let Some(w) = window_opt.as_ref() {
+                            if handled_click {
+                                w.set_title(&get_title());
+                            }
+                            // HOISTED OUT of the `hit_test_click` arm on purpose.
+                            // This used to live inside it, so a click that hit
+                            // empty space changed focus and then never repainted:
+                            // the focus ring and caret were stuck at their old
+                            // values. Focus is now state the frame depends on, so
+                            // any change to it must schedule a redraw.
+                            w.request_redraw();
+                        }
+                    }
+                    Event::WindowEvent {
+                        event: WindowEvent::ModifiersChanged(mods),
+                        ..
+                    } => {
+                        // Latch modifier state for Shift-extends-selection.
+                        shift_held = mods.shift();
                     }
                     Event::WindowEvent {
                         event: WindowEvent::KeyboardInput { input, .. },
@@ -1237,36 +1687,40 @@ where
                                     velox_core::lifecycle::run_all_destroy_hooks();
                                     *control_flow = ControlFlow::Exit;
                                 }
-                                VirtualKeyCode::Back => {
-                                    if focused_input.is_some() {
-                                        crate::dispatch_input_to_focused(
-                                            '\u{8}',
+                                _ => {
+                                    // Every remaining editing key routes through the
+                                    // one shared call, so the HMR loop cannot drift
+                                    // from this one again.
+                                    if let Some(action) =
+                                        crate::edit_action_for_key(keycode, shift_held)
+                                    {
+                                        let changed = crate::apply_edit_to_focused(
+                                            &mut input_targets,
+                                            action,
                                             &last_vnode,
-                                            &focused_input,
                                             &mut on_event,
                                         );
-                                        velox_core::lifecycle::run_all_updated_hooks();
-                                        if let Some(w) = window_opt.as_ref() {
-                                            w.request_redraw();
+                                        if changed {
+                                            // Caret goes solid while you type.
+                                            arm_blink_deadline(&mut blink_deadline);
+                                            velox_core::lifecycle::run_all_updated_hooks();
+                                            if let Some(w) = window_opt.as_ref() {
+                                                w.request_redraw();
+                                            }
                                         }
                                     }
                                 }
-                                VirtualKeyCode::Return => {
-                                    if focused_input.is_some() {
-                                        crate::dispatch_input_to_focused(
-                                            '\r',
-                                            &last_vnode,
-                                            &focused_input,
-                                            &mut on_event,
-                                        );
-                                        velox_core::lifecycle::run_all_updated_hooks();
-                                        if let Some(w) = window_opt.as_ref() {
-                                            w.request_redraw();
-                                        }
-                                    }
-                                }
-                                _ => {}
                             }
+                        }
+                    }
+                    Event::UserEvent(()) => {
+                        // Caret blink tick from `CaretBlinkTicker`. See that
+                        // type for why a thread is involved and why it is not a
+                        // shared-state race.
+                        if crate::on_caret_blink_tick(&mut input_targets, &mut blink_deadline)
+                            && let Some(w) = window_opt.as_ref()
+                        {
+                            w.request_redraw();
                         }
                     }
                     Event::WindowEvent {
@@ -1274,16 +1728,17 @@ where
                         ..
                     } => {
                         // Printable characters go to the focused text input.
-                        if let Some(_) = &focused_input
-                            && !c.is_control()
+                        if !c.is_control()
                             && c != '\u{7f}'
-                        {
-                            crate::dispatch_input_to_focused(
-                                c,
+                            && crate::apply_edit_to_focused(
+                                &mut input_targets,
+                                crate::events::EditAction::Insert(c),
                                 &last_vnode,
-                                &focused_input,
                                 &mut on_event,
-                            );
+                            )
+                        {
+                            // Caret goes solid while you type.
+                            arm_blink_deadline(&mut blink_deadline);
                             velox_core::lifecycle::run_all_updated_hooks();
                             if let Some(w) = window_opt.as_ref() {
                                 w.request_redraw();
@@ -1329,10 +1784,10 @@ where
                                     log::warn!("renderer resize failed ({}x{}): {}", pw, ph, e);
                                 }
                             }
-                            if let Some(presenter) = presenter.as_mut() {
-                                if let Err(e) = presenter.resize(pw, ph) {
-                                    log::warn!("presenter resize failed: {}", e);
-                                }
+                            if let Some(presenter) = presenter.as_mut()
+                                && let Err(e) = presenter.resize(pw, ph)
+                            {
+                                log::warn!("presenter resize failed: {}", e);
                             }
                         }
                         // First mount: fire on_mounted once.
@@ -1361,6 +1816,14 @@ where
                                         .unwrap_or(false)
                                 },
                             );
+                            // Caret/selection/focus contract for the paint lane.
+                            // After the style cascade, before layout: it adds no
+                            // second cascade and no second rounding site.
+                            let vnode = crate::inject_input_caret_attrs(
+                                &vnode,
+                                crate::events::focused_input_index(&input_targets)
+                                    .and_then(|i| input_targets.get(i)),
+                            );
                             last_vnode = Some(vnode.clone());
                             let mut layout =
                                 velox_dom::layout::compute_layout(&vnode, vw as i32, vh as i32);
@@ -1385,10 +1848,10 @@ where
                             ) {
                                 log::error!("skia render error: {}", e);
                             }
-                            if let Some(presenter) = presenter.as_mut() {
-                                if let Err(e) = presenter.present(s) {
-                                    log::error!("skia present error: {}", e);
-                                }
+                            if let Some(presenter) = presenter.as_mut()
+                                && let Err(e) = presenter.present(s)
+                            {
+                                log::error!("skia present error: {}", e);
                             }
                         }
                     }
@@ -1403,6 +1866,18 @@ where
     }
     Ok(())
 }
+
+/// What the caught window/loop construction yields: the event loop and its HMR
+/// proxy (both survive even when the window does not), the window itself, its
+/// physical size, and the DPI scale factor.
+#[cfg(feature = "skia-native")]
+type WindowBootstrap = (
+    Option<winit::event_loop::EventLoop<HmrMessage>>,
+    Option<winit::event_loop::EventLoopProxy<HmrMessage>>,
+    Option<winit::window::Window>,
+    winit::dpi::PhysicalSize<u32>,
+    f32,
+);
 
 /// HMR variant — same viewport contract as [`run_window_vnode_skia`] (see its docs).
 /// `make_view` is called with logical `(w, h)` on every frame/resize; templates use
@@ -1438,58 +1913,53 @@ where
     // Use EventLoop<HmrMessage> so the HMR thread can forward messages
     // directly via EventLoopProxy::send_event(HmrMessage) without any
     // shared Mutex<Receiver>.
-    let (event_loop_opt, proxy_opt, window, window_size, scale_factor): (
-        Option<winit::event_loop::EventLoop<HmrMessage>>,
-        Option<winit::event_loop::EventLoopProxy<HmrMessage>>,
-        Option<winit::window::Window>,
-        PhysicalSize<u32>,
-        f32,
-    ) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let event_loop = EventLoopBuilder::<HmrMessage>::with_user_event().build();
-        let proxy = event_loop.create_proxy();
-        let window_result = WindowBuilder::new()
-            .with_title(title)
-            .with_inner_size(PhysicalSize::new(800, 600))
-            .build(&event_loop);
-        match window_result {
-            Ok(w) => {
-                let size = w.inner_size();
-                let sf = w.scale_factor() as f32;
-                (Some(event_loop), Some(proxy), Some(w), size, sf)
-            }
-            Err(e) => {
-                let msg = e.to_string();
-                let lower = msg.to_ascii_lowercase();
-                let is_display_err = lower.contains("broken pipe")
-                    || lower.contains("os error 32")
-                    || lower.contains("no compositor")
-                    || lower.contains("no display server")
-                    || lower.contains("failed to connect");
-                if headless_env_hmr || is_display_err {
-                    log::warn!("window creation failed — continuing in headless mode: {msg}");
-                    (
-                        Some(event_loop),
-                        Some(proxy),
-                        None,
-                        PhysicalSize::new(800, 600),
-                        1.0,
-                    )
-                } else {
-                    panic!("failed to create window: {e}");
+    let (event_loop_opt, proxy_opt, window, window_size, scale_factor): WindowBootstrap =
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let event_loop = EventLoopBuilder::<HmrMessage>::with_user_event().build();
+            let proxy = event_loop.create_proxy();
+            let window_result = WindowBuilder::new()
+                .with_title(title)
+                .with_inner_size(PhysicalSize::new(800, 600))
+                .build(&event_loop);
+            match window_result {
+                Ok(w) => {
+                    let size = w.inner_size();
+                    let sf = w.scale_factor() as f32;
+                    (Some(event_loop), Some(proxy), Some(w), size, sf)
+                }
+                Err(e) => {
+                    let msg = e.to_string();
+                    let lower = msg.to_ascii_lowercase();
+                    let is_display_err = lower.contains("broken pipe")
+                        || lower.contains("os error 32")
+                        || lower.contains("no compositor")
+                        || lower.contains("no display server")
+                        || lower.contains("failed to connect");
+                    if headless_env_hmr || is_display_err {
+                        log::warn!("window creation failed — continuing in headless mode: {msg}");
+                        (
+                            Some(event_loop),
+                            Some(proxy),
+                            None,
+                            PhysicalSize::new(800, 600),
+                            1.0,
+                        )
+                    } else {
+                        panic!("failed to create window: {e}");
+                    }
                 }
             }
-        }
-    }))
-    .unwrap_or_else(|payload| {
-        // Surface the panic payload (usually the compositor error, e.g.
-        // broken pipe) instead of silently masking it — log::warn is
-        // invisible without an initialized logger (CX-13 / F-23).
-        eprintln!(
-            "[velox] window/event loop creation panicked — continuing in headless mode: {}",
-            panic_detail(payload)
-        );
-        (None, None, None, PhysicalSize::new(800, 600), 1.0)
-    });
+        }))
+        .unwrap_or_else(|payload| {
+            // Surface the panic payload (usually the compositor error, e.g.
+            // broken pipe) instead of silently masking it — log::warn is
+            // invisible without an initialized logger (CX-13 / F-23).
+            eprintln!(
+                "[velox] window/event loop creation panicked — continuing in headless mode: {}",
+                panic_detail(payload)
+            );
+            (None, None, None, PhysicalSize::new(800, 600), 1.0)
+        });
 
     // Spawn the HMR forwarding thread. It takes sole ownership of the
     // Receiver (moved out of the Arc<Mutex>) and forwards each HmrMessage
@@ -1588,7 +2058,18 @@ where
     let mut click_targets: Vec<crate::events::ClickTarget> = Vec::new();
     let mut hover_targets: Vec<crate::events::HoverTarget> = Vec::new();
     let mut input_targets: Vec<crate::events::InputTarget> = Vec::new();
-    let mut _last_vnode: Option<velox_dom::VNode> = None;
+    // Renamed from `_last_vnode`: the HMR loop had NO `focused_input` at all, so
+    // typing, Backspace and Return were dead under HMR. Keeping the last vnode
+    // under a real name is what makes the ported input handling possible.
+    let mut last_vnode: Option<velox_dom::VNode> = None;
+    // Path (child source indices) to the focused text input, if any.
+    // Mirrors the plain loop's state so the two loops stay behaviourally equal.
+    let mut focused_input: Option<Vec<usize>> = None;
+    // Instant before which the caret must stay solid regardless of tick timing.
+    let mut blink_deadline: Option<std::time::Instant> = None;
+    // Shift state, latched from `WindowEvent::ModifiersChanged` — see the plain
+    // loop for why the per-key `modifiers` field is not used.
+    let mut shift_held = false;
     let mut scroll_offsets_hmr: std::collections::HashMap<Vec<usize>, f32> =
         std::collections::HashMap::new();
     let mut last_layout_hmr: Option<velox_dom::layout::LayoutNode> = None;
@@ -1615,7 +2096,10 @@ where
                 .map(|id| Some(id) == hovered_id)
                 .unwrap_or(false)
         });
-        _last_vnode = Some(vnode.clone());
+        // First frame: no input can be focused yet, so every text input gets the
+        // unfocused defaults.
+        let vnode = crate::inject_input_caret_attrs(&vnode, None);
+        last_vnode = Some(vnode.clone());
         let mut layout = velox_dom::layout::compute_layout(&vnode, vw as i32, vh as i32);
         {
             let mut path = Vec::new();
@@ -1633,10 +2117,10 @@ where
         if let Err(e) = crate::skia_render::skia_impl::render_frame(s, &vnode, &layout, &sheet) {
             log::error!("skia initial render error: {}", e);
         }
-        if let Some(presenter) = presenter.as_mut() {
-            if let Err(e) = presenter.present(s) {
-                log::error!("skia initial present error: {}", e);
-            }
+        if let Some(presenter) = presenter.as_mut()
+            && let Err(e) = presenter.present(s)
+        {
+            log::error!("skia initial present error: {}", e);
         }
     }
 
@@ -1644,6 +2128,12 @@ where
         // The event loop can panic if the display server becomes unreachable
         // (e.g. "Io error: Broken pipe") — catch that and degrade gracefully.
         let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            // Caret blink clock for the HMR loop. `EventLoop::run` consumes
+            // `self`, so the proxy has to be made before the call. This loop's
+            // channel is typed `HmrMessage`, so the tick rides
+            // `HmrMessage::KeepWindow` — see that arm for why.
+            let _blink_ticker =
+                crate::CaretBlinkTicker::start(event_loop.create_proxy(), HmrMessage::KeepWindow);
             event_loop.run(move |event, _, control_flow| {
                 *control_flow = ControlFlow::Wait;
                 match event {
@@ -1682,7 +2172,16 @@ where
                                                 .unwrap_or(false)
                                         },
                                     );
-                                    _last_vnode = Some(vnode2.clone());
+                                    // Caret attrs survive a hot reload: the
+                                    // focused path is matched by tree path, and
+                                    // `recompute_targets` below re-applies the
+                                    // edit state onto the new targets.
+                                    let vnode2 = crate::inject_input_caret_attrs(
+                                        &vnode2,
+                                        crate::events::focused_input_index(&input_targets)
+                                            .and_then(|i| input_targets.get(i)),
+                                    );
+                                    last_vnode = Some(vnode2.clone());
                                     let mut layout = velox_dom::layout::compute_layout(
                                         &vnode2, vw2 as i32, vh2 as i32,
                                     );
@@ -1708,7 +2207,20 @@ where
                                 w.request_redraw();
                             }
                         }
-                        HmrMessage::KeepWindow => {}
+                        // `KeepWindow` is overloaded as the HMR loop's caret
+                        // blink tick. The HMR channel is typed `HmrMessage`, and
+                        // winit 0.28 has no timer API, so the ticker posts a
+                        // no-op HMR message on the same channel rather than
+                        // forcing the loop to be untyped. The dev server's real
+                        // keep-alives land here too, and both are no-ops, so
+                        // overloading costs nothing.
+                        HmrMessage::KeepWindow => {
+                            if crate::on_caret_blink_tick(&mut input_targets, &mut blink_deadline)
+                                && let Some(w) = window_opt.as_ref()
+                            {
+                                w.request_redraw();
+                            }
+                        }
                     },
                     Event::NewEvents(StartCause::Init) => {
                         if let Some(w) = window_opt.as_ref() {
@@ -1788,6 +2300,19 @@ where
                             },
                         ..
                     } => {
+                        // Text-input focus: identical to the plain loop, and now
+                        // actually present. This arm previously had NO focus
+                        // handling at all, which is why the whole caret was
+                        // unreachable under HMR.
+                        crate::apply_click_focus(
+                            &mut input_targets,
+                            &last_vnode,
+                            &mut focused_input,
+                            mouse_pos.0,
+                            mouse_pos.1,
+                            scale_factor,
+                        );
+                        let mut handled_click = false;
                         if let Some((handler, payload_opt)) =
                             crate::events::hit_test_click(&click_targets, mouse_pos.0, mouse_pos.1)
                         {
@@ -1814,7 +2339,12 @@ where
                                             .unwrap_or(false)
                                     },
                                 );
-                                _last_vnode = Some(vnode.clone());
+                                let vnode = crate::inject_input_caret_attrs(
+                                    &vnode,
+                                    crate::events::focused_input_index(&input_targets)
+                                        .and_then(|i| input_targets.get(i)),
+                                );
+                                last_vnode = Some(vnode.clone());
                                 let mut layout =
                                     velox_dom::layout::compute_layout(&vnode, vw as i32, vh as i32);
                                 {
@@ -1834,17 +2364,31 @@ where
                                     &mut input_targets,
                                 );
                             }
-                            if let Some(w) = window_opt.as_ref() {
-                                w.set_title(&get_title());
-                                w.request_redraw();
-                            }
+                            handled_click = true;
                         }
+                        if let Some(w) = window_opt.as_ref() {
+                            if handled_click {
+                                w.set_title(&get_title());
+                            }
+                            // HOISTED OUT of the `hit_test_click` arm, for the
+                            // same reason as the plain loop: this arm had the
+                            // identical nesting bug, so a click on empty space
+                            // changed focus and never repainted.
+                            w.request_redraw();
+                        }
+                    }
+                    Event::WindowEvent {
+                        event: WindowEvent::ModifiersChanged(mods),
+                        ..
+                    } => {
+                        // Latch modifier state for Shift-extends-selection.
+                        shift_held = mods.shift();
                     }
                     Event::WindowEvent {
                         event: WindowEvent::KeyboardInput { input, .. },
                         ..
                     } => {
-                        // Handle keyboard shortcuts
+                        // Keyboard shortcuts and text-input editing keys.
                         use winit::event::VirtualKeyCode;
                         if let Some(keycode) = input.virtual_keycode
                             && input.state == ElementState::Pressed
@@ -1859,7 +2403,54 @@ where
                                     velox_core::lifecycle::run_all_destroy_hooks();
                                     *control_flow = ControlFlow::Exit;
                                 }
-                                _ => {}
+                                // Ported from the plain loop. This arm used to be
+                                // a bare `_ => {}` stub with no `focused_input` in
+                                // scope at all, so typing did nothing under HMR.
+                                _ => {
+                                    if let Some(action) =
+                                        crate::edit_action_for_key(keycode, shift_held)
+                                    {
+                                        let changed = crate::apply_edit_to_focused(
+                                            &mut input_targets,
+                                            action,
+                                            &last_vnode,
+                                            &mut on_event,
+                                        );
+                                        if changed {
+                                            // Caret goes solid while you type.
+                                            crate::arm_blink_deadline(&mut blink_deadline);
+                                            velox_core::lifecycle::run_all_updated_hooks();
+                                            if let Some(w) = window_opt.as_ref() {
+                                                w.request_redraw();
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    Event::WindowEvent {
+                        event: WindowEvent::ReceivedCharacter(c),
+                        ..
+                    } => {
+                        // Printable characters go to the focused text input.
+                        // Ported from the plain loop; there was no
+                        // `ReceivedCharacter` arm anywhere in this loop, so
+                        // typing inserted nothing under HMR.
+                        if !c.is_control()
+                            && c != '\u{7f}'
+                            && crate::apply_edit_to_focused(
+                                &mut input_targets,
+                                crate::events::EditAction::Insert(c),
+                                &last_vnode,
+                                &mut on_event,
+                            )
+                        {
+                            // Caret goes solid while you type.
+                            crate::arm_blink_deadline(&mut blink_deadline);
+                            velox_core::lifecycle::run_all_updated_hooks();
+                            if let Some(w) = window_opt.as_ref() {
+                                w.request_redraw();
                             }
                         }
                     }
@@ -1900,10 +2491,10 @@ where
                                     log::warn!("renderer resize failed ({}x{}): {}", pw, ph, e);
                                 }
                             }
-                            if let Some(presenter) = presenter.as_mut() {
-                                if let Err(e) = presenter.resize(pw, ph) {
-                                    log::warn!("presenter resize failed: {}", e);
-                                }
+                            if let Some(presenter) = presenter.as_mut()
+                                && let Err(e) = presenter.resize(pw, ph)
+                            {
+                                log::warn!("presenter resize failed: {}", e);
                             }
                         }
                         ensure_mounted(&mut did_mount_hmr);
@@ -1931,7 +2522,13 @@ where
                                         .unwrap_or(false)
                                 },
                             );
-                            _last_vnode = Some(vnode.clone());
+                            // Caret/selection/focus contract for the paint lane.
+                            let vnode = crate::inject_input_caret_attrs(
+                                &vnode,
+                                crate::events::focused_input_index(&input_targets)
+                                    .and_then(|i| input_targets.get(i)),
+                            );
+                            last_vnode = Some(vnode.clone());
                             let mut layout =
                                 velox_dom::layout::compute_layout(&vnode, vw as i32, vh as i32);
                             {
@@ -1955,10 +2552,10 @@ where
                             ) {
                                 log::error!("skia render error: {}", e);
                             }
-                            if let Some(presenter) = presenter.as_mut() {
-                                if let Err(e) = presenter.present(s) {
-                                    log::error!("softbuffer present error: {}", e);
-                                }
+                            if let Some(presenter) = presenter.as_mut()
+                                && let Err(e) = presenter.present(s)
+                            {
+                                log::error!("softbuffer present error: {}", e);
                             }
                         }
                     }

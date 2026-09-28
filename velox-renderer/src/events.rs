@@ -74,6 +74,37 @@ pub struct InputTarget {
     pub clip: Option<velox_dom::layout::Rect>,
     /// Stacking-context position used for stacking-aware hit ordering.
     pub sc: StackCtx,
+    /// Whether this input currently holds keyboard focus. Drives the focus ring
+    /// and gates caret painting; exported to paint as the `focused` vnode attr.
+    pub focused: bool,
+    /// Caret position as a **char** index into the value string (never a byte
+    /// index). Exported to paint as the `caret` vnode attr.
+    pub cursor: usize,
+    /// Selection anchor as a **char** index; `None` means the selection is
+    /// collapsed (a plain caret). The selection spans
+    /// `min(anchor, cursor) .. max(anchor, cursor)` — see [`InputTarget::selection`].
+    pub anchor: Option<usize>,
+    /// Caret blink phase. `true` = the caret bar is visible this frame. Reset to
+    /// `true` on focus gain and after any editing key (the caret goes solid
+    /// while you type), then flipped on the blink cadence. Exported to paint as
+    /// the `caret_blink` vnode attr.
+    pub blink_on: bool,
+}
+
+impl InputTarget {
+    /// The selected char range as a sorted `(start, end)` pair, or `None` when
+    /// the selection is collapsed (no `anchor`, or `anchor == cursor`).
+    pub fn selection(&self) -> Option<(usize, usize)> {
+        let anchor = self.anchor?;
+        if anchor == self.cursor {
+            return None;
+        }
+        Some(if anchor < self.cursor {
+            (anchor, self.cursor)
+        } else {
+            (self.cursor, anchor)
+        })
+    }
 }
 
 /// Stacking-context position of a node, threaded through the `collect_*`
@@ -352,6 +383,32 @@ pub fn hit_test_click(targets: &[ClickTarget], x: f32, y: f32) -> Option<(&str, 
     None
 }
 
+/// Is this element a single-line text input that can take keyboard focus and a
+/// caret?
+///
+/// Single source of truth for "is this a text input". `collect_input_targets`
+/// uses it to decide what to make focusable, and the renderer's caret-attribute
+/// injection uses it to decide which elements carry the `caret` / `caret_blink`
+/// / `sel_start` / `sel_end` / `focused` contract. If these two disagreed, a
+/// focusable input could be missing the attributes paint needs, or an element
+/// with no target could be handed attrs that drive a phantom caret.
+///
+/// `type` is case-insensitive per the HTML spec, and a missing or blank `type`
+/// defaults to `text`; anything that is not a single-line text type (`email`,
+/// `number`, `password`, `checkbox`, …) is excluded.
+pub fn is_text_input(tag: &str, props: &velox_dom::Props) -> bool {
+    if tag != "input" {
+        return false;
+    }
+    match props.attrs.get("type") {
+        None => true,
+        Some(t) => {
+            let t = t.trim();
+            t.is_empty() || t.eq_ignore_ascii_case("text")
+        }
+    }
+}
+
 /// Collect focusable text-input elements (`<input type="text">`) with their
 /// tree paths. Used to route keyboard input to the focused field.
 pub fn collect_input_targets(
@@ -375,9 +432,7 @@ pub fn collect_input_targets(
             children,
             ..
         } => {
-            let is_text_input =
-                tag == "input" && props.attrs.get("type").map(|s| s == "text").unwrap_or(true);
-            if is_text_input
+            if is_text_input(tag, props)
                 && next_clip
                     .map(|c| rects_intersect(layout.rect, c))
                     .unwrap_or(true)
@@ -391,6 +446,14 @@ pub fn collect_input_targets(
                     order: ord,
                     clip: next_clip,
                     sc,
+                    // Edit state is owned by the caller and re-applied by
+                    // `preserve_input_state` after every rebuild, so a fresh
+                    // collection always starts unfocused with a collapsed
+                    // caret at index 0 and the caret visible.
+                    focused: false,
+                    cursor: 0,
+                    anchor: None,
+                    blink_on: true,
                 });
             }
             let mut ordered: Vec<(i32, usize)> = layout
@@ -422,6 +485,13 @@ pub fn collect_input_targets(
 
 /// Return the topmost text-input target under a point, if any.
 pub fn hit_test_input(targets: &[InputTarget], x: f32, y: f32) -> Option<&InputTarget> {
+    hit_test_input_index(targets, x, y).map(|i| &targets[i])
+}
+
+/// Index-returning form of [`hit_test_input`], for callers that need to
+/// *mutate* the hit target (focus/caret edits) — `hit_test_input` borrows the
+/// slice immutably, which would conflict with `&mut input_targets`.
+pub fn hit_test_input_index(targets: &[InputTarget], x: f32, y: f32) -> Option<usize> {
     for idx in stack_order_desc(targets, |t| t.z_index, |t| t.order, |t| t.sc) {
         let target = &targets[idx];
         // Points outside the intersected clip stack cannot focus the input.
@@ -431,10 +501,343 @@ pub fn hit_test_input(targets: &[InputTarget], x: f32, y: f32) -> Option<&InputT
             continue;
         }
         if rect_contains_point(target.rect, x, y) {
-            return Some(target);
+            return Some(idx);
         }
     }
     None
+}
+
+/// Index of the focused input, i.e. the one whose `focused` flag is set.
+pub fn focused_input_index(targets: &[InputTarget]) -> Option<usize> {
+    targets.iter().position(|t| t.focused)
+}
+
+/// Carry per-input edit state (focus / caret / anchor / blink phase) across a
+/// target rebuild, matched by `path`.
+///
+/// `collect_input_targets` rebuilds the vector from scratch every frame and
+/// cannot know about keystrokes, so without this the caret would snap back to 0
+/// on every redraw. `value_len` supplies the current char length of the value at
+/// a given path (0 when there is no such input) so caret and anchor can be
+/// clamped: the app may rewrite the value between two frames (uppercasing,
+/// truncation, async load), and a stale out-of-range index would otherwise be
+/// carried forward. Clamping to a *char* length is what makes the later
+/// byte-offset conversion safe.
+pub fn preserve_input_state(
+    targets: &mut [InputTarget],
+    previous: &[InputTarget],
+    value_len: &dyn Fn(&[usize]) -> usize,
+) {
+    for t in targets.iter_mut() {
+        if let Some(prev) = previous.iter().find(|p| p.path == t.path) {
+            let len = value_len(&t.path);
+            t.focused = prev.focused;
+            t.blink_on = prev.blink_on;
+            t.cursor = prev.cursor.min(len);
+            t.anchor = prev.anchor.map(|a| a.min(len));
+        }
+    }
+}
+
+/// Map a click x-position to a char index inside a single-line text input.
+///
+/// `rect` is the laid-out input box and `click_x` is in the same logical space.
+/// `text_origin_x` is where the text run starts (the box's left content edge,
+/// i.e. `rect.x + padding-left`), so the caller owns padding and this function
+/// needs no style knowledge. `font_size` is a fallback advance used only when
+/// `measure` reports a non-finite or negative width. `measure` receives a
+/// candidate prefix (`&value[..byte_i]`, always on a char boundary) and returns
+/// its advance width in logical px.
+///
+/// The scan is a **linear** walk over char boundaries, not a binary search:
+/// `measure` is an arbitrary caller-supplied closure, and kerning or ligatures
+/// make prefix widths non-monotonic in principle, which would make a binary
+/// search land on a boundary that is not the nearest one to the click. This
+/// implementation records the last boundary at or left of the click *and* the
+/// first boundary to its right, then picks whichever is horizontally closer —
+/// correct for any prefix-width sequence, monotonic or not.
+pub fn click_to_char_index(
+    value: &str,
+    rect: velox_dom::layout::Rect,
+    click_x: f32,
+    text_origin_x: f32,
+    font_size: f32,
+    measure: &dyn Fn(&str) -> f32,
+) -> usize {
+    let char_count = value.chars().count();
+    if char_count == 0 {
+        return 0;
+    }
+    // Horizontal distance from the start of the text run, clamped at 0. The
+    // origin is taken from `text_origin_x` but never left of the box's own left
+    // edge, so a caller that forgets padding still gets sane results.
+    let origin = text_origin_x.max(rect.x as f32);
+    let local = (click_x - origin).max(0.0);
+
+    // Fallback advance used only when the measurer is unusable.
+    let fallback = |s: &str| font_size * 0.5 * s.chars().count() as f32;
+    let width_of = |s: &str| {
+        let w = measure(s);
+        if w.is_finite() && w >= 0.0 {
+            w
+        } else {
+            fallback(s)
+        }
+    };
+
+    let mut best_left = 0usize;
+    let mut left_x = 0.0f32;
+    let mut best_right: Option<usize> = None;
+    let mut right_x = 0.0f32;
+
+    for (char_i, (byte_i, _)) in value.char_indices().enumerate() {
+        let w = width_of(&value[..byte_i]);
+        if w <= local {
+            best_left = char_i;
+            left_x = w;
+        } else {
+            best_right = Some(char_i);
+            right_x = w;
+            break;
+        }
+    }
+
+    match best_right {
+        // Click at or past the right edge of the text run: end of the value.
+        None => char_count,
+        Some(right) => {
+            // Nearest boundary wins; ties go left.
+            let d_left = (local - left_x).abs();
+            let d_right = (right_x - local).abs();
+            if d_left <= d_right { best_left } else { right }
+        }
+    }
+}
+
+/// Snap an arbitrary index down to the nearest `char` boundary of `value`,
+/// clamped to `0..=value.len()`.
+///
+/// This is the single panic guard for char-index arithmetic: Rust string
+/// slicing panics on a non-boundary index, and a caret index can arrive from
+/// anywhere (a stale frame, a caller-supplied offset, a value the app rewrote
+/// under us). Stepping *down* keeps the caret visually stable and, because
+/// every caller only ever slices at a snapped index, cannot panic.
+pub fn snap_to_char_boundary(value: &str, index: usize) -> usize {
+    let mut i = index.min(value.len());
+    while i > 0 && !value.is_char_boundary(i) {
+        i -= 1;
+    }
+    i
+}
+
+/// Byte offset of char index `char_i` in `value`, clamped to `value.len()`.
+fn byte_of_char(value: &str, char_i: usize) -> usize {
+    value
+        .char_indices()
+        .nth(char_i)
+        .map(|(b, _)| b)
+        .unwrap_or(value.len())
+}
+
+/// Delete the char range `[a, b)` (char indices, order-independent) from
+/// `value`, returning the new string. Out-of-range and inverted input is
+/// tolerated: the range is sorted and both ends snapped to char boundaries
+/// before any slicing happens.
+pub fn delete_char_range(value: &str, a: usize, b: usize) -> String {
+    let (a, b) = if a <= b { (a, b) } else { (b, a) };
+    let ba = snap_to_char_boundary(value, byte_of_char(value, a));
+    let bb = snap_to_char_boundary(value, byte_of_char(value, b));
+    let (ba, bb) = if ba <= bb { (ba, bb) } else { (bb, ba) };
+    let mut out = String::with_capacity(value.len().saturating_sub(bb - ba));
+    out.push_str(&value[..ba]);
+    out.push_str(&value[bb..]);
+    out
+}
+
+/// Insert `ch` at char index `char_i` of `value`, returning the new string.
+pub fn insert_char_at(value: &str, char_i: usize, ch: char) -> String {
+    let b = snap_to_char_boundary(value, byte_of_char(value, char_i));
+    let mut out = String::with_capacity(value.len() + ch.len_utf8());
+    out.push_str(&value[..b]);
+    out.push(ch);
+    out.push_str(&value[b..]);
+    out
+}
+
+/// A single caret/selection/text editing intent, resolved against an
+/// [`InputTarget`] by [`apply_edit`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EditAction {
+    /// Move the caret one char left; with `shift`, extend the selection.
+    MoveLeft { shift: bool },
+    /// Move the caret one char right; with `shift`, extend the selection.
+    MoveRight { shift: bool },
+    /// Caret to the start of the value; with `shift`, extend the selection.
+    Home { shift: bool },
+    /// Caret to the end of the value; with `shift`, extend the selection.
+    End { shift: bool },
+    /// Delete the selection, else the char before the caret.
+    Backspace,
+    /// Delete the selection, else the char at the caret.
+    Delete,
+    /// Delete the selection, then insert `ch` at the (collapsed) caret.
+    Insert(char),
+    /// Delete the selection, then submit.
+    Submit,
+}
+
+/// Outcome of applying an [`EditAction`].
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct EditResult {
+    /// The new field value, present only when the text actually changed.
+    pub value: Option<String>,
+    /// True when the action should submit the field (Return).
+    pub submit: bool,
+    /// True when the caret or the selection moved. A pure caret move repaints
+    /// without dispatching anything to the app.
+    pub moved: bool,
+}
+
+impl EditResult {
+    /// Whether the caller must repaint (and run updated hooks) after this edit.
+    pub fn needs_repaint(&self) -> bool {
+        self.value.is_some() || self.submit || self.moved
+    }
+}
+
+/// Apply an editing action to `target`, treating `value` as the field's current
+/// text, and return what changed.
+///
+/// This is deliberately a pure state transition: the caller owns dispatching
+/// `result.value` to the app's `on:input` handler and repainting. Both event
+/// loops (plain and HMR) call this same function, which is what keeps them
+/// from drifting apart again.
+///
+/// Panic safety: every index is snapped to a char boundary and every slice goes
+/// through [`delete_char_range`] / [`insert_char_at`], which snap internally, so
+/// no index derived from a caret position can slice a multi-byte character in
+/// half. Caret positions coming from callers are also clamped to the value's
+/// char length, so a stale or bogus index degrades to a clamped one rather than
+/// panicking.
+pub fn apply_edit(target: &mut InputTarget, value: &str, action: EditAction) -> EditResult {
+    let len = value.chars().count();
+    let mut cursor = target.cursor.min(len);
+    let anchor = target.anchor.map(|a| a.min(len));
+    let sel = match anchor {
+        Some(a) if a != cursor => Some(if a < cursor { (a, cursor) } else { (cursor, a) }),
+        _ => None,
+    };
+    let mut res = EditResult::default();
+    // Any text/caret change makes the caret solid again; the blink tick resumes
+    // from the caller's deadline.
+    let mut touched = false;
+
+    match action {
+        EditAction::MoveLeft { shift } => {
+            if cursor > 0 {
+                let old = cursor;
+                cursor -= 1;
+                if shift {
+                    target.anchor = Some(anchor.unwrap_or(old));
+                } else {
+                    target.anchor = None;
+                }
+                touched = true;
+            }
+        }
+        EditAction::MoveRight { shift } => {
+            if cursor < len {
+                let old = cursor;
+                cursor += 1;
+                if shift {
+                    target.anchor = Some(anchor.unwrap_or(old));
+                } else {
+                    target.anchor = None;
+                }
+                touched = true;
+            }
+        }
+        EditAction::Home { shift } => {
+            if shift {
+                target.anchor = Some(anchor.unwrap_or(cursor));
+            } else {
+                target.anchor = None;
+            }
+            if cursor != 0 {
+                cursor = 0;
+                touched = true;
+            } else {
+                // Selection collapse onto 0 is still a visual change.
+                res.moved = sel.is_some();
+            }
+        }
+        EditAction::End { shift } => {
+            if shift {
+                target.anchor = Some(anchor.unwrap_or(cursor));
+            } else {
+                target.anchor = None;
+            }
+            if cursor != len {
+                cursor = len;
+                touched = true;
+            } else {
+                res.moved = sel.is_some();
+            }
+        }
+        EditAction::Backspace => {
+            if let Some((s, e)) = sel {
+                res.value = Some(delete_char_range(value, s, e));
+                cursor = s;
+                target.anchor = None;
+                touched = true;
+            } else if cursor > 0 {
+                res.value = Some(delete_char_range(value, cursor - 1, cursor));
+                cursor -= 1;
+                target.anchor = None;
+                touched = true;
+            }
+        }
+        EditAction::Delete => {
+            if let Some((s, e)) = sel {
+                res.value = Some(delete_char_range(value, s, e));
+                cursor = s;
+                target.anchor = None;
+                touched = true;
+            } else if cursor < len {
+                res.value = Some(delete_char_range(value, cursor, cursor + 1));
+                target.anchor = None;
+                touched = true;
+            }
+        }
+        EditAction::Insert(ch) => {
+            if let Some((s, e)) = sel {
+                let cleared = delete_char_range(value, s, e);
+                res.value = Some(insert_char_at(&cleared, s, ch));
+                cursor = s + 1;
+            } else {
+                res.value = Some(insert_char_at(value, cursor, ch));
+                cursor += 1;
+            }
+            target.anchor = None;
+            touched = true;
+        }
+        EditAction::Submit => {
+            if let Some((s, e)) = sel {
+                res.value = Some(delete_char_range(value, s, e));
+                cursor = s;
+                touched = true;
+            }
+            target.anchor = None;
+            res.submit = true;
+        }
+    }
+
+    target.cursor = cursor;
+    if touched {
+        target.blink_on = true;
+        res.moved = true;
+    }
+    res
 }
 
 pub fn hit_test_hover(targets: &[HoverTarget], x: f32, y: f32) -> Option<u32> {
