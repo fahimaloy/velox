@@ -65,6 +65,22 @@ thread_local! {
 /// thousand `Weak`s, so paying for one occasionally is cheaper than the memory.
 const STOPPED_EFFECTS_PRUNE_AT: usize = 1024;
 
+/// How large a signal's subscriber vector must get before `Signal::get` prunes
+/// the dead entries out of it.
+///
+/// This is a *dead-entry budget*, not a fan-out target, and the two must not be
+/// confused. It has to sit above the number of live subscribers a signal
+/// realistically has, because the prune fires on total length; a signal that
+/// legitimately has this many live subscribers sweeps on every read and gains
+/// nothing. Below that, the prune is amortised: it runs at most once per this
+/// many pushes, so the per-read cost of housekeeping is O(1) instead of O(n).
+///
+/// Each entry is an 8-byte `Weak`, so the most this can ever leak per signal is
+/// half a KiB — paid only by signals that actually accumulated that many dead
+/// entries. A signal that is read but never `set` is the pathological case it
+/// exists to bound: nothing else would ever reclaim those entries.
+const SUBSCRIBER_SWEEP_AT: usize = 64;
+
 /// Record that `eff` has been stopped, so `flush_queue` will skip it, and keep
 /// the set from growing without bound.
 ///
@@ -277,11 +293,44 @@ where
         CURRENT_EFFECT.with(|current| {
             if let Some(effect_rc) = current.borrow().as_ref() {
                 let mut subs = self.subscribers.borrow_mut();
-                // Prune dead weak references first. `strong_count` asks the same
-                // question as `upgrade().is_some()` but without materialising a
-                // temporary `Rc` to answer it.
-                subs.retain(|w| w.strong_count() > 0);
-                // Check if already subscribed
+                // Prune dead weak references, but only once the vector is big
+                // enough to be worth the walk. This used to run on every read,
+                // which made the hottest path in the framework both O(n) and a
+                // mutation.
+                //
+                // Bounded rather than unconditional on purpose. A dead entry is
+                // created when an effect's last strong `Rc` goes away, which is
+                // when its `EffectHandle` is dropped — the handle holds that last
+                // reference, so calling `stop()` and keeping the handle leaves
+                // the entry alive, a stopped-but-alive tombstone that
+                // `flush_queue` skips by id. Either way it is not created here.
+                // Nothing removes those entries again until the next `set()` on
+                // this signal, so a signal that is read but never written would
+                // accumulate them forever and a later subscriber would append to
+                // an ever-growing vector.
+                // Pruning at death time is not available to us: an effect body is
+                // `Box<dyn FnMut()>` and `Signal<T>` is generic, so an effect
+                // cannot remember which signals it subscribed to without a
+                // type-erased registry on `EffectInner`.
+                //
+                // So dead entries are capped here instead. The sweep only fires
+                // when the vector has actually grown, so it runs at most once per
+                // `SUBSCRIBER_SWEEP_AT` pushes rather than once per read.
+                if subs.len() >= SUBSCRIBER_SWEEP_AT {
+                    // `strong_count` asks the same question as
+                    // `upgrade().is_some()` but without materialising a temporary
+                    // `Rc` to answer it.
+                    subs.retain(|w| w.strong_count() > 0);
+                }
+                // Check if already subscribed.
+                //
+                // With the sweep above no longer running first to pre-clean the
+                // list, duplicate suppression now rests on `Rc::ptr_eq` alone.
+                // It is a sound identity test: `upgrade()` fails for a dead
+                // entry, and two distinct `EffectInner`s cannot share an
+                // allocation, so `ptr_eq` holds exactly when both are the same
+                // effect. Cost is unchanged, O(len) — this is a constant-factor
+                // win (one walk per read instead of two), not an asymptotic one.
                 let already_subscribed = subs
                     .iter()
                     .any(|w| w.upgrade().is_some_and(|rc| Rc::ptr_eq(&rc, effect_rc)));
@@ -784,5 +833,82 @@ mod tests {
         assert_eq!(sig.get(), 5);
 
         drop(handle);
+    }
+
+    /// The growth bound: dead subscribers must not accumulate without limit when
+    /// a signal is read but never `set` again.
+    ///
+    /// This is the risk that deleting the per-read sweep outright would have
+    /// introduced rather than fixed. A dead entry is created when an effect's
+    /// last strong `Rc` goes away, and nothing removes it again until the next
+    /// `set()` on that signal. A signal that is read but never written would
+    /// otherwise accumulate one entry per effect that ever subscribed to it,
+    /// for the lifetime of the process, and a later subscriber would append to
+    /// an ever-growing vector.
+    ///
+    /// What the bound actually is, stated precisely: dead entries *do*
+    /// accumulate between reads, because nothing reclaims them until something
+    /// reads. The guarantee is that the next read inside an effect reclaims
+    /// them once the vector has reached `SUBSCRIBER_SWEEP_AT` — not that they
+    /// never appear.
+    ///
+    /// Fails without the bounded sweep: each round would leave `BATCH` dead
+    /// entries plus one, so the first round already exceeds the threshold.
+    ///
+    /// In-file because `subscribers` is private, on the same reasoning as
+    /// `stopped_effects_store_stays_bounded` above — exposing a `pub` accessor
+    /// purely so an integration test could read it would widen the public API.
+    #[test]
+    fn dead_subscribers_are_reclaimed_when_a_signal_is_never_set_again() {
+        // Twice the threshold, so the final read of a round is the one that
+        // crosses it.
+        const BATCH: usize = SUBSCRIBER_SWEEP_AT * 2;
+        const ROUNDS: usize = 5;
+
+        let sig = Rc::new(Signal::new(0u32));
+
+        for round in 0..ROUNDS {
+            // A batch of effects that each subscribe by reading `sig`, then die
+            // outright. Dropping the *handle* is what actually kills the `Rc`:
+            // both `stop` and `Drop` drop the `EFFECT_STORAGE` reference, and
+            // the handle holds the last strong one. Calling `stop()` instead
+            // would leave the entry alive, which is the stopped-but-alive
+            // tombstone case already covered by `2e02f1d`.
+            {
+                let mut handles = Vec::with_capacity(BATCH);
+                for _ in 0..BATCH {
+                    let s = sig.clone();
+                    handles.push(effect(move || {
+                        s.get();
+                    }));
+                }
+                // `sig` is deliberately never `set`, so the write path never
+                // prunes either.
+                drop(handles);
+            }
+
+            // A later subscriber. Its read is what must reclaim the dead
+            // entries — this is the "a later subscriber appends to an
+            // ever-growing vector" case from the plan.
+            {
+                let s = sig.clone();
+                let last = effect(move || {
+                    s.get();
+                });
+                drop(last);
+            }
+
+            let dead = sig
+                .subscribers
+                .borrow()
+                .iter()
+                .filter(|w| w.strong_count() == 0)
+                .count();
+            assert!(
+                dead <= SUBSCRIBER_SWEEP_AT,
+                "round {round}: {dead} dead subscribers accumulated with no bound, \
+                 so the bounded sweep is not reclaiming them (threshold {SUBSCRIBER_SWEEP_AT})"
+            );
+        }
     }
 }

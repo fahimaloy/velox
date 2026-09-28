@@ -10,3 +10,10 @@ publish = false
 
 [dependencies]
 log = "0.4"
+
+[dev-dependencies]
+criterion = "0.5"
+
+[[bench]]
+name = "signal_read"
+harness = false
