@@ -1,4 +1,4 @@
-use crate::style::{TextOverflow, VerticalAlign, WhiteSpace};
+use crate::style::{Sides, TextOverflow, VerticalAlign, WhiteSpace};
 use crate::{Length, VNode};
 
 /// Default font size for root element (used for rem calculations)
@@ -1485,12 +1485,8 @@ fn content_size_for(
     declared: Option<i32>,
     avail: i32,
     is_border_box: bool,
-    pl: i32,
-    pr: i32,
-    bl: i32,
-    br: i32,
-    ml: i32,
-    mr: i32,
+    padding: &Sides<i32>,
+    margin: &Sides<i32>,
     is_viewport_filling: bool,
     legacy_pair: bool,
 ) -> i32 {
@@ -1498,12 +1494,12 @@ fn content_size_for(
         if let Some(dw) = declared {
             dw
         } else {
-            (avail - ml - mr).max(1)
+            (avail - margin.left - margin.right).max(1)
         }
     } else if let Some(dw) = declared {
-        dw + pl + pr + bl + br
+        dw + padding.left + padding.right + padding.top + padding.bottom
     } else if is_viewport_filling || legacy_pair {
-        (avail - ml - mr).max(1)
+        (avail - margin.left - margin.right).max(1)
     } else {
         avail
     }
@@ -3015,7 +3011,7 @@ pub fn compute_layout(node: &VNode, viewport_w: i32, viewport_h: i32) -> LayoutN
                         None
                     });
                     raw.as_deref()
-                        .and_then(|v| crate::Length::parse(v))
+                        .and_then(crate::Length::parse)
                         .map(|l| matches!(l, crate::Length::Percent(p) if (p - 100.0).abs() < 0.01))
                         .unwrap_or(false)
                 };
@@ -3103,17 +3099,25 @@ pub fn compute_layout(node: &VNode, viewport_w: i32, viewport_h: i32) -> LayoutN
                 // string on every box of every layout. `clamp_width_to_max_width` does
                 // that re-read and exists only for the flex placement pass, where the
                 // item's box model is genuinely not in scope.
+                let padding = Sides {
+                    top: bl,
+                    right: pr,
+                    bottom: br,
+                    left: pl,
+                };
+                let margin = Sides {
+                    top: 0,
+                    right: mr,
+                    bottom: 0,
+                    left: ml,
+                };
                 let rect_w = cap_to_max_width(
                     content_size_for(
                         declared_w,
                         avail_w,
                         is_border_box,
-                        pl,
-                        pr,
-                        bl,
-                        br,
-                        ml,
-                        mr,
+                        &padding,
+                        &margin,
                         is_viewport_filling,
                         legacy_pair,
                     ),
@@ -3638,10 +3642,11 @@ pub fn compute_layout(node: &VNode, viewport_w: i32, viewport_h: i32) -> LayoutN
                             main_size
                         };
                         // For indefinite cross-size, give children unconstrained cross-size so they lay out at natural size
-                        let child_avail_cross = if is_column {
-                            cross_size as f32 // column flex cross-size (width) is always definite
-                        } else if has_definite_cross_size {
-                            cross_size as f32 // definite cross-size: use it for children (align-items: stretch will apply)
+                        let child_avail_cross = if is_column || has_definite_cross_size {
+                            // column flex cross-size (width) is always definite; a
+                            // row's is definite here when the container declared one
+                            // (align-items: stretch will then apply to it).
+                            cross_size as f32
                         } else {
                             UNCONSTRAINED_CROSS_SIZE // indefinite: unconstrained, children use natural size
                         };
@@ -3657,28 +3662,16 @@ pub fn compute_layout(node: &VNode, viewport_w: i32, viewport_h: i32) -> LayoutN
                         } else {
                             (child_avail_main as f32, child_avail_cross)
                         };
-                        // Laid out at the origin: the position is assigned in the
-                        // placement pass below, and the measure pass needs a definite
-                        // offset base rather than a guess.
-                        let ln = at(
-                            fc.node,
-                            0,
-                            0,
-                            child_avail_w as i32,
-                            child_avail_h as i32,
-                            viewport_w,
-                            viewport_h,
-                            ContainingBlock {
-                                x: content_x,
-                                y: content_y_start,
-                                w: content_w,
-                                h: content_h_available,
-                            },
-                            Some(fc.index),
-                            root_font_size,
-                            my_font_size,
-                        );
-
+                        // The basis ladder below reads only `fc.style`, `main_size`
+                        // and the font sizes -- never the child's laid-out size --
+                        // so it is safe, and much cheaper, to decide the basis
+                        // BEFORE paying for a subtree layout. A content-basis item
+                        // re-lays its subtree out at a wide probe width and then
+                        // again at the clamped content width; the old unconditional
+                        // pre-layout ran FIRST, so such an item cost three subtree
+                        // layouts (3^depth across nested containers) for a value
+                        // the content branch threw away. It now runs only on the
+                        // `else` arm below, which is the sole place that reads it.
                         let flex_basis_val = style_lookup_len_full(
                             fc.style,
                             "flex-basis",
@@ -3751,16 +3744,17 @@ pub fn compute_layout(node: &VNode, viewport_w: i32, viewport_h: i32) -> LayoutN
                         // size (CSS Flexbox §9.2.3), not the width it happens to
                         // fill. `at` lays a block out at whatever width it is
                         // given and a block with no declared `width` FILLS it,
-                        // so the measurement above reported the line's main size
-                        // straight back. Every such item then claimed the whole
-                        // row, the line summed to more than it had, and shrink
-                        // took the space back out of the one item not allowed to
-                        // shrink -- which is why a `flex: 1` sibling collapsed to
-                        // zero while a plain sibling ate the row.
+                        // so measuring the item at the line's main size just
+                        // reported the line's main size straight back. Every such
+                        // item then claimed the whole row, the line summed to more
+                        // than it had, and shrink took the space back out of the
+                        // one item not allowed to shrink -- which is why a
+                        // `flex: 1` sibling collapsed to zero while a plain
+                        // sibling ate the row.
                         //
-                        // This has to happen BEFORE the basis ladder, because the
-                        // ladder's content arms read `ln.rect` and would otherwise
-                        // read the fill.
+                        // The probe therefore has to produce `ln` BEFORE the basis
+                        // ladder below, because that ladder's content arms read
+                        // `ln.rect` and would otherwise read the fill.
                         //
                         // Re-measure at a probe wide enough that the content
                         // cannot wrap and read the content width back off, the
@@ -3842,7 +3836,29 @@ pub fn compute_layout(node: &VNode, viewport_w: i32, viewport_h: i32) -> LayoutN
                                 my_font_size,
                             )
                         } else {
-                            ln
+                            // Not content-basis: the basis ladder wants the child's
+                            // laid-out size, so lay it out ONCE, here. Laid out at
+                            // the origin: the position is assigned in the placement
+                            // pass below, and the measure pass needs a definite
+                            // offset base rather than a guess.
+                            at(
+                                fc.node,
+                                0,
+                                0,
+                                child_avail_w as i32,
+                                child_avail_h as i32,
+                                viewport_w,
+                                viewport_h,
+                                ContainingBlock {
+                                    x: content_x,
+                                    y: content_y_start,
+                                    w: content_w,
+                                    h: content_h_available,
+                                },
+                                Some(fc.index),
+                                root_font_size,
+                                my_font_size,
+                            )
                         };
                         // Determine effective basis:
                         // - shorthand_basis_px if explicit
