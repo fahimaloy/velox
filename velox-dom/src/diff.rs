@@ -24,9 +24,11 @@
 //! component-instance registry, which is a public shape change to `VNode`.
 //!
 //! This module IS that reconciler, and it is complete and duplicate-key safe
-//! (`diff_children_keyed` tracks a consumed set). It has no production caller:
-//! the renderer's own `reconcile_keyed_children` is a separate and incorrect
-//! helper. See `velox-renderer/src/lib.rs`.
+//! (`diff_children_keyed` tracks a consumed set). It has no production caller.
+//! The renderer's own `reconcile_keyed_children` helper, which was incorrect and
+//! reachable from nothing but tests, has been deleted. The project decision that
+//! `:key` stays a plain attribute — and what would reopen it — is written down
+//! in `docs/RECONCILER.md`.
 
 use crate::{Props, VNode};
 use std::collections::HashSet;

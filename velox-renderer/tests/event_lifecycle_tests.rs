@@ -1,7 +1,11 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use velox_dom::{Props, h, text};
+use velox_dom::{
+    Props, VNode,
+    diff::{Patch, diff},
+    h, text,
+};
 use velox_renderer::{Renderer, events, events::EventRegistry};
 
 // =============================================================================
@@ -400,90 +404,149 @@ fn runtime_hover_sent_once() {
 }
 
 // =============================================================================
-// Reconcile integration
+// Keyed reconcile
+//
+// These exercise `velox_dom::diff::diff` — the correct, duplicate-key-safe keyed
+// reconciler. They used to call `velox_renderer::reconcile_keyed_children`, which
+// was deleted: on a key match it pushed the STALE old node and discarded the
+// incoming content, so a reordered child's new text never reached the tree.
+// That helper and its reason-for-deletion are recorded in `docs/RECONCILER.md`.
 // =============================================================================
 
-#[test]
-fn reconcile_keyed_children_preserves_node_identity() {
-    let mut old: Vec<velox_dom::VNode> = vec![
-        h("li", vec![("key", "a"), ("data-id", "1")], vec![text("A")]),
-        h("li", vec![("key", "b"), ("data-id", "2")], vec![text("B")]),
-    ];
-    let new: Vec<velox_dom::VNode> = vec![
-        h("li", vec![("key", "b")], vec![text("B-new")]),
-        h("li", vec![("key", "a")], vec![text("A-new")]),
-    ];
-
-    velox_renderer::reconcile_keyed_children(&mut old, &new);
-
-    assert_eq!(old.len(), 2);
-    // After reconciliation, order should be b, a
-    match &old[0] {
-        velox_dom::VNode::Element { props, .. } => {
-            assert_eq!(props.attrs.get("key"), Some(&"b".to_string()));
-        }
-        _ => panic!("expected element"),
-    }
-    match &old[1] {
-        velox_dom::VNode::Element { props, .. } => {
-            assert_eq!(props.attrs.get("key"), Some(&"a".to_string()));
-        }
-        _ => panic!("expected element"),
-    }
+/// Whether any patch anywhere in the tree replaces text with exactly `needle`.
+///
+/// A keyed content update is nested (`UpdateChild` -> `UpdateChild` ->
+/// `Replace`), so "did the new content actually reach the tree?" cannot be
+/// answered from the top-level patch list alone.
+fn replaces_text_with(patches: &[Patch], needle: &str) -> bool {
+    patches.iter().any(|p| match p {
+        Patch::Replace(VNode::Text(t)) => t == needle,
+        Patch::UpdateChild(_, inner) => replaces_text_with(inner, needle),
+        _ => false,
+    })
 }
 
 #[test]
-fn reconcile_keyed_children_adds_new() {
-    let mut old: Vec<velox_dom::VNode> = vec![h("li", vec![("key", "a")], vec![])];
-    let new: Vec<velox_dom::VNode> = vec![
-        h("li", vec![("key", "a")], vec![]),
-        h("li", vec![("key", "b")], vec![]),
-    ];
+fn keyed_diff_reorders_by_key_and_applies_new_content() {
+    let old = h(
+        "ul",
+        (),
+        vec![
+            h("li", vec![("key", "a"), ("data-id", "1")], vec![text("A")]),
+            h("li", vec![("key", "b"), ("data-id", "2")], vec![text("B")]),
+        ],
+    );
+    let new = h(
+        "ul",
+        (),
+        vec![
+            h("li", vec![("key", "b")], vec![text("B-new")]),
+            h("li", vec![("key", "a")], vec![text("A-new")]),
+        ],
+    );
 
-    velox_renderer::reconcile_keyed_children(&mut old, &new);
+    let patches = diff(&old, &new);
 
-    assert_eq!(old.len(), 2);
+    // "b" moves to the front as a MOVE, not as an insert+remove pair: the node is
+    // relocated, so whatever is keyed to it survives the reorder.
+    assert!(patches.contains(&Patch::MoveChild(1, 0)));
+
+    // A reorder is never expressed as tearing nodes down and rebuilding them.
+    assert!(
+        !patches
+            .iter()
+            .any(|p| matches!(p, Patch::InsertChild(_, _) | Patch::RemoveChild(_)))
+    );
+
+    // Both moved nodes are updated in place at their new indices. These are the
+    // assertions `tests/reconcile_keyed_tests.rs` got backwards: it asserted the
+    // reused node kept the OLD text "B", which is the discarded-content bug.
+    assert!(replaces_text_with(&patches, "B-new"));
+    assert!(replaces_text_with(&patches, "A-new"));
+    assert!(!replaces_text_with(&patches, "B"));
+    assert!(!replaces_text_with(&patches, "A"));
+
+    // The moved node loses the attribute the new tree dropped.
+    assert!(
+        patches
+            .iter()
+            .any(|p| matches!(p, Patch::UpdateChild(0, inner)
+            if inner.contains(&Patch::RemoveAttr("data-id".to_string()))))
+    );
 }
 
 #[test]
-fn reconcile_keyed_children_removes_old() {
-    let mut old: Vec<velox_dom::VNode> = vec![
-        h("li", vec![("key", "a")], vec![]),
-        h("li", vec![("key", "b")], vec![]),
-        h("li", vec![("key", "c")], vec![]),
-    ];
-    let new: Vec<velox_dom::VNode> = vec![h("li", vec![("key", "b")], vec![])];
+fn keyed_diff_inserts_a_new_key_without_disturbing_the_existing_one() {
+    let old = h("ul", (), vec![h("li", vec![("key", "a")], vec![])]);
+    let new = h(
+        "ul",
+        (),
+        vec![
+            h("li", vec![("key", "a")], vec![]),
+            h("li", vec![("key", "b")], vec![]),
+        ],
+    );
 
-    velox_renderer::reconcile_keyed_children(&mut old, &new);
-
-    assert_eq!(old.len(), 1);
-    match &old[0] {
-        velox_dom::VNode::Element { props, .. } => {
-            assert_eq!(props.attrs.get("key"), Some(&"b".to_string()));
-        }
-        _ => panic!("expected element"),
-    }
+    // Exactly one insert, at index 1. "a" matches by key and is left alone, so
+    // there is no patch for it at all.
+    assert_eq!(
+        diff(&old, &new),
+        vec![Patch::InsertChild(1, h("li", vec![("key", "b")], vec![]))]
+    );
 }
 
 #[test]
-fn reconcile_keyed_children_empty_old() {
-    let mut old: Vec<velox_dom::VNode> = vec![];
-    let new: Vec<velox_dom::VNode> = vec![
-        h("li", vec![("key", "a")], vec![]),
-        h("li", vec![("key", "b")], vec![]),
-    ];
+fn keyed_diff_removes_unmatched_keys_and_moves_the_survivor() {
+    let old = h(
+        "ul",
+        (),
+        vec![
+            h("li", vec![("key", "a")], vec![]),
+            h("li", vec![("key", "b")], vec![]),
+            h("li", vec![("key", "c")], vec![]),
+        ],
+    );
+    let new = h("ul", (), vec![h("li", vec![("key", "b")], vec![])]);
 
-    velox_renderer::reconcile_keyed_children(&mut old, &new);
-
-    assert_eq!(old.len(), 2);
+    // "b" relocates 1 -> 0, then the two now-unmatched old nodes are removed from
+    // live index 1 (which holds whichever of "a"/"c" remains after each removal).
+    assert_eq!(
+        diff(&old, &new),
+        vec![
+            Patch::MoveChild(1, 0),
+            Patch::RemoveChild(1),
+            Patch::RemoveChild(1),
+        ]
+    );
 }
 
 #[test]
-fn reconcile_keyed_children_empty_new() {
-    let mut old: Vec<velox_dom::VNode> = vec![h("li", vec![("key", "a")], vec![])];
-    let new: Vec<velox_dom::VNode> = vec![];
+fn keyed_diff_inserts_everything_when_old_is_empty() {
+    let old = h("ul", (), vec![]);
+    let new = h(
+        "ul",
+        (),
+        vec![
+            h("li", vec![("key", "a")], vec![]),
+            h("li", vec![("key", "b")], vec![]),
+        ],
+    );
 
-    velox_renderer::reconcile_keyed_children(&mut old, &new);
+    assert_eq!(
+        diff(&old, &new),
+        vec![
+            Patch::InsertChild(0, h("li", vec![("key", "a")], vec![])),
+            Patch::InsertChild(1, h("li", vec![("key", "b")], vec![])),
+        ]
+    );
+}
 
-    assert_eq!(old.len(), 0);
+#[test]
+fn keyed_diff_removes_everything_when_new_is_empty() {
+    let old = h("ul", (), vec![h("li", vec![("key", "a")], vec![])]);
+    let new = h("ul", (), vec![]);
+
+    // `diff_children` picks the keyed path from the NEW tree, so an empty new
+    // tree takes the unkeyed branch and still removes the leftover child.
+    assert_eq!(diff(&old, &new), vec![Patch::RemoveChild(0)]);
 }

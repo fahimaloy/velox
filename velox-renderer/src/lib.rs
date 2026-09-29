@@ -1,7 +1,6 @@
 //! Renderer crate with optional backends.
 //! No features enabled => stub, compiles fast.
 
-use std::collections::{HashMap, HashSet};
 use velox_dom::VNode;
 use velox_style::Stylesheet;
 
@@ -859,58 +858,6 @@ pub fn build_a11y_tree(vnode: &VNode, width: i32, height: i32) -> A11yTree {
     let mut next_id = 1;
     let root = build_a11y_tree_with_layout(vnode, &layout, &mut next_id);
     A11yTree { root }
-}
-
-/// Reconcile two VNode children vectors using an optional `key` prop.
-///
-/// # This helper is wrong, and it is on a dead path
-///
-/// On a `key` match it pushes `old[idx].clone()` and discards the incoming node,
-/// so a keyed child whose text, attrs or children changed keeps the **stale**
-/// old content — the new content never reaches the tree. The `used` set below is
-/// written and never read. Deleting the helper outright is blocked: seven live
-/// tests across `tests/reconcile_keyed_tests.rs` and
-/// `tests/event_lifecycle_tests.rs` call it, and `tests/reconcile_keyed_tests.rs`
-/// *asserts the stale-content behaviour as intended* ("since we reused the old
-/// node, its child text remains the original"). Whether to delete it or to
-/// redefine it is an open decision.
-///
-/// It is also only reachable from `run_window_vnode`, which has zero in-tree
-/// callers: every example and every scaffolded project calls the two `skia`
-/// entry points instead. And it reconciles only the root's direct children, so
-/// any `v-for` below the root is never touched.
-///
-/// The correct implementation already exists and is unused:
-/// `velox_dom::diff::diff` / `diff_children_keyed`, which emit
-/// `Patch::MoveChild` and are duplicate-key safe.
-///
-/// `:key` itself is a stated non-goal: it is a plain runtime `key` attribute
-/// that does not reorder, diff, or preserve identity. See the module docs in
-/// `velox-dom/src/diff.rs` for why identity preservation is not implementable
-/// without changing the public shape of `VNode`.
-pub fn reconcile_keyed_children(old: &mut Vec<VNode>, new: &[VNode]) {
-    let mut key_to_index: HashMap<String, usize> = HashMap::new();
-    for (i, n) in old.iter().enumerate() {
-        if let VNode::Element { props, .. } = n
-            && let Some(k) = props.attrs.get("key")
-        {
-            key_to_index.insert(k.clone(), i);
-        }
-    }
-    let mut used: HashSet<usize> = HashSet::new();
-    let mut out: Vec<VNode> = Vec::with_capacity(new.len());
-    for nn in new.iter() {
-        if let VNode::Element { props: nprops, .. } = nn
-            && let Some(k) = nprops.attrs.get("key")
-            && let Some(&idx) = key_to_index.get(k)
-        {
-            out.push(old[idx].clone());
-            used.insert(idx);
-            continue;
-        }
-        out.push(nn.clone());
-    }
-    *old = out;
 }
 
 /// Minimal renderer trait. Backends implement this to expose a consistent API.

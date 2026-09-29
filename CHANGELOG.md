@@ -25,6 +25,9 @@
 - Fixed clippy `needless_borrow`: removed unnecessary borrows in template parser
 - Updated build tests to use template files instead of removed examples directory
 
+### Removed
+- Removed `velox_renderer::reconcile_keyed_children`, which had no production callers. On a key match it pushed the previous-frame node and discarded the incoming content, so a keyed child whose text or attributes changed kept stale content. `:key` semantics and what would revisit them are now written down in `docs/RECONCILER.md`
+
 ### Changed
 - Removed `syn` and `quote` dependencies from `velox-sfc` (were unused)
 - Simplified project template `App.vx` to self-contained counter example
