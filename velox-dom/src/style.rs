@@ -1993,8 +1993,14 @@ fn parse_border_shorthand(value: &str) -> Option<Border> {
         Sides::all(default_width)
     };
 
-    // If no style specified, default to solid
-    let default_style = BorderStyle::Solid;
+    // CSS 2.1 §8.5.2: the initial value of `border-style` is `none`, so a
+    // width on its own must paint nothing. The old `Solid` default meant plain
+    // `border: 1px` drew a black 1px border. Note the renderer already
+    // disagreed with that default and sided with the spec:
+    // `skia_render::parse_border_value` returns `None` unless the value
+    // literally contains `solid`, so this was the DOM inventing the only
+    // visible border of the two.
+    let default_style = BorderStyle::None;
     let style_sides = if style_parts.len() == 1 {
         Sides::all(style_parts[0])
     } else if style_parts.len() == 2 {
@@ -2324,6 +2330,56 @@ mod tests {
         assert_eq!(cs.border.width.top, Length::Px(4.0));
         assert_eq!(cs.border.style.top, BorderStyle::Solid);
         assert_eq!(cs.border.color.top, Color::BLACK);
+    }
+
+    /// A width with no style must NOT become a visible border. `border-style`'s
+    /// initial value is `none`, so `border: 1px` paints nothing; the width is
+    /// still recorded so that a later `border-style: solid` can use it.
+    #[test]
+    fn border_width_without_a_style_is_not_a_visible_border() {
+        let mut cs = ComputedStyle::new();
+        cs.set_property("border", "1px");
+        assert_eq!(
+            cs.border.style.top,
+            BorderStyle::None,
+            "`border: 1px` must not fabricate a style; the initial value of \
+             `border-style` is `none`, so a bare width paints nothing"
+        );
+        // The width itself is still parsed — it is the *style* that is absent,
+        // and dropping the width too would break `border: 1px` followed by
+        // `border-style: solid`.
+        assert_eq!(cs.border.width.top, Length::Px(1.0));
+
+        // Same for every width-only spelling, and for width+color with no style.
+        for value in ["1px", "2px", "3px", "1px red", "2px #00ff00"] {
+            let mut cs = ComputedStyle::new();
+            cs.set_property("border", value);
+            assert_eq!(
+                cs.border.style.top,
+                BorderStyle::None,
+                "`border: {value}` carries no style keyword and must stay `none`"
+            );
+        }
+
+        // A width-only declaration is not a dead end: setting the style
+        // afterwards makes the already-parsed width visible.
+        let mut cs = ComputedStyle::new();
+        cs.set_property("border", "2px");
+        cs.set_property("border-style", "solid");
+        assert_eq!(cs.border.width.top, Length::Px(2.0));
+        assert_eq!(cs.border.style.top, BorderStyle::Solid);
+
+        // And the explicit styles are untouched by the new default.
+        for (value, expected) in [
+            ("1px solid red", BorderStyle::Solid),
+            ("1px dashed", BorderStyle::Dashed),
+            ("1px dotted", BorderStyle::Dotted),
+            ("1px none", BorderStyle::None),
+        ] {
+            let mut cs = ComputedStyle::new();
+            cs.set_property("border", value);
+            assert_eq!(cs.border.style.top, expected, "`border: {value}`");
+        }
     }
 
     #[test]
