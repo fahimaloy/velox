@@ -246,7 +246,7 @@ velox run
 ```bash
 cd my-first-app
 
-# Start dev server with hot reload (watches src/ by default)
+# Start dev server with hot reload (watches the current directory by default)
 velox dev
 
 # In another terminal, edit src/App.vx and save
@@ -361,29 +361,43 @@ Start a development server with hot reload.
 
 **Syntax:**
 ```bash
-velox dev [--watch <directory>]
+velox dev [--watch <directory>] [--release]
 ```
 
 **Options:**
-- `-w, --watch <PATH>` — Watch directory for changes (default: `src`)
+- `-w, --watch <PATH>` — Project directory to build and watch for changes (default: the current directory)
+- `--release` — Build in release mode
+
+`--watch` names the **project** directory, not an extra directory to watch alongside
+the current one. It may be given only once.
 
 **Examples:**
 ```bash
-# Watch src/ with auto-reload
+# Watch the current project directory with auto-reload
 velox dev
 
-# Watch custom directory
-velox dev --watch assets
-
-# Watch multiple or specific paths
-velox dev --watch src --watch assets
+# Build and watch a project rooted at another path
+velox dev --watch ../my-app
 ```
 
 **Workflow:**
-- File changes auto-detected
+- File changes are reported by the OS (inotify on Linux), not by polling, so a save is picked up in milliseconds
+- `target/`, `.git`, `.vscode`, `.idea` and dot-directories are excluded — `cargo build` writes thousands of files into `target/`, and watching it exhausts the kernel's watch budget
 - App rebuilds and restarts
 - Press `r` to manually reload
 - Press `q` to quit
+
+**Inotify watch limit (Linux):** watching is backed by inotify, a finite kernel
+resource. If it is exhausted the dev server reports the error and keeps running, but
+files may no longer be detected — press `r` to rebuild by hand. Raise the limit with:
+
+```bash
+sudo sysctl -w fs.inotify.max_user_watches=524288
+sudo sysctl -w fs.inotify.max_user_instances=1024
+```
+
+To persist it, write those two lines to a file in `/etc/sysctl.d/` and run
+`sudo sysctl --system`.
 
 ---
 
@@ -466,7 +480,7 @@ Platform: Linux
 velox init myapp
 cd myapp
 
-# 2. Start development server (watches src/ by default)
+# 2. Start development server (watches the current directory by default)
 velox dev
 
 # 3. In another terminal, edit src/App.vx
