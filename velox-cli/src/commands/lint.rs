@@ -16,6 +16,48 @@ fn print_script_warnings(sfc: &velox_sfc::Sfc, path: &Path) {
     }
 }
 
+/// Warn about CSS declarations that velox parses but never renders.
+///
+/// A property listed in `ComputedStyle::PARSED_BUT_UNRENDERED` has a
+/// `set_property` arm but no reader on the live path, so authoring it looks
+/// correct and does nothing — `visibility: hidden` hides nothing.
+///
+/// This reports **only** table members, never "anything unmatched": the
+/// cascade filters unknown declarations out silently, so flagging genuinely
+/// unknown properties would contradict the spec and would fire on every vendor
+/// prefix, custom property and deliberately-declined property.
+///
+/// The parsed `Sfc` already carries the `<style>` block as a raw string; this is
+/// its first consumer. `StyleBlock` carries no source offset, so a true line
+/// number is not recoverable — we report file + rule index rather than
+/// approximating a line that may point at unrelated code.
+fn print_style_warnings(sfc: &velox_sfc::Sfc, path: &Path) {
+    let Some(block) = sfc.style.as_ref() else {
+        return;
+    };
+    // `Stylesheet::parse` skips malformed rules rather than failing, so a
+    // broken stylesheet yields fewer rules and never panics.
+    let sheet = velox_style::Stylesheet::parse(&block.content);
+    for (i, rule) in sheet.rules.iter().enumerate() {
+        // `decls` is a HashMap: sort so warnings are stable run to run.
+        let mut props: Vec<&str> = rule.decls.keys().map(String::as_str).collect();
+        props.sort_unstable();
+        for prop in props {
+            if let Some((_, why)) = velox_style::ComputedStyle::PARSED_BUT_UNRENDERED
+                .iter()
+                .find(|(name, _)| *name == prop)
+            {
+                println!(
+                    "⚠️  {} - <style> rule {}: `{}` is parsed but never rendered ({why})",
+                    path.display(),
+                    i + 1,
+                    prop
+                );
+            }
+        }
+    }
+}
+
 /// Lint a single .vx file. Returns `true` if the file failed to parse.
 fn lint_file_error(path: &Path) -> bool {
     let content = match fs::read_to_string(path) {
@@ -28,6 +70,7 @@ fn lint_file_error(path: &Path) -> bool {
     match velox_sfc::parse_sfc(&content) {
         Ok(sfc) => {
             print_script_warnings(&sfc, path);
+            print_style_warnings(&sfc, path);
             false
         }
         Err(e) => {
@@ -74,6 +117,7 @@ fn fix_file(path: &Path) -> bool {
     };
 
     print_script_warnings(&sfc, path);
+    print_style_warnings(&sfc, path);
 
     let fixed = normalize_source(&original);
     if fixed == original {

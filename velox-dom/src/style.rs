@@ -1285,6 +1285,72 @@ impl ComputedStyle {
         }
     }
 
+    /// Properties that `set_property` accepts and stores, but which produce **no
+    /// user-visible effect** — the declaration is valid CSS, survives the
+    /// cascade, and is then dropped.
+    ///
+    /// `ComputedStyle` itself has no production consumer, so the readers that
+    /// matter are the three ad-hoc style-string parsers on the live path:
+    /// `layout::table_for`, the box painter, and the text painter. Each honours
+    /// a *different* subset, so "a field exists" proves nothing; a property is
+    /// honest only if at least one of those readers looks it up.
+    ///
+    /// Adding a `set_property` arm for one of these? Either implement it, or
+    /// leave it here — but the honest state is: in the armed set AND in this
+    /// table, until a reader exists. A property is never in both states: see
+    /// `velox-cli/tests/lint_css_tests.rs::table_entries_all_have_a_set_property_arm`,
+    /// which fails the moment the two drift apart.
+    ///
+    /// This table is the *only* thing `velox lint` reports. It deliberately
+    /// does not report "anything unmatched": the cascade filters unknown
+    /// declarations out silently, so flagging genuinely-unknown properties
+    /// would contradict the spec — and would fire on every vendor prefix,
+    /// custom property and deliberately-declined property.
+    ///
+    /// Format: `(property, what was checked and found not to render)`.
+    pub const PARSED_BUT_UNRENDERED: &[(&str, &str)] = &[
+        (
+            "overflow-x",
+            "arm at style.rs:1622 sets `overflow_x`; no reader looks up `overflow-x`",
+        ),
+        (
+            "overflow-y",
+            "arm at style.rs:1627 sets `overflow_y`; no reader looks up `overflow-y`",
+        ),
+        (
+            "background-image",
+            "arm at style.rs:1553 sets `background_image`; the box painter only reads `background`/`background-color`",
+        ),
+        (
+            "letter-spacing",
+            "arm at style.rs:1593 sets `letter_spacing`; cascade-inheritable, but no reader applies it",
+        ),
+        (
+            "visibility",
+            "arm at style.rs:1634 sets `visibility`; NO reader looks up `visibility`, so `visibility: hidden` hides nothing",
+        ),
+        (
+            "transform",
+            "arm at style.rs:1641 sets `transform`; read at layout.rs:3695 ONLY to force a stacking context — no visual effect",
+        ),
+        (
+            "box-shadow",
+            "arm at style.rs:1648 sets `box_shadow`; the string name appears nowhere in the renderer",
+        ),
+        (
+            "transition",
+            "arm at style.rs:1653 pushes to `transitions`; no reader plays a transition",
+        ),
+        (
+            "border-style",
+            "arm at style.rs:1680 sets `border.style.*`; only `border`/`border-width` are read, so `border-style` alone does nothing",
+        ),
+        (
+            "border-color",
+            "arm at style.rs:1688 sets `border.color.*`; only `border`/`border-width` are read, so `border-color` alone does nothing",
+        ),
+    ];
+
     pub fn set_property(&mut self, prop: &str, value: &str) {
         let prop_lower = prop.to_lowercase();
 
