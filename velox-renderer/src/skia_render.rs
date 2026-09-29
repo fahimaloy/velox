@@ -385,8 +385,18 @@ pub mod skia_impl {
                         font_family = family;
                     }
                 } else if key == "font-weight" {
-                    text_style.bold = val.trim().eq_ignore_ascii_case("bold")
-                        || val.trim().parse::<u16>().map(|w| w >= 700).unwrap_or(false);
+                    // `bolder` is a relative-bold keyword. The render path has a
+                    // single bold/not-bold axis (`TextStyle::bold`, no numeric
+                    // weight), so the relative keyword collapses to bold. It was
+                    // previously neither "bold" nor a u16 and so fell through to
+                    // non-bold, silently dropping the declaration. `lighter`
+                    // stays non-bold: it is a relative-light keyword, and a single
+                    // boolean cannot represent "bolder than a weight we do not
+                    // track", so mapping it to bold would be a new lie.
+                    let w = val.trim();
+                    text_style.bold = w.eq_ignore_ascii_case("bold")
+                        || w.eq_ignore_ascii_case("bolder")
+                        || w.parse::<u16>().map(|n| n >= 700).unwrap_or(false);
                 } else if key == "white-space" {
                     let v = val.trim().to_ascii_lowercase();
                     text_style.nowrap = v == "nowrap" || v == "pre";
@@ -2842,6 +2852,72 @@ pub mod skia_impl {
                 parse_text_style("white-space:nowrap;text-overflow:ellipsis", base, "default");
             assert!(s.nowrap, "expected nowrap");
             assert!(s.ellipsis, "expected ellipsis");
+        }
+
+        fn plain_text_style() -> TextStyle {
+            TextStyle {
+                color: sk::Color::from_argb(255, 0, 0, 0),
+                align: TextAlign::Left,
+                underline: false,
+                font_size: 14.0,
+                bold: false,
+                line_height: 1.2,
+                nowrap: false,
+                ellipsis: false,
+            }
+        }
+
+        // `font-weight: bolder` was silently dropped: the check was
+        // `"bold" || parse::<u16>() >= 700`, and `bolder` is neither, so the
+        // declaration fell through to non-bold. CSS treats `bolder` as
+        // relative-bold and the DOM already maps it to 900
+        // (`velox_dom::style::FontWeight::Bolder`); the renderer must not
+        // contradict that.
+        #[test]
+        fn parse_text_style_treats_bolder_as_bold() {
+            for decl in [
+                "font-weight:bolder",
+                "font-weight: Bolder ",
+                "font-weight:BOLDER",
+            ] {
+                let (s, _f) = parse_text_style(decl, plain_text_style(), "default");
+                assert!(s.bold, "expected `{decl}` to render bold");
+            }
+        }
+
+        // The regression guard above is only meaningful if the sibling cases
+        // keep working and the relative-light keyword is not swept in with it.
+        #[test]
+        fn parse_text_style_font_weight_keyword_matrix() {
+            // Bold-producing, all four spellings CSS accepts for bold.
+            for decl in [
+                "font-weight:bold",
+                "font-weight:700",
+                "font-weight:900",
+                "font-weight:bolder",
+            ] {
+                let (s, _f) = parse_text_style(decl, plain_text_style(), "default");
+                assert!(s.bold, "expected `{decl}` to render bold");
+            }
+            // Non-bold-producing.
+            for decl in [
+                "font-weight:normal",
+                "font-weight:100",
+                "font-weight:400",
+                "font-weight:600",
+                "font-weight:lighter",
+            ] {
+                let (s, _f) = parse_text_style(decl, plain_text_style(), "default");
+                assert!(!s.bold, "expected `{decl}` to render non-bold");
+            }
+        }
+
+        // `bolder` must also override an inherited bold:false base rather than
+        // being treated as "no change".
+        #[test]
+        fn parse_text_style_bolder_overrides_non_bold_base() {
+            let (s, _f) = parse_text_style("font-weight:bolder", plain_text_style(), "default");
+            assert!(s.bold);
         }
 
         fn fnv1a(bytes: &[u8]) -> u32 {
