@@ -510,3 +510,48 @@ fn strong_and_b_are_bold() {
         );
     }
 }
+
+// ===== `font-style` is armed but has NO reader ==============================
+//
+// This file's invariant (see the module docs) is that a declaration may only
+// reach `ua.css` if it (1) has a `set_property` arm AND (2) is consumed by
+// `parse_text_style` or by `velox-dom/src/layout.rs`. `font-style` is the case
+// that splits the two apart, so it is pinned here rather than asserted on
+// geometry, which it cannot influence.
+
+/// Half 1 of the invariant: the arm exists and parses the CSS keywords.
+#[test]
+fn font_style_has_a_set_property_arm() {
+    use velox_dom::style::{ComputedStyle, FontStyle};
+    for (value, expected) in [
+        ("normal", FontStyle::Normal),
+        ("italic", FontStyle::Italic),
+        ("oblique", FontStyle::Oblique),
+    ] {
+        let mut cs = ComputedStyle::default();
+        cs.set_property("font-style", value);
+        assert_eq!(
+            cs.font_style, expected,
+            "`font-style: {value}` must parse; `velox-style` lists it in INHERITABLE, \
+             so the cascade hands the declaration over and dropping it in \
+             set_property made it a no-op"
+        );
+    }
+}
+
+/// Half 2 of the invariant, and the reason this property is NOT in `ua.css`:
+/// nothing reads it. Until a reader lands, the honest state is the
+/// "parsed but unrendered" table, which `velox lint` reports — an armed
+/// property with a reader is the only thing that earns a `ua.css` entry.
+#[test]
+fn font_style_is_listed_as_parsed_but_unrendered() {
+    use velox_dom::style::ComputedStyle;
+    assert!(
+        ComputedStyle::PARSED_BUT_UNRENDERED
+            .iter()
+            .any(|(prop, _)| *prop == "font-style"),
+        "`font-style` has a set_property arm but no reader, so it must be listed in \
+         PARSED_BUT_UNRENDERED. If a reader now consumes it, delete this entry and add \
+         a real screen-level assertion — leaving both would make the table lie."
+    );
+}

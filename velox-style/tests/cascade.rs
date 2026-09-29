@@ -182,6 +182,74 @@ fn full_inheritable_set_propagates_to_children() {
     );
 }
 
+/// `font-style` was being dropped TWICE: `velox-style` listed it in
+/// `INHERITABLE` (so the cascade propagated it) but `ComputedStyle::set_property`
+/// had no arm for it, so the declaration never reached the computed style. The
+/// inheritance half of the round trip is asserted by
+/// `full_inheritable_set_propagates_to_children` above; this pins the other
+/// half — the declaration actually parses into `ComputedStyle::font_style`
+/// rather than being silently discarded.
+#[test]
+fn font_style_reaches_the_computed_style_it_is_inherited_into() {
+    let author = Stylesheet::parse(".app{ font-style: italic }");
+    let child = h("span", Props::new(), vec![]);
+    let app = h("div", Props::from_class("app"), vec![child]);
+    let styled = velox_style::apply_with_cascade(&app, &author);
+    let span = first_child(&styled);
+
+    // The cascade emits the declaration ...
+    assert_eq!(
+        style_value(span, "font-style"),
+        Some("italic".to_string()),
+        "font-style must be inherited by the cascade"
+    );
+
+    // ... and the DOM must actually parse it, which is the half that was
+    // missing: with no `set_property` arm this stayed `Normal` while the
+    // string above still said `italic`.
+    let mut cs = velox_dom::style::ComputedStyle::default();
+    for decl in get_style(span).unwrap_or_default().split(';') {
+        if let Some((k, v)) = decl.trim().split_once(':') {
+            cs.set_property(k.trim(), v.trim());
+        }
+    }
+    assert_eq!(
+        cs.font_style,
+        velox_dom::style::FontStyle::Italic,
+        "set_property must arm font-style: it is in INHERITABLE, so the cascade \
+         hands it over, and dropping it here made the declaration a no-op"
+    );
+}
+
+/// The arm must cover every keyword CSS defines, and must not corrupt the
+/// field when given something it does not recognise.
+#[test]
+fn font_style_keywords_and_garbage() {
+    use velox_dom::style::{ComputedStyle, FontStyle};
+
+    for (value, expected) in [
+        ("normal", FontStyle::Normal),
+        ("italic", FontStyle::Italic),
+        ("oblique", FontStyle::Oblique),
+        ("ITALIC", FontStyle::Italic),
+        ("  Oblique  ", FontStyle::Oblique),
+    ] {
+        let mut cs = ComputedStyle::default();
+        cs.set_property("font-style", value);
+        assert_eq!(cs.font_style, expected, "font-style: {value:?}");
+    }
+
+    // An unparsable value must leave the field at its initial value rather
+    // than half-applying, matching how `font-weight` already behaves.
+    let mut cs = ComputedStyle::default();
+    cs.set_property("font-style", "diagonal");
+    assert_eq!(
+        cs.font_style,
+        FontStyle::Normal,
+        "an unknown font-style value must not change the field"
+    );
+}
+
 // ===== UA `display: inline` defaults =====
 //
 // `apply_with_cascade` merges the UA sheet under the author sheet and writes

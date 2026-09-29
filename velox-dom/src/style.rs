@@ -621,6 +621,32 @@ impl FontWeight {
     }
 }
 
+/// Font style enum.
+///
+/// Deliberately a local definition rather than a reuse of
+/// `velox_style::fonts::FontStyle`, which has the same three variants. Both
+/// `velox-renderer` and `velox-style` depend on `velox-dom`, and `velox-style`
+/// is only a *dev*-dependency of it, so importing it here would close a
+/// dependency cycle. Keep the two definitions in step.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum FontStyle {
+    #[default]
+    Normal,
+    Italic,
+    Oblique,
+}
+
+impl FontStyle {
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.trim().to_lowercase().as_str() {
+            "normal" => Some(FontStyle::Normal),
+            "italic" => Some(FontStyle::Italic),
+            "oblique" => Some(FontStyle::Oblique),
+            _ => None,
+        }
+    }
+}
+
 /// Text decoration enum
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub enum TextDecoration {
@@ -1250,6 +1276,11 @@ pub struct ComputedStyle {
     pub font_size: Length,
     pub font_family: String,
     pub font_weight: FontWeight,
+    /// Inherited (CSS 2.1 §10.8.1), so it is in `velox_style`'s `INHERITABLE`.
+    /// Reaches the cascade — it used to be dropped here because `set_property`
+    /// had no arm for it — but no renderer reads it yet; see
+    /// `PARSED_BUT_UNRENDERED`.
+    pub font_style: FontStyle,
     pub line_height: Option<f32>,
     pub letter_spacing: Length,
     pub text_align: TextAlign,
@@ -1311,43 +1342,47 @@ impl ComputedStyle {
     pub const PARSED_BUT_UNRENDERED: &[(&str, &str)] = &[
         (
             "overflow-x",
-            "arm at style.rs:1622 sets `overflow_x`; no reader looks up `overflow-x`",
+            "arm at style.rs:1662 sets `overflow_x`; no reader looks up `overflow-x`",
         ),
         (
             "overflow-y",
-            "arm at style.rs:1627 sets `overflow_y`; no reader looks up `overflow-y`",
+            "arm at style.rs:1667 sets `overflow_y`; no reader looks up `overflow-y`",
         ),
         (
             "background-image",
-            "arm at style.rs:1553 sets `background_image`; the box painter only reads `background`/`background-color`",
+            "arm at style.rs:1588 sets `background_image`; the box painter only reads `background`/`background-color`",
+        ),
+        (
+            "font-style",
+            "arm at style.rs:1621 sets `font_style`; the cascade now propagates it, but NO reader applies it — the renderer's `TextRenderConfig.font_style` is only ever set by `Default`, never copied from here",
         ),
         (
             "letter-spacing",
-            "arm at style.rs:1593 sets `letter_spacing`; cascade-inheritable, but no reader applies it",
+            "arm at style.rs:1633 sets `letter_spacing`; cascade-inheritable, but no reader applies it",
         ),
         (
             "visibility",
-            "arm at style.rs:1634 sets `visibility`; NO reader looks up `visibility`, so `visibility: hidden` hides nothing",
+            "arm at style.rs:1674 sets `visibility`; NO reader looks up `visibility`, so `visibility: hidden` hides nothing",
         ),
         (
             "transform",
-            "arm at style.rs:1641 sets `transform`; read at layout.rs:3695 ONLY to force a stacking context — no visual effect",
+            "arm at style.rs:1681 sets `transform`; read at layout.rs:3695 ONLY to force a stacking context — no visual effect",
         ),
         (
             "box-shadow",
-            "arm at style.rs:1648 sets `box_shadow`; the string name appears nowhere in the renderer",
+            "arm at style.rs:1688 sets `box_shadow`; the string name appears nowhere in the renderer",
         ),
         (
             "transition",
-            "arm at style.rs:1653 pushes to `transitions`; no reader plays a transition",
+            "arm at style.rs:1693 pushes to `transitions`; no reader plays a transition",
         ),
         (
             "border-style",
-            "arm at style.rs:1680 sets `border.style.*`; only `border`/`border-width` are read, so `border-style` alone does nothing",
+            "arm at style.rs:1720 sets `border.style.*`; only `border`/`border-width` are read, so `border-style` alone does nothing",
         ),
         (
             "border-color",
-            "arm at style.rs:1688 sets `border.color.*`; only `border`/`border-width` are read, so `border-color` alone does nothing",
+            "arm at style.rs:1728 sets `border.color.*`; only `border`/`border-width` are read, so `border-color` alone does nothing",
         ),
     ];
 
@@ -1581,6 +1616,11 @@ impl ComputedStyle {
             "font-weight" => {
                 if let Some(fw) = FontWeight::parse(value) {
                     self.font_weight = fw;
+                }
+            }
+            "font-style" => {
+                if let Some(fs) = FontStyle::parse(value) {
+                    self.font_style = fs;
                 }
             }
             "line-height" => {
@@ -1820,6 +1860,7 @@ impl Default for ComputedStyle {
             font_size: Length::Px(16.0), // Default font size
             font_family: "sans-serif".to_string(),
             font_weight: FontWeight::default(),
+            font_style: FontStyle::default(),
             line_height: None,
             letter_spacing: Length::default(),
             text_align: TextAlign::default(),
