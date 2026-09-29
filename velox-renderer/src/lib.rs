@@ -1184,6 +1184,414 @@ fn panic_detail(payload: Box<dyn std::any::Any + Send>) -> String {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Shared window-event arms (Task 5.6b)
+// ---------------------------------------------------------------------------
+//
+// `run_window_vnode_skia` and `run_window_vnode_skia_with_hmr` are the same loop
+// written twice, and six `WindowEvent` arms were copy-pasted between them. Two
+// copies means every fix has to be made twice, and this repo has already paid
+// for that: the HMR keyboard arm shipped as a bare `_ => {}` stub, and the HMR
+// loop had no `ReceivedCharacter` arm at all, so typing silently did nothing
+// under HMR. Each function below is the single implementation of one arm, and
+// both loops call it.
+//
+// Two rules, both load-bearing:
+//
+//   * These functions never touch `ControlFlow`. The loops keep every
+//     `*control_flow = ...` assignment, because parking on `Wait` (not `Poll`,
+//     not `WaitUntil`) is right for a non-game application: `Poll` would burn a
+//     core while idle and `WaitUntil` would swallow the events these arms
+//     handle. `tests/event_loop_arms.rs` pins that, and it is easier to keep
+//     pinned when the control flow never leaves the loop.
+//   * Shared state is passed as arguments instead of moving into a struct, so
+//     the three arms that are *not* here keep reading the loop's own locals
+//     under their own names — see the note on why those three stayed behind.
+//
+// Why six of the nine, and not nine:
+//
+//   * Extracted: `CloseRequested`, `Resized`, `ScaleFactorChanged`,
+//     `CursorMoved`, `ModifiersChanged`, `MouseWheel`.
+//   * Left in place: the left-click, `KeyboardInput` and `ReceivedCharacter`
+//     arms. `tests/event_loop_arms.rs` pins their bodies as *literal source
+//     text* inside each loop — `apply_click_focus(`, `&mut focused_input`,
+//     `hit_test_click`, `edit_action_for_key(keycode, shift_held)`,
+//     `arm_blink_deadline(&mut blink_deadline)`, `EditAction::Insert(c)` — and
+//     `the_duplicated_arms_of_both_loops_make_the_same_calls` compares their
+//     callee sequences so a second divergence cannot appear beside the one
+//     known HMR-only `last_vnode` republish. Moving the bodies out of the
+//     loops deletes that guard along with the duplicate: the drift test would
+//     compare two identical one-line call sites and never see the arms again.
+//     Those three are the arms the caret and typing regressions both lived in,
+//     so they keep a live drift test instead of a second copy. Task 5.6 step 3
+//     is what actually finishes the job — see the report for why it needs
+//     production-code change before it can exist.
+
+/// `WindowEvent::CloseRequested` — shared by both loops.
+///
+/// Returns `true` so the *caller* performs the exit. `ControlFlow` belongs to
+/// the loop, and keeping the assignment at the call site keeps it visible to
+/// the structural test.
+#[cfg(feature = "skia-native")]
+fn window_close_requested() -> bool {
+    velox_core::lifecycle::run_all_destroy_hooks();
+    true
+}
+
+/// `WindowEvent::Resized` — shared by both loops.
+///
+/// R-L3: coalesce. A drag produces many `Resized` events and only the last one
+/// per frame may materialise, so this records the pending size and asks for a
+/// redraw. It must not touch the raster surface; surface recreation belongs to
+/// `RedrawRequested`.
+#[cfg(feature = "skia-native")]
+fn window_resized(
+    resize_state: &mut ResizeState,
+    window_opt: &Option<winit::window::Window>,
+    size: (u32, u32),
+) {
+    // `ResizeState::queue` is the production `pending_resize = Some(..)` path.
+    resize_state.queue(size);
+    if let Some(w) = window_opt.as_ref() {
+        w.request_redraw();
+    }
+}
+
+/// `WindowEvent::ScaleFactorChanged` — shared by both loops.
+///
+/// R-M1: the physical cursor must not move when the scale factor changes, so
+/// the logical `mouse_pos` is rescaled by `old / new` in the same step that
+/// adopts the new factor. R-L3: the pending resize and the surface scale are
+/// updated here, but nothing is recreated — layout and hit-test refresh wait
+/// for `RedrawRequested` (single layout/frame, R-H5).
+#[cfg(feature = "skia-native")]
+fn window_scale_factor_changed(
+    scale_factor: &mut f32,
+    mouse_pos: &mut (f32, f32),
+    resize_state: &mut ResizeState,
+    surface: &mut Option<crate::skia_surface::SkiaSurface>,
+    window_opt: &Option<winit::window::Window>,
+    new_scale: f64,
+    new_inner_size: (u32, u32),
+) {
+    let old_scale = *scale_factor;
+    *scale_factor = new_scale as f32;
+    if old_scale.is_finite() && old_scale > 0.0 && scale_factor.is_finite() && *scale_factor > 0.0 {
+        mouse_pos.0 = mouse_pos.0 * old_scale / *scale_factor;
+        mouse_pos.1 = mouse_pos.1 * old_scale / *scale_factor;
+    }
+    resize_state.queue(new_inner_size);
+    if let Some(s) = surface.as_mut() {
+        s.set_scale_factor(*scale_factor);
+    }
+    if let Some(w) = window_opt.as_ref() {
+        w.request_redraw();
+    }
+}
+
+/// `WindowEvent::CursorMoved` — shared by both loops.
+///
+/// winit reports physical pixels while hit-testing and layout are logical, so
+/// the position is divided by the scale factor. Only a *change* of hover asks
+/// for a redraw: a cursor move within the same target paints identically.
+#[cfg(feature = "skia-native")]
+fn window_cursor_moved(
+    scale_factor: f32,
+    mouse_pos: &mut (f32, f32),
+    hover_targets: &[crate::events::HoverTarget],
+    hovered_id: &mut Option<u32>,
+    window_opt: &Option<winit::window::Window>,
+    position: (f32, f32),
+) {
+    *mouse_pos = (position.0 / scale_factor, position.1 / scale_factor);
+    let now_hovered = crate::events::hit_test_hover(hover_targets, mouse_pos.0, mouse_pos.1);
+    if now_hovered != *hovered_id {
+        *hovered_id = now_hovered;
+        if let Some(w) = window_opt.as_ref() {
+            w.request_redraw();
+        }
+    }
+}
+
+/// `WindowEvent::ModifiersChanged` — shared by both loops.
+///
+/// Latches Shift for Shift-extends-selection. winit 0.28 deprecates
+/// `KeyboardInput::modifiers` in favour of this event, so the caret reads the
+/// latched value instead of the deprecated per-key field.
+#[cfg(feature = "skia-native")]
+fn window_modifiers_changed(shift_held: &mut bool, shift: bool) {
+    *shift_held = shift;
+}
+
+/// Convert a winit scroll delta into logical pixels, negated so that wheel-down
+/// increases the scroll offset and reveals content below.
+///
+/// winit reports positive `y` for wheel-up; one line is 40 logical px, and
+/// `PixelDelta` is physical so it needs the scale factor.
+#[cfg(feature = "skia-native")]
+fn window_wheel_delta_y(delta: winit::event::MouseScrollDelta, scale_factor: f32) -> f32 {
+    match delta {
+        winit::event::MouseScrollDelta::LineDelta(_, y) => -y * 40.0,
+        winit::event::MouseScrollDelta::PixelDelta(pos) => -(pos.y as f32) / scale_factor,
+    }
+}
+
+/// `WindowEvent::MouseWheel` — shared by both loops.
+///
+/// Scrollable overflow: the deepest scrollable under the cursor, clamped by
+/// `apply_wheel_scroll`, which returns whether the offset actually moved. A
+/// wheel event that arrives before the first frame has no layout to scroll and
+/// must be a no-op rather than a panic.
+#[cfg(feature = "skia-native")]
+fn window_mouse_wheel(
+    scale_factor: f32,
+    mouse_pos: (f32, f32),
+    last_layout: &Option<velox_dom::layout::LayoutNode>,
+    scroll_offsets: &mut std::collections::HashMap<Vec<usize>, f32>,
+    window_opt: &Option<winit::window::Window>,
+    delta: winit::event::MouseScrollDelta,
+) {
+    let delta_y = window_wheel_delta_y(delta, scale_factor);
+    if let Some(layout) = last_layout.as_ref()
+        && crate::events::apply_wheel_scroll(
+            layout,
+            mouse_pos.0,
+            mouse_pos.1,
+            scroll_offsets,
+            delta_y,
+        )
+        && let Some(w) = window_opt.as_ref()
+    {
+        w.request_redraw();
+    }
+}
+
+// Behavioural tests for the shared arms.
+//
+// The loops themselves can only run inside a live winit window, and winit is an
+// optional dependency rather than a dev-dependency, so nothing under `tests/`
+// can name a `WindowEvent` and reach these functions. `tests/event_loop_arms.rs`
+// pins the *source text* of what is left in the loops, which catches the two
+// copies drifting apart from each other but says nothing about whether either
+// one is correct. These tests are that missing check: each one states an
+// observable property of a shared arm, so deleting or breaking the shared
+// implementation turns them red.
+//
+// They run under `cargo test --features velox-renderer/skia-native`; a plain
+// `cargo test -p velox-renderer` does not enable `skia-native` and does not
+// compile the loops or these tests at all.
+#[cfg(all(test, feature = "skia-native"))]
+mod window_event_shared_tests {
+    use super::*;
+    use std::collections::HashMap;
+    use winit::dpi::PhysicalPosition;
+    use winit::event::MouseScrollDelta;
+
+    /// Stand-in for the loop's `window_opt`. A `None` window is the case that
+    /// matters for these assertions: every shared arm must still do its state
+    /// work, and must simply skip the redraw request.
+    fn no_window() -> Option<winit::window::Window> {
+        None
+    }
+
+    fn hover_target(x: i32, y: i32, w: i32, h: i32, id: u32) -> crate::events::HoverTarget {
+        crate::events::HoverTarget {
+            rect: velox_dom::layout::Rect { x, y, w, h },
+            id,
+            z_index: 0,
+            order: 0,
+            clip: None,
+            sc: crate::events::StackCtx::ROOT,
+        }
+    }
+
+    #[test]
+    fn close_requested_tells_the_caller_to_exit() {
+        // `ControlFlow` is the loop's to own, so the shared arm signals instead
+        // of setting it. A false here would leave the window running.
+        assert!(window_close_requested());
+    }
+
+    #[test]
+    fn resized_keeps_only_the_last_size_of_a_drag() {
+        // R-L3 coalescing: a drag emits many `Resized` events and only the
+        // final one may be committed, so a resize storm cannot queue a backlog.
+        let mut state = ResizeState::new();
+        let window = no_window();
+        window_resized(&mut state, &window, (800, 600));
+        window_resized(&mut state, &window, (1024, 768));
+        assert_eq!(state.take_pending(), Some((1024, 768)));
+        assert_eq!(state.take_pending(), None);
+    }
+
+    #[test]
+    fn scale_factor_change_rescales_the_cursor_so_the_physical_point_is_stable() {
+        // R-M1: the physical cursor does not move when the scale factor does,
+        // so the logical position has to be divided by the same ratio.
+        let mut state = ResizeState::new();
+        let window = no_window();
+        let mut surface: Option<crate::skia_surface::SkiaSurface> = None;
+        let mut scale_factor = 1.0f32;
+        let mut mouse_pos = (100.0f32, 200.0f32);
+
+        window_scale_factor_changed(
+            &mut scale_factor,
+            &mut mouse_pos,
+            &mut state,
+            &mut surface,
+            &window,
+            2.0,
+            (1920, 1080),
+        );
+
+        assert_eq!(scale_factor, 2.0);
+        assert_eq!(mouse_pos, (50.0, 100.0));
+        // The pending resize is queued by the same arm (R-L3).
+        assert_eq!(state.take_pending(), Some((1920, 1080)));
+    }
+
+    #[test]
+    fn scale_factor_change_never_divides_by_a_degenerate_old_scale() {
+        // A 0, negative or NaN old scale cannot produce a meaningful ratio.
+        // Rescaling by it anyway would poison `mouse_pos` with NaN or infinity,
+        // after which every hover hit-test silently misses forever.
+        for degenerate in [0.0f32, -1.0, f32::NAN, f32::INFINITY] {
+            let mut state = ResizeState::new();
+            let window = no_window();
+            let mut surface: Option<crate::skia_surface::SkiaSurface> = None;
+            let mut scale_factor = degenerate;
+            let mut mouse_pos = (10.0f32, 20.0f32);
+
+            window_scale_factor_changed(
+                &mut scale_factor,
+                &mut mouse_pos,
+                &mut state,
+                &mut surface,
+                &window,
+                2.0,
+                (800, 600),
+            );
+
+            assert_eq!(
+                scale_factor, 2.0,
+                "old_scale={degenerate}: new scale adopted"
+            );
+            assert_eq!(
+                mouse_pos,
+                (10.0, 20.0),
+                "old_scale={degenerate}: cursor left alone"
+            );
+            // The pending resize is not conditional on the cursor arithmetic.
+            assert_eq!(state.take_pending(), Some((800, 600)));
+        }
+    }
+
+    #[test]
+    fn cursor_moved_converts_physical_pixels_to_logical_units() {
+        // winit reports physical pixels; layout and hit-testing are logical.
+        // Skipping this division puts the cursor half a screen away at 2x.
+        let window = no_window();
+        let mut mouse_pos = (0.0f32, 0.0f32);
+        let mut hovered_id: Option<u32> = None;
+
+        window_cursor_moved(
+            2.0,
+            &mut mouse_pos,
+            &[],
+            &mut hovered_id,
+            &window,
+            (300.0, 200.0),
+        );
+
+        assert_eq!(mouse_pos, (150.0, 100.0));
+    }
+
+    #[test]
+    fn cursor_moved_latches_and_clears_the_hover_target_under_the_logical_cursor() {
+        let window = no_window();
+        let targets = [hover_target(0, 0, 200, 200, 7)];
+        let mut mouse_pos = (0.0f32, 0.0f32);
+        let mut hovered_id: Option<u32> = None;
+
+        // 300 physical px at 2.0 is 150 logical, inside the 0..200 target.
+        window_cursor_moved(
+            2.0,
+            &mut mouse_pos,
+            &targets,
+            &mut hovered_id,
+            &window,
+            (300.0, 200.0),
+        );
+        assert_eq!(hovered_id, Some(7));
+
+        // Leaving the target has to clear the latch, or the hover style sticks.
+        window_cursor_moved(
+            2.0,
+            &mut mouse_pos,
+            &targets,
+            &mut hovered_id,
+            &window,
+            (900.0, 800.0),
+        );
+        assert_eq!(hovered_id, None);
+    }
+
+    #[test]
+    fn modifiers_changed_latches_the_shift_state_the_caret_reads() {
+        // winit 0.28 deprecated the per-key `KeyboardInput::modifiers` field, so
+        // Shift-extends-selection depends on this latch being the only writer.
+        let mut shift_held = false;
+        window_modifiers_changed(&mut shift_held, true);
+        assert!(shift_held);
+        window_modifiers_changed(&mut shift_held, false);
+        assert!(!shift_held);
+    }
+
+    #[test]
+    fn wheel_deltas_become_logical_pixels_in_the_natural_direction() {
+        // winit reports positive y for wheel-up; the offset must grow when the
+        // wheel is pushed down, and one line is 40 logical px.
+        assert_eq!(
+            window_wheel_delta_y(MouseScrollDelta::LineDelta(0.0, 1.0), 1.0),
+            -40.0
+        );
+        assert_eq!(
+            window_wheel_delta_y(MouseScrollDelta::LineDelta(0.0, -1.0), 1.0),
+            40.0
+        );
+        // The horizontal component is not a vertical scroll.
+        assert_eq!(
+            window_wheel_delta_y(MouseScrollDelta::LineDelta(7.0, 1.0), 1.0),
+            -40.0
+        );
+        // `PixelDelta` is physical, so it needs the scale factor.
+        assert_eq!(
+            window_wheel_delta_y(
+                MouseScrollDelta::PixelDelta(PhysicalPosition::new(0.0, -100.0)),
+                2.0,
+            ),
+            50.0
+        );
+    }
+
+    #[test]
+    fn a_wheel_event_before_the_first_frame_is_a_no_op() {
+        // A wheel can arrive before any `RedrawRequested`, when there is no
+        // layout to scroll. That must be inert, not a panic.
+        let window = no_window();
+        let mut scroll_offsets: HashMap<Vec<usize>, f32> = HashMap::new();
+        window_mouse_wheel(
+            1.0,
+            (10.0, 10.0),
+            &None,
+            &mut scroll_offsets,
+            &window,
+            MouseScrollDelta::LineDelta(0.0, 3.0),
+        );
+        assert!(scroll_offsets.is_empty());
+    }
+}
+
 /// Run a Skia window whose contents are produced by `make_view`.
 ///
 /// # Viewport contract (1A / X-H1) — Viewport Root Normalization (CX-04)
@@ -1339,9 +1747,10 @@ where
     // Instant before which the caret must stay solid regardless of tick
     // timing. Armed by every editing key and by focus changes.
     let mut blink_deadline: Option<std::time::Instant> = None;
-    // Shift state, latched from `WindowEvent::ModifiersChanged`. winit 0.28
-    // deprecates `KeyboardInput::modifiers` in favour of this event, so the
-    // caret reads the latched value instead of the deprecated field.
+    // Shift state, latched by the shared `window_modifiers_changed` below.
+    // winit 0.28 deprecates `KeyboardInput::modifiers` in favour of the
+    // `ModifiersChanged` event, so the caret reads this latched value instead
+    // of the deprecated per-key field.
     let mut shift_held = false;
     // Scrollable overflow model: wheel clamping + deepest hit_test
     let mut scroll_offsets: std::collections::HashMap<Vec<usize>, f32> =
@@ -1432,19 +1841,21 @@ where
                         event: WindowEvent::CloseRequested,
                         ..
                     } => {
-                        velox_core::lifecycle::run_all_destroy_hooks();
-                        *control_flow = ControlFlow::Exit;
+                        // Destroy hooks run inside the shared arm; the exit stays
+                        // here so `ControlFlow` never leaves the loop.
+                        if window_close_requested() {
+                            *control_flow = ControlFlow::Exit;
+                        }
                     }
                     Event::WindowEvent {
                         event: WindowEvent::Resized(new_size),
                         ..
                     } => {
-                        // R-L3: coalesce — do not touch raster surface here; defer to RedrawRequested.
-                        resize_state.queue((new_size.width, new_size.height));
-                        // `ResizeState::queue` is the production `pending_resize = Some(...)` path.
-                        if let Some(w) = window_opt.as_ref() {
-                            w.request_redraw();
-                        }
+                        window_resized(
+                            &mut resize_state,
+                            &window_opt,
+                            (new_size.width, new_size.height),
+                        );
                     }
                     Event::WindowEvent {
                         event:
@@ -1455,43 +1866,28 @@ where
                             },
                         ..
                     } => {
-                        let old_scale = scale_factor;
-                        scale_factor = new_scale as f32;
-                        // R-M1: atomically rescale mouse_pos to keep physical cursor stable
-                        if old_scale.is_finite()
-                            && old_scale > 0.0
-                            && scale_factor.is_finite()
-                            && scale_factor > 0.0
-                        {
-                            mouse_pos.0 = mouse_pos.0 * old_scale / scale_factor;
-                            mouse_pos.1 = mouse_pos.1 * old_scale / scale_factor;
-                        }
-                        // R-L3: coalesce renderer/presenter resize to RedrawRequested as well.
-                        resize_state.queue((new_inner_size.width, new_inner_size.height));
-                        if let Some(s) = &mut renderer.surface {
-                            s.set_scale_factor(scale_factor);
-                        }
-                        // Hit-test/layout refresh deferred to RedrawRequested (single layout/frame, R-H5).
-                        if let Some(w) = window_opt.as_ref() {
-                            w.request_redraw();
-                        }
+                        window_scale_factor_changed(
+                            &mut scale_factor,
+                            &mut mouse_pos,
+                            &mut resize_state,
+                            &mut renderer.surface,
+                            &window_opt,
+                            new_scale,
+                            (new_inner_size.width, new_inner_size.height),
+                        );
                     }
                     Event::WindowEvent {
                         event: WindowEvent::CursorMoved { position, .. },
                         ..
                     } => {
-                        mouse_pos = (
-                            position.x as f32 / scale_factor,
-                            position.y as f32 / scale_factor,
+                        window_cursor_moved(
+                            scale_factor,
+                            &mut mouse_pos,
+                            &hover_targets,
+                            &mut hovered_id,
+                            &window_opt,
+                            (position.x as f32, position.y as f32),
                         );
-                        let now_hovered =
-                            crate::events::hit_test_hover(&hover_targets, mouse_pos.0, mouse_pos.1);
-                        if now_hovered != hovered_id {
-                            hovered_id = now_hovered;
-                            if let Some(w) = window_opt.as_ref() {
-                                w.request_redraw();
-                            }
-                        }
                     }
                     Event::WindowEvent {
                         event:
@@ -1585,8 +1981,7 @@ where
                         event: WindowEvent::ModifiersChanged(mods),
                         ..
                     } => {
-                        // Latch modifier state for Shift-extends-selection.
-                        shift_held = mods.shift();
+                        window_modifiers_changed(&mut shift_held, mods.shift());
                     }
                     Event::WindowEvent {
                         event: WindowEvent::KeyboardInput { input, .. },
@@ -1669,29 +2064,14 @@ where
                         event: WindowEvent::MouseWheel { delta, .. },
                         ..
                     } => {
-                        // Scrollable overflow: deepest scrollable under the cursor,
-                        // clamped via ScrollState. Winit reports positive y for
-                        // wheel-up, so negate for the natural direction (wheel-down
-                        // increases the offset and reveals content below). One
-                        // line ~= 40 logical px; PixelDelta is physical.
-                        let delta_y: f32 = match delta {
-                            winit::event::MouseScrollDelta::LineDelta(_, y) => -y * 40.0,
-                            winit::event::MouseScrollDelta::PixelDelta(pos) => {
-                                -(pos.y as f32) / scale_factor
-                            }
-                        };
-                        if let Some(layout) = last_layout.as_ref()
-                            && crate::events::apply_wheel_scroll(
-                                layout,
-                                mouse_pos.0,
-                                mouse_pos.1,
-                                &mut scroll_offsets,
-                                delta_y,
-                            )
-                            && let Some(w) = window_opt.as_ref()
-                        {
-                            w.request_redraw();
-                        }
+                        window_mouse_wheel(
+                            scale_factor,
+                            mouse_pos,
+                            &last_layout,
+                            &mut scroll_offsets,
+                            &window_opt,
+                            delta,
+                        );
                     }
                     Event::RedrawRequested(_) => {
                         // R-L3: materialize any coalesced resize exactly once per frame.
@@ -1989,8 +2369,8 @@ where
     let mut focused_input: Option<Vec<usize>> = None;
     // Instant before which the caret must stay solid regardless of tick timing.
     let mut blink_deadline: Option<std::time::Instant> = None;
-    // Shift state, latched from `WindowEvent::ModifiersChanged` — see the plain
-    // loop for why the per-key `modifiers` field is not used.
+    // Shift state, latched by the shared `window_modifiers_changed` below —
+    // see the plain loop for why the per-key `modifiers` field is not used.
     let mut shift_held = false;
     let mut scroll_offsets_hmr: std::collections::HashMap<Vec<usize>, f32> =
         std::collections::HashMap::new();
@@ -2153,19 +2533,21 @@ where
                         event: WindowEvent::CloseRequested,
                         ..
                     } => {
-                        velox_core::lifecycle::run_all_destroy_hooks();
-                        *control_flow = ControlFlow::Exit;
+                        // Destroy hooks run inside the shared arm; the exit stays
+                        // here so `ControlFlow` never leaves the loop.
+                        if window_close_requested() {
+                            *control_flow = ControlFlow::Exit;
+                        }
                     }
                     Event::WindowEvent {
                         event: WindowEvent::Resized(new_size),
                         ..
                     } => {
-                        // R-L3: coalesce — defer surface recreation to RedrawRequested.
-                        resize_state.queue((new_size.width, new_size.height));
-                        // `ResizeState::queue` is the production `pending_resize = Some(...)` path.
-                        if let Some(w) = window_opt.as_ref() {
-                            w.request_redraw();
-                        }
+                        window_resized(
+                            &mut resize_state,
+                            &window_opt,
+                            (new_size.width, new_size.height),
+                        );
                     }
                     Event::WindowEvent {
                         event:
@@ -2176,42 +2558,28 @@ where
                             },
                         ..
                     } => {
-                        let old_scale = scale_factor;
-                        scale_factor = new_scale as f32;
-                        if old_scale.is_finite()
-                            && old_scale > 0.0
-                            && scale_factor.is_finite()
-                            && scale_factor > 0.0
-                        {
-                            mouse_pos.0 = mouse_pos.0 * old_scale / scale_factor;
-                            mouse_pos.1 = mouse_pos.1 * old_scale / scale_factor;
-                        }
-                        // R-L3: coalesce renderer/presenter resize to RedrawRequested.
-                        resize_state.queue((new_inner_size.width, new_inner_size.height));
-                        if let Some(s) = &mut renderer.surface {
-                            s.set_scale_factor(scale_factor);
-                        }
-                        // Hit-test/layout refresh deferred to RedrawRequested (single layout/frame, R-H5).
-                        if let Some(w) = window_opt.as_ref() {
-                            w.request_redraw();
-                        }
+                        window_scale_factor_changed(
+                            &mut scale_factor,
+                            &mut mouse_pos,
+                            &mut resize_state,
+                            &mut renderer.surface,
+                            &window_opt,
+                            new_scale,
+                            (new_inner_size.width, new_inner_size.height),
+                        );
                     }
                     Event::WindowEvent {
                         event: WindowEvent::CursorMoved { position, .. },
                         ..
                     } => {
-                        mouse_pos = (
-                            position.x as f32 / scale_factor,
-                            position.y as f32 / scale_factor,
+                        window_cursor_moved(
+                            scale_factor,
+                            &mut mouse_pos,
+                            &hover_targets,
+                            &mut hovered_id,
+                            &window_opt,
+                            (position.x as f32, position.y as f32),
                         );
-                        let now_hovered =
-                            crate::events::hit_test_hover(&hover_targets, mouse_pos.0, mouse_pos.1);
-                        if now_hovered != hovered_id {
-                            hovered_id = now_hovered;
-                            if let Some(w) = window_opt.as_ref() {
-                                w.request_redraw();
-                            }
-                        }
                     }
                     Event::WindowEvent {
                         event:
@@ -2303,8 +2671,7 @@ where
                         event: WindowEvent::ModifiersChanged(mods),
                         ..
                     } => {
-                        // Latch modifier state for Shift-extends-selection.
-                        shift_held = mods.shift();
+                        window_modifiers_changed(&mut shift_held, mods.shift());
                     }
                     Event::WindowEvent {
                         event: WindowEvent::KeyboardInput { input, .. },
@@ -2380,27 +2747,14 @@ where
                         event: WindowEvent::MouseWheel { delta, .. },
                         ..
                     } => {
-                        // Scrollable overflow: deepest scrollable under the cursor,
-                        // clamped via ScrollState. Negate winit's y (positive = wheel
-                        // up) for the natural direction; one line ~= 40 logical px.
-                        let delta_y: f32 = match delta {
-                            winit::event::MouseScrollDelta::LineDelta(_, y) => -y * 40.0,
-                            winit::event::MouseScrollDelta::PixelDelta(pos) => {
-                                -(pos.y as f32) / scale_factor
-                            }
-                        };
-                        if let Some(layout) = last_layout_hmr.as_ref()
-                            && crate::events::apply_wheel_scroll(
-                                layout,
-                                mouse_pos.0,
-                                mouse_pos.1,
-                                &mut scroll_offsets_hmr,
-                                delta_y,
-                            )
-                            && let Some(w) = window_opt.as_ref()
-                        {
-                            w.request_redraw();
-                        }
+                        window_mouse_wheel(
+                            scale_factor,
+                            mouse_pos,
+                            &last_layout_hmr,
+                            &mut scroll_offsets_hmr,
+                            &window_opt,
+                            delta,
+                        );
                     }
                     Event::RedrawRequested(_) => {
                         // R-L3: materialize any coalesced resize exactly once per frame.
