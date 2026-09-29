@@ -17,10 +17,18 @@ pub mod skia_impl {
     use std::cell::RefCell;
     use std::collections::HashMap;
 
+    /// One resolved `border:` shorthand, in the units painting needs.
+    ///
+    /// `style` exists because this struct previously could not express it.
+    /// `parse_border_value` returned `None` for anything that was not literally
+    /// `solid`, so `border: 1px dashed` painted *nothing at all* — the style
+    /// had nowhere to go, so the whole declaration was discarded. Carrying the
+    /// style is what lets those declarations survive to the canvas.
     #[derive(Clone, Copy)]
     struct BorderSpec {
         width: f32,
         color: sk::Color,
+        style: velox_dom::style::BorderStyle,
     }
 
     #[derive(Hash, Eq, PartialEq, Clone)]
@@ -165,31 +173,86 @@ pub mod skia_impl {
         None
     }
 
-    fn parse_border_value(value: &str) -> Option<BorderSpec> {
+    /// Why this parser exists at all, and why it is not `ComputedStyle`.
+    ///
+    /// Painting consumes a *merged style string* built by the cascade in
+    /// `velox-style`, not a `ComputedStyle` — `velox-dom`'s `set_property` has
+    /// no production caller in this crate, so there is nothing to read a
+    /// resolved border off. That is why this re-implements the grammar
+    /// `velox_dom::style::parse_border_shorthand` already owns. The DOM's copy
+    /// is the reference: the two must agree, and where they disagreed this one
+    /// was the wrong one (it accepted only `px` widths and only `solid`).
+    ///
+    /// Unifying them — routing painting through `ComputedStyle`, or moving the
+    /// grammar into a shared module both crates can see — is a design task and
+    /// deliberately not attempted here.
+    fn parse_border_value(value: &str, font_size: f32, viewport: (f32, f32)) -> Option<BorderSpec> {
+        use velox_dom::style::{BorderStyle, Color, Length};
+
         let mut width: Option<f32> = None;
         let mut color: Option<sk::Color> = None;
-        let mut is_solid = false;
+        let mut style: Option<BorderStyle> = None;
 
         for part in value.split_whitespace() {
-            if let Some(px) = part.strip_suffix("px") {
-                if let Ok(v) = px.parse::<f32>() {
-                    width = Some(v);
-                }
-            } else if part.eq_ignore_ascii_case("solid") {
-                is_solid = true;
-            } else if let Some(col) = parse_color_hex(part) {
-                color = Some(col);
+            if let Some(l) = Length::parse(part) {
+                width = Some(l.to_px(font_size, font_size, viewport));
+            } else if let Some(s) = BorderStyle::parse(part)
+                && style.is_none()
+            {
+                style = Some(s);
+            } else if let Some(c) = Color::parse(part)
+                && color.is_none()
+            {
+                color = Some(sk::Color::from_argb(c.a, c.r, c.g, c.b));
             }
         }
 
-        if !is_solid {
+        // CSS 2.1 §8.5.2: the initial value of `border-style` is `none`, so a
+        // width with no style paints nothing. The DOM's `parse_border_shorthand`
+        // does the same, and the two only ever agreed by accident before.
+        let style = style.unwrap_or_default();
+        if matches!(style, BorderStyle::None | BorderStyle::Hidden) {
             return None;
         }
 
         Some(BorderSpec {
-            width: width.unwrap_or(1.0),
+            // CSS 2.1 §8.5.1: the initial `border-width` is `medium` (3px),
+            // matching the DOM's own default rather than the old 1px.
+            width: width.unwrap_or(3.0),
             color: color.unwrap_or_else(|| sk::Color::from_argb(255, 0, 0, 0)),
+            style,
         })
+    }
+
+    /// Turn a resolved `BorderSpec::style` into something the stroke paint can
+    /// actually draw.
+    ///
+    /// `dashed` and `dotted` get a real Skia dash path effect, scaled by the
+    /// border width so the pattern tracks the weight.
+    ///
+    /// `double`, `groove`, `ridge`, `inset` and `outset` are drawn as a plain
+    /// single stroke. That is a deliberate simplification, not an oversight:
+    /// the defect fixed here was that they rendered as *nothing at all*. They
+    /// now draw a visible border of the requested width and colour, which is
+    /// strictly closer to the reference. The 3D bevels are cosmetic and are
+    /// listed in the report as a known remaining gap.
+    ///
+    /// `solid` and `hidden`/`none` clear any dash left on the paint: the paint
+    /// is reused across elements within a frame, so a stale path effect would
+    /// otherwise bleed into the next element's border.
+    fn apply_border_style(paint: &mut sk::Paint, border: &BorderSpec) {
+        use velox_dom::style::BorderStyle;
+        let w = if border.width.is_finite() && border.width > 0.0 {
+            border.width
+        } else {
+            1.0
+        };
+        let intervals = match border.style {
+            BorderStyle::Dashed => Some([w * 3.0, w * 3.0]),
+            BorderStyle::Dotted => Some([w, w]),
+            _ => None,
+        };
+        paint.set_path_effect(intervals.and_then(|iv| sk::path_effect::PathEffect::dash(&iv, 0.0)));
     }
 
     fn parse_px_value(value: &str) -> Option<f32> {
@@ -242,8 +305,14 @@ pub mod skia_impl {
         })
     }
 
+    /// `font_size` and `viewport` exist for `parse_border_value`'s relative
+    /// lengths (`2em solid red` used to vanish because only `px` was read).
+    /// They are passed in rather than re-derived here because the paint loop
+    /// already knows both.
     fn parse_style_attr(
         style: &str,
+        font_size: f32,
+        viewport: (f32, f32),
     ) -> (
         Option<sk::Color>,
         Option<BorderSpec>,
@@ -277,7 +346,7 @@ pub mod skia_impl {
                             .map(|c| sk::Color::from_argb(c.a, c.r, c.g, c.b))
                     });
                 } else if key == "border" {
-                    border = parse_border_value(val);
+                    border = parse_border_value(val, font_size, viewport);
                 } else if key == "border-radius" {
                     if let Some(px) = parse_px_value(val) {
                         radius = Some(px);
@@ -757,6 +826,9 @@ pub mod skia_impl {
             paints: &mut RenderPaints,
             images: &mut ImageCache,
             inherited_opacity: f32,
+            // Logical viewport, for `vw`/`vh` in `border-width`. Passed in
+            // because a nested `fn` cannot capture the outer function's locals.
+            viewport: (f32, f32),
         ) {
             match node {
                 VNode::Element {
@@ -770,15 +842,18 @@ pub mod skia_impl {
                     let mut opacity = inherited_opacity;
                     let mut filters = FilterSpec::default();
                     if let Some(s) = props.attrs.get("style") {
+                        // `parse_text_style` runs first: the border parser needs
+                        // this element's OWN font size to resolve `em`, and that
+                        // is only known after the text style is computed.
+                        let (style, family) = parse_text_style(s, text_style, font_family);
                         let (bg, border, radius, overflow, inset, alpha, filter_spec, _z) =
-                            parse_style_attr(s);
+                            parse_style_attr(s, style.font_size, viewport);
                         let rrect = radius.map(|r| sk::RRect::new_rect_xy(rect, r, r));
                         if let Some(rrect) = rrect {
                             clip_rrect = Some(rrect);
                         }
                         overflow_hidden = overflow;
                         clip_inset = inset;
-                        let (style, family) = parse_text_style(s, text_style, font_family);
                         child_text_style = style;
                         child_family = family;
                         opacity = (opacity * alpha).clamp(0.0, 1.0);
@@ -797,6 +872,7 @@ pub mod skia_impl {
                             paints
                                 .stroke
                                 .set_color(color_with_opacity(border.color, opacity));
+                            apply_border_style(&mut paints.stroke, &border);
                             if let Some(rrect) = rrect {
                                 canvas.draw_rrect(rrect, &paints.stroke);
                             } else {
@@ -850,6 +926,7 @@ pub mod skia_impl {
                             paints,
                             images,
                             opacity,
+                            viewport,
                         );
                     }
                     if did_clip {
@@ -941,6 +1018,7 @@ pub mod skia_impl {
             &mut paints,
             &mut images,
             1.0,
+            (root_rect.width(), root_rect.height()),
         );
 
         let image = surface.image_snapshot();
@@ -1625,6 +1703,9 @@ pub mod skia_impl {
             paints: &mut RenderPaints,
             images: &mut ImageCache,
             inherited_opacity: f32,
+            // Logical viewport, for `vw`/`vh` in `border-width`. Passed in
+            // because a nested `fn` cannot capture `render_frame`'s locals.
+            viewport: (f32, f32),
         ) {
             match node {
                 VNode::Element {
@@ -1647,8 +1728,14 @@ pub mod skia_impl {
                     let mut opacity = inherited_opacity;
                     let mut filters = FilterSpec::default();
                     if let Some(s) = props.attrs.get("style") {
+                        // As at the other call site: resolve the element's own
+                        // font size before the border parser needs it for `em`.
+                        // The logical viewport is the physical surface divided
+                        // by the scale the canvas was scaled by, because the
+                        // rects being painted here are logical.
+                        let (style, family) = parse_text_style(s, text_style, font_family);
                         let (bg, border, radius, overflow, inset, alpha, filter_spec, _z) =
-                            parse_style_attr(s);
+                            parse_style_attr(s, style.font_size, viewport);
                         let rect = sk::Rect::from_xywh(
                             layout.rect.x as f32,
                             layout.rect.y as f32,
@@ -1661,7 +1748,6 @@ pub mod skia_impl {
                         }
                         overflow_hidden = overflow;
                         clip_inset = inset;
-                        let (style, family) = parse_text_style(s, text_style, font_family);
                         child_text_style = style;
                         child_family = family;
                         opacity = (opacity * alpha).clamp(0.0, 1.0);
@@ -1679,6 +1765,7 @@ pub mod skia_impl {
                             paints
                                 .stroke
                                 .set_color(color_with_opacity(border.color, opacity));
+                            apply_border_style(&mut paints.stroke, &border);
                             if let Some(rrect) = rrect {
                                 canvas.draw_rrect(rrect, &paints.stroke);
                             } else {
@@ -1986,6 +2073,7 @@ pub mod skia_impl {
                                 paints,
                                 images,
                                 opacity,
+                                viewport,
                             );
                         }
                     }
@@ -2116,6 +2204,7 @@ pub mod skia_impl {
             &mut paints,
             &mut images,
             1.0,
+            (root_rect.width(), root_rect.height()),
         );
         let debug_overlay = std::env::var("VELOX_DEBUG_HIT_RECTS")
             .ok()
@@ -2918,6 +3007,190 @@ pub mod skia_impl {
         fn parse_text_style_bolder_overrides_non_bold_base() {
             let (s, _f) = parse_text_style("font-weight:bolder", plain_text_style(), "default");
             assert!(s.bold);
+        }
+
+        // ------------------------------------------------------------------
+        // `border:` shorthand — the renderer's private copy of the grammar.
+        //
+        // `parse_border_value` used to strip only a literal `px` suffix and
+        // honour only a literal `solid`, returning `None` for anything else.
+        // So `border: 1px dashed` and `border: 2em solid red` painted NO
+        // BORDER AT ALL, while the DOM parsed both correctly. It now delegates
+        // to the DOM's own public grammar (`Length::parse`,
+        // `BorderStyle::parse`, `Color::parse`, `Length::to_px`), so the two
+        // halves agree by construction rather than by coincidence.
+        // ------------------------------------------------------------------
+        use velox_dom::style::BorderStyle;
+
+        /// The `border` slot of `parse_style_attr`'s tuple, end to end.
+        /// Takes the shorthand *value*; the property name is added here.
+        fn border_of(value: &str, font_size: f32) -> Option<BorderSpec> {
+            parse_style_attr(&format!("border: {value}"), font_size, (800.0, 600.0)).1
+        }
+
+        fn spec(style: BorderStyle) -> BorderSpec {
+            BorderSpec {
+                width: 2.0,
+                color: sk::Color::from_argb(255, 0, 0, 0),
+                style,
+            }
+        }
+
+        // THE HEADLINE FIX. Every style keyword CSS defines must reach the
+        // canvas; before, all but `solid` were dropped and drew nothing.
+        #[test]
+        fn border_value_every_style_keyword_reaches_the_canvas() {
+            for (kw, want) in [
+                ("solid", BorderStyle::Solid),
+                ("dashed", BorderStyle::Dashed),
+                ("dotted", BorderStyle::Dotted),
+                ("double", BorderStyle::Double),
+                ("groove", BorderStyle::Groove),
+                ("ridge", BorderStyle::Ridge),
+                ("inset", BorderStyle::Inset),
+                ("outset", BorderStyle::Outset),
+            ] {
+                let b = border_of(&format!("2px {kw} red"), 16.0)
+                    .unwrap_or_else(|| panic!("`border: 2px {kw} red` produced no border"));
+                assert_eq!(b.style, want, "wrong style for `{kw}`");
+                assert_eq!(b.width, 2.0, "wrong width for `{kw}`");
+                // DOM parity, asserted against the DOM's own parser.
+                assert_eq!(BorderStyle::parse(kw), Some(want));
+            }
+        }
+
+        // The second half of the headline: a non-`px` width used to discard the
+        // whole declaration. `em` resolves against the element's own font size,
+        // `vw` against the viewport the paint loop was given.
+        #[test]
+        fn border_value_resolves_relative_lengths() {
+            let b = border_of("2em solid red", 20.0).expect("2em solid red dropped");
+            assert_eq!(b.width, 40.0, "`em` must scale with the font size");
+
+            let b = border_of("10vw solid red", 16.0).expect("10vw solid red dropped");
+            assert_eq!(b.width, 80.0, "`vw` must scale with the viewport");
+
+            // `rem` has no root font size in scope anywhere in the paint path,
+            // so it resolves against the element font size. Correct whenever
+            // the element has not overridden `font-size`; a `rem` border on an
+            // element that *has* overridden it will be wrong. Tracked as a
+            // known limitation rather than silently dropped.
+            let b = border_of("1rem solid red", 18.0).expect("1rem solid red dropped");
+            assert_eq!(b.width, 18.0);
+
+            // Still handles every length the DOM handles, unitless included.
+            for (decl, want) in [("0 solid red", 0.0), ("3 solid red", 3.0)] {
+                assert_eq!(border_of(decl, 16.0).unwrap().width, want);
+            }
+        }
+
+        // Colour parity. The renderer's own `parse_color_hex` knew 12 names and
+        // no 3-digit hex; the DOM's `Color::parse` knows 22 and `#rgb`. These
+        // seven are the ones the renderer silently painted black.
+        #[test]
+        fn border_value_accepts_every_named_colour_the_dom_accepts() {
+            for (kw, rgb) in [
+                ("silver", (192, 192, 192)),
+                ("teal", (0, 128, 128)),
+                ("navy", (0, 0, 128)),
+                ("olive", (128, 128, 0)),
+                ("maroon", (128, 0, 0)),
+                ("aqua", (0, 255, 255)),
+                ("pink", (255, 192, 203)),
+            ] {
+                let b = border_of(&format!("1px solid {kw}"), 16.0)
+                    .unwrap_or_else(|| panic!("named colour `{kw}` dropped the whole border"));
+                assert_eq!(
+                    b.color,
+                    sk::Color::from_argb(255, rgb.0, rgb.1, rgb.2),
+                    "`{kw}` resolved to the wrong colour"
+                );
+                // DOM parity for the same token.
+                let dom = velox_dom::style::Color::parse(kw).expect("DOM rejects its own colour");
+                assert_eq!((dom.r, dom.g, dom.b), rgb);
+            }
+            // 3-digit hex is a DOM capability the renderer's parser lacked.
+            assert_eq!(
+                border_of("1px solid #f00", 16.0).unwrap().color,
+                sk::Color::from_argb(255, 255, 0, 0)
+            );
+        }
+
+        // Parity with the DOM after 45088c5: a width with no style paints
+        // nothing, because CSS's initial `border-style` is `none`. The two
+        // halves used to agree here only by accident.
+        #[test]
+        fn border_width_without_a_style_paints_nothing() {
+            assert!(
+                border_of("1px", 16.0).is_none(),
+                "a bare width must not invent a border style"
+            );
+            assert!(
+                border_of("2em red", 16.0).is_none(),
+                "a bare width must not invent a border style"
+            );
+            // ...and `none`/`hidden` are likewise not a visible border.
+            assert!(border_of("1px none red", 16.0).is_none());
+            assert!(border_of("1px hidden red", 16.0).is_none());
+        }
+
+        // With no width, CSS's initial `border-width` is `medium` (3px). The
+        // renderer's old default was 1px, so `border: solid red` was also
+        // thinner than the DOM resolved.
+        #[test]
+        fn border_value_defaults_to_medium_width() {
+            assert_eq!(border_of("solid red", 16.0).unwrap().width, 3.0);
+        }
+
+        // `dashed`/`dotted` get a real Skia dash; the rest paint a plain
+        // stroke. Pinned so a later "simplification" cannot quietly drop it.
+        #[test]
+        fn apply_border_style_dashes_only_dashed_and_dotted() {
+            let mut paint = sk::Paint::default();
+            for (s, want_dash) in [
+                (BorderStyle::Dashed, true),
+                (BorderStyle::Dotted, true),
+                (BorderStyle::Solid, false),
+                (BorderStyle::Double, false),
+                (BorderStyle::Inset, false),
+            ] {
+                apply_border_style(&mut paint, &spec(s));
+                assert_eq!(
+                    paint.path_effect().is_some(),
+                    want_dash,
+                    "dash effect wrong for {s:?}"
+                );
+            }
+        }
+
+        // The stroke paint is reused across elements within a frame, so a dash
+        // left on it would bleed into the next element's border.
+        #[test]
+        fn apply_border_style_clears_a_stale_dash() {
+            let mut paint = sk::Paint::default();
+            apply_border_style(&mut paint, &spec(BorderStyle::Dashed));
+            assert!(paint.path_effect().is_some());
+            apply_border_style(&mut paint, &spec(BorderStyle::Solid));
+            assert!(
+                paint.path_effect().is_none(),
+                "stale dash leaked onto a solid border"
+            );
+        }
+
+        // A zero or non-finite width must not produce an infinite/NaN dash
+        // interval, which Skia would reject.
+        #[test]
+        fn apply_border_style_survives_a_degenerate_width() {
+            for w in [0.0, -3.0, f32::NAN, f32::INFINITY] {
+                let mut paint = sk::Paint::default();
+                let mut s = spec(BorderStyle::Dashed);
+                s.width = w;
+                apply_border_style(&mut paint, &s);
+                assert!(
+                    paint.path_effect().is_some(),
+                    "dashed border with width {w} should still dash"
+                );
+            }
         }
 
         fn fnv1a(bytes: &[u8]) -> u32 {
