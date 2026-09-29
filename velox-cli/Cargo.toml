@@ -25,6 +25,16 @@ velox-style = { path = "../velox-style" }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0.149"
 velox-renderer = { version = "0.1.0", path = "../velox-renderer" }
+# Real filesystem watching for the dev server. Replaces a 400 ms polling
+# `read_dir` walk: `notify` reports changes in well under 100 ms and does not
+# touch every file on every tick. See `commands::dev::DirWatcher`.
+#
+# NOTE a failure mode this introduces that the old poll did not have: on Linux
+# `notify` uses inotify, which is a *finite* kernel resource. Exhausting
+# `fs.inotify.max_user_watches` / `max_user_instances` makes `watcher.watch()`
+# fail with "No space left on device". The dev server surfaces that error and
+# keeps running rather than going silently blind — see `DirWatcher`.
+notify = "6"
 
 [lib]
 name = "velox_cli"

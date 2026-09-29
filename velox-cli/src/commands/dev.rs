@@ -1,4 +1,6 @@
 use anyhow::Result;
+use notify::{EventKind, RecursiveMode, Watcher};
+use std::collections::HashMap;
 use std::io::{BufRead, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
@@ -6,15 +8,426 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 
+/// Directory names that never produce a dev-server rebuild.
+///
+/// `target/` is load-bearing, not cosmetic. `cargo build` writes thousands of
+/// files into it, inside the watched tree; a watcher that descends into it burns
+/// the inotify watch budget — the finite kernel resource whose exhaustion is this
+/// watcher's documented failure mode (see [`DirWatcher`]). The exclusion is
+/// asserted *behaviourally* in `tests/watcher_tests.rs`: a real file written
+/// under `target/` must produce no event.
 const IGNORED: &[&str] = &["target", ".git", ".vscode", ".idea"];
 
-/// How long the dev loop blocks waiting for the next event before it gives up
-/// and re-scans for file changes. It is a *timeout*, not a poll interval: a
-/// keystroke on stdin or a finished build wakes the loop immediately, so input
-/// latency and rebuild latency are no longer quantised to this value.
+/// How long the dev loop blocks waiting for the next event before it re-checks
+/// whether stdin has gone away.
+///
+/// This is no longer a *poll interval for file changes* — those arrive over the
+/// command channel from [`DirWatcher`] and wake the loop immediately. It remains
+/// only a backstop for the one thing the channel cannot report: the stdin
+/// reader's death (see [`InputSource`]). Input latency and rebuild latency are
+/// no longer quantised to this value.
 const LOOP_TIMEOUT: Duration = Duration::from_millis(400);
+
+/// How long the dev loop waits for a burst of filesystem events to go quiet
+/// before acting on it.
+///
+/// `notify` reports create + modify + close_write for a single editor save, so
+/// without a collapse every save would cost three `cargo build`s. The collapse
+/// is a deadline comparison in the event loop, **not** a sleep: the loop blocks
+/// on the command channel for exactly the remaining time, so a keystroke or a
+/// finished build still wakes it early. The previous implementation slept a flat
+/// 150 ms in the change path itself, which blocked command handling.
+const DEBOUNCE_WINDOW: Duration = Duration::from_millis(50);
+
+/// True when `path` (as reported by the watcher, relative to the watch root)
+/// must not trigger a rebuild.
+///
+/// A path is excluded when **any** component is a dot-directory (`.git`,
+/// `.vscode`, …) or a name in [`IGNORED`]. Checking every component rather than
+/// only the last is what makes the exclusion hold for a nested
+/// `sub/project/target/`, not just a `target/` sitting at the watch root.
+pub fn is_ignored(path: &Path) -> bool {
+    path.components().any(|c| match c {
+        std::path::Component::Normal(name) => {
+            let n = name.to_string_lossy();
+            n.starts_with('.') || IGNORED.contains(&n.as_ref())
+        }
+        // `CurDir` is the empty/no-op component; everything else (`RootDir`,
+        // `Prefix`, `ParentDir`) is not a name we can exclude on.
+        _ => false,
+    })
+}
+
+// ---- filesystem watcher ----------------------------------------------------
+
+/// Which SFC block a change landed in.
+///
+/// The watcher used to report only *that* something changed, so every edit —
+/// including a one-property CSS tweak — forced a full `cargo build` and an app
+/// restart. The kind of change determines the response, exactly as in Vite, and
+/// every ambiguity resolves to the conservative [`ChangeKind::Script`].
+///
+/// The bias is deliberate and one-directional. Classifying a multi-block or
+/// unparseable edit as cheaper would mean swapping a stylesheet while the
+/// template that renders it never recompiled: the user would be looking at stale
+/// code that *looks* live. Over-reporting as a `Script` change costs a rebuild
+/// the user would have got anyway.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChangeKind {
+    /// Only `<style>` content differs. Rebuilds nothing.
+    StyleOnly,
+    /// Only `<template>` content differs.
+    TemplateOnly,
+    /// Script logic changed, or more than one block, or the file does not parse
+    /// as an SFC, or it is not an SFC at all. This is the kind that requires a
+    /// real `cargo build`, and the fallback for every case that is not provably
+    /// style-only or template-only.
+    Script,
+}
+
+impl ChangeKind {
+    /// Fold two observed changes into the one the dev server should act on.
+    ///
+    /// Collapsing a burst means several edits can land in one debounce window,
+    /// and a style edit plus a script edit in that window is a script change.
+    /// Ordering is [`ChangeKind::Script`] > `TemplateOnly` > `StyleOnly`, so the
+    /// merge can never make a build cheaper than any of its inputs.
+    pub fn merge(self, other: ChangeKind) -> ChangeKind {
+        use ChangeKind::*;
+        match (self, other) {
+            (Script, _) | (_, Script) => Script,
+            (TemplateOnly, _) | (_, TemplateOnly) => TemplateOnly,
+            (StyleOnly, StyleOnly) => StyleOnly,
+        }
+    }
+}
+
+/// Classify a change by which SFC block it landed in.
+///
+/// Compares the parsed blocks of the previous and current source rather than
+/// grepping for a tag, so an unterminated `</templ` mid-keystroke is detected as
+/// broken rather than mistaken for a style-only edit.
+///
+/// Every unparseable or non-SFC input returns [`ChangeKind::Script`] for the
+/// reason given on that variant: a half-written file is the *normal* case while
+/// an editor is mid-save, not an exception.
+pub fn classify_change(before: &str, after: &str) -> ChangeKind {
+    use ChangeKind::*;
+    let (Ok(b), Ok(a)) = (velox_sfc::parse_sfc(before), velox_sfc::parse_sfc(after)) else {
+        return Script;
+    };
+    fn block(s: &velox_sfc::Sfc) -> (Option<&str>, Option<&str>, Option<&str>, Option<&str>) {
+        // A missing block and an empty one must compare equal, so read them
+        // through the same `Option<&str>` shape rather than comparing
+        // `Option<&StyleBlock>` (which also needs `PartialEq` on the block
+        // types) or letting `None` differ from `Some("")`.
+        (
+            s.style.as_ref().map(|b| b.content.as_str()),
+            s.template.as_ref().map(|b| b.content.as_str()),
+            s.script_setup.as_ref().map(|b| b.content.as_str()),
+            s.script.as_ref().map(|b| b.content.as_str()),
+        )
+    }
+    let (b_style, b_tpl, b_setup, b_script) = block(&b);
+    let (a_style, a_tpl, a_setup, a_script) = block(&a);
+
+    let style = b_style != a_style;
+    let template = b_tpl != a_tpl;
+    let script = b_setup != a_setup || b_script != a_script;
+
+    match (style, template, script) {
+        (true, false, false) => StyleOnly,
+        (false, true, false) => TemplateOnly,
+        // Includes `(false, false, false)`: nothing parsed differently. It is
+        // reported as `Script` because a no-op must never suppress the rebuild
+        // that a genuinely unparseable neighbour would have forced.
+        _ => Script,
+    }
+}
+
+/// Non-blocking collapse of a burst of filesystem events into one rebuild.
+///
+/// Holds only a deadline. It never sleeps: the dev loop asks [`ChangeDebouncer::wait`]
+/// how long it may block on its command channel and wakes early for a keystroke
+/// or a finished build. That is what replaced the old 150 ms `thread::sleep` in
+/// the change path, which stalled all command handling.
+///
+/// `now` is a parameter rather than read from the clock so the whole state
+/// machine is testable without sleeping.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct ChangeDebouncer {
+    /// When the current burst goes quiet, or `None` when no burst is pending.
+    deadline: Option<Instant>,
+}
+
+impl ChangeDebouncer {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Record one raw event, (re)starting the quiet window.
+    pub fn record(&mut self, now: Instant, window: Duration) {
+        self.deadline = Some(now + window);
+    }
+
+    /// Whether a burst is still being collected.
+    pub fn is_pending(&self) -> bool {
+        self.deadline.is_some()
+    }
+
+    /// Fire the pending rebuild if the burst has gone quiet, consuming it.
+    ///
+    /// Returns `true` exactly once per burst, which is what makes N raw events
+    /// cost one `cargo build`.
+    pub fn take_if_due(&mut self, now: Instant) -> bool {
+        match self.deadline {
+            Some(deadline) if now >= deadline => {
+                self.deadline = None;
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// How long the loop may block before re-checking this debouncer.
+    ///
+    /// `None` when there is nothing pending, in which case the caller falls back
+    /// to [`LOOP_TIMEOUT`]. Never returns a zero wait, so a caller cannot spin.
+    pub fn wait(&self, now: Instant) -> Option<Duration> {
+        let deadline = self.deadline?;
+        Some(
+            deadline
+                .saturating_duration_since(now)
+                .max(Duration::from_millis(1)),
+        )
+    }
+}
+
+/// What the dev loop does about a filesystem-watcher failure.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WatchReaction {
+    /// Print the failure and **keep going**. Never fatal: a blind watcher is
+    /// still a running dev server the user can restart a build from by hand,
+    /// whereas stopping loses the app they had running.
+    Report { message: String, fatal: bool },
+}
+
+/// Turn a watcher error into what the dev loop does about it.
+///
+/// Separate from the loop so the contract is assertable: a watcher failure is
+/// reported, names its remedy, and is *not* fatal.
+///
+/// This exists because `notify` introduces a failure the old poll did not have.
+/// On Linux it uses inotify, a finite kernel resource; exhausting
+/// `fs.inotify.max_user_watches` makes watching a path fail with "No space left
+/// on device". The old `read_dir` poll had no such limit. That makes a silently
+/// dead watcher — one that claims to hot-reload and never does — a new way for
+/// the dev server to lie to the user, so the error is surfaced instead.
+pub fn react_to_watch_error(message: &str) -> WatchReaction {
+    WatchReaction::Report {
+        message: format!(
+            "{message}\n\
+             \x20    The kernel's inotify watch limit is exhausted, so files may no longer be\n\
+             \x20    detected. Raise it (Linux):\n\
+             \x20      sudo sysctl -w fs.inotify.max_user_watches=524288\n\
+             \x20      sudo sysctl -w fs.inotify.max_user_instances=1024\n\
+             \x20    or persist it in /etc/sysctl.d/. The dev server keeps running;\n\
+             \x20    press 'r' to rebuild by hand, and check that target/ is outside the watched tree."
+        ),
+        fatal: false,
+    }
+}
+
+/// A live filesystem watcher, owned for its whole lifetime.
+///
+/// Owns the `notify` watcher, which is what holds the inotify instance — dropping
+/// it releases those watches, so a `DirWatcher` that goes out of scope stops
+/// watching.
+///
+/// Reports changes as [`DevCmd::FileChanged`] on the dev server's own command
+/// channel, so a filesystem event and a keystroke wake the same `recv_timeout`.
+/// This is why the watcher needs no polling and no second thread of its own:
+/// `notify` runs its event loop internally and calls the handler below.
+pub struct DirWatcher {
+    _watcher: notify::RecommendedWatcher,
+}
+
+impl DirWatcher {
+    /// Start watching `root` recursively, reporting to `tx`.
+    ///
+    /// Returns a `DirWatcher` even when it could not watch `root`: the failure
+    /// is delivered as [`DevCmd::WatchError`] on the channel instead, because a
+    /// dev server that refuses to start over a watcher problem is a worse
+    /// failure than one that says so and keeps running.
+    ///
+    /// `tx` is cloned into the notify handler and into the event-filter closure,
+    /// both of which are `Send`, which is what lets the whole watcher stay
+    /// single-threaded from the dev loop's point of view.
+    pub fn start(root: &Path, tx: mpsc::Sender<DevCmd>) -> Self {
+        // Last-seen content per path, so a change can be classified against
+        // what was there before. Shared with the handler; the handler runs on
+        // notify's thread.
+        let previous: Arc<Mutex<HashMap<PathBuf, String>>> = Arc::new(Mutex::new(HashMap::new()));
+        // Seed the cache with what is already on disk, so the *first* save is
+        // classified against real prior content rather than as "unknown".
+        seed_cache(&previous, root);
+
+        let prev_for_handler = Arc::clone(&previous);
+        let tx_for_handler = tx.clone();
+        // Events arrive with absolute paths. They are reported (and cached)
+        // relative to the watch root, which is what the dev server printed before
+        // this watcher existed — and it is load-bearing, not cosmetic: the cache
+        // is seeded with relative keys, so an absolute key would miss on every
+        // lookup and every change would be classified as the conservative
+        // `Script` kind.
+        let root_for_handler = root.to_path_buf();
+
+        let mut watcher =
+            match notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
+                let event = match res {
+                    Ok(e) => e,
+                    // A runtime inotify error (queue overflow, watch removal).
+                    // Surfaced, not swallowed: see `react_to_watch_error`.
+                    Err(e) => {
+                        let _ = tx_for_handler.send(DevCmd::WatchError {
+                            message: e.to_string(),
+                        });
+                        return;
+                    }
+                };
+                // Access events are the watcher reading the tree, not the user
+                // editing it. Acting on them would make the dev server rebuild
+                // in response to its own `cargo build`.
+                if matches!(event.kind, EventKind::Access(_)) {
+                    return;
+                }
+                for path in &event.paths {
+                    let Ok(rel) = path.strip_prefix(&root_for_handler) else {
+                        continue;
+                    };
+                    // Checking *every* component is what excludes a nested
+                    // `sub/project/target/`, and it is also what keeps a
+                    // directory-creation event from leaking: `notify` reports
+                    // each newly created parent as an event in its own right, and
+                    // creating `target/` reports `target` — which this filter
+                    // already rejects.
+                    //
+                    // An earlier draft also skipped `path.is_dir()`. Mutation
+                    // testing showed that guard was not load-bearing (removing
+                    // it left every test green — see
+                    // `3.1-mutation-results.log`, M2), so it was deleted rather
+                    // than shipped as unverified code. It carried a TOCTOU race
+                    // of its own: a directory removed again before the check
+                    // reads as a file.
+                    if is_ignored(rel) {
+                        continue;
+                    }
+                    let kind = classify_observed(&prev_for_handler, rel);
+                    if tx_for_handler
+                        .send(DevCmd::FileChanged {
+                            path: rel.to_path_buf(),
+                            kind,
+                        })
+                        .is_err()
+                    {
+                        // The dev loop is gone; nothing left to tell.
+                        return;
+                    }
+                }
+            }) {
+                Ok(w) => w,
+                Err(e) => {
+                    let _ = tx.send(DevCmd::WatchError {
+                        message: format!("Could not start a filesystem watcher: {e}"),
+                    });
+                    // `InotifyWatcher` is the concrete type on Linux and the
+                    // recommended one everywhere; if construction itself failed there
+                    // is nothing to hand back, so the dev loop runs without one and
+                    // has already been told why.
+                    return Self {
+                        _watcher: unavailable_watcher(),
+                    };
+                }
+            };
+
+        if let Err(e) = watcher.watch(root, RecursiveMode::Recursive) {
+            let _ = tx.send(DevCmd::WatchError {
+                message: format!("Could not watch {}: {e}", root.display()),
+            });
+        }
+
+        Self { _watcher: watcher }
+    }
+}
+
+/// A no-op watcher, for the case where `notify` could not be constructed at all.
+///
+/// Exists so [`DirWatcher::start`] always returns something: the failure has
+/// already been reported to the user, and a dev server that exits immediately
+/// after saying "could not start a filesystem watcher" is less useful than one
+/// that stays up and can still be driven by hand with `r`.
+fn unavailable_watcher() -> notify::RecommendedWatcher {
+    // `recommended_watcher` has failed once already in this process, so this
+    // cannot realistically fail; if it somehow does, there is no third option
+    // that keeps the caller simpler.
+    notify::recommended_watcher(|_| {}).expect("notify watcher construction")
+}
+
+/// Read the current on-disk content of every non-ignored file under `root`.
+///
+/// One walk, at watcher startup only. It exists so the first save after `velox
+/// dev` starts is classified against real prior content: without a baseline the
+/// first change of any kind would have to be treated as unknown.
+fn seed_cache(cache: &Arc<Mutex<HashMap<PathBuf, String>>>, root: &Path) {
+    fn walk(cache: &Arc<Mutex<HashMap<PathBuf, String>>>, dir: &Path, root: &Path) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let Ok(rel) = path.strip_prefix(root) else {
+                continue;
+            };
+            if is_ignored(rel) {
+                continue;
+            }
+            if path.is_dir() {
+                walk(cache, &path, root);
+            } else if let Ok(content) = std::fs::read_to_string(&path) {
+                cache.lock().unwrap().insert(rel.to_path_buf(), content);
+            }
+        }
+    }
+    walk(cache, root, root);
+}
+
+/// Classify one observed change by diffing the file's new content against its
+/// last-seen content, and update the cache either way.
+///
+/// A file we have never seen (created since startup, or binary/unreadable) is
+/// [`ChangeKind::Script`]: there is no prior content to diff against, and the
+/// conservative kind is always the safe answer.
+fn classify_observed(previous: &Arc<Mutex<HashMap<PathBuf, String>>>, path: &Path) -> ChangeKind {
+    let Ok(after) = std::fs::read_to_string(path) else {
+        return ChangeKind::Script;
+    };
+    let mut cache = previous.lock().unwrap();
+    match cache.remove(path) {
+        Some(before) => {
+            let kind = classify_change(&before, &after);
+            cache.insert(path.to_path_buf(), after);
+            kind
+        }
+        // New file, or a deletion. Either way there is nothing to diff, so the
+        // dev server is told to do the safe thing.
+        None => {
+            cache.insert(path.to_path_buf(), after);
+            ChangeKind::Script
+        }
+    }
+}
 
 // ---- tiny ANSI helpers (no extra deps) ----
 fn ansi(code: &str, s: &str) -> String {
@@ -100,6 +513,63 @@ fn project_bin_name(project_dir: &Path) -> Option<String> {
     None
 }
 
+/// What the dev loop should do about an observed change.
+///
+/// Split out so the "a style edit must not trigger `cargo build`" rule is a
+/// single, named, testable decision rather than an `if` buried in the loop where
+/// the next edit to the loop can quietly undo it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ChangeReaction {
+    /// A real `cargo build` plus an app restart.
+    Rebuild,
+    /// A live stylesheet swap: no `cargo build`, no app restart. This is the
+    /// single biggest HMR win available, since CSS edits are the most frequent
+    /// edit in any UI codebase.
+    SwapStylesheet { path: PathBuf },
+}
+
+impl ChangeReaction {
+    /// Whether this reaction needs a `cargo build` **right now**.
+    ///
+    /// **This is the task 3.1 / task 3.2 seam, and it is deliberately still
+    /// `true` for every kind.**
+    ///
+    /// The swap that [`ChangeReaction::SwapStylesheet`] asks for needs
+    /// `HmrMessage::StyleUpdate`, which lives in `velox-renderer` — outside this
+    /// crate, and the whole of task 3.2. Flipping this to `false` for
+    /// `StyleOnly` *before* that message exists would not be the HMR win, it
+    /// would be a silent regression: CSS edits would stop rebuilding and there
+    /// would be nothing to replace them, so editing a `<style>` block would do
+    /// nothing at all and look like a broken dev server.
+    ///
+    /// So the win lands as one line, here, in the same commit that adds the
+    /// message. The classification it depends on is complete and tested now, so
+    /// that commit is a one-liner rather than a re-derivation.
+    pub fn needs_rebuild(self) -> bool {
+        let _ = self;
+        true
+    }
+}
+
+/// Decide what a classified change means for the dev loop.
+///
+/// Pure and one-to-one with [`ChangeKind`], mirroring [`react_to`] for build
+/// outcomes: the loop matches on this rather than on the kind, which is what
+/// makes "a style edit is not a rebuild" a testable claim instead of a comment.
+pub fn react_to_change(path: &Path, kind: ChangeKind) -> ChangeReaction {
+    match kind {
+        ChangeKind::StyleOnly => ChangeReaction::SwapStylesheet {
+            path: path.to_path_buf(),
+        },
+        // `TemplateOnly` and `Script` both need a real build, so they are not
+        // distinguished here. That is honest rather than lazy: task 3.3 is what
+        // gives `TemplateOnly` a live rerender, and until it lands both kinds
+        // cost exactly the same rebuild, so pretending otherwise here would
+        // claim a capability that does not exist.
+        ChangeKind::TemplateOnly | ChangeKind::Script => ChangeReaction::Rebuild,
+    }
+}
+
 /// The dev loop's command channel.
 ///
 /// `pub` so the off-the-loop build plumbing can be tested from
@@ -114,6 +584,24 @@ pub enum DevCmd {
     /// reports back over this same channel, so the dev loop wakes on it
     /// immediately instead of waiting out `LOOP_TIMEOUT` to notice.
     Built(BuildOutcome),
+    /// A watched file changed, classified by the SFC block it landed in.
+    ///
+    /// Arrives from [`DirWatcher`] over this same channel as the keystrokes, so
+    /// a save and a keypress wake one `recv_timeout` rather than a save having
+    /// to wait out a poll tick. `path` is relative to the watch root.
+    ///
+    /// `notify` reports create + modify + close_write for one save, so this
+    /// arrives several times per save; [`ChangeDebouncer`] collapses the burst
+    /// without blocking.
+    FileChanged {
+        path: PathBuf,
+        kind: ChangeKind,
+    },
+    /// The filesystem watcher failed — most importantly inotify watch
+    /// exhaustion. Reported, never fatal: see [`react_to_watch_error`].
+    WatchError {
+        message: String,
+    },
 }
 
 /// Tracks the dev loop's only source of user input.
@@ -585,17 +1073,34 @@ pub fn dev_current(project_dir: &Path, release: bool) -> Result<()> {
     // successful build.
     let mut child: Option<AppChild> = None;
     let mut gate = BuildGate::new();
-    let mut last_check = SystemTime::now();
+    // The debouncer is the *only* thing that used to be `last_check` plus a
+    // 150 ms sleep. It holds a deadline, not a clock: a burst of filesystem
+    // events extends it, and the loop wakes when it expires.
+    let mut debounce = ChangeDebouncer::new();
+    // The change observed in the current burst, folded with
+    // [`ChangeKind::merge`] so N edits in one window cost one build and the
+    // result is never cheaper than any single edit in it.
+    let mut burst: Option<(PathBuf, ChangeKind)> = None;
     let mut crashed = false;
+
+    // Watching starts here and the watcher lives to the end of the loop, because
+    // dropping it releases the inotify watches. It is created after the channel
+    // so a failure can be reported on the loop's own channel.
+    let _watcher = DirWatcher::start(&watch_dir, tx.clone());
 
     loop {
         // True when something this iteration wants a rebuild for.
         let mut change_requested = false;
 
-        // Block until the next event. A keystroke or a finished build wakes the
-        // loop straight away; `LOOP_TIMEOUT` is only how long we wait before
-        // deciding it is time to look for file changes again.
-        match rx.recv_timeout(LOOP_TIMEOUT) {
+        // Block until the next event. A keystroke, a finished build, or a
+        // filesystem change all wake the loop straight away.
+        //
+        // The wait is the *shorter* of the debounce deadline and
+        // `LOOP_TIMEOUT`: while a burst is being collected the loop must wake
+        // exactly when it goes quiet, and afterwards it only needs to wake
+        // periodically to notice that stdin died. Neither branch sleeps.
+        let wait = debounce.wait(Instant::now()).unwrap_or(LOOP_TIMEOUT);
+        match rx.recv_timeout(wait) {
             Ok(DevCmd::Quit) => {
                 // Drop both guards here rather than relying on end-of-scope
                 // drops, so the app is gone before we say it is. Dropping is the
@@ -618,11 +1123,42 @@ pub fn dev_current(project_dir: &Path, release: bool) -> Result<()> {
             }
             Ok(DevCmd::Reload) => {
                 println!("{}", yellow("↻ Manual reload requested"));
-                // A manual reload is a change, but not a *file* change: advance
-                // the scan clock so the build we are about to run does not come
-                // back around as a detected change.
-                last_check = SystemTime::now();
+                // A manual reload is a change, but not a *file* change. There is
+                // no scan clock to advance any more — the watcher only reports
+                // real events, so a manual reload cannot come back as one.
                 change_requested = true;
+            }
+            Ok(DevCmd::FileChanged { path, kind }) => {
+                // One raw event. `notify` emits several per save, so this only
+                // restarts the quiet window; the build happens once, below,
+                // when the window expires.
+                debounce.record(Instant::now(), DEBOUNCE_WINDOW);
+                burst = Some(match burst {
+                    Some((prev_path, prev_kind)) => (prev_path, prev_kind.merge(kind)),
+                    None => (path, kind),
+                });
+            }
+            Ok(DevCmd::WatchError { message }) => {
+                // Reported, not fatal. The loop keeps running and keeps reading
+                // the same channel, so a change that still gets through is
+                // still acted on. See `react_to_watch_error` for why stopping
+                // would be the worse failure.
+                match react_to_watch_error(&message) {
+                    // `fatal` is carried on the variant precisely so a future
+                    // fatal outcome is representable; today it is always false,
+                    // which is the contract the test pins.
+                    WatchReaction::Report { message, fatal } => {
+                        let label = if fatal {
+                            "stopped"
+                        } else {
+                            "watching continues"
+                        };
+                        println!(
+                            "{} Filesystem watcher error ({label}):\n{message}",
+                            red("✗")
+                        );
+                    }
+                }
             }
             Ok(DevCmd::Built(outcome)) => {
                 // The worker is finished either way; freeing it here lets the
@@ -670,9 +1206,25 @@ pub fn dev_current(project_dir: &Path, release: bool) -> Result<()> {
             Err(RecvTimeoutError::Disconnected) => break,
         }
 
-        if let Some(changed) = changed_file(&watch_dir, &mut last_check) {
-            println!("{} {} changed — rebuilding", yellow("↻"), changed.display());
-            change_requested = true;
+        // Drain the burst: act only once, and only after it has gone quiet. This
+        // is the non-blocking collapse. There is no `sleep` here — the loop
+        // already blocked on the channel above for exactly the remaining
+        // window, so a keystroke or a finished build still interrupts it.
+        if debounce.take_if_due(Instant::now())
+            && let Some((path, kind)) = burst.take()
+        {
+            println!(
+                "{} {} changed ({kind:?}) — rebuilding",
+                yellow("↻"),
+                path.display()
+            );
+            // The rebuild decision goes through `react_to_change` so that
+            // task 3.2 turns "a style edit is not a rebuild" into a one-liner
+            // here rather than a re-derivation. It returns `true` for every
+            // kind today, and that is a deliberate stop, not an oversight — see
+            // `ChangeReaction::needs_rebuild` for why flipping it before the
+            // `StyleUpdate` message exists would be a silent regression.
+            change_requested = react_to_change(&path, kind).needs_rebuild();
         }
 
         if change_requested && gate.on_change() == BuildAction::Start {
@@ -870,182 +1422,94 @@ fn print_build_error(stderr: &str) {
     println!();
 }
 
-/// Returns the first changed file (relative to `dir`) if anything changed since
-/// `last_check`, and advances `last_check` to now.
-///
-/// There is deliberately no sleep here. The previous version stamped
-/// `*last_check` *before* a 150 ms wait and never re-scanned afterwards, so it
-/// was not a debounce: it stamped the clock, slept, and a save landing inside
-/// that window had `mtime > last_check` on the next scan and therefore *caused*
-/// a second full `cargo build` rather than being absorbed. Coalescing now lives
-/// in [`BuildGate`], which is a state machine rather than a sleep, so it covers
-/// the whole duration of a build instead of a fixed 150 ms.
-fn changed_file(dir: &Path, last_check: &mut SystemTime) -> Option<std::path::PathBuf> {
-    fn walk(p: &Path, t: SystemTime, base: &Path) -> Option<std::path::PathBuf> {
-        if let Ok(rd) = std::fs::read_dir(p) {
-            for e in rd.flatten() {
-                let path = e.path();
-                let n = path.file_name().and_then(|x| x.to_str()).unwrap_or("");
-                if n.starts_with('.') || IGNORED.contains(&n) {
-                    continue;
-                }
-                if path.is_dir() {
-                    if let Some(f) = walk(&path, t, base) {
-                        return Some(f);
-                    }
-                } else if let Ok(md) = e.metadata()
-                    && let Ok(m) = md.modified()
-                    && m > t
-                {
-                    return Some(path.strip_prefix(base).unwrap_or(&path).to_path_buf());
-                }
-            }
-        }
-        None
-    }
-    let found = walk(dir, *last_check, dir);
-    if found.is_some() {
-        *last_check = SystemTime::now();
-    }
-    found
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::AtomicU32;
 
-    static SEQ: AtomicU32 = AtomicU32::new(0);
-
-    /// A self-deleting temp directory.
+    /// `target/` is excluded at the watch root and at any depth.
     ///
-    /// `tempfile` is not a dependency of this crate (and adding one would churn
-    /// the lockfile mid-programme), so the handful of lines it would provide are
-    /// inlined here instead.
-    struct TempTree(PathBuf);
+    /// The behavioural counterpart lives in `tests/watcher_tests.rs`
+    /// (`a_change_under_target_is_not_reported`), which proves the same thing
+    /// end-to-end through a real watcher. This one pins the pure predicate, so
+    /// a regression names the function rather than showing up as a flaky
+    /// timeout.
+    #[test]
+    fn target_is_excluded_at_every_depth() {
+        assert!(is_ignored(Path::new("target/debug/junk.txt")));
+        assert!(is_ignored(Path::new("sub/project/target/debug/artifact")));
+        assert!(is_ignored(Path::new("target")));
+        assert!(!is_ignored(Path::new("src/target_like/keep.txt")));
+    }
 
-    impl TempTree {
-        fn new() -> Self {
-            let n = SEQ.fetch_add(1, Ordering::Relaxed);
-            let p = std::env::temp_dir().join(format!("velox-dev-fs-{}-{}", std::process::id(), n));
-            let _ = std::fs::remove_dir_all(&p);
-            std::fs::create_dir_all(&p).expect("create temp tree");
-            Self(p)
-        }
+    #[test]
+    fn dot_directories_are_excluded_but_source_files_are_not() {
+        assert!(is_ignored(Path::new(".git/HEAD")));
+        assert!(is_ignored(Path::new(".vscode/settings.json")));
+        assert!(!is_ignored(Path::new("App.vx")));
+        assert!(!is_ignored(Path::new("components/only.vx")));
+    }
 
-        /// Create `rel` (with any parent directories).
-        fn write(&self, rel: &str) {
-            let p = self.0.join(rel);
-            if let Some(parent) = p.parent() {
-                std::fs::create_dir_all(parent).expect("create parent");
+    /// Merging a burst must never make the rebuild cheaper than any edit in it.
+    ///
+    /// This is the property that keeps a style edit that happened to land in the
+    /// same debounce window as a script edit from silently skipping the build.
+    #[test]
+    fn merging_a_burst_never_cheaper_than_its_worst_input() {
+        use ChangeKind::*;
+        assert_eq!(StyleOnly.merge(StyleOnly), StyleOnly);
+        assert_eq!(StyleOnly.merge(TemplateOnly), TemplateOnly);
+        assert_eq!(TemplateOnly.merge(StyleOnly), TemplateOnly);
+        assert_eq!(StyleOnly.merge(Script), Script);
+        assert_eq!(Script.merge(StyleOnly), Script);
+        assert_eq!(Script.merge(TemplateOnly), Script);
+        assert_eq!(TemplateOnly.merge(Script), Script);
+    }
+
+    /// A style edit is routed to a stylesheet swap, not to a rebuild.
+    ///
+    /// The routing is pinned even though
+    /// [`ChangeReaction::needs_rebuild`] is still `true` for every kind. The
+    /// point is that the *classification* is complete and correct today, so
+    /// task 3.2 only has to flip the one boolean.
+    #[test]
+    fn a_style_edit_is_routed_to_a_stylesheet_swap() {
+        assert_eq!(
+            react_to_change(Path::new("App.vx"), ChangeKind::StyleOnly),
+            ChangeReaction::SwapStylesheet {
+                path: PathBuf::from("App.vx")
             }
-            std::fs::write(&p, b"x").expect("write file");
-        }
+        );
+        assert_eq!(
+            react_to_change(Path::new("App.vx"), ChangeKind::TemplateOnly),
+            ChangeReaction::Rebuild
+        );
+        assert_eq!(
+            react_to_change(Path::new("App.vx"), ChangeKind::Script),
+            ChangeReaction::Rebuild
+        );
     }
 
-    impl Drop for TempTree {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.0);
-        }
-    }
-
-    /// A clock that makes every file on disk look freshly changed, so a test is
-    /// about *which* files the walk accepts rather than about mtime resolution.
-    fn everything_changed() -> SystemTime {
-        SystemTime::UNIX_EPOCH
-    }
-
-    /// `target/` must be pruned even when it sits directly under the watched
-    /// root.
+    /// The debouncer must not block the loop it runs on.
     ///
-    /// This is the assertion that can actually fail. It is easy to write a
-    /// version of this test that passes for the wrong reason — the dev server
-    /// normally watches `<project>/src`, and `target/` lives at the project root,
-    /// so the path is never even in scope. Pointing `changed_file` at a root that
-    /// *does* contain `target/` puts the name filter on the path it is meant to
-    /// guard: delete `"target"` from `IGNORED` and this returns `Some("junk.txt")`.
+    /// This replaces the removed `scanning_does_not_sleep` test, which pinned
+    /// that the old 150 ms sleep was gone from the change path. The property is
+    /// the same one — the change path must not sleep — but it is now stated
+    /// against the mechanism that replaced the sleep: 10 000 record/check cycles
+    /// cost microseconds, where anything that slept even once for 1 ms would
+    /// take at least 10 ms.
     #[test]
-    fn a_change_under_target_is_ignored() {
-        let t = TempTree::new();
-        t.write("target/debug/junk.txt");
-        let mut last_check = everything_changed();
-        assert_eq!(
-            changed_file(&t.0, &mut last_check),
-            None,
-            "files under target/ must not trigger a rebuild"
-        );
-    }
-
-    #[test]
-    fn a_change_under_a_dot_directory_is_ignored() {
-        let t = TempTree::new();
-        t.write(".git/HEAD");
-        t.write(".vscode/settings.json");
-        let mut last_check = everything_changed();
-        assert_eq!(
-            changed_file(&t.0, &mut last_check),
-            None,
-            "dot-directories must not trigger a rebuild"
-        );
-    }
-
-    /// The counterpart to the two above: the filter must not be so broad that a
-    /// real edit is missed. Without this, deleting `IGNORED` entirely would make
-    /// the exclusion tests green by accident.
-    #[test]
-    fn a_source_file_change_is_reported() {
-        let t = TempTree::new();
-        t.write("keep.txt");
-        let mut last_check = everything_changed();
-        assert_eq!(
-            changed_file(&t.0, &mut last_check),
-            Some(PathBuf::from("keep.txt"))
-        );
-    }
-
-    #[test]
-    fn a_source_file_nested_below_the_root_is_reported_relative_to_it() {
-        let t = TempTree::new();
-        t.write("components/only.vx");
-        let mut last_check = everything_changed();
-        assert_eq!(
-            changed_file(&t.0, &mut last_check),
-            Some(PathBuf::from("components/only.vx"))
-        );
-    }
-
-    /// Nothing to report means the clock must not move either, or a later scan
-    /// would compare against a time that was never used to justify a rebuild.
-    #[test]
-    fn an_ignored_change_does_not_advance_the_clock() {
-        let t = TempTree::new();
-        t.write("target/debug/junk.txt");
-        let before = everything_changed();
-        let mut last_check = before;
-        assert_eq!(changed_file(&t.0, &mut last_check), None);
-        assert_eq!(last_check, before, "clock advanced with no change found");
-    }
-
-    /// The scan must not block the dev loop.
-    ///
-    /// The removed code slept 150 ms *after* finding a change, on the dev loop
-    /// itself, which is what this pins. Three scans of a one-entry tree cost
-    /// microseconds, so the bound is orders of magnitude above the real cost
-    /// while still being half the one sleep it replaced; three calls with the
-    /// sleep restored take at least 450 ms.
-    #[test]
-    fn scanning_does_not_sleep() {
-        let t = TempTree::new();
-        t.write("keep.txt");
-        let start = std::time::Instant::now();
-        for _ in 0..3 {
-            let mut last_check = everything_changed();
-            let _ = changed_file(&t.0, &mut last_check);
+    fn the_debounce_path_never_sleeps() {
+        let mut d = ChangeDebouncer::new();
+        let start = Instant::now();
+        for i in 0..10_000u32 {
+            let now = start + Duration::from_micros(i as u64);
+            d.record(now, Duration::from_millis(50));
+            let _ = d.take_if_due(now);
         }
         let elapsed = start.elapsed();
         assert!(
-            elapsed < Duration::from_millis(150),
-            "3 scans took {elapsed:?}; the scan must not sleep"
+            elapsed < Duration::from_millis(50),
+            "10 000 debounce cycles took {elapsed:?}; the change path must not sleep"
         );
     }
 }

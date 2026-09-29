@@ -46,7 +46,28 @@ enum Commands {
     },
 
     /// Development server with hot reload
-    #[command(about = "Start dev server with file watching")]
+    #[command(
+        about = "Start dev server with file watching",
+        long_about = "\
+Start dev server with file watching.
+
+FILE WATCHING
+    Changes are reported by the OS (inotify on Linux), not by polling, so a
+    save is picked up in milliseconds. `target/`, `.git`, `.vscode`, `.idea` and
+    dot-directories are excluded: `cargo build` writes thousands of files into
+    `target/`, and watching it is what exhausts the kernel's watch budget.
+
+INOTIFY WATCH LIMIT (Linux)
+    Watching is backed by inotify, a finite kernel resource. If the limit is
+    exhausted, the dev server reports the error and keeps running, but files may
+    no longer be detected — press 'r' to rebuild by hand. Raise the limit with:
+
+        sudo sysctl -w fs.inotify.max_user_watches=524288
+        sudo sysctl -w fs.inotify.max_user_instances=1024
+
+    To persist it, write those two lines to a file in /etc/sysctl.d/ and run
+    `sudo sysctl --system`."
+    )]
     Dev {
         /// Watch directory (project root; builds with cargo run)
         #[arg(long, short = 'w')]
