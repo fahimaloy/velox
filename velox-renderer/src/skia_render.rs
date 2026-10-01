@@ -414,7 +414,24 @@ pub mod skia_impl {
         0
     }
 
-    fn parse_text_style(style: &str, base: TextStyle, family: &str) -> (TextStyle, String) {
+    /// `viewport` is a parameter rather than a capture because a nested `fn`
+    /// item cannot capture the enclosing function's locals (E0434); both
+    /// callers already hold it for `parse_style_attr`'s `vw`/`vh` borders.
+    fn parse_text_style(
+        style: &str,
+        base: TextStyle,
+        family: &str,
+        viewport: (f32, f32),
+    ) -> (TextStyle, String) {
+        use velox_dom::layout::DEFAULT_ROOT_FONT_SIZE as ROOT_FONT_SIZE;
+        use velox_dom::style::Length;
+        // The size a RELATIVE unit in this element's own `font-size` resolves
+        // against: the parent's, as the recursion threads it in `base`. Read
+        // before `base` is moved, and deliberately NOT `text_style.font_size`
+        // — CSS 2.1 §6.7: a relative unit in the value of the property itself
+        // is relative to the PARENT's font size, so a second `font-size`
+        // declaration in the same block must not compound.
+        let parent_font_size = base.font_size;
         let mut text_style = base;
         let mut font_family = family.to_string();
         for decl in style.split(';') {
@@ -446,8 +463,35 @@ pub mod skia_impl {
                         text_style.underline = false;
                     }
                 } else if key == "font-size" {
-                    if let Some(px) = parse_px_value(val).or_else(|| parse_float_value(val)) {
-                        text_style.font_size = px.max(1.0);
+                    // `parse_px_value(val).or_else(|| parse_float_value(val))`
+                    // read `px` and bare numbers only, so `2em`, `1.5rem`,
+                    // `150%` and `5vw` were all dropped with no warning: the
+                    // declaration reached the style string, the cascade, and
+                    // the parser, and painted nothing. The whole `h1`–`h6`
+                    // hierarchy rendered at its parent's size.
+                    //
+                    // Delegate to the DOM's own grammar — the same
+                    // `Length::parse`/`Length::to_px` pair `parse_border_value`
+                    // uses for `2em solid red` — so the glyph size and the box
+                    // size come out of one unit table. Filtering this down to
+                    // `em`/`rem` would have left `150%` silently dropped, which
+                    // is the same lie in a smaller hole.
+                    if let Some(len) = Length::parse(val) {
+                        let px = len.to_px(parent_font_size, ROOT_FONT_SIZE, viewport);
+                        // One guard drops three classes of input, all of which
+                        // the old `.max(1.0)`-only path mishandled:
+                        //  - `auto`: not a `font-size` value in CSS 2.1 §15.5
+                        //    (`<absolute-size> | <relative-size> | <length> |
+                        //    <percentage>`), and `Length::to_px` maps it to 0,
+                        //    which the floor alone would paint as a 1px font.
+                        //  - non-positive (`0`, `0%`, `-4px`): a negative font
+                        //    size is invalid and a 0px one paints nothing.
+                        //  - non-finite (`NaN`, or an overflowing literal such
+                        //    as `1e999px`): `f32::parse` accepts both, and
+                        //    `f32::max(1.0)` keeps `inf`, which Skia rejects.
+                        if px.is_finite() && px > 0.0 {
+                            text_style.font_size = px.max(1.0);
+                        }
                     }
                 } else if key == "font-family" {
                     if let Some(family) = parse_font_family(val) {
@@ -845,7 +889,8 @@ pub mod skia_impl {
                         // `parse_text_style` runs first: the border parser needs
                         // this element's OWN font size to resolve `em`, and that
                         // is only known after the text style is computed.
-                        let (style, family) = parse_text_style(s, text_style, font_family);
+                        let (style, family) =
+                            parse_text_style(s, text_style, font_family, viewport);
                         let (bg, border, radius, overflow, inset, alpha, filter_spec, _z) =
                             parse_style_attr(s, style.font_size, viewport);
                         let rrect = radius.map(|r| sk::RRect::new_rect_xy(rect, r, r));
@@ -1733,7 +1778,8 @@ pub mod skia_impl {
                         // The logical viewport is the physical surface divided
                         // by the scale the canvas was scaled by, because the
                         // rects being painted here are logical.
-                        let (style, family) = parse_text_style(s, text_style, font_family);
+                        let (style, family) =
+                            parse_text_style(s, text_style, font_family, viewport);
                         let (bg, border, radius, overflow, inset, alpha, filter_spec, _z) =
                             parse_style_attr(s, style.font_size, viewport);
                         let rect = sk::Rect::from_xywh(
@@ -2937,8 +2983,12 @@ pub mod skia_impl {
                 nowrap: false,
                 ellipsis: false,
             };
-            let (s, _f) =
-                parse_text_style("white-space:nowrap;text-overflow:ellipsis", base, "default");
+            let (s, _f) = parse_text_style(
+                "white-space:nowrap;text-overflow:ellipsis",
+                base,
+                "default",
+                (800.0, 600.0),
+            );
             assert!(s.nowrap, "expected nowrap");
             assert!(s.ellipsis, "expected ellipsis");
         }
@@ -2969,7 +3019,7 @@ pub mod skia_impl {
                 "font-weight: Bolder ",
                 "font-weight:BOLDER",
             ] {
-                let (s, _f) = parse_text_style(decl, plain_text_style(), "default");
+                let (s, _f) = parse_text_style(decl, plain_text_style(), "default", (800.0, 600.0));
                 assert!(s.bold, "expected `{decl}` to render bold");
             }
         }
@@ -2985,7 +3035,7 @@ pub mod skia_impl {
                 "font-weight:900",
                 "font-weight:bolder",
             ] {
-                let (s, _f) = parse_text_style(decl, plain_text_style(), "default");
+                let (s, _f) = parse_text_style(decl, plain_text_style(), "default", (800.0, 600.0));
                 assert!(s.bold, "expected `{decl}` to render bold");
             }
             // Non-bold-producing.
@@ -2996,7 +3046,7 @@ pub mod skia_impl {
                 "font-weight:600",
                 "font-weight:lighter",
             ] {
-                let (s, _f) = parse_text_style(decl, plain_text_style(), "default");
+                let (s, _f) = parse_text_style(decl, plain_text_style(), "default", (800.0, 600.0));
                 assert!(!s.bold, "expected `{decl}` to render non-bold");
             }
         }
@@ -3005,11 +3055,246 @@ pub mod skia_impl {
         // being treated as "no change".
         #[test]
         fn parse_text_style_bolder_overrides_non_bold_base() {
-            let (s, _f) = parse_text_style("font-weight:bolder", plain_text_style(), "default");
+            let (s, _f) = parse_text_style(
+                "font-weight:bolder",
+                plain_text_style(),
+                "default",
+                (800.0, 600.0),
+            );
             assert!(s.bold);
         }
 
         // ------------------------------------------------------------------
+        // `font-size` in relative units.
+        //
+        // The arm used to be `parse_px_value(val).or_else(|| parse_float_value(val))`,
+        // which reads `px` and bare numbers ONLY. `2em` failed both and the
+        // declaration was dropped with no warning, so `ua.css`'s
+        // `h1 { font-size: 2em }` laid the BOX at 32px and painted the glyphs
+        // at the inherited 14px. The whole `h1`-`h6` hierarchy rendered at its
+        // parent's size.
+        // ------------------------------------------------------------------
+
+        /// A base style whose inherited font size is `size`, so a test can
+        /// prove a relative unit is resolved against the INHERITED value rather
+        /// than against a constant baked into the parser.
+        fn base_at_font_size(size: f32) -> TextStyle {
+            TextStyle {
+                font_size: size,
+                ..plain_text_style()
+            }
+        }
+
+        /// Every unit the CSS 2.1 §15.5 `<length> | <percentage>` production
+        /// admits for `font-size`, each paired with the pixel value it must
+        /// produce against an inherited 16px parent in an 800x600 viewport.
+        ///
+        /// `%`, `vw` and `vh` are here deliberately. Filtering this list down to
+        /// `em`/`rem` would be a smaller diff, but it would leave `font-size:
+        /// 150%` silently dropped — the same dead declaration this change
+        /// exists to kill, just in a smaller hole.
+        #[test]
+        fn parse_text_style_resolves_every_relative_font_size_unit() {
+            const VIEWPORT: (f32, f32) = (800.0, 600.0);
+            // (declaration, expected px against an inherited 16px parent)
+            for (decl, expected) in [
+                ("font-size: 2em", 32.0),    // 2 * 16
+                ("font-size: 0.5em", 8.0),   // 0.5 * 16
+                ("font-size: 1.5rem", 24.0), // 1.5 * DEFAULT_ROOT_FONT_SIZE(16)
+                ("font-size: 150%", 24.0),   // 1.5 * 16
+                ("font-size: 5vw", 40.0),    // 5% of 800
+                ("font-size: 5vh", 30.0),    // 5% of 600
+            ] {
+                let (s, _f) = parse_text_style(decl, base_at_font_size(16.0), "default", VIEWPORT);
+                assert_eq!(
+                    s.font_size, expected,
+                    "`{decl}` must resolve to {expected}px against an inherited 16px parent; \
+                     a dropped font-size paints the parent's glyphs, which is the defect"
+                );
+            }
+        }
+
+        /// The relative units must follow the INHERITED size, not a constant.
+        /// If the parser had defaulted its `em` basis to 16 this row would be
+        /// identical to the one above, which is exactly the bug the previous
+        /// test could not see.
+        #[test]
+        fn parse_text_style_relative_font_size_follows_the_inherited_size() {
+            const VIEWPORT: (f32, f32) = (800.0, 600.0);
+            // An `h1` inside a `div` that sets `font-size: 20px`: `2em` is 40px,
+            // not the 32px it would be at the default root.
+            let (s, _f) = parse_text_style(
+                "font-size: 2em",
+                base_at_font_size(20.0),
+                "default",
+                VIEWPORT,
+            );
+            assert_eq!(s.font_size, 40.0, "`2em` of an inherited 20px is 40px");
+
+            // `rem` is the discriminating half: it is rooted at
+            // DEFAULT_ROOT_FONT_SIZE and MUST NOT follow the inherited size.
+            let (s, _f) = parse_text_style(
+                "font-size: 1rem",
+                base_at_font_size(20.0),
+                "default",
+                VIEWPORT,
+            );
+            assert_eq!(
+                s.font_size,
+                velox_dom::layout::DEFAULT_ROOT_FONT_SIZE,
+                "`rem` is rooted at the root font size and must ignore the inherited 20px"
+            );
+        }
+
+        /// `vw`/`vh` need the viewport threaded in, so a hard-coded or
+        /// zero-viewport resolution would show up here.
+        #[test]
+        fn parse_text_style_viewport_units_follow_the_viewport_argument() {
+            let (s, _f) = parse_text_style(
+                "font-size: 10vw",
+                base_at_font_size(16.0),
+                "default",
+                (1000.0, 500.0),
+            );
+            assert_eq!(s.font_size, 100.0, "10% of a 1000px viewport");
+            let (s, _f) = parse_text_style(
+                "font-size: 10vh",
+                base_at_font_size(16.0),
+                "default",
+                (1000.0, 500.0),
+            );
+            assert_eq!(s.font_size, 50.0, "10% of a 500px viewport");
+        }
+
+        /// The two forms the arm already honoured must keep working. A fix that
+        /// only added relative units and broke `12px` would be a new defect.
+        #[test]
+        fn parse_text_style_keeps_absolute_font_sizes() {
+            const VIEWPORT: (f32, f32) = (800.0, 600.0);
+            for (decl, expected) in [
+                ("font-size: 12px", 12.0),
+                ("font-size: 33px", 33.0),
+                ("font-size: 18", 18.0), // bare number, as `Length::parse` maps it to Px
+                ("font-size:  20px ", 20.0), // surrounding whitespace
+            ] {
+                let (s, _f) = parse_text_style(decl, base_at_font_size(16.0), "default", VIEWPORT);
+                assert_eq!(
+                    s.font_size, expected,
+                    "`{decl}` must still resolve to {expected}px"
+                );
+            }
+        }
+
+        /// The one guard in the `font-size` arm drops three classes of input,
+        /// and all three must INHERIT rather than paint: `auto` (invalid per
+        /// CSS 2.1 §15.5, and `Length::to_px` maps it to 0), a non-positive
+        /// size, and a non-finite one. `f32::parse` accepts `NaN` and an
+        /// overflowing literal like `1e999px`, and `f32::max(1.0)` keeps
+        /// `inf`, so without the `is_finite` half of the guard Skia is handed
+        /// an infinite font size.
+        #[test]
+        fn parse_text_style_drops_font_sizes_that_cannot_paint() {
+            const VIEWPORT: (f32, f32) = (800.0, 600.0);
+            for decl in [
+                "font-size: auto",    // invalid in CSS 2.1 §15.5, to_px => 0
+                "font-size: 0",       // Length::Zero
+                "font-size: 0px",     // zero after resolution
+                "font-size: 0%",      // zero after resolution
+                "font-size: -4px",    // negative
+                "font-size: 1e999px", // parses to `inf`
+                "font-size: NaNpx",   // parses to `NaN`
+            ] {
+                let (s, _f) = parse_text_style(decl, base_at_font_size(16.0), "default", VIEWPORT);
+                assert_eq!(
+                    s.font_size, 16.0,
+                    "`{decl}` cannot paint a glyph and must be dropped, inheriting the 16px base"
+                );
+            }
+        }
+
+        /// A 1rem-wide box is the root font size, resolved by `velox-dom`
+        /// itself, so it is an independent readout of the basis this parser must
+        /// share. The two numbers are compared rather than each asserted
+        /// against a literal, because AGREEMENT is the property that matters:
+        /// if the DOM's root constant ever moves and the painter does not, this
+        /// assertion is what notices. The inherited size is 999px so a pass
+        /// cannot be an accident of `em` handling.
+        ///
+        /// What this test does NOT do is catch a renderer that declared its own
+        /// copy of the root size: such a copy would hold the same `16.0` today,
+        /// so the two numbers would still agree. Mutation M8 of
+        /// `gates/4.2b-fixA-falsify.py` demonstrated exactly that — it replaced
+        /// the import with `const ROOT_FONT_SIZE: f32 = 16.0;` and left this
+        /// test green. The test below is the guard that mutation turns red.
+        #[test]
+        fn parse_text_style_rem_agrees_with_the_dom_layout_root_basis() {
+            let tree = velox_dom::h("div", velox_dom::Props::from_inline("width: 1rem"), vec![]);
+            let laid = velox_dom::layout::compute_layout(&tree, 800, 600);
+            let (s, _f) = parse_text_style(
+                "font-size: 1rem",
+                base_at_font_size(999.0),
+                "default",
+                (800.0, 600.0),
+            );
+            assert_eq!(
+                s.font_size, laid.rect.w as f32,
+                "the painter's `1rem` font size ({}) must equal the width velox-dom lays a \
+                 `1rem` box out at ({}) — same root basis, or glyphs and boxes diverge",
+                s.font_size, laid.rect.w
+            );
+        }
+
+        /// The root font size must be BORROWED, never restated. This is a
+        /// source scan rather than a value comparison, and that is the whole
+        /// point: a second literal root size in the renderer is
+        /// indistinguishable from the first by any value-based test until the
+        /// day someone edits `DEFAULT_ROOT_FONT_SIZE` and only one of the two
+        /// moves — glyphs laid out against one root size, boxes against another.
+        ///
+        /// Only the PRODUCTION half of the file is scanned, split structurally
+        /// at `mod tests`, so the `"16.0"` needle cannot match its own source
+        /// and the legitimate `16.0`s in the border and seam tests below cannot
+        /// mask a real hit.
+        #[test]
+        fn the_renderer_borrows_the_dom_root_font_size() {
+            let src = include_str!("skia_render.rs");
+            let production = src
+                .split_once("\n    mod tests {")
+                .expect("skia_render.rs has a `mod tests` block to split production from")
+                .0;
+            assert!(
+                !production.contains("16.0"),
+                "the production half of skia_render.rs must not contain a `16.0` literal: \
+                 the root font size is `velox_dom::layout::DEFAULT_ROOT_FONT_SIZE`, and a \
+                 second copy would drift away from it silently"
+            );
+            assert!(
+                production.contains("DEFAULT_ROOT_FONT_SIZE"),
+                "the production half of skia_render.rs must resolve `rem` through \
+                 `velox_dom::layout::DEFAULT_ROOT_FONT_SIZE`"
+            );
+        }
+
+        /// CSS 2.1 §6.7: a relative unit in the value of a property is relative
+        /// to the PARENT's font size, so two `font-size` declarations in one
+        /// block must not compound — the second `3em` is 3x the INHERITED 16,
+        /// not 3x the 24 the first one set. Resolving against
+        /// `text_style.font_size` instead would give 72.
+        #[test]
+        fn parse_text_style_relative_font_size_does_not_compound_within_one_block() {
+            let (s, _f) = parse_text_style(
+                "font-size: 1.5em; font-size: 3em",
+                base_at_font_size(16.0),
+                "default",
+                (800.0, 600.0),
+            );
+            assert_eq!(
+                s.font_size, 48.0,
+                "the later declaration wins, and its `3em` is 3x the inherited 16px, not 3x the 24px set before it"
+            );
+        }
+
+        /// ------------------------------------------------------------------
         // `border:` shorthand — the renderer's private copy of the grammar.
         //
         // `parse_border_value` used to strip only a literal `px` suffix and

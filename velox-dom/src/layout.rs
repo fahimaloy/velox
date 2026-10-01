@@ -6,7 +6,13 @@ use std::collections::hash_map::Entry;
 use std::rc::Rc;
 
 /// Default font size for root element (used for rem calculations)
-const DEFAULT_ROOT_FONT_SIZE: f32 = 16.0;
+///
+/// `pub` because the renderer resolves `rem` in a `font-size` declaration and
+/// must use the SAME constant `compute_layout` seeds its recursion with as
+/// `root_font_size`. A second literal `16.0` in the renderer would be a value
+/// that could drift away from the one the boxes were laid out with, and nothing
+/// at the call site would notice.
+pub const DEFAULT_ROOT_FONT_SIZE: f32 = 16.0;
 
 /// Font family used for text measurement when a caller has no stylesheet
 /// context to name one. Matches the family `text_wrap::wrap_text` assumes.
@@ -587,14 +593,20 @@ fn own_font_size(style: Option<&str>, inherited: f32) -> f32 {
 
 /// The font size a node inherits, which is its own when it does not declare
 /// one. `last_inline_leaf` only needs it to read the STRUT off, and a strut is
-/// defined against the element's own font, so the root default of 16 is the
+/// defined against the element's own font, so `DEFAULT_ROOT_FONT_SIZE` is the
 /// right answer for a node that inherits from nothing.
 fn inherited_font_size(node: &VNode) -> f32 {
     let VNode::Element { props, .. } = node else {
-        return 16.0;
+        return DEFAULT_ROOT_FONT_SIZE;
     };
     let style = props.attrs.get("style").map(|s| s.as_str());
-    style_lookup_font_size(style, 16.0, 16.0, (0.0, 0.0)).unwrap_or(16.0)
+    style_lookup_font_size(
+        style,
+        DEFAULT_ROOT_FONT_SIZE,
+        DEFAULT_ROOT_FONT_SIZE,
+        (0.0, 0.0),
+    )
+    .unwrap_or(DEFAULT_ROOT_FONT_SIZE)
 }
 
 /// Whether an atomic's computed `overflow` is `visible`, which decides whether
