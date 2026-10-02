@@ -1,51 +1,444 @@
 <template>
-  <div class="app">
-    <header class="header">
-      <h1 class="title">{{ title }}</h1>
-    </header>
-    <Todos />
+  <div :class="{ dark: is_dark }">
+    <div class="app">
+      <div class="shell">
+        <header class="masthead">
+          <div class="brand">
+            <p class="eyebrow">VELOX</p>
+            <h1 class="title">{{ title }}</h1>
+            <p class="tagline">{{ tagline }}</p>
+          </div>
+          <button class="toggle" @click="toggle_theme">
+            <span class="glyph" v-if="is_dark">☀</span>
+            <span class="glyph" v-else>☾</span>
+          </button>
+        </header>
+
+        <div class="meta">
+          <span class="meta-count">{{ summary }}</span>
+          <span class="meta-fill"></span>
+          <button class="ghost" v-if="can_clear" @click="open_clear">Clear completed</button>
+          <button class="ghost" @click="open_about">About</button>
+        </div>
+        <span class="rule"></span>
+
+        <Todos />
+
+        <p class="footnote">{{ footnote }}</p>
+      </div>
+    </div>
+
+    <Confirm
+      v-if="clear_open"
+      :title="clear_title"
+      :message="clear_message"
+      :accept_label="clear_accept"
+      :cancel_label="clear_cancel"
+      :dark="is_dark"
+      @accept="on_clear_accept"
+      @dismiss="on_clear_cancel"
+    />
+
+    <Modal
+      v-if="about_open"
+      :title="about_title"
+      :body="about_body"
+      :confirm_label="about_confirm"
+      :cancel_label="about_cancel"
+      :dark="is_dark"
+      @confirm="on_about_close"
+      @dismiss="on_about_close"
+    />
   </div>
 </template>
 
 <script setup>
+// A NOTE ON THE TEMPLATE ABOVE, since this parser has no comment syntax of its
+// own: an HTML comment inside `<template>` is read as an opening tag whose name
+// is the empty string, which then never closes — so every comment in this
+// template lives here or in the style block instead.
+//
+// The root element carries the theme class, and it has to be a
+// WRAPPER rather than the page itself. A selector's leftmost part is matched
+// only against a STRICT ancestor of the element the rest of it names
+// (velox-style/src/lib.rs `match_prefix` starts one level above the target), and
+// the cascade cannot say "this element has two classes" — `parse_selector_part`
+// reads `.app.dark` as one class literally named "app.dark". So the element
+// that HOLDS `.dark` can never be the element a `.dark …` rule styles, and every
+// themed element has to sit one level below a carrier. That is the same reason
+// `TodoItem` nests twice.
+//
+// The two dialogs are siblings of `.app` rather than children of `.shell`.
+// `position: fixed` puts them out of flow, and out-of-flow children paint after
+// their in-flow siblings (velox-dom/src/layout.rs
+// `out_of_flow_containing_block`, and the paint sort in
+// velox-renderer/src/skia_render.rs), so they land above the page; and nothing
+// above them sets `overflow: hidden`, which would clip a fixed overlay.
+//
+// The toggle swaps one glyph for another rather than re-colouring one, and the
+// glyph names the theme you are IN rather than the one you would move to. They
+// are written as literal characters on purpose: NOTHING in Velox decodes an HTML
+// character reference — `&#9728;` reaches the text painter as the seven
+// characters `&#9728;`, not as U+2600 — and U+2600 ☀ and U+263E ☾ are both
+// present in the only two faces the renderer can load (Noto Sans and DejaVu
+// Sans, per `load_default_typeface`), which is what makes writing them out
+// safe rather than a gamble.
 import Todos from './components/Todos.vx'
+import Confirm from './components/Confirm.vx'
+import Modal from './components/Modal.vx'
+use velox_core::signal::Signal;
 
+// This component owns the page chrome and the two dialogs' open/closed flags,
+// and it is the only one that has to know about the other components at all.
+//
+// The `todos`, `confirm` and `modal` fields are load-bearing, and not for the
+// reason a reader would guess. Velox routes a handler found INSIDE a child's
+// template to `state.<lowercased tag name>.<method>()` — but only when the root
+// declares a field of that name, and only for the first component in the tree
+// that has one (velox-sfc/src/template_codegen.rs `collect_tree_handlers_inner`,
+// `becomes_owner = owner.is_none() && fields.contains(&field)`). So:
+//
+//   * `todos` puts the list on the persistent path. `<Todos />` is rendered
+//     with no props, no events and no slots, which is exactly the condition for
+//     `render_with_state`, so the list and the theme flag survive every render.
+//   * `confirm` and `modal` give the root dispatcher somewhere to send a click
+//     on a dialog's own buttons. Without them those handlers are compiled as
+//     methods of THIS State, and `state.modal_scrim()` is a method that does not
+//     exist here — a compile error, not a silently dead button.
+//
+// The theme flag itself lives on `todos` because that is the one child whose
+// state survives a render. `App` flips it, `Todos` reads it and hands it down as
+// a prop, and each component puts it on one of its OWN elements — scoped CSS
+// cannot cross a component boundary (velox-sfc/src/codegen.rs
+// `scope_single_selector` appends this component's `data-v-*` to EVERY compound,
+// leftmost included, and the id is per component), so a `.dark` class on this
+// root alone would style nothing outside this file.
 pub struct State {
-    // Persistent child-state: the Todos component owns its todo list across
-    // renders because it is created once here and passed by reference.
     pub todos: std::sync::Arc<super::todos::script_rs::State>,
+    pub confirm: std::sync::Arc<super::confirm::script_rs::State>,
+    pub modal: std::sync::Arc<super::modal::script_rs::State>,
+    pub clear_open: Signal<bool>,
+    pub about_open: Signal<bool>,
 }
 
 impl State {
     pub fn new() -> Self {
         Self {
             todos: std::sync::Arc::new(super::todos::script_rs::State::new()),
+            confirm: std::sync::Arc::new(super::confirm::script_rs::State::new()),
+            modal: std::sync::Arc::new(super::modal::script_rs::State::new()),
+            clear_open: Signal::new(false),
+            about_open: Signal::new(false),
         }
     }
 
     pub fn title(&self) -> String {
         String::from("Velox Todo")
     }
+
+    pub fn tagline(&self) -> String {
+        String::from("One file per component. A template, a state block and a scoped style block, drawn natively with Skia.")
+    }
+
+    pub fn footnote(&self) -> String {
+        String::from("Everything above is live: add a task, tick a row, clear what is done, or open the About panel.")
+    }
+
+    // `--dark` needs the string form, not a bool. A `:class` object binding is
+    // evaluated through the same resolver as an interpolation
+    // (velox-sfc/src/template_codegen.rs `resolver_truthiness`), which reads the
+    // value as text. It also means a ternary would be wrong here — a non-object
+    // bind is never resolved at all and silently yields "".
+    pub fn is_dark(&self) -> String {
+        self.todos.is_dark()
+    }
+
+    pub fn toggle_theme(&self) {
+        let next = self.todos.dark.get();
+        self.todos.dark.set(!next);
+    }
+
+    pub fn can_clear(&self) -> bool {
+        self.todos.can_clear()
+    }
+
+    pub fn summary(&self) -> String {
+        let total = self.todos.total();
+        let done = self.todos.done_count();
+        if total == 0 {
+            return String::from("An empty list");
+        }
+        if done == total {
+            return String::from("All of it done");
+        }
+        String::from(format!("{} left of {}", total - done, total))
+    }
+
+    // ---- Clear completed ------------------------------------------------
+    pub fn clear_open(&self) -> String {
+        if self.clear_open.get() {
+            String::from("true")
+        } else {
+            String::from("false")
+        }
+    }
+
+    pub fn open_clear(&self) {
+        self.clear_open.set(true);
+    }
+
+    pub fn clear_title(&self) -> String {
+        String::from("Clear completed tasks?")
+    }
+
+    pub fn clear_message(&self) -> String {
+        String::from("Finished tasks are removed from the list. This cannot be undone.")
+    }
+
+    pub fn clear_accept(&self) -> String {
+        String::from("Clear them")
+    }
+
+    pub fn clear_cancel(&self) -> String {
+        String::from("Keep them")
+    }
+
+    // No payload parameter on purpose. The dispatcher emits `if let Some(p) =
+    // payload { state.method(p) }` for any handler whose State method takes one,
+    // so a bare component click — which carries no payload — would never reach
+    // it. `Confirm` still sends one; ignoring it is the caller's choice.
+    pub fn on_clear_accept(&self) {
+        self.todos.remove_completed();
+        self.clear_open.set(false);
+    }
+
+    pub fn on_clear_cancel(&self) {
+        self.clear_open.set(false);
+    }
+
+    // ---- About ----------------------------------------------------------
+    pub fn about_open(&self) -> String {
+        if self.about_open.get() {
+            String::from("true")
+        } else {
+            String::from("false")
+        }
+    }
+
+    pub fn open_about(&self) {
+        self.about_open.set(true);
+    }
+
+    pub fn about_title(&self) -> String {
+        String::from("About this app")
+    }
+
+    pub fn about_body(&self) -> String {
+        String::from("Every part of this window is a .vx single-file component: a template, a state block and a scoped style block in one file. The dialog you are reading is one of them, and it is a reusable component rather than a one-off.")
+    }
+
+    pub fn about_confirm(&self) -> String {
+        String::from("Understood")
+    }
+
+    pub fn about_cancel(&self) -> String {
+        String::from("Close")
+    }
+
+    pub fn on_about_close(&self) {
+        self.about_open.set(false);
+    }
 }
 </script>
 
 <style scoped>
+/* The one place a font is named. It is INHERITABLE (velox-style/src/lib.rs:733),
+   so every descendant picks it up and no child rule has to repeat it.
+
+   Today the stack documents intent rather than being resolved: the renderer's
+   font cache holds exactly ONE typeface — whatever `load_default_typeface`
+   finds, which is DejaVu Sans or Noto Sans — and `parse_font_family` keeps only
+   the FIRST name in a comma list (velox-renderer/src/skia_render.rs:462), so
+   there is no per-family fallback and no way to ask for a second face. The list
+   is written the way a CSS author would write it so that it starts working the
+   day the cache does, and it costs nothing today. */
+
 .app {
     width: 100%;
     min-height: 100vh;
     display: flex;
     flex-direction: column;
-    background: #1a1a2e;
-    color: #e6edf3;
-    font-family: system-ui, sans-serif;
+    align-items: center;
+    font-family: "Inter", "Noto Sans", "DejaVu Sans", sans-serif;
+    font-size: 15px;
+    line-height: 1.5;
+    background: #f6f5f2;
+    color: #14181b;
 }
-.header {
-    padding: 28px 24px 12px;
-    text-align: center;
+.shell {
+    display: flex;
+    flex-direction: column;
+    width: 100%;
+    max-width: 620px;
+    min-width: 0;
+    padding: 44px 24px 32px;
+}
+.masthead {
+    display: flex;
+    flex-direction: row;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 20px;
+}
+.brand {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+}
+.eyebrow {
+    margin: 0 0 10px;
+    font-size: 11px;
+    font-weight: 700;
+    line-height: 1.2;
+    color: #0d6e66;
 }
 .title {
     margin: 0;
-    font-size: 30px;
+    font-size: 27px;
     font-weight: 700;
+    line-height: 1.15;
+    color: #14181b;
+}
+.tagline {
+    margin: 7px 0 0;
+    font-size: 14px;
+    line-height: 1.45;
+    color: #5a6469;
+}
+
+/* The theme control. It is a `<button>`, which is the only kind of element
+   `:hover` reaches besides one carrying `on:click` or a class literally `btn`
+   (velox-renderer/src/events.rs:150) — so the affordance is a border and a fill
+   change on a real button, not a hover on a bare div. */
+.toggle {
+    flex: 0 0 auto;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 38px;
+    height: 38px;
+    padding: 0;
+    border: 1px solid #dedbd3;
+    border-radius: 999px;
+    background: #ffffff;
+    color: #5a6469;
+}
+.toggle:hover {
+    border: 1px solid #c4bfb4;
+    background: #efece5;
+    color: #14181b;
+}
+.glyph {
+    display: block;
+    font-size: 15px;
+    line-height: 1;
+}
+.meta {
+    display: flex;
+    flex-direction: row;
+    align-items: center;
+    gap: 8px;
+    margin-top: 26px;
+    padding-bottom: 10px;
+}
+.meta-count {
+    font-size: 13px;
+    line-height: 1.4;
+    color: #5a6469;
+}
+.meta-fill {
+    flex: 1 1 auto;
+}
+
+/* A 1px divider as its own element. `border-bottom` is NOT a declaration
+   `ComputedStyle::set_property` has an arm for — only the `border` shorthand and
+   `border-width`/`border-style`/`border-color` exist, and the last two are in
+   `PARSED_BUT_UNRENDERED` — so a one-sided border is silently dropped. A
+   background on a 1px box is the only way to draw a rule. */
+.rule {
+    display: block;
+    width: 100%;
+    height: 1px;
+    background: #e3e1db;
+}
+.ghost {
+    flex: 0 0 auto;
+    height: 28px;
+    padding: 0 10px;
+    border: 1px solid #dedbd3;
+    border-radius: 8px;
+    background: #ffffff;
+    color: #5a6469;
+    font-size: 13px;
+    font-weight: 600;
+    text-align: center;
+}
+.ghost:hover {
+    border: 1px solid #c4bfb4;
+    background: #efece5;
+    color: #14181b;
+}
+.footnote {
+    margin: 22px 0 0;
+    font-size: 12px;
+    line-height: 1.5;
+    color: #6b7377;
+}
+
+/* Dark overrides. Velox's cascade has no specificity and no `!important`
+   (velox-style/src/lib.rs:812 `apply_styles_with_hover` — last match wins), so
+   every dark rule has to come AFTER the light rule it beats, in this one block.
+   This is also the shape a caller appends to in order to restyle dark mode. */
+.dark .app {
+    background: #0f1316;
+    color: #e8ecec;
+}
+.dark .eyebrow {
+    color: #4fd1c5;
+}
+.dark .title {
+    color: #e8ecec;
+}
+.dark .tagline {
+    color: #a3aeb2;
+}
+.dark .toggle {
+    border: 1px solid #242c31;
+    background: #161b1f;
+    color: #a3aeb2;
+}
+.dark .toggle:hover {
+    border: 1px solid #333d45;
+    background: #1d2429;
+    color: #e8ecec;
+}
+.dark .meta-count {
+    color: #a3aeb2;
+}
+.dark .rule {
+    background: #242c31;
+}
+.dark .ghost {
+    border: 1px solid #242c31;
+    background: #161b1f;
+    color: #a3aeb2;
+}
+.dark .ghost:hover {
+    border: 1px solid #333d45;
+    background: #1d2429;
+    color: #e8ecec;
+}
+.dark .footnote {
+    color: #75818a;
 }
 </style>

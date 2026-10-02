@@ -12,6 +12,29 @@ publish = false
 log = "0.4"
 
 [dev-dependencies]
+# `criterion` is a dev-dependency of `velox-core` for `benches/signal_read.rs`
+# and nothing else: the crate is `publish = false`, so neither it nor criterion
+# can reach anything a user builds.
+#
+# WAIVED ADVISORY: RUSTSEC-2026-0204 (crossbeam-epoch 0.9.18, `fmt::Pointer` on
+# an invalid pointer) reaches this crate only as
+#   crossbeam-epoch <- crossbeam-deque <- rayon-core <- rayon <- criterion
+# i.e. through the `[dev-dependencies]` edge above. Measured 2026-10-02:
+# `cargo tree -i crossbeam-epoch --workspace -e normal` prints "nothing to
+# print" — no non-dev edge reaches it anywhere in the workspace. The advisory
+# reports no patched version, so the only fix that does not involve deleting the
+# benchmarks is to waive it.
+#
+# criterion is kept because removing it would cost baseline comparison
+# (`--save-baseline` / `--baseline`) and repeated sampling with outlier
+# rejection — the parts that actually catch a regression across commits — for no
+# shipped-artifact risk. Note this is NOT what the `layout_us` <= 400 us gate
+# runs on: that gate is `velox-renderer/tests/frame_cost_bench.rs`, which uses
+# plain `std::time::Instant` and needs no criterion.
+#
+# Re-check trigger: if a patched `crossbeam-epoch` ever appears, take the
+# upgrade and drop the corresponding `--ignore` in the `dependency-audit` job
+# in `.github/workflows/ci.yml`, which carries the full rationale.
 criterion = "0.5"
 
 [[bench]]

@@ -22,6 +22,48 @@ pre { display: block; white-space: pre; margin: 1em 0; }
 textarea { white-space: pre-wrap; }
 button { padding: 6px 12px; border: 1px solid #888; }
 
+/* An `<input>` has no children, so its auto height was `0 + padding +
+   border` — the boilerplate's `padding: 10px 12px; border: 1px` produced a
+   22px field whose 15px text had no room. The padding gives the glyphs room
+   on both sides; the `min-height` guarantees a usable hit target even for a
+   field whose author set `padding: 0`. Browsers reach the same shape through
+   a UA border instead (Chrome `padding: 1px 2px; border: 2px inset`); Velox
+   deliberately claims no UA border for `input`, so the height has to come from
+   an explicit floor. An author's own `padding` overrides the padding here
+   because the cascade puts author declarations over UA ones.
+
+   `color` is here for the same reason the padding is, and it is the second
+   half of the same bug. Browsers give every form control `color: fieldtext`,
+   which is deliberately NOT the inherited author colour: a page that sets
+   `color: #f1f5f9` on its root gets near-white *paragraph* text on its page
+   background, and that is not what belongs inside the field. Without a UA
+   `color`, an input that declares no colour of its own inherits the page's text
+   colour while still painting the white fallback fill the renderer uses when no
+   `background` is specified — near-white on white, i.e. invisible. The pair
+   moves together: if the fallback fill ever stops being white, this declaration
+   has to move with it. An author's own `color` still wins, so a component
+   stylesheet saying `input { color: … }` is unaffected, and that is how an app
+   goes dark-on-light or light-on-dark.
+
+   All three declarations are pinned through the real cascade in
+   `velox-dom/tests/ua_defaults_live.rs`, each on its own: the padding on the
+   line box it insets, the `min-height` floor with the padding overridden away
+   so the floor is all that is left, and the colour on the post-cascade style
+   string because it has no layout reader.
+
+   KNOWN DEVIATION. The rule below is NOT conditioned on input type, so
+   `checkbox` and `radio`
+   inherit the padding, the 24px floor, and the forced black — none of which
+   belongs on a control whose painted area is a 13x13 box. It cannot be
+   conditioned here, because Velox cannot express `:not([type=checkbox])`:
+   `split_pseudos` drops the unrecognised `not(...)` pseudo and
+   `parse_selector_part` keeps `[type=checkbox]` as a REQUIREMENT, so
+   `input:not([type=checkbox])` parses to exactly `input[type=checkbox]` and
+   the condition comes out INVERTED. Writing it would apply these declarations
+   to the checkbox and not to the text field — worse than leaving the rule
+   unconditioned. Pinned by `velox-style/tests/unsupported_not_pseudo.rs`. */
+input { padding: 6px 10px; min-height: 24px; color: #000000; }
+
 /* Elements whose Velox default is `display: inline`, so they do not lay out as
    block boxes. In browsers almost all of these take CSS's initial value,
    `inline`, because the HTML rendering section declares no `display` for them.

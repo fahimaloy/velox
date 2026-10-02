@@ -16,6 +16,7 @@
 // `Rc<State>`; in that case the fix is to change the code, not to keep the allow.
 #![allow(clippy::arc_with_non_send_sync)]
 
+use std::cmp::Ordering;
 use std::sync::Arc;
 
 use velox_dom::layout::{LayoutNode, Rect, compute_layout};
@@ -32,6 +33,11 @@ const FILTER_BG: [u8; 3] = [51, 65, 85]; // .filter chip
 
 const LARGE: (i32, i32) = (1280, 800);
 const SMALL: (i32, i32) = (480, 360);
+
+/// Per-channel slack when deciding whether a pixel counts as ink. Wide enough to
+/// absorb the antialiased fringe of a glyph, far narrower than the gap between
+/// the theme's background and its text.
+const INK_TOLERANCE: i32 = 12;
 
 fn proof_dir() -> std::path::PathBuf {
     let dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -87,7 +93,10 @@ fn input_rect(state: &Arc<app::script_rs::State>, width: i32, height: i32) -> Re
     find_layout_rect(&layout, &vnode, "input").expect("input layout")
 }
 
-fn dark_pixels_in(rgba: &[u8], rect: Rect, width: i32, height: i32) -> usize {
+/// The pixel coordinates strictly inside `rect`.
+///
+/// Inset by 4px so the element's own border is never counted as content.
+fn interior_pixels(rect: Rect, width: i32, height: i32) -> impl Iterator<Item = (usize, usize)> {
     let left = rect.x.saturating_add(4).clamp(0, width) as usize;
     let top = rect.y.saturating_add(4).clamp(0, height) as usize;
     let right = rect
@@ -100,8 +109,11 @@ fn dark_pixels_in(rgba: &[u8], rect: Rect, width: i32, height: i32) -> usize {
         .saturating_add(rect.h)
         .saturating_sub(4)
         .clamp(0, height) as usize;
-    (top..bottom)
-        .flat_map(|y| (left..right).map(move |x| (x, y)))
+    (top..bottom).flat_map(move |y| (left..right).map(move |x| (x, y)))
+}
+
+fn dark_pixels_in(rgba: &[u8], rect: Rect, width: i32, height: i32) -> usize {
+    interior_pixels(rect, width, height)
         .filter(|(x, y)| {
             let offset = (*y * width as usize + *x) * 4;
             rgba[offset] < 120 && rgba[offset + 1] < 120 && rgba[offset + 2] < 120
@@ -167,6 +179,272 @@ fn write_proof(name: &str, width: i32, height: i32, png: &[u8]) -> std::path::Pa
     let path = proof_dir().join(format!("{name}-{width}x{height}.png"));
     std::fs::write(&path, png).expect("write proof png");
     path
+}
+
+/// Read one declaration out of a cascaded `style` attribute (`"a: b; c: d"`).
+fn style_decl<'s>(style: &'s str, key: &str) -> Option<&'s str> {
+    style
+        .split(';')
+        .filter_map(|d| d.split_once(':'))
+        .find(|(k, _)| k.trim() == key)
+        .map(|(_, v)| v.trim())
+}
+
+/// Parse `#rgb` / `#rrggbb` / `rgb(r, g, b)` into channels.
+///
+/// Deliberately narrow: this resolves the theme's own declarations, and a value
+/// it cannot parse is reported as `None` so a caller can fail loudly instead of
+/// silently measuring against a made-up colour.
+fn parse_css_color(value: &str) -> Option<[u8; 3]> {
+    let value = value.trim();
+    if let Some(hex) = value.strip_prefix('#') {
+        let nibble = |c: u8| char::from(c).to_digit(16).map(|d| d as u8);
+        return match hex.len() {
+            3 => {
+                let mut out = [0u8; 3];
+                for (i, slot) in out.iter_mut().enumerate() {
+                    let d = nibble(hex.as_bytes()[i])?;
+                    *slot = d * 17;
+                }
+                Some(out)
+            }
+            6 => {
+                let bytes = hex.as_bytes();
+                let mut out = [0u8; 3];
+                for (i, slot) in out.iter_mut().enumerate() {
+                    let hi = nibble(bytes[i * 2])?;
+                    let lo = nibble(bytes[i * 2 + 1])?;
+                    *slot = hi * 16 + lo;
+                }
+                Some(out)
+            }
+            _ => None,
+        };
+    }
+    if let Some(inner) = value
+        .strip_prefix("rgb(")
+        .and_then(|rest| rest.strip_suffix(')'))
+    {
+        let mut out = [0u8; 3];
+        for (i, slot) in out.iter_mut().enumerate() {
+            *slot = inner.split(',').nth(i)?.trim().parse::<u8>().ok()?;
+        }
+        return Some(out);
+    }
+    None
+}
+
+/// An input's own resolved foreground/background, read from its cascaded style.
+struct InputTheme {
+    background: [u8; 3],
+    foreground: [u8; 3],
+}
+
+/// The input's own resolved colours.
+///
+/// Read from the **cascaded** `style` the cascade wrote onto the element (UA +
+/// author), never hardcoded: which end of the scale counts as "ink" is a
+/// property of the theme, not of the text, so a probe that measures brightness
+/// is measuring the theme instead of the ink.
+fn input_theme(state: &Arc<app::script_rs::State>) -> InputTheme {
+    let tree = styled_build(state);
+    let attrs = find_element_attrs(&tree, "input").expect("input element");
+    let style = attrs.get("style").map(String::as_str).unwrap_or("");
+    let background = style_decl(style, "background-color")
+        .or_else(|| style_decl(style, "background"))
+        .and_then(parse_css_color)
+        .unwrap_or_else(|| {
+            panic!("the input must resolve a literal background colour, got: {style}")
+        });
+    let foreground = style_decl(style, "color")
+        .and_then(parse_css_color)
+        .unwrap_or_else(|| panic!("the input must resolve a literal text colour, got: {style}"));
+    InputTheme {
+        background,
+        foreground,
+    }
+}
+
+/// Pixels inside `rect` that **differ from the input's own background** — an
+/// ink measure.
+///
+/// This replaces a brightness threshold, which cannot express what it is
+/// supposed to: with the input honouring the author's `#1e293b` background, a
+/// "every channel < 120" test counts the *background* as dark and excludes both
+/// the typed value (`#e2e8f0`) and the derived placeholder — so typing made the
+/// measured count go *down*, and the assertion inverted itself for any dark
+/// theme. Counting pixels that differ from the element's own resolved background
+/// has no such dependency on which end of the scale is bright.
+fn ink_pixels_in(
+    rgba: &[u8],
+    rect: Rect,
+    width: i32,
+    height: i32,
+    background: [u8; 3],
+    tolerance: i32,
+) -> usize {
+    interior_pixels(rect, width, height)
+        .filter(|(x, y)| {
+            let offset = (*y * width as usize + *x) * 4;
+            (rgba[offset] as i32 - background[0] as i32).abs() > tolerance
+                || (rgba[offset + 1] as i32 - background[1] as i32).abs() > tolerance
+                || (rgba[offset + 2] as i32 - background[2] as i32).abs() > tolerance
+        })
+        .count()
+}
+
+/// Same ink measure, restricted to the element's own text colour.
+///
+/// Used where the question is "is *this* text painted", as opposed to "is
+/// something painted": the placeholder is ink too, but in a different colour,
+/// and counting it would make the empty field look occupied.
+fn text_ink_pixels_in(
+    rgba: &[u8],
+    rect: Rect,
+    width: i32,
+    height: i32,
+    foreground: [u8; 3],
+    tolerance: i32,
+) -> usize {
+    interior_pixels(rect, width, height)
+        .filter(|(x, y)| {
+            let offset = (*y * width as usize + *x) * 4;
+            (rgba[offset] as i32 - foreground[0] as i32).abs() <= tolerance
+                && (rgba[offset + 1] as i32 - foreground[1] as i32).abs() <= tolerance
+                && (rgba[offset + 2] as i32 - foreground[2] as i32).abs() <= tolerance
+        })
+        .count()
+}
+
+/// A copy of the tree with the input's `placeholder` attribute removed.
+///
+/// The blank-field baseline for the ink proof. Without it the "empty" input
+/// still paints its placeholder, so the baseline is not empty and the proof
+/// would be comparing two different strings' worth of ink rather than
+/// "something vs nothing".
+fn without_input_placeholder(node: &velox_dom::VNode) -> velox_dom::VNode {
+    match node {
+        velox_dom::VNode::Text(text) => velox_dom::VNode::Text(text.clone()),
+        velox_dom::VNode::Element {
+            tag,
+            props,
+            children,
+        } => {
+            let mut props = props.clone();
+            if tag == "input" {
+                props.attrs.remove("placeholder");
+            }
+            velox_dom::VNode::Element {
+                tag: tag.clone(),
+                props,
+                children: children.iter().map(without_input_placeholder).collect(),
+            }
+        }
+    }
+}
+
+/// Render a prepared tree, so a proof can rasterize a variant of the app's own
+/// output instead of only the output the app produces.
+fn render_tree(vnode: &velox_dom::VNode, width: i32, height: i32) -> Vec<u8> {
+    let sheet = Stylesheet::parse(app::STYLE);
+    render_vnode_to_rgba(vnode, &sheet, width, height).expect("raster rgba")
+}
+
+/// A one-input page in an explicit theme, for the theme-independence proof.
+///
+/// Built here rather than reused from the app so the *only* variable between the
+/// light and dark cases is which end of the scale is bright. Nothing else about
+/// the two renders differs.
+fn themed_input_vnode(background: &str, foreground: &str, value: &str) -> velox_dom::VNode {
+    let style = format!(
+        "position:absolute;left:10px;top:10px;width:320px;height:40px;\
+         box-sizing:border-box;padding:6px 10px;font-size:14px;\
+         border:1px solid {background};background:{background};color:{foreground}"
+    );
+    velox_dom::VNode::Element {
+        tag: "div".into(),
+        props: velox_dom::Props::new().set("style", "background:#808080;width:100%;height:100%"),
+        children: vec![velox_dom::VNode::Element {
+            tag: "input".into(),
+            props: velox_dom::Props::new()
+                .set("type", "text")
+                .set("value", value)
+                .set("style", style),
+            children: vec![],
+        }],
+    }
+}
+
+/// The ink the field shows for `value` in the given theme, plus the brightness
+/// count for the same render.
+fn themed_input_ink(background: &str, foreground: &str, value: &str) -> (usize, usize) {
+    let (w, h) = (400, 120);
+    let vnode = themed_input_vnode(background, foreground, value);
+    let rect = find_layout_rect(&compute_layout(&vnode, w, h), &vnode, "input").expect("input");
+    let rgba = render_tree(&vnode, w, h);
+    let bg = parse_css_color(background).expect("fixture background");
+    (
+        ink_pixels_in(&rgba, rect, w, h, bg, INK_TOLERANCE),
+        dark_pixels_in(&rgba, rect, w, h),
+    )
+}
+
+/// The ink measure must not know which end of the scale is bright.
+///
+/// Two renders that differ in nothing but the theme: light background with dark
+/// text, dark background with light text. The same assertion — typing adds ink
+/// inside the field — has to hold for both, and the brightness measure that
+/// replaced it does not: on the light theme typing *raises* the dark count and
+/// on the dark theme it *lowers* it, because the background itself is what
+/// crosses the threshold. That inversion is the whole reason the probe counts
+/// ink now.
+#[test]
+fn the_ink_measure_is_theme_independent() {
+    const LIGHT: (&str, &str) = ("#ffffff", "#0f172a");
+    const DARK: (&str, &str) = ("#1e293b", "#e2e8f0");
+    const TYPED: &str = "Ship it";
+
+    let mut dark_counts = Vec::new();
+    for (name, (background, foreground)) in [("light", LIGHT), ("dark", DARK)] {
+        let (blank_ink, blank_dark) = themed_input_ink(background, foreground, "");
+        let (typed_ink, typed_dark) = themed_input_ink(background, foreground, TYPED);
+        assert!(
+            typed_ink > blank_ink + 5,
+            "{name} theme: typing must add ink pixels inside the input \
+             ({typed_ink} vs {blank_ink})"
+        );
+        dark_counts.push((name, blank_dark, typed_dark));
+    }
+
+    // Each theme gets its OWN assertion on a named direction, and the
+    // direction is not left to a score.
+    //
+    // The previous version scored `Greater` as +1, `Less` as -1, `Equal` as 0
+    // and asserted the sum was 0. That passed VACUOUSLY in exactly the case the
+    // test exists to catch: if `dark_pixels_in` ever came to count only the
+    // background — the failure described in the doc comment above — BOTH themes
+    // would return `Equal`, both contributed 0, and the sum was still 0. The
+    // tripwire could not fire. Naming the expected direction for each theme
+    // makes `Equal` a failure instead of a silent zero.
+    let (light, dark) = (dark_counts[0], dark_counts[1]);
+    assert_eq!(
+        light.2.cmp(&light.1),
+        Ordering::Greater,
+        "on the light theme typing must RAISE the dark-pixel count ({blank} -> \
+         {typed}). If it did not, `dark_pixels_in` is no longer measuring what \
+         this test's doc comment says it measures.",
+        blank = light.1,
+        typed = light.2,
+    );
+    assert_eq!(
+        dark.2.cmp(&dark.1),
+        Ordering::Less,
+        "on the dark theme typing must LOWER the dark-pixel count ({blank} -> \
+         {typed}). If it did not, `dark_pixels_in` is no longer measuring what \
+         this test's doc comment says it measures.",
+        blank = dark.1,
+        typed = dark.2,
+    );
 }
 
 fn pixels_near(rgba: &[u8], color: [u8; 3], tolerance: i32) -> usize {
@@ -249,8 +527,36 @@ fn small_viewport_renders_the_list_and_reacts_to_events() {
 fn typed_draft_reaches_the_input_before_add() {
     let state = Arc::new(app::script_rs::State::new());
     let (empty_png, empty_rgba) = render(&state, LARGE.0, LARGE.1);
-    let empty_rect = input_rect(&state, LARGE.0, LARGE.1);
-    let empty_dark_pixels = dark_pixels_in(&empty_rgba, empty_rect, LARGE.0, LARGE.1);
+    let theme = input_theme(&state);
+
+    // The blank-field baseline: the same input with its placeholder attribute
+    // removed. The empty input above still paints the placeholder, so comparing
+    // against it would weigh two different strings' worth of ink instead of
+    // "something vs nothing".
+    let blank_tree = without_input_placeholder(&build(&state));
+    let blank_rect = find_layout_rect(
+        &compute_layout(&blank_tree, LARGE.0, LARGE.1),
+        &blank_tree,
+        "input",
+    )
+    .expect("input layout");
+    let blank_rgba = render_tree(&blank_tree, LARGE.0, LARGE.1);
+    let blank_ink_pixels = ink_pixels_in(
+        &blank_rgba,
+        blank_rect,
+        LARGE.0,
+        LARGE.1,
+        theme.background,
+        INK_TOLERANCE,
+    );
+    let blank_text_ink_pixels = text_ink_pixels_in(
+        &blank_rgba,
+        blank_rect,
+        LARGE.0,
+        LARGE.1,
+        theme.foreground,
+        INK_TOLERANCE,
+    );
 
     // The rendered input starts empty but carries the bound placeholder.
     let empty_tree = build(&state);
@@ -284,13 +590,43 @@ fn typed_draft_reaches_the_input_before_add() {
         Some("What needs to be done?"),
         "placeholder stays bound after typing"
     );
-    // The renderer paints the input's value. Count dark text pixels inside the
-    // laid-out input so a state-only change cannot pass this proof.
+    // The renderer paints the input's value. Count the pixels inside the
+    // laid-out input that differ from the input's OWN resolved background, so a
+    // state-only change cannot pass this proof and the measure stays correct
+    // when the theme flips from light to dark.
     let typed_rect = input_rect(&state, LARGE.0, LARGE.1);
-    let typed_dark_pixels = dark_pixels_in(&rgba, typed_rect, LARGE.0, LARGE.1);
+    let typed_ink_pixels = ink_pixels_in(
+        &rgba,
+        typed_rect,
+        LARGE.0,
+        LARGE.1,
+        theme.background,
+        INK_TOLERANCE,
+    );
     assert!(
-        typed_dark_pixels > empty_dark_pixels + 5,
-        "typed draft must add dark text pixels inside the input ({typed_dark_pixels} vs {empty_dark_pixels})"
+        typed_ink_pixels > blank_ink_pixels + 5,
+        "typed draft must add ink pixels inside the input ({typed_ink_pixels} vs {blank_ink_pixels} ink pixels against background {:?})",
+        theme.background
+    );
+    // And those pixels must be the value's own text colour, not merely
+    // something else in the field: the placeholder is ink too, and in a
+    // different colour, so counting it would let an untyped field look typed.
+    let typed_text_ink_pixels = text_ink_pixels_in(
+        &rgba,
+        typed_rect,
+        LARGE.0,
+        LARGE.1,
+        theme.foreground,
+        INK_TOLERANCE,
+    );
+    assert_eq!(
+        blank_text_ink_pixels, 0,
+        "the blank field must be blank in the value's text colour"
+    );
+    assert!(
+        typed_text_ink_pixels > blank_text_ink_pixels + 5,
+        "typed draft must add value-coloured pixels inside the input ({typed_text_ink_pixels} vs {blank_text_ink_pixels} at foreground {:?})",
+        theme.foreground
     );
     assert_ne!(empty_rgba, rgba, "typed draft did not change the render");
     let path = write_proof("todo-draft", LARGE.0, LARGE.1, &png);

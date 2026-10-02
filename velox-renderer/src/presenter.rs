@@ -33,6 +33,12 @@ pub fn is_compositor_available() -> bool {
 /// Returns `true` if the Wayland socket file exists and a Unix stream
 /// connection can be established. Note: this only checks the socket layer —
 /// it does NOT guarantee the Wayland protocol handshake will succeed.
+///
+/// Unix-only: the check is a `std::os::unix::net::UnixStream` connect, which
+/// exists on no other target. Off unix the same name is answered by the
+/// `#[cfg(not(unix))]` twin below, so the call site in [`prepare_backend`]
+/// needs no `cfg` of its own.
+#[cfg(unix)]
 fn is_wayland_socket_alive() -> bool {
     let display = match std::env::var("WAYLAND_DISPLAY") {
         Ok(d) => d,
@@ -58,6 +64,30 @@ fn is_wayland_socket_alive() -> bool {
     // or a similar error.
     use std::os::unix::net::UnixStream;
     UnixStream::connect(&socket_path).is_ok()
+}
+
+/// Non-unix twin of [`is_wayland_socket_alive`]: always `false`.
+///
+/// The unix answer comes from a `UnixStream` connect, and there is no Unix
+/// socket API on any other target, so there is nothing to connect with —
+/// `false` ("no reachable Wayland socket") is the honest answer, not a
+/// placeholder. It must not be `unreachable!()` or `todo!()`: this runs inside
+/// the event loop, where a panic is a crash rather than a report.
+///
+/// The consequence is deliberate. In [`prepare_backend`], a `false` here with
+/// `WAYLAND_DISPLAY` set and no `DISPLAY` fallback sends the caller down the
+/// headless path. That is the safe direction to err in, because the whole
+/// reason this function exists is that winit's Wayland backend `process::exit()`s
+/// (uncatchably) when the socket is dead — declining to try beats exiting.
+/// Off unix winit does not select the Wayland backend anyway, so in practice a
+/// stray `WAYLAND_DISPLAY` costs a headless window rather than a usable one.
+///
+/// Deliberately not a `cfg!` arm inside one body: the `use` of
+/// `std::os::unix::net::UnixStream` is a hard compile error off unix, so the
+/// unix half has to disappear as a unit rather than be branched over.
+#[cfg(not(unix))]
+fn is_wayland_socket_alive() -> bool {
+    false
 }
 
 /// Sets `WINIT_UNIX_BACKEND` to prefer the specified backend, used before
@@ -138,6 +168,12 @@ pub fn prepare_backend() -> bool {
         force_backend("x11");
     } else if has_wayland && !has_display {
         // Only Wayland is set (no X11 fallback). Check socket liveness.
+        //
+        // Intentionally NOT `#[cfg]`-gated: `is_wayland_socket_alive` has a
+        // `#[cfg(not(unix))]` twin that answers `false`, so this call resolves
+        // on every target. Adding a `cfg` here would leave that twin uncalled
+        // off unix and turn it into a `dead_code` warning, which this repo's
+        // `-D warnings` gate would then fail on the non-unix build.
         if !is_wayland_socket_alive() {
             // Wayland socket is dead and no X11 fallback.
             // Return true to signal headless mode.

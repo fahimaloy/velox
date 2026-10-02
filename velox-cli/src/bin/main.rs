@@ -106,6 +106,10 @@ enum AddCommand {
     Component {
         /// Component name (e.g. "Counter" or "side-bar")
         name: String,
+        /// Named slots to declare, comma-separated (e.g. "header,footer").
+        /// The implicit `default` slot is always included.
+        #[arg(long, short = 's', value_name = "NAME,NAME")]
+        slots: Option<String>,
     },
 }
 
@@ -182,8 +186,8 @@ fn main() -> Result<()> {
         }
 
         Commands::Add { what } => match what {
-            AddCommand::Component { name } => {
-                velox_cli::commands::add_component(&name)?;
+            AddCommand::Component { name, slots } => {
+                velox_cli::commands::add_component(&name, slots.as_deref())?;
             }
         },
 

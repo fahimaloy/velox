@@ -10,6 +10,31 @@ use velox_dom::VNode;
 use velox_dom::text_wrap::MeasuredText;
 use velox_style::{Stylesheet, apply_with_cascade};
 
+/// The font size the painter's ROOT `TextStyle` starts at, in logical px.
+///
+/// This is the size an element paints at when it declares no `font-size` of
+/// its own, which makes it the *inherited* size every relative length and every
+/// measured advance in the hit-test lane has to resolve against. It used to be
+/// a bare `14.0` written out in both render entry points, while the caret lane
+/// in `lib.rs` carried a third answer — the DOM's
+/// [`velox_dom::layout::DEFAULT_ROOT_FONT_SIZE`] — and measured glyphs in it.
+/// One named constant, reachable from both lanes, is what stops the third
+/// answer from reappearing.
+#[cfg(feature = "skia-native")]
+pub(crate) const PAINT_ROOT_FONT_SIZE: f32 = 14.0;
+
+/// The basis `rem` resolves against, in logical px.
+///
+/// Distinct from [`PAINT_ROOT_FONT_SIZE`] on purpose: `rem` is a *root* unit,
+/// so it must not move when the painter's root text size changes. It is the
+/// same constant `input_metrics::input_text_metrics` and `parse_text_style`
+/// use, and the three must stay that way — a `rem` resolved against the
+/// element's own size is not `rem` at all, and it made `border: 1rem` and
+/// `padding: 1rem` disagree between the paint lane and the caret lane by
+/// exactly the element's font size.
+#[cfg(feature = "skia-native")]
+pub(crate) const REM_ROOT_FONT_SIZE: f32 = velox_dom::layout::DEFAULT_ROOT_FONT_SIZE;
+
 #[cfg(feature = "skia-native")]
 pub mod skia_impl {
     use super::*;
@@ -50,6 +75,33 @@ pub mod skia_impl {
         text: String,
     }
 
+    /// How far ABOVE the baseline the `line-through` rule sits, in `em` of the font
+    /// size. See `line_through_y` for why it is above and not below.
+    const LINE_THROUGH_ASCENT_EM: f32 = 0.25;
+
+    /// Attribute the cascade writes `::placeholder` declarations onto.
+    ///
+    /// A pseudo-element's declarations cannot live in the element's own
+    /// `style`: `input::placeholder { color: red }` would otherwise set the
+    /// VALUE text red, which is the opposite of what the author wrote. One
+    /// attribute per pseudo-element is what keeps the two separate all the way
+    /// to paint.
+    ///
+    /// The literal lives in `velox_style::PLACEHOLDER_STYLE_ATTR`, because
+    /// `velox_style` is what WRITES this attribute and this is what READS it. A
+    /// private copy of the string here was a second, unfalsifiable answer to
+    /// "what is that attribute called": renaming it in the cascade would have
+    /// made the painter silently read nothing, with no compiler or test able to
+    /// say so. Re-exported from the crate that owns the name.
+    pub use velox_style::PLACEHOLDER_STYLE_ATTR;
+
+    /// How much of the text colour a derived placeholder keeps.
+    ///
+    /// 0.55 is the same ballpark as every browser's default placeholder
+    /// opacity (`opacity: 0.54` in Blink, `color: GrayText` elsewhere): enough
+    /// dimming to read as "not the value" while staying legible.
+    const PLACEHOLDER_CONTRAST: f32 = 0.55;
+
     /// Cap on memoized text advances, in `(family, size, text)` entries.
     ///
     /// The wrap path (`wrap_text`/`truncate_with_ellipsis`) measures every
@@ -86,7 +138,16 @@ pub mod skia_impl {
     struct TextStyle {
         color: sk::Color,
         align: TextAlign,
+        /// The two INLINE text decorations that are drawn as a rule across
+        /// the run's measured advance: `underline` and `line-through`.
+        ///
+        /// They are two independent flags rather than one enum because CSS
+        /// 2.1 §8.3.1 lets them combine — `text-decoration: underline
+        /// line-through` draws both — and a single-valued enum (which is what
+        /// `velox_dom::style::TextDecoration` is) cannot hold that. Painting
+        /// is the only consumer that needs both at once.
         underline: bool,
+        line_through: bool,
         font_size: f32,
         bold: bool,
         line_height: f32,
@@ -106,6 +167,74 @@ pub mod skia_impl {
     struct FilterSpec {
         blur_sigma: Option<f32>,
         brightness: Option<f32>,
+    }
+
+    /// Resolved padding sides, px.
+    ///
+    /// Parsed from the authored declaration by `parse_padding` (or, for the
+    /// `<input>` lane's horizontal geometry, from computed values via
+    /// `crate::input_metrics` — see that module for why the cross-lane
+    /// contract reads computed values).
+    #[derive(Clone, Copy, Debug, PartialEq)]
+    struct Padding {
+        top: f32,
+        right: f32,
+        bottom: f32,
+        left: f32,
+    }
+
+    impl Padding {
+        const ZERO: Padding = Padding {
+            top: 0.0,
+            right: 0.0,
+            bottom: 0.0,
+            left: 0.0,
+        };
+    }
+
+    /// What an element's own `style` attribute declares about its BOX, already
+    /// resolved to px where a length is involved.
+    #[derive(Clone, Copy)]
+    struct BoxStyle {
+        background: Option<sk::Color>,
+        border: Option<BorderSpec>,
+        radius: Option<f32>,
+        /// `None` when the element declared no padding at all, which is
+        /// different from declaring `padding: 0`.
+        padding: Option<Padding>,
+        overflow_hidden: bool,
+        clip_inset: Option<ClipInsets>,
+        opacity: f32,
+        filters: FilterSpec,
+        z_index: i32,
+    }
+
+    impl Default for BoxStyle {
+        /// Hand-written, not derived: `#[derive(Default)]` would make
+        /// `opacity` `0.0`, and the paint lane MULTIPLIES the inherited opacity
+        /// by this one — so every element would paint at zero alpha and the
+        /// whole frame would come back transparent. The predecessor's local
+        /// started at `1.0f32`, and CSS's initial `opacity` is 1.
+        fn default() -> Self {
+            Self {
+                background: None,
+                border: None,
+                radius: None,
+                padding: None,
+                overflow_hidden: false,
+                clip_inset: None,
+                opacity: 1.0,
+                filters: FilterSpec::default(),
+                z_index: 0,
+            }
+        }
+    }
+
+    impl BoxStyle {
+        /// The declared padding, or zero.
+        fn padding_or_zero(&self) -> Padding {
+            self.padding.unwrap_or(Padding::ZERO)
+        }
     }
 
     fn parse_color_hex(value: &str) -> Option<sk::Color> {
@@ -186,6 +315,15 @@ pub mod skia_impl {
     /// Unifying them — routing painting through `ComputedStyle`, or moving the
     /// grammar into a shared module both crates can see — is a design task and
     /// deliberately not attempted here.
+    ///
+    /// `rem` in a border width resolves against `REM_ROOT_FONT_SIZE`, not
+    /// against the element's own `font_size`. `input_metrics::input_text_metrics`
+    /// insets the value text by the same declaration using the root basis, and
+    /// it has to: the border is painted AFTER `canvas.restore()`, so it cannot
+    /// cover text that was laid out under a border too wide. Resolving `rem`
+    /// against the element's size instead made `font-size:32px` +
+    /// `border:1rem` stroke 32px while the text was inset by 16px, painting the
+    /// value straight over the border.
     fn parse_border_value(value: &str, font_size: f32, viewport: (f32, f32)) -> Option<BorderSpec> {
         use velox_dom::style::{BorderStyle, Color, Length};
 
@@ -195,7 +333,7 @@ pub mod skia_impl {
 
         for part in value.split_whitespace() {
             if let Some(l) = Length::parse(part) {
-                width = Some(l.to_px(font_size, font_size, viewport));
+                width = Some(l.to_px(font_size, super::REM_ROOT_FONT_SIZE, viewport));
             } else if let Some(s) = BorderStyle::parse(part)
                 && style.is_none()
             {
@@ -255,6 +393,53 @@ pub mod skia_impl {
         paint.set_path_effect(intervals.and_then(|iv| sk::path_effect::PathEffect::dash(&iv, 0.0)));
     }
 
+    /// Placeholder ink for an empty `<input>`.
+    ///
+    /// Resolution order, most specific first:
+    ///  1. an author's `input::placeholder { color: … }`, which the cascade
+    ///     carries on a separate `style:placeholder` attribute so it can never
+    ///     be confused with the element's own `style`;
+    ///  2. otherwise a **derived** colour: the field's own `color` mixed
+    ///     toward its background.
+    ///
+    /// Why derived rather than a fixed grey: the hardcoded `#999` that a
+    /// literal-based implementation reaches for is illegible on the dark
+    /// fields this engine's own boilerplate uses (`background:#16213e`), and
+    /// equally invisible on a light one if the theme is flipped. Mixing
+    /// toward the field's own background keeps the placeholder reading as the
+    /// same hue, held back by a fixed amount of contrast, on either.
+    fn placeholder_color(
+        props: &velox_dom::Props,
+        text_color: sk::Color,
+        field_bg: sk::Color,
+    ) -> sk::Color {
+        if let Some(styled) = props.attrs.get(PLACEHOLDER_STYLE_ATTR)
+            && let Some(c) = styled
+                .split(';')
+                .filter_map(|d| d.trim().split_once(':'))
+                .find(|(k, _)| k.trim() == "color")
+                .and_then(|(_, v)| {
+                    parse_color_hex(v.trim()).or_else(|| {
+                        velox_dom::style::Color::parse(v.trim())
+                            .map(|c| sk::Color::from_argb(c.a, c.r, c.g, c.b))
+                    })
+                })
+        {
+            return c;
+        }
+        // Keep the alpha the author gave the text; only the channels dim.
+        let mix = |from: u8, to: u8| -> u8 {
+            let v = to as f32 + (from as f32 - to as f32) * PLACEHOLDER_CONTRAST;
+            v.round().clamp(0.0, 255.0) as u8
+        };
+        sk::Color::from_argb(
+            text_color.a(),
+            mix(text_color.r(), field_bg.r()),
+            mix(text_color.g(), field_bg.g()),
+            mix(text_color.b(), field_bg.b()),
+        )
+    }
+
     fn parse_px_value(value: &str) -> Option<f32> {
         value
             .strip_suffix("px")
@@ -263,6 +448,65 @@ pub mod skia_impl {
 
     fn parse_float_value(value: &str) -> Option<f32> {
         value.trim().parse::<f32>().ok()
+    }
+
+    /// Parse a `padding` shorthand into resolved px sides.
+    ///
+    /// CSS 2.1 §8.3.3: 1, 2, 3 and 4-value forms. `em`/`%` resolve against the
+    /// element's OWN font size, same as every other relative length in this
+    /// file (`font_size` is the element's, not the parent's).
+    ///
+    /// `rem` does NOT, which is the whole reason the second argument to
+    /// `Length::to_px` is `REM_ROOT_FONT_SIZE` and not `font_size`. `Length`'s
+    /// signature takes `(parent_size, root_size, viewport)` and uses the second
+    /// argument for `rem` only — so passing `font_size` twice silently made
+    /// `rem` a synonym for `em` here while `input_metrics::input_text_metrics`
+    /// and `parse_text_style` both resolved it against the root. The `%` case
+    /// below documents the convention for the third argument; `rem` follows the
+    /// second.
+    ///
+    /// A non-finite or negative component is clamped to 0 rather than being
+    /// allowed to poison a rect: `f32::parse` accepts both `1e999px` and
+    /// `-8px`, and either would put the painted box somewhere unreachable.
+    fn parse_padding(value: &str, font_size: f32, viewport: (f32, f32)) -> Option<Padding> {
+        let mut parts: Vec<f32> = Vec::new();
+        for part in value.split_whitespace() {
+            let len = velox_dom::style::Length::parse(part)?;
+            let px = len.to_px(font_size, super::REM_ROOT_FONT_SIZE, viewport);
+            if !px.is_finite() {
+                return None;
+            }
+            parts.push(px.max(0.0));
+        }
+        let sides = match parts.len() {
+            1 => Padding {
+                top: parts[0],
+                right: parts[0],
+                bottom: parts[0],
+                left: parts[0],
+            },
+            2 => Padding {
+                top: parts[0],
+                right: parts[1],
+                bottom: parts[0],
+                left: parts[1],
+            },
+            3 => Padding {
+                top: parts[0],
+                right: parts[1],
+                bottom: parts[2],
+                left: parts[1],
+            },
+            4 => Padding {
+                top: parts[0],
+                right: parts[1],
+                bottom: parts[2],
+                left: parts[3],
+            },
+            // `padding: 10px 12px 8px 4px 2px` is not a padding declaration.
+            _ => return None,
+        };
+        Some(sides)
     }
 
     fn parse_font_family(value: &str) -> Option<String> {
@@ -309,28 +553,13 @@ pub mod skia_impl {
     /// lengths (`2em solid red` used to vanish because only `px` was read).
     /// They are passed in rather than re-derived here because the paint loop
     /// already knows both.
-    fn parse_style_attr(
-        style: &str,
-        font_size: f32,
-        viewport: (f32, f32),
-    ) -> (
-        Option<sk::Color>,
-        Option<BorderSpec>,
-        Option<f32>,
-        bool,
-        Option<ClipInsets>,
-        f32,
-        FilterSpec,
-        i32,
-    ) {
-        let mut bg = None;
-        let mut border = None;
-        let mut radius = None;
-        let mut overflow_hidden = false;
-        let mut clip_inset = None;
-        let mut opacity = 1.0f32;
-        let mut filters = FilterSpec::default();
-        let mut z_index = 0i32;
+    ///
+    /// Returns a `BoxStyle` rather than a tuple. The tuple had grown to eight
+    /// elements and was about to become unreadable at the call sites; a named
+    /// field also lets the `padding` arm added below exist without every
+    /// reader having to learn its position.
+    fn parse_style_attr(style: &str, font_size: f32, viewport: (f32, f32)) -> BoxStyle {
+        let mut out = BoxStyle::default();
 
         for decl in style.split(';') {
             let d = decl.trim();
@@ -341,24 +570,49 @@ pub mod skia_impl {
                 let key = k.trim();
                 let val = v.trim();
                 if key == "background-color" || key == "background" {
-                    bg = parse_color_hex(val).or_else(|| {
+                    out.background = parse_color_hex(val).or_else(|| {
                         velox_dom::style::Color::parse(val)
                             .map(|c| sk::Color::from_argb(c.a, c.r, c.g, c.b))
                     });
                 } else if key == "border" {
-                    border = parse_border_value(val, font_size, viewport);
+                    out.border = parse_border_value(val, font_size, viewport);
                 } else if key == "border-radius" {
                     if let Some(px) = parse_px_value(val) {
-                        radius = Some(px);
+                        out.radius = Some(px);
+                    }
+                } else if key == "padding" {
+                    // There was NO arm for `padding` here at all, so an
+                    // author's padding reached layout (which has its own
+                    // reader) but never reached paint. For an `<input>` that
+                    // is what put the first glyph hard against the border.
+                    // The `padding-*` longhands are read too, because the
+                    // cascade does not expand the shorthand and an author who
+                    // overrides one side inline writes the longhand.
+                    if let Some(p) = parse_padding(val, font_size, viewport) {
+                        out.padding = Some(p);
+                    }
+                } else if key.starts_with("padding-") {
+                    let side = key.trim_start_matches("padding-");
+                    let len = velox_dom::style::Length::parse(val)
+                        .map(|l| l.to_px(font_size, super::REM_ROOT_FONT_SIZE, viewport));
+                    if let Some(len) = len {
+                        let p = out.padding.get_or_insert(Padding::ZERO);
+                        match side {
+                            "top" => p.top = len,
+                            "right" => p.right = len,
+                            "bottom" => p.bottom = len,
+                            "left" => p.left = len,
+                            _ => {}
+                        }
                     }
                 } else if key == "overflow" {
                     let v = val.to_ascii_lowercase();
-                    overflow_hidden = v == "hidden" || v == "scroll" || v == "auto";
+                    out.overflow_hidden = v == "hidden" || v == "scroll" || v == "auto";
                 } else if key == "clip-path" {
-                    clip_inset = parse_clip_inset(val);
+                    out.clip_inset = parse_clip_inset(val);
                 } else if key == "opacity" {
                     if let Some(alpha) = parse_float_value(val) {
-                        opacity = alpha.clamp(0.0, 1.0);
+                        out.opacity = alpha.clamp(0.0, 1.0);
                     }
                 } else if key == "filter" {
                     for part in val.split(')') {
@@ -369,31 +623,22 @@ pub mod skia_impl {
                         if let Some(value) = part.strip_prefix("blur(")
                             && let Some(px) = parse_px_value(value.trim())
                         {
-                            filters.blur_sigma = Some(px.max(0.0));
+                            out.filters.blur_sigma = Some(px.max(0.0));
                         } else if let Some(value) = part.strip_prefix("brightness(")
                             && let Some(f) = parse_float_value(value.trim())
                         {
-                            filters.brightness = Some(f.max(0.0));
+                            out.filters.brightness = Some(f.max(0.0));
                         }
                     }
                 } else if key == "z-index"
                     && let Ok(z) = val.parse::<i32>()
                 {
-                    z_index = z;
+                    out.z_index = z;
                 }
             }
         }
 
-        (
-            bg,
-            border,
-            radius,
-            overflow_hidden,
-            clip_inset,
-            opacity,
-            filters,
-            z_index,
-        )
+        out
     }
 
     fn z_index_for_props(props: &velox_dom::Props) -> i32 {
@@ -456,11 +701,25 @@ pub mod skia_impl {
                         _ => TextAlign::Left,
                     };
                 } else if key == "text-decoration" {
+                    // CSS 2.1 §8.3.1: a `text-decoration` value is a SPACE-
+                    // SEPARATED LIST of keywords, and any combination is
+                    // legal. This used to be
+                    //   `contains("underline") -> true; else if == "none" -> false`
+                    // which had three defects: `line-through` matched neither
+                    // branch and so inherited whatever the parent had (and
+                    // rendered nothing), `underline line-through` set the
+                    // underline and silently dropped the strike, and any
+                    // value containing "none" as a substring was misread.
+                    // Both flags are now assigned explicitly, so a combined
+                    // value draws both and `none` clears both.
                     let val_l = val.to_ascii_lowercase();
-                    if val_l.contains("underline") {
-                        text_style.underline = true;
-                    } else if val_l == "none" {
+                    if val_l.split_whitespace().any(|k| k == "none") {
                         text_style.underline = false;
+                        text_style.line_through = false;
+                    } else {
+                        text_style.underline = val_l.split_whitespace().any(|k| k == "underline");
+                        text_style.line_through =
+                            val_l.split_whitespace().any(|k| k == "line-through");
                     }
                 } else if key == "font-size" {
                     // `parse_px_value(val).or_else(|| parse_float_value(val))`
@@ -624,6 +883,65 @@ pub mod skia_impl {
         (halo, core)
     }
 
+    /// The vertical position of the `line-through` rule for one line box.
+    ///
+    /// CSS 2.1 §8.3.1 gives no numeric position ("ideally, the middle of the
+    /// glyphs"), so this follows the common browser rule: through the middle of
+    /// the x-height band, which is ABOVE the baseline — not below it.
+    ///
+    /// The direction is load-bearing and is the opposite of the first guess.
+    /// The underline already sits just below the baseline (`baseline + 1.0`), so
+    /// a strike placed below the baseline too lands within a pixel of it and
+    /// `underline line-through` renders as one fat blob instead of two rules.
+    /// (Not hypothetical: the pixel test `underline_line_through_draws_both_bands`
+    /// is what caught it.)
+    ///
+    /// The offset is derived from the FONT SIZE rather than a constant, because
+    /// at 14px and at 48px the same constant lands visibly high and visibly low
+    /// respectively. `0.25em` approximates half an x-height, which is close for
+    /// every Latin face in this repo's bundles and — being derived — degrades
+    /// smoothly instead of jumping to an absolute pixel value.
+    fn line_through_y(baseline_y: f32, font_size: f32) -> f32 {
+        baseline_y - font_size * LINE_THROUGH_ASCENT_EM
+    }
+
+    /// Draw `underline` and/or `line-through` across one already-measured line.
+    ///
+    /// `line_start_x` and `line_width` are the MEASURED run: the caller has
+    /// already wrapped the paragraph and measured each visual line, so this is
+    /// a measure-then-strike pass and the rule lands across every WRAPPED line
+    /// rather than only the first. `line_width` of 0 draws nothing, so a
+    /// blank wrapped line does not get a stray rule.
+    fn draw_text_decorations(
+        canvas: &sk::Canvas,
+        paints: &mut RenderPaints,
+        style: TextStyle,
+        line_start_x: f32,
+        baseline_y: f32,
+        line_width: f32,
+        font_size: f32,
+        inherited_opacity: f32,
+    ) {
+        if !(style.underline || style.line_through) || line_width <= 0.0 {
+            return;
+        }
+        let ink = color_with_opacity(style.color, inherited_opacity);
+        let x0 = line_start_x;
+        let x1 = line_start_x + line_width;
+        if style.underline {
+            paints.underline.set_color(ink);
+            // `+1.0` sits just under the baseline, which is where browsers put
+            // it and where it does not collide with descenders.
+            let uy = baseline_y + 1.0;
+            canvas.draw_line((x0, uy), (x1, uy), &paints.underline);
+        }
+        if style.line_through {
+            paints.strike.set_color(ink);
+            let sy = line_through_y(baseline_y, font_size);
+            canvas.draw_line((x0, sy), (x1, sy), &paints.strike);
+        }
+    }
+
     fn color_with_opacity(color: sk::Color, opacity: f32) -> sk::Color {
         let a = ((color.a() as f32) * opacity).round().clamp(0.0, 255.0) as u8;
         sk::Color::from_argb(a, color.r(), color.g(), color.b())
@@ -754,6 +1072,10 @@ pub mod skia_impl {
         stroke: sk::Paint,
         text: sk::Paint,
         underline: sk::Paint,
+        /// The `line-through` rule. Its own paint rather than a reused one so
+        /// its width is not coupled to whatever the element border last set on
+        /// `stroke`.
+        strike: sk::Paint,
         image: sk::Paint,
     }
 
@@ -769,6 +1091,12 @@ pub mod skia_impl {
             let mut underline = sk::Paint::default();
             underline.set_anti_alias(true);
             underline.set_stroke_width(1.0);
+            let mut strike = sk::Paint::default();
+            strike.set_anti_alias(true);
+            // Browsers draw the strike thinner than the underline; 1px is
+            // already the thinnest this surface can render honestly, so the
+            // weight matches and only the POSITION differs.
+            strike.set_stroke_width(1.0);
             let mut image = sk::Paint::default();
             image.set_anti_alias(true);
             RenderPaints {
@@ -776,6 +1104,7 @@ pub mod skia_impl {
                 stroke,
                 text,
                 underline,
+                strike,
                 image,
             }
         }
@@ -850,7 +1179,8 @@ pub mod skia_impl {
             color: sk::Color::from_argb(255, 0, 0, 0),
             align: TextAlign::Left,
             underline: false,
-            font_size: 14.0,
+            line_through: false,
+            font_size: super::PAINT_ROOT_FONT_SIZE,
             bold: false,
             line_height: 1.2,
             nowrap: false,
@@ -891,19 +1221,18 @@ pub mod skia_impl {
                         // is only known after the text style is computed.
                         let (style, family) =
                             parse_text_style(s, text_style, font_family, viewport);
-                        let (bg, border, radius, overflow, inset, alpha, filter_spec, _z) =
-                            parse_style_attr(s, style.font_size, viewport);
-                        let rrect = radius.map(|r| sk::RRect::new_rect_xy(rect, r, r));
+                        let box_style = parse_style_attr(s, style.font_size, viewport);
+                        let rrect = box_style.radius.map(|r| sk::RRect::new_rect_xy(rect, r, r));
                         if let Some(rrect) = rrect {
                             clip_rrect = Some(rrect);
                         }
-                        overflow_hidden = overflow;
-                        clip_inset = inset;
+                        overflow_hidden = box_style.overflow_hidden;
+                        clip_inset = box_style.clip_inset;
                         child_text_style = style;
                         child_family = family;
-                        opacity = (opacity * alpha).clamp(0.0, 1.0);
-                        filters = filter_spec;
-                        if let Some(bg) = bg {
+                        opacity = (opacity * box_style.opacity).clamp(0.0, 1.0);
+                        filters = box_style.filters;
+                        if let Some(bg) = box_style.background {
                             paints.fill.set_color(color_with_opacity(bg, opacity));
                             if let Some(rrect) = rrect {
                                 canvas.draw_rrect(rrect, &paints.fill);
@@ -912,7 +1241,7 @@ pub mod skia_impl {
                             }
                         }
 
-                        if let Some(border) = border {
+                        if let Some(border) = box_style.border {
                             paints.stroke.set_stroke_width(border.width);
                             paints
                                 .stroke
@@ -1039,13 +1368,19 @@ pub mod skia_impl {
                         {
                             let _ = canvas.draw_str(line.as_str(), (tx, ty), &font, &paints.text);
                         }
-                        if text_style.underline {
-                            paints
-                                .underline
-                                .set_color(color_with_opacity(text_style.color, inherited_opacity));
-                            let uy = ty + 1.0;
-                            canvas.draw_line((tx, uy), (tx + line_w, uy), &paints.underline);
-                        }
+                        // Measure-then-strike: `line_w` is this VISUAL line's measured advance
+                        // from the wrap pass above, so the rule lands across
+                        // every wrapped line, not just the first.
+                        draw_text_decorations(
+                            canvas,
+                            paints,
+                            text_style,
+                            tx,
+                            ty,
+                            line_w,
+                            font_size,
+                            inherited_opacity,
+                        );
                     }
                 }
             }
@@ -1303,6 +1638,16 @@ pub mod skia_impl {
             self.default_family.clone()
         }
 
+        /// Resolve a family to a typeface.
+        ///
+        /// NOT a fontconfig family lookup. `FontCache::new_with_scale` inserts
+        /// exactly one entry, `"default"`, from `load_default_typeface`
+        /// (a bundled/system font file, else a preferred-family probe). Every
+        /// other `family` therefore misses the map and is served THE SAME
+        /// default face. `font-family: Inter` is currently a no-op paint-wide,
+        /// and it is a no-op here because of this function, not because the
+        /// cascade dropped the declaration. Real per-family loading is a
+        /// separate task.
         fn get_or_load_family(&mut self, family: &str) -> Option<sk::Typeface> {
             if let Some(tf) = self.typefaces.get(family) {
                 return Some(tf.clone());
@@ -1487,11 +1832,11 @@ pub mod skia_impl {
         }
     }
 
-    // PERSISTENT FONT CACHES (perf: one fontconfig scan per scale, not per call).
+    // PERSISTENT FONT CACHES (perf: one typeface probe per scale, not per call).
     //
     // `FontCache::new_with_scale` calls `load_default_typeface`, which builds a
-    // `sk::FontMgr::default()` and therefore runs a full fontconfig family scan.
-    // That scan is not cheap — it measured at ~50% of total process CPU under
+    // `sk::FontMgr::default()`. That construction is not cheap — it measured at
+    // ~50% of total process CPU under
     // `perf`. Both `measure_text` (registered as the global measurer via
     // `text_wrap::set_skia_measurer`, so it runs for every measurement layout
     // performs) and `render_frame` (once per frame) used to build a brand new
@@ -1547,8 +1892,9 @@ pub mod skia_impl {
     /// The field is an `Option` so `Drop` can `take()` the cache out. It is
     /// deliberately NOT a plain `FontCache` handed back via
     /// `mem::replace(.., FontCache::new_with_scale(1.0))`: that would construct
-    /// a throwaway `FontCache` — and therefore run the fontconfig scan this
-    /// whole change exists to avoid — on every single frame.
+    /// a throwaway `FontCache` — and therefore rebuild the `FontMgr` and
+    /// re-probe the typeface this whole change exists to avoid — on every
+    /// single frame.
     struct RenderFontCache {
         cache: Option<FontCache>,
     }
@@ -1586,8 +1932,9 @@ pub mod skia_impl {
             .ok()
             .flatten();
         let mut guard = RenderFontCache {
-            // Only the very first frame on this thread pays the fontconfig
-            // scan; every later frame gets the previous frame's cache back.
+            // Only the very first frame on this thread pays the
+            // `FontMgr`/typeface probe; every later frame gets the previous
+            // frame's cache back.
             cache: Some(taken.unwrap_or_else(|| FontCache::new_with_scale(scale))),
         };
         // Same rationale as `with_measure_font_cache`: a frame must be told the
@@ -1608,15 +1955,25 @@ pub mod skia_impl {
         // Substituting it would change the measured advance for a degenerate
         // scale, so this keeps its own guard. This is a glyph-advance size snap
         // for measurement, not a logical->physical size conversion.
-        let snapped = if scale.is_finite() && scale > 0.0 {
+        //
+        // The `scale != 1.0` term is what keeps this in step with its two
+        // siblings, `FontCache::snapped_size` and `TextMeasurer::snapped_size`,
+        // both of which skip the round trip at scale 1. That step is a hinting
+        // concern: at scale 1 the device size IS the logical size and there is
+        // no subpixel grid to land on, so snapping there only discards
+        // precision. This function lacked the guard while the other two had it,
+        // and it is the one the caret lane measures with — so a fractional
+        // `font-size` (16.5px, `1.05em`, `0.9375rem`) painted at 16.5 was
+        // measured at 17, a 3% advance error on the most common desktop scale.
+        let snapped = if scale.is_finite() && scale > 0.0 && scale != 1.0 {
             (font_size * scale).round() / scale
         } else {
             font_size
         };
         // Persistent cache, not a fresh one per measurement: see the comment on
         // `MEASURE_FONT_CACHE`. This is the hot path — it runs for every text
-        // measurement layout does — so the fontconfig scan must happen here at
-        // most once per scale instead of once per call.
+        // measurement layout does — so the `FontMgr`/typeface probe must happen
+        // here at most once per scale instead of once per call.
         with_measure_font_cache(scale, |fc| fc.measure_run(font_family, snapped, text))
     }
 
@@ -1716,8 +2073,8 @@ pub mod skia_impl {
         // Persistent per-thread cache rather than a fresh one per frame: see
         // the comment on `RENDER_FONT_CACHE`. `font_guard` lends this frame the
         // cache and returns it to the thread-local slot on drop, so the
-        // fontconfig scan behind `load_default_typeface` runs once per thread
-        // instead of once per frame. `take_render_font_cache` has already
+        // `FontMgr`/typeface probe behind `load_default_typeface` runs once per
+        // thread instead of once per frame. `take_render_font_cache` has already
         // resynced it to `scale`, so glyph rasterisation and the canvas scale
         // above still agree.
         let mut font_guard = take_render_font_cache(scale);
@@ -1727,7 +2084,8 @@ pub mod skia_impl {
             color: sk::Color::from_argb(255, 0, 0, 0),
             align: TextAlign::Left,
             underline: false,
-            font_size: 14.0,
+            line_through: false,
+            font_size: super::PAINT_ROOT_FONT_SIZE,
             bold: false,
             line_height: 1.2,
             nowrap: false,
@@ -1772,6 +2130,17 @@ pub mod skia_impl {
                     let mut child_family = font_family.to_string();
                     let mut opacity = inherited_opacity;
                     let mut filters = FilterSpec::default();
+                    // The author's own box styling, hoisted out of the
+                    // `if let Some(style)` block below. The `<input>` lane
+                    // paints its own fill and border OVER the ones drawn
+                    // there, so it needs to know what the author asked for
+                    // rather than assume white and `#c8c8c8` — which is
+                    // exactly the bug: the element box was already painted
+                    // correctly and then covered.
+                    let mut author_bg: Option<sk::Color> = None;
+                    let mut author_border: Option<BorderSpec> = None;
+                    let mut author_radius: Option<f32> = None;
+                    let mut author_padding: Option<Padding> = None;
                     if let Some(s) = props.attrs.get("style") {
                         // As at the other call site: resolve the element's own
                         // font size before the border parser needs it for `em`.
@@ -1780,25 +2149,28 @@ pub mod skia_impl {
                         // rects being painted here are logical.
                         let (style, family) =
                             parse_text_style(s, text_style, font_family, viewport);
-                        let (bg, border, radius, overflow, inset, alpha, filter_spec, _z) =
-                            parse_style_attr(s, style.font_size, viewport);
+                        let box_style = parse_style_attr(s, style.font_size, viewport);
                         let rect = sk::Rect::from_xywh(
                             layout.rect.x as f32,
                             layout.rect.y as f32,
                             layout.rect.w as f32,
                             layout.rect.h as f32,
                         );
-                        let rrect = radius.map(|r| sk::RRect::new_rect_xy(rect, r, r));
+                        let rrect = box_style.radius.map(|r| sk::RRect::new_rect_xy(rect, r, r));
                         if let Some(rrect) = rrect {
                             clip_rrect = Some(rrect);
                         }
-                        overflow_hidden = overflow;
-                        clip_inset = inset;
+                        author_bg = box_style.background;
+                        author_border = box_style.border;
+                        author_radius = box_style.radius;
+                        author_padding = box_style.padding;
+                        overflow_hidden = box_style.overflow_hidden;
+                        clip_inset = box_style.clip_inset;
                         child_text_style = style;
                         child_family = family;
-                        opacity = (opacity * alpha).clamp(0.0, 1.0);
-                        filters = filter_spec;
-                        if let Some(bg) = bg {
+                        opacity = (opacity * box_style.opacity).clamp(0.0, 1.0);
+                        filters = box_style.filters;
+                        if let Some(bg) = box_style.background {
                             paints.fill.set_color(color_with_opacity(bg, opacity));
                             if let Some(rrect) = rrect {
                                 canvas.draw_rrect(rrect, &paints.fill);
@@ -1806,7 +2178,7 @@ pub mod skia_impl {
                                 canvas.draw_rect(rect, &paints.fill);
                             }
                         }
-                        if let Some(border) = border {
+                        if let Some(border) = box_style.border {
                             paints.stroke.set_stroke_width(border.width);
                             paints
                                 .stroke
@@ -1845,9 +2217,21 @@ pub mod skia_impl {
                             .unwrap_or("text");
                         let value = props.attrs.get("value").map(|s| s.as_str()).unwrap_or("");
 
-                        // Draw input background (white or light gray)
-                        let input_bg = sk::Color::from_argb(255, 255, 255, 255);
-                        let border_color = sk::Color::from_argb(255, 200, 200, 200);
+                        // The field's fill and border. These used to be two
+                        // hardcoded literals — opaque white and `#c8c8c8` —
+                        // which OVERRODE the author's own `background` and
+                        // `border`: the boilerplate's `.input`
+                        // (`background:#16213e; border:1px solid #3a3a5c`) was
+                        // painted correctly by the element box pass above and
+                        // then painted white over. The literals now survive
+                        // only as the fallback for a field whose author (and
+                        // UA) specified nothing, so an unstyled input still
+                        // looks like a field.
+                        let input_bg =
+                            author_bg.unwrap_or_else(|| sk::Color::from_argb(255, 255, 255, 255));
+                        let border_color = author_border
+                            .map(|b| b.color)
+                            .unwrap_or_else(|| sk::Color::from_argb(255, 200, 200, 200));
 
                         let rect = sk::Rect::from_xywh(
                             layout.rect.x as f32,
@@ -1865,13 +2249,35 @@ pub mod skia_impl {
                                 size,
                                 size,
                             );
+                            // A checkbox is a 1px-outlined square in the UA
+                            // sense, so the author's `border` does not apply
+                            // to the box drawn INSIDE it; honour `radius` so
+                            // `border-radius` is not silently dropped here
+                            // either.
+                            let check_radius = author_radius
+                                .map(|r| (r * 0.25).min(size * 0.5))
+                                .unwrap_or(0.0);
+                            let check_shape =
+                                sk::RRect::new_rect_xy(check_rect, check_radius, check_radius);
                             // Background
                             paints.fill.set_color(input_bg);
-                            canvas.draw_rect(check_rect, &paints.fill);
+                            canvas.draw_rrect(check_shape, &paints.fill);
                             // Border
                             paints.stroke.set_stroke_width(1.0);
                             paints.stroke.set_color(border_color);
-                            canvas.draw_rect(check_rect, &paints.stroke);
+                            // Clear any dash a previous element left on the
+                            // shared stroke paint: a checkbox outline is
+                            // solid in every UA sheet, and the paint is
+                            // reused within a frame.
+                            apply_border_style(
+                                &mut paints.stroke,
+                                &BorderSpec {
+                                    width: 1.0,
+                                    color: border_color,
+                                    style: velox_dom::style::BorderStyle::Solid,
+                                },
+                            );
+                            canvas.draw_rrect(check_shape, &paints.stroke);
                             // Check mark if checked.
                             //
                             // The template binds `:checked="completed"`
@@ -1926,36 +2332,94 @@ pub mod skia_impl {
                                     .unwrap_or(value.len())
                             };
 
-                            let input_rect = sk::Rect::from_xywh(
-                                rect.left + 1.0,
-                                rect.top + 1.0,
-                                (rect.width() - 2.0).max(0.0),
-                                (rect.height() - 2.0).max(0.0),
+                            // ONE geometry authority for the whole input
+                            // lane. This used to be a hardcoded 1px border
+                            // inset plus a hardcoded `TEXT_PAD = 4.0`, which is
+                            // how the author's `padding` was silently dropped
+                            // and how paint came to disagree with the hit-test
+                            // lane's caret placement. Reading computed border
+                            // widths and padding sides means `padding`,
+                            // `padding-left` and `12px` all place the first
+                            // glyph identically.
+                            //
+                            // The hit-test lane calls the same function, so the
+                            // two cannot drift apart again.
+                            let metrics = crate::input_metrics::input_text_metrics(
+                                props.attrs.get("style").map(|s| s.as_str()),
+                                layout.rect,
+                                viewport,
+                                text_style.font_size,
                             );
-                            paints.fill.set_color(input_bg);
-                            canvas.draw_rect(input_rect, &paints.fill);
+                            let input_rect = sk::Rect::from_xywh(
+                                metrics.pad_left,
+                                metrics.pad_top,
+                                (metrics.pad_right - metrics.pad_left).max(0.0),
+                                (metrics.pad_bottom - metrics.pad_top).max(0.0),
+                            );
+                            // An author's `border-radius` must reach the field
+                            // itself, so the fill is an rrect rather than a
+                            // rect. The element box pass above already drew
+                            // the author's background; re-filling the padding
+                            // box here is what keeps an opaque light fallback
+                            // from covering a dark `background`.
+                            let field_radius = author_radius.unwrap_or(0.0);
+                            // The element box pass above ALREADY painted the
+                            // author's `background`, on the border box, with
+                            // the author's radius. Re-filling it here would
+                            // composite a translucent colour a SECOND time:
+                            // `rgba(255,0,0,0.5)` over a black page came out at
+                            // 190/255 red instead of 127. (Caught by the pixel
+                            // test
+                            // `a_translucent_author_background_is_not_forced_opaque`
+                            // — an opaque background is idempotent here, which is
+                            // exactly why the bug survived the first fix.)
+                            //
+                            // So this lane paints only the case it actually
+                            // owns: the author declared no background at all, and
+                            // the fallback is what keeps an unstyled field from
+                            // being invisible.
+                            if author_bg.is_none() {
+                                paints.fill.set_color(color_with_opacity(input_bg, opacity));
+                                canvas.draw_rrect(
+                                    sk::RRect::new_rect_xy(rect, field_radius, field_radius),
+                                    &paints.fill,
+                                );
+                            }
 
-                            // Everything below is clipped to the field's inner
-                            // rect so a long value's caret and selection can
+                            // Everything below is clipped to the field's padding
+                            // box so a long value's caret and selection can
                             // never paint into the surrounding page.
                             canvas.save();
                             canvas.clip_rect(input_rect, sk::ClipOp::Intersect, true);
 
-                            let font_size = text_style.font_size;
-                            let font = fonts.font(font_family, font_size);
-                            // Same baseline arithmetic the value text already
-                            // used, so the caret's line box is the text's line
-                            // box rather than a second opinion about where the
-                            // line sits.
-                            let ty = input_rect.top
-                                + font_size
-                                + (input_rect.height() - font_size) / 2.0;
-                            // Horizontal padding between the field's inner
-                            // edge and the first glyph. One constant, read by
-                            // the text origin, the caret x and the selection
-                            // edges, so the three can never disagree.
-                            const TEXT_PAD: f32 = 4.0;
-                            let text_left = input_rect.left + TEXT_PAD;
+                            let font_size = metrics.font_size;
+                            let font = fonts.font(&child_family, font_size);
+                            // The glyph line is centred in the CONTENT box, not
+                            // in the padding box: CSS puts the line box inside
+                            // the content box and lets padding surround it. For
+                            // the symmetric padding every author writes
+                            // (`padding: 10px 12px`) this is numerically the
+                            // same as the old padding-box centring; for
+                            // asymmetric padding it is the difference between
+                            // the text sitting where the author put it and the
+                            // text ignoring the padding entirely.
+                            //
+                            // Horizontal geometry does NOT come from
+                            // `author_padding`: it comes from `metrics`, which
+                            // reads computed values, because the hit-test lane
+                            // has to reach the same answer and only computed
+                            // values make the shorthand and the longhand agree.
+                            // Vertical is paint-only, so it uses this paint
+                            // lane's own declaration reader.
+                            let pad = author_padding.unwrap_or(Padding::ZERO);
+                            let content_top = input_rect.top + pad.top;
+                            let content_h = (input_rect.height() - pad.top - pad.bottom).max(0.0);
+                            let ty = content_top + font_size + (content_h - font_size) / 2.0;
+                            // The text origin and the content width come from
+                            // `metrics`, the same values the hit-test lane
+                            // reads. One source, so the caret can never land
+                            // somewhere other than where the glyph is.
+                            let text_left = metrics.text_left;
                             let line_top = ty - font_size;
                             let line_bottom = ty;
 
@@ -1966,19 +2430,19 @@ pub mod skia_impl {
                             // actual glyphs.
                             let advance_of = |fonts: &mut FontCache, ci: usize| -> f32 {
                                 let byte = char_to_byte(ci);
-                                fonts.measure_text(font_family, font_size, &value[..byte])
+                                fonts.measure_text(&child_family, font_size, &value[..byte])
                             };
-                            // Where text may actually be drawn: the inner
-                            // rect less the same padding, so the last glyph
-                            // is not half under the border. An index whose
-                            // measured advance runs past this (an overflowing
-                            // value) clamps HERE, landing the caret flat on
-                            // the clip edge rather than scrolling the text.
-                            // The text itself never reflows: the caret is an
-                            // overlay, and a caret that scrolled entirely out
-                            // of view would be the "cursor not showing up"
-                            // report a third time.
-                            let content_right = input_rect.right - TEXT_PAD;
+                            // Where text may actually be drawn: the padding box
+                            // less the same padding, so the last glyph is not
+                            // half under the border. An index whose measured
+                            // advance runs past this (an overflowing value)
+                            // clamps HERE, landing the caret flat on the clip
+                            // edge rather than scrolling the text. The text
+                            // itself never reflows: the caret is an overlay, and
+                            // a caret that scrolled entirely out of view would
+                            // be the "cursor not showing up" report a third
+                            // time.
+                            let content_right = metrics.content_right;
                             let caret_x_of = |fonts: &mut FontCache, ci: usize| -> f32 {
                                 (text_left + advance_of(fonts, ci))
                                     .min(content_right)
@@ -2009,10 +2473,56 @@ pub mod skia_impl {
                             }
 
                             // 2. Value text, on top of the selection.
+                            //
+                            // The colour is the element's OWN `color` — which is
+                            // `child_text_style`, the style `parse_text_style`
+                            // produced for this element from its own `style`
+                            // attribute. Reading the inherited `text_style`
+                            // instead was a second, quieter bug: it is the
+                            // PARENT's colour, so `color:#ff0000` on the input
+                            // was read as "whatever the parent said", which for
+                            // the unstyled boilerplate parent is black.
+                            // `caret_colors` already keys the caret off the same
+                            // field/ink pair, so the two agree by construction.
+                            let value_ink = color_with_opacity(child_text_style.color, opacity);
                             if !value.is_empty() {
-                                paints.text.set_color(sk::Color::from_argb(255, 0, 0, 0));
+                                paints.text.set_color(value_ink);
                                 let _ =
                                     canvas.draw_str(value, (text_left, ty), &font, &paints.text);
+                            } else if let Some(placeholder) = props
+                                .attrs
+                                .get("placeholder")
+                                .map(|s| s.as_str())
+                                .filter(|s| !s.is_empty())
+                            {
+                                // 2b. Placeholder, only while the field is
+                                // empty. A non-empty value always wins, which
+                                // is the whole point of a placeholder.
+                                //
+                                // The ink is NOT a fixed grey literal: it is
+                                // derived from the field's own `color`, so a
+                                // dark-themed input gets a dark-theme-muted
+                                // placeholder instead of a grey that vanishes
+                                // against it. An author who styled it
+                                // explicitly — `input::placeholder { ... }`,
+                                // carried in by the cascade as
+                                // `style:placeholder` — overrides this.
+                                let ph_ink =
+                                    placeholder_color(props, child_text_style.color, input_bg);
+                                paints.text.set_color(color_with_opacity(ph_ink, opacity));
+                                let _ = canvas.draw_str(
+                                    truncate_with_ellipsis(
+                                        placeholder,
+                                        metrics.text_width(),
+                                        fonts,
+                                        &child_family,
+                                        font_size,
+                                    )
+                                    .as_str(),
+                                    (text_left, ty),
+                                    &font,
+                                    &paints.text,
+                                );
                             }
 
                             // 3. Caret bar. Overlay only — nothing reflows.
@@ -2052,15 +2562,75 @@ pub mod skia_impl {
 
                             // 4. Border, then the focus ring.
                             //
-                            // The ring is INSET 2px and 2px thick, so it never
-                            // shares a pixel with the 1px border drawn here.
-                            // A ring drawn on the border's own pixels is
-                            // invisible, which is exactly the "input box on
-                            // focus cursor not showing up" report.
-                            paints.stroke.set_stroke_width(1.0);
-                            paints.stroke.set_color(border_color);
-                            canvas.draw_rect(input_rect, &paints.stroke);
+                            // The border is drawn on the BORDER BOX, inset by
+                            // half the stroke so a 1px border sits wholly on
+                            // the box edge rather than straddling it — which is
+                            // also what makes the width the author asked for
+                            // (`border: 2px`) visible instead of clipped by
+                            // the padding box. It is an rrect whenever a
+                            // radius is present, so `border-radius` reaches the
+                            // outline: a plain `draw_rect` here is what made
+                            // the boilerplate's `border-radius: 8px` field look
+                            // like a sharp-cornered box drawn over a rounded
+                            // background.
+                            paints
+                                .stroke
+                                .set_color(color_with_opacity(border_color, opacity));
+                            if let Some(border) = author_border {
+                                let sw = if border.width.is_finite() && border.width > 0.0 {
+                                    border.width
+                                } else {
+                                    1.0
+                                };
+                                let half = sw / 2.0;
+                                let border_rect = sk::Rect::from_xywh(
+                                    rect.left + half,
+                                    rect.top + half,
+                                    (rect.width() - sw).max(0.0),
+                                    (rect.height() - sw).max(0.0),
+                                );
+                                if border_rect.width() > 0.0 && border_rect.height() > 0.0 {
+                                    // Pull the radius in by the inset so the
+                                    // outer edge of the stroke lands on the
+                                    // rounded corner the author specified.
+                                    let r = (field_radius - half).max(0.0);
+                                    let shape = sk::RRect::new_rect_xy(border_rect, r, r);
+                                    paints.stroke.set_stroke_width(sw);
+                                    apply_border_style(&mut paints.stroke, &border);
+                                    canvas.draw_rrect(shape, &paints.stroke);
+                                }
+                            } else {
+                                // No author border at all: keep the historical
+                                // 1px `#c8c8c8` outline, but honour the
+                                // radius so the fallback does not reintroduce
+                                // the square-corner defect.
+                                paints.stroke.set_stroke_width(1.0);
+                                let shape =
+                                    sk::RRect::new_rect_xy(rect, field_radius, field_radius);
+                                apply_border_style(
+                                    &mut paints.stroke,
+                                    &BorderSpec {
+                                        width: 1.0,
+                                        color: border_color,
+                                        style: velox_dom::style::BorderStyle::Solid,
+                                    },
+                                );
+                                canvas.draw_rrect(shape, &paints.stroke);
+                            }
                             if focused {
+                                // The ring is INSET 2px from the PADDING box and
+                                // 2px thick, so it never shares a pixel with
+                                // the border drawn above. A ring drawn on the
+                                // border's own pixels is invisible, which is
+                                // exactly the "input box on focus cursor not
+                                // showing up" report.
+                                //
+                                // The inset is measured from the padding box,
+                                // not the border box: the border occupies
+                                // `[rect.left, rect.left + border_left)`, so
+                                // insetting from `rect` by the same 2px would
+                                // put the ring's outer edge ON the border and
+                                // leave it half-covering it.
                                 const RING_INSET: f32 = 2.0;
                                 let ring = sk::Rect::from_xywh(
                                     input_rect.left + RING_INSET,
@@ -2069,11 +2639,30 @@ pub mod skia_impl {
                                     (input_rect.height() - RING_INSET * 2.0).max(0.0),
                                 );
                                 if ring.width() > 0.0 && ring.height() > 0.0 {
+                                    let r = (field_radius - RING_INSET).max(0.0);
+                                    let shape = sk::RRect::new_rect_xy(ring, r, r);
                                     paints.stroke.set_stroke_width(2.0);
+                                    // Reset the path effect BEFORE the ring, not
+                                    // after the border. `paints.stroke` is
+                                    // frame-scoped and `apply_border_style` is
+                                    // the only thing that installs or clears a
+                                    // dash on it, so with `border: 2px dashed` the
+                                    // border's `[6, 6]` intervals were still live
+                                    // here and the focus ring came out dashed —
+                                    // defeating the exact report this ring
+                                    // exists to fix.
+                                    apply_border_style(
+                                        &mut paints.stroke,
+                                        &BorderSpec {
+                                            width: 2.0,
+                                            color: sk::Color::from_argb(255, 52, 120, 246),
+                                            style: velox_dom::style::BorderStyle::Solid,
+                                        },
+                                    );
                                     paints
                                         .stroke
                                         .set_color(sk::Color::from_argb(255, 52, 120, 246));
-                                    canvas.draw_rect(ring, &paints.stroke);
+                                    canvas.draw_rrect(shape, &paints.stroke);
                                 }
                             }
                         }
@@ -2221,13 +2810,19 @@ pub mod skia_impl {
                         {
                             let _ = canvas.draw_str(line.as_str(), (tx, ty), &font, &paints.text);
                         }
-                        if text_style.underline {
-                            paints
-                                .underline
-                                .set_color(color_with_opacity(text_style.color, inherited_opacity));
-                            let uy = ty + 1.0;
-                            canvas.draw_line((tx, uy), (tx + line_w, uy), &paints.underline);
-                        }
+                        // Measure-then-strike: `line_w` is this VISUAL line's measured advance
+                        // from the wrap pass above, so the rule lands across
+                        // every wrapped line, not just the first.
+                        draw_text_decorations(
+                            canvas,
+                            paints,
+                            text_style,
+                            tx,
+                            ty,
+                            line_w,
+                            font_size,
+                            inherited_opacity,
+                        );
                     }
                 }
             }
@@ -2491,6 +3086,56 @@ pub mod skia_impl {
                         bounds.bottom.max(0.0),
                         "descent for {text:?} at {size}px: below the baseline is positive"
                     );
+                }
+            }
+        }
+
+        /// THE PAINT LANE AND THE CARET LANE MUST AGREE ON THE MEASURED ADVANCE, at
+        /// every scale including 1.0.
+        ///
+        /// Three snap rules exist and the file documents two of them diverging
+        /// from `Viewport::snap_logical_to_physical_grid`; it never recorded that
+        /// they also have to agree with EACH OTHER. `FontCache::snapped_size`
+        /// (paint, via `font()`/`measure_run`) early-returns unrounded at
+        /// `scale == 1.0`; the free `measure_text` (the caret lane, via
+        /// `TextMeasurer::measure_with_scale`) rounded at every finite positive
+        /// scale, 1.0 included. So at the most common desktop scale a
+        /// fractional `font-size` painted at its exact value and was measured at
+        /// the next whole pixel — `16.5px` painted at 16.5, measured at 17, a 3%
+        /// advance error on a value click lands about one character short per
+        /// thirty-three.
+        ///
+        /// The assertion is a DIFFERENCE, not a re-derived number: measuring the
+        /// same run through both lanes at scale 1.0 must give bit-identical
+        /// widths, and at a fractional scale both must agree too. `measure_text`
+        /// internally re-snaps before delegating to `FontCache::measure_run`, so
+        /// this compares the two independent snap decisions rather than a
+        /// function against itself.
+        #[test]
+        fn the_caret_lane_and_the_paint_lane_measure_the_same_advance() {
+            const SEAM: &str = SEAM_FAMILY;
+            for scale in [1.0f32, 1.25, 1.5, 2.0] {
+                let mut cache = FontCache::new_with_scale(scale);
+                // Fractional sizes first: those are the ones that distinguish
+                // "snapped" from "not snapped", and an integral size would let
+                // a snapped and an unsnapped implementation agree by luck.
+                // NOTE on the sizes chosen: the bundled default face quantizes
+                // advances to whole logical px, so most size/text pairs measure
+                // the same at 16px and 16.5px. Pairs that DO differ ("Wg" and
+                // "Hello world" at 16.5 vs 17) are included precisely so this
+                // assertion is not vacuous — a snapped/unsnapped pair that
+                // happens to measure alike would let both lanes disagree in
+                // production while this test stayed green.
+                for size in [16.5f32, 13.333, 0.9375 * 16.0, 21.0] {
+                    for text in ["MMMMMMMMMMMMMMMMMMMM", "iiiii", "Wg", "Hello world", "0"] {
+                        let paint = cache.measure_run(SEAM, size, text).width;
+                        let caret = measure_text(text, size, SEAM, scale).width;
+                        assert_eq!(
+                            caret, paint,
+                            "advance for {text:?} at {size}px, scale {scale}: the caret lane \
+                             measured {caret} but the paint lane measured {paint}"
+                        );
+                    }
                 }
             }
         }
@@ -2977,6 +3622,7 @@ pub mod skia_impl {
                 color: sk::Color::from_argb(255, 0, 0, 0),
                 align: TextAlign::Left,
                 underline: false,
+                line_through: false,
                 font_size: 14.0,
                 bold: false,
                 line_height: 1.2,
@@ -2998,6 +3644,7 @@ pub mod skia_impl {
                 color: sk::Color::from_argb(255, 0, 0, 0),
                 align: TextAlign::Left,
                 underline: false,
+                line_through: false,
                 font_size: 14.0,
                 bold: false,
                 line_height: 1.2,
@@ -3310,7 +3957,7 @@ pub mod skia_impl {
         /// The `border` slot of `parse_style_attr`'s tuple, end to end.
         /// Takes the shorthand *value*; the property name is added here.
         fn border_of(value: &str, font_size: f32) -> Option<BorderSpec> {
-            parse_style_attr(&format!("border: {value}"), font_size, (800.0, 600.0)).1
+            parse_style_attr(&format!("border: {value}"), font_size, (800.0, 600.0)).border
         }
 
         fn spec(style: BorderStyle) -> BorderSpec {
@@ -3355,13 +4002,14 @@ pub mod skia_impl {
             let b = border_of("10vw solid red", 16.0).expect("10vw solid red dropped");
             assert_eq!(b.width, 80.0, "`vw` must scale with the viewport");
 
-            // `rem` has no root font size in scope anywhere in the paint path,
-            // so it resolves against the element font size. Correct whenever
-            // the element has not overridden `font-size`; a `rem` border on an
-            // element that *has* overridden it will be wrong. Tracked as a
-            // known limitation rather than silently dropped.
+            // `rem` resolves against the ROOT size (16), not the element's own,
+            // so it is deliberately NOT 18 here. This assertion previously
+            // documented the bug as the convention, with a comment admitting the
+            // value was "wrong" and calling it a known limitation. See
+            // `parse_border_resolves_rem_against_the_root_not_the_element` for
+            // the invariant that pins it.
             let b = border_of("1rem solid red", 18.0).expect("1rem solid red dropped");
-            assert_eq!(b.width, 18.0);
+            assert_eq!(b.width, 16.0, "`rem` is a root unit, not an `em`");
 
             // Still handles every length the DOM handles, unitless included.
             for (decl, want) in [("0 solid red", 0.0), ("3 solid red", 3.0)] {
@@ -3425,6 +4073,422 @@ pub mod skia_impl {
         #[test]
         fn border_value_defaults_to_medium_width() {
             assert_eq!(border_of("solid red", 16.0).unwrap().width, 3.0);
+        }
+
+        // ── A6: text-decoration is a space-separated list, and every keyword
+        // in it must be honoured. The old parser was
+        //   `contains("underline") -> true; else if == "none" -> false`
+        // so `line-through` matched NEITHER branch, inherited whatever the
+        // parent had, and painted nothing at all — the DOM parsed it fine, so
+        // the declaration was silently dropped at paint time only.
+        fn decoration_of(value: &str) -> (bool, bool) {
+            let (s, _) = parse_text_style(
+                &format!("text-decoration:{value}"),
+                plain_text_style(),
+                "default",
+                (800.0, 600.0),
+            );
+            (s.underline, s.line_through)
+        }
+
+        #[test]
+        fn text_decoration_underline_still_works() {
+            assert_eq!(decoration_of("underline"), (true, false));
+        }
+
+        #[test]
+        fn text_decoration_line_through_is_not_dropped() {
+            assert_eq!(
+                decoration_of("line-through"),
+                (false, true),
+                "line-through is the single keyword this task is about: it must \
+                 set the strike flag and leave underline alone"
+            );
+        }
+
+        // CSS 2.1 §8.3.1 allows any combination. The DOM's `TextDecoration` is a
+        // single-valued enum and cannot hold this, which is exactly why the
+        // renderer carries two independent bools rather than one.
+        #[test]
+        fn text_decoration_underline_line_through_draws_both() {
+            assert_eq!(decoration_of("underline line-through"), (true, true));
+            // Order is irrelevant in CSS.
+            assert_eq!(decoration_of("line-through underline"), (true, true));
+            // Extra whitespace must not create an empty keyword.
+            assert_eq!(decoration_of("  underline   line-through  "), (true, true));
+        }
+
+        #[test]
+        fn text_decoration_none_clears_both_flags() {
+            assert_eq!(decoration_of("none"), (false, false));
+        }
+
+        // `none` must win even when it appears alongside a keyword, and it
+        // must clear an INHERITED flag rather than merely leaving it alone.
+        #[test]
+        fn text_decoration_none_beats_a_sibling_keyword() {
+            assert_eq!(decoration_of("none line-through"), (false, false));
+            let base = TextStyle {
+                underline: true,
+                line_through: true,
+                ..plain_text_style()
+            };
+            let (s, _) = parse_text_style("text-decoration:none", base, "default", (800.0, 600.0));
+            assert!(
+                !s.underline && !s.line_through,
+                "text-decoration:none must clear the inherited flags, not just avoid setting them"
+            );
+        }
+
+        // The old `== "none"` test meant a value like `underline-none` (not legal
+        // CSS, but reachable from a hand-written style string) silently turned
+        // the underline OFF because it was not exactly `"none"`… and, more to
+        // the point, that `contains` made the two branches asymmetric. Pin the
+        // keyword comparison so neither can come back.
+        #[test]
+        fn text_decoration_matches_whole_keywords_not_substrings() {
+            // `xline-through` is not the keyword `line-through`; it must not
+            // enable the strike.
+            assert_eq!(
+                decoration_of("xline-through"),
+                (false, false),
+                "a keyword must be matched whole, not as a substring"
+            );
+        }
+
+        // The strike's height is derived from the FONT SIZE, not a constant,
+        // because the same constant lands visibly high at 14px and visibly low
+        // at 48px. Pin the ratio so the derivation cannot silently invert.
+        #[test]
+        fn line_through_tracks_the_font_size_rather_than_a_constant() {
+            let small = line_through_y(100.0, 14.0);
+            let large = line_through_y(100.0, 48.0);
+            assert!(
+                small < 100.0 && large < 100.0,
+                "the strike must sit ABOVE the baseline: it crosses the glyphs, \
+                 it does not underline them"
+            );
+            assert!(
+                100.0 - large > 100.0 - small,
+                "a larger font must push the strike further up ({small} vs {large})"
+            );
+            assert!(
+                (small - 100.0 + 14.0 * LINE_THROUGH_ASCENT_EM).abs() < 1e-4,
+                "the offset must be exactly {}em of the font size",
+                LINE_THROUGH_ASCENT_EM
+            );
+        }
+
+        // The strike and the underline are at DIFFERENT heights, on OPPOSITE
+        // sides of the baseline, and far enough apart to render as two rules
+        // rather than one blob. This is the regression that motivated the
+        // constant's sign: the strike was originally placed BELOW the baseline,
+        // within a pixel of the underline at `baseline + 1.0`.
+        #[test]
+        fn underline_and_line_through_are_far_enough_apart_to_be_two_rules() {
+            for size in [12.0_f32, 14.0, 16.0, 24.0, 48.0] {
+                let baseline = 100.0;
+                let under = baseline + 1.0;
+                let strike = line_through_y(baseline, size);
+                assert!(
+                    under - strike >= 2.0,
+                    "at {size}px the underline (row {under}) and the strike (row \
+                     {strike}) are less than 2px apart, so `underline \
+                     line-through` renders as one fat blob"
+                );
+            }
+        }
+
+        // ── A4: the input lane's own declaration reader.
+
+        fn padding_of(value: &str, font_size: f32) -> Option<Padding> {
+            parse_padding(value, font_size, (800.0, 600.0))
+        }
+
+        #[test]
+        fn parse_padding_reads_every_css_shorthand_form() {
+            let p = |v: &str| padding_of(v, 16.0).unwrap();
+            assert_eq!(
+                p("4px"),
+                Padding {
+                    top: 4.0,
+                    right: 4.0,
+                    bottom: 4.0,
+                    left: 4.0
+                }
+            );
+            assert_eq!(
+                p("1px 2px"),
+                Padding {
+                    top: 1.0,
+                    right: 2.0,
+                    bottom: 1.0,
+                    left: 2.0
+                }
+            );
+            assert_eq!(
+                p("1px 2px 3px"),
+                Padding {
+                    top: 1.0,
+                    right: 2.0,
+                    bottom: 3.0,
+                    left: 2.0
+                },
+                "the 3-value form is top / left-right / bottom"
+            );
+            assert_eq!(
+                p("1px 2px 3px 4px"),
+                Padding {
+                    top: 1.0,
+                    right: 2.0,
+                    bottom: 3.0,
+                    left: 4.0
+                },
+                "the 4-value form is top / right / bottom / left"
+            );
+        }
+
+        // `em` resolves against the element's OWN font size, like every other
+        // relative length in this file. The boilerplate's `padding: 10px 12px`
+        // is the px case; `padding: .5em` is what a themed stylesheet writes.
+        #[test]
+        fn parse_padding_resolves_em_against_the_elements_font_size() {
+            assert_eq!(
+                padding_of("2em", 16.0).unwrap(),
+                Padding {
+                    top: 32.0,
+                    right: 32.0,
+                    bottom: 32.0,
+                    left: 32.0
+                }
+            );
+            assert_eq!(
+                padding_of("2em", 8.0).unwrap(),
+                Padding {
+                    top: 16.0,
+                    right: 16.0,
+                    bottom: 16.0,
+                    left: 16.0
+                }
+            );
+        }
+
+        // `%` here resolves against the element's own font size, the same
+        // convention every other relative length in this file already uses.
+        // CSS resolves percentage padding against the containing block, which
+        // is information this parser does not have; pinning the convention
+        // here is what stops the two code paths from drifting apart
+        // unremarked.
+        #[test]
+        fn parse_padding_resolves_percent_against_the_font_size() {
+            assert_eq!(
+                padding_of("50%", 16.0).unwrap(),
+                Padding {
+                    top: 8.0,
+                    right: 8.0,
+                    bottom: 8.0,
+                    left: 8.0
+                }
+            );
+        }
+
+        // `rem` does NOT follow the rule the two tests above pin. `Length::to_px`'s
+        // second argument is the ROOT basis and is used for `rem` alone, so
+        // `rem` must not move when the element's font size moves — that is the
+        // entire distinction between `rem` and `em`, and it is why both parse
+        // entry points here pass `REM_ROOT_FONT_SIZE` there while
+        // `input_metrics::input_text_metrics` and `parse_text_style` already
+        // did. Holding the element's own size constant across both calls is the
+        // assertion: a `rem` that tracked the element's size would be an `em`,
+        // and the paint lane and the caret lane would disagree by exactly
+        // `font_size - 16`.
+        #[test]
+        fn parse_padding_resolves_rem_against_the_root_not_the_element() {
+            // font_size 32 with the root at the DOM default: `1rem` is 16 either
+            // way the root is fixed, so 32px is the number that proves the
+            // element's own size was NOT used.
+            assert_eq!(
+                padding_of("1rem", 32.0).unwrap(),
+                Padding {
+                    top: 16.0,
+                    right: 16.0,
+                    bottom: 16.0,
+                    left: 16.0
+                },
+                "`rem` resolved against the element's own font size"
+            );
+            // The same declaration at a different font size must resolve to the
+            // same px — that invariance IS the property `rem` has and `em` does
+            // not, so it is the assertion that cannot pass by coincidence.
+            assert_eq!(
+                padding_of("1rem", 16.0).unwrap(),
+                padding_of("1rem", 32.0).unwrap()
+            );
+            // And it stays pinned to the root for a shorthand that mixes units.
+            assert_eq!(
+                padding_of("1rem 2rem", 32.0).unwrap(),
+                Padding {
+                    top: 16.0,
+                    right: 32.0,
+                    bottom: 16.0,
+                    left: 32.0
+                }
+            );
+        }
+
+        // A negative component must clamp to 0 rather than being allowed to
+        // invert the content box; a non-finite one is rejected outright.
+        // `f32::parse` accepts both `-8px` and `1e999px`, and either would put
+        // the painted box somewhere unreachable.
+        #[test]
+        fn parse_padding_clamps_negative_lengths_and_rejects_infinite_ones() {
+            assert_eq!(
+                padding_of("-8px", 16.0).unwrap(),
+                Padding::ZERO,
+                "a negative padding must clamp to zero, not invert the content box"
+            );
+            assert!(
+                padding_of("1e999px", 16.0).is_none(),
+                "an overflowing length must be rejected, not become inf"
+            );
+        }
+
+        #[test]
+        fn parse_padding_rejects_garbage_and_the_four_value_overflow() {
+            assert!(
+                padding_of("wide", 16.0).is_none(),
+                "a non-length must not become padding"
+            );
+            assert!(
+                padding_of("1px 2px 3px 4px 5px", 16.0).is_none(),
+                "a five-value shorthand is not CSS and must not be guessed at"
+            );
+        }
+
+        // The border half of the same `rem` rule. A `rem` border width has no
+        // symmetric-cancellation escape hatch the way `rem` padding does: the
+        // border is painted after `canvas.restore()`, so it cannot cover text
+        // laid out under a too-wide border, and an over-wide `rem` border lands
+        // the value text ON the ink.
+        #[test]
+        fn parse_border_resolves_rem_against_the_root_not_the_element() {
+            let wide = border_of("1rem solid #ff0000", 32.0).unwrap();
+            assert_eq!(
+                wide.width, 16.0,
+                "a `rem` border width resolved against the element's own font size; the \
+                 caret lane insets the value text by the ROOT-resolved width \
+                 (`input_metrics`), so the two lanes disagree by `font_size - root`"
+            );
+            assert_eq!(
+                border_of("1rem solid #ff0000", 16.0).unwrap().width,
+                wide.width,
+                "a `rem` border width must not move when the element's font size moves"
+            );
+            assert_eq!(border_of("1rem solid #ff0000", 64.0).unwrap().width, 16.0);
+            // `em` in the same slot is unaffected and still tracks the element:
+            // this is the control that keeps the `rem` assertions above honest
+            // about which argument actually changed.
+            assert_eq!(border_of("1em solid #ff0000", 32.0).unwrap().width, 32.0);
+        }
+
+        // ── A5: placeholder ink is DERIVED, not a fixed grey literal.
+
+        type Props = velox_dom::Props;
+
+        fn ph(props: &Props, ink: sk::Color, bg: sk::Color) -> sk::Color {
+            placeholder_color(props, ink, bg)
+        }
+
+        #[test]
+        fn placeholder_colour_is_derived_from_the_fields_own_colour() {
+            let white = sk::Color::from_argb(255, 255, 255, 255);
+            let dark = sk::Color::from_argb(255, 22, 33, 62);
+            let on_dark = ph(&Props::new(), white, dark);
+            assert_ne!(
+                on_dark, white,
+                "the placeholder must not be the full-strength value ink"
+            );
+            assert_ne!(
+                on_dark, dark,
+                "the placeholder must not be the field background either"
+            );
+            // Still the value ink's HUE, just dimmed: every channel must be
+            // strictly between the background's and the text's.
+            for c in [on_dark.r(), on_dark.g(), on_dark.b()] {
+                let (lo, hi) = if white.r() > dark.r() {
+                    (dark.r(), white.r())
+                } else {
+                    (white.r(), dark.r())
+                };
+                assert!(
+                    c > lo && c < hi,
+                    "channel {c} is not between {lo} and {hi}: the mix did not hold the hue"
+                );
+            }
+        }
+
+        #[test]
+        fn placeholder_colour_is_derived_not_a_fixed_grey() {
+            let ink_a = sk::Color::from_argb(255, 255, 0, 0);
+            let ink_b = sk::Color::from_argb(255, 0, 0, 255);
+            let bg = sk::Color::from_argb(255, 255, 255, 255);
+            assert_ne!(
+                ph(&Props::new(), ink_a, bg),
+                ph(&Props::new(), ink_b, bg),
+                "two different text colours must not produce the same placeholder: \
+                 that would mean it is a fixed grey"
+            );
+        }
+
+        #[test]
+        fn placeholder_keeps_the_texts_alpha_and_dims_only_the_channels() {
+            let half = sk::Color::from_argb(128, 255, 255, 255);
+            let white = sk::Color::from_argb(255, 255, 255, 255);
+            assert_eq!(
+                ph(&Props::new(), half, white).a(),
+                128,
+                "the derivation must not silently make a translucent value text opaque"
+            );
+        }
+
+        // The cascade carries `input::placeholder { color: … }` on a SEPARATE
+        // attribute; this is the hook that makes the pseudo-element actually
+        // styleable rather than merely present.
+        #[test]
+        fn an_authored_placeholder_colour_wins_over_the_derived_one() {
+            let props = Props::new().set(PLACEHOLDER_STYLE_ATTR, "color:#ff0000");
+            let got = ph(
+                &props,
+                sk::Color::from_argb(255, 255, 255, 255),
+                sk::Color::from_argb(255, 255, 255, 255),
+            );
+            assert_eq!(
+                (got.r(), got.g(), got.b()),
+                (255, 0, 0),
+                "an explicit ::placeholder colour must override the derivation"
+            );
+        }
+
+        // A pseudo-element block that declares anything OTHER than `color`
+        // must not be mistaken for a colour declaration, or the whole thing
+        // silently degrades to "unsupported".
+        #[test]
+        fn an_authored_placeholder_block_without_colour_still_derives() {
+            let props = Props::new().set(PLACEHOLDER_STYLE_ATTR, "opacity:0.5;font-style:italic");
+            let got = ph(
+                &props,
+                sk::Color::from_argb(255, 255, 255, 255),
+                sk::Color::from_argb(255, 0, 0, 0),
+            );
+            // White on black, held back by PLACEHOLDER_CONTRAST — i.e. the
+            // derivation, not the full-strength value ink and not a fixed grey.
+            let want = (0.0 + (255.0 - 0.0) * PLACEHOLDER_CONTRAST).round() as u8;
+            assert_eq!(
+                (got.r(), got.g(), got.b()),
+                (want, want, want),
+                "a block with no colour declaration must fall through to the derivation"
+            );
+            assert_ne!(got.r(), 255, "…and the derivation must have dimmed it");
         }
 
         // `dashed`/`dotted` get a real Skia dash; the rest paint a plain

@@ -478,7 +478,19 @@ pub fn render_with_state<F>(state: std::sync::Arc<script_rs::State>, mut resolve
 
     // make_on_event: dispatch every template handler (plus, for the root, every
     // handler anywhere in the component tree) to the owning State method.
-    let handlers = collect_handlers(&nodes);
+    //
+    // A function-typed prop contributes a handler here too. The child calls
+    // through a closure rather than through `emit`, but the method the closure
+    // re-enters is still this component's, so the arm has to exist — and the
+    // arity it dispatches with is read off the method declaration here rather
+    // than assumed at the call site, which is what lets one binding serve both
+    // a zero-argument handler and a payload handler.
+    let mut handlers = collect_handlers(&nodes);
+    for handler in collect_function_prop_handlers(&nodes, &props) {
+        if !handlers.contains(&handler) {
+            handlers.push(handler);
+        }
+    }
     out.push_str("\n\n");
     out.push_str(&generate_make_on_event(&handlers, &tree_handlers, &methods));
 
@@ -1518,11 +1530,55 @@ pub fn render_with_props(props: PropsArg) -> velox_dom::VNode {
     .to_string()
 }
 
+/// The KEY a child looks up for the slot outlet its attrs describe — the
+/// `name` attribute of a `<slot>`, folded the way the parent folded the name it
+/// stored.
+///
+/// # Why the fold is not optional
+///
+/// A slot name is written twice, on opposite sides of a component boundary, and
+/// the two spellings have to meet. The parent half is a directive, so the parser
+/// folds it: `v-slot:footerBar` arrives as `slot:footer-bar` and `#footerBar` as
+/// the same string, and `slots_map_expr` uses that as the map key. The child half
+/// is a plain static attribute, so nothing folded it — the lookup used the raw
+/// `footerBar`, the map held `footer-bar`, and `render_slot` found nothing.
+///
+/// The symptom is the worst kind: the outlet rendered its FALLBACK, so the page
+/// looked like a component that had chosen to ignore its caller, with no
+/// diagnostic anywhere. Folding the child's name through the same function the
+/// parent's went through is what makes `v-slot:footerBar` and `name="footerBar"`
+/// the same slot, and `name="footer-bar"` the same slot too — so a project that
+/// kebab-cases on one side and camel-cases on the other still works.
+///
+/// # An unmatched name is not an error
+///
+/// The fallback is the feature: a `<slot name="footer">` on a component that is
+/// sometimes used without a footer is supposed to render its own children. There
+/// is no way to tell "no caller passed this" from "the caller passed a different
+/// name" at this level — the map is built by the CALLER, in a different file, and
+/// an empty result is equally correct for both — so this stays a lookup with a
+/// fallback. A mismatch is a naming mistake, not a broken component.
+fn normalize_slot_name(name: &str) -> String {
+    crate::template_parse::normalize_directive_name(name.trim())
+}
+
+/// The `name` a `<slot>` element looks itself up under, from its static `name`
+/// attribute; `"default"` when it names none.
+fn slot_outlet_name(attrs: &[TemplateAttr]) -> String {
+    attrs
+        .iter()
+        .find(|a| a.name == "name" && matches!(a.kind, AttrKind::Static))
+        .and_then(|a| a.value.clone())
+        .map(|raw| normalize_slot_name(&raw))
+        .unwrap_or_else(|| "default".to_string())
+}
+
 /// Emit code for a `<slot>` element.
 ///
 /// `<slot>` elements appear inside component templates and act as outlets for
 /// slot content passed from the parent component. The slot's name is determined
-/// by the `name` attribute (defaulting to "default").
+/// by the `name` attribute (defaulting to "default"), folded by
+/// [`slot_outlet_name`] so it meets the key the parent stored.
 ///
 /// Slot content is passed from the parent as a `HashMap<&str, VNode>` under
 /// the key "slot:{name}". At render time, `render_slot` looks up the slot name
@@ -1536,17 +1592,20 @@ fn emit_slot_node(
     props: PropsChannel<'_>,
     scope_id: Option<&str>,
 ) -> String {
-    let slot_name = attrs
-        .iter()
-        .find(|a| a.name == "name" && matches!(a.kind, AttrKind::Static))
-        .and_then(|a| a.value.clone())
-        .unwrap_or_else(|| "default".to_string());
+    let slot_name = slot_outlet_name(attrs);
 
-    // Emit fallback content (the slot's children).
+    // The fallback is the slot's own children, and `emit_children_with_mode`
+    // returns a BLOCK that evaluates to a `Vec<VNode>`. `render_slot` takes
+    // `FnOnce() -> VNode`, so the children are handed to `h("slot", …)` exactly
+    // as `slots_map_expr` hands a multi-node entry to it — the fallback has to
+    // be ONE node, and the wrapper is what makes several children into one. The
+    // earlier `|| { { …__children } }` passed the `Vec` straight through and did
+    // not compile (E0308, expected `VNode`, found `Vec<VNode>`) for every slot
+    // that had fallback content at all.
     let fallback = emit_children_with_mode(children, mode, fields, props, scope_id);
 
     format!(
-        r#"render_slot({slot_name_lit}, || {{ {fallback} }})"#,
+        r#"render_slot({slot_name_lit}, || velox_dom::h("slot", velox_dom::Props::new(), {fallback}))"#,
         slot_name_lit = string_lit(&slot_name),
         fallback = fallback,
     )
@@ -2030,12 +2089,11 @@ fn emit_node_with_mode(
                 let mut clean_attrs = attrs.clone();
                 clean_attrs.retain(|a| a.name != "data-velox-component");
 
-                // Separate slot children from props/events.
-                // Children that are plain Element/Text/Interpolation nodes are
-                // slot content (default slot). Children with v-slot:foo directive
-                // or with a parent that has #foo / #default shorthand go into
-                // named slots — for MVP we treat all non-prop children as the
-                // default slot.
+                // Separate slot children from props/events. Every child is slot
+                // content; the slot it belongs to is the one it names
+                // (`v-slot:footer`, `#footer`), or the default slot when it names
+                // none. `slots_map_expr` does the grouping — see its doc comment
+                // for why the content it emits carries this caller's scope id.
                 let has_slot_children = !children.is_empty();
 
                 // Persistent child state: when the parent State declares a field
@@ -2061,31 +2119,29 @@ fn emit_node_with_mode(
                     generate_component_props_expr(&clean_attrs, comp_name, &props);
                 let callbacks = collect_component_callbacks(&clean_attrs);
 
+                // Make every handler this tag binds callable by the child, before
+                // any of the render entry points below. State mode only — see
+                // `emit_dispatch_registrations`.
+                let dispatch = if mode == TransformMode::State {
+                    emit_dispatch_registrations(
+                        comp_name,
+                        &component_dispatch_handlers(&clean_attrs, comp_name, &props),
+                    )
+                } else {
+                    String::new()
+                };
+
                 if callbacks.is_empty() && !has_slot_children {
                     return format!(
-                        r#"{{ let __props = {props_expr}; {comp_name}::render_with_props(__props) }}"#,
+                        r#"{{ {dispatch}let __props = {props_expr}; {comp_name}::render_with_props(__props) }}"#,
                     );
                 }
 
-                // Build slots map from default slot children.
-                // Named slots (#foo="slotProps" or v-slot:foo) are a future
-                // extension; for now all children become the "default" slot.
+                // One map entry per slot the children name; see `slots_map_expr`.
                 let slots_expr = if has_slot_children {
-                    let slot_vnodes: Vec<String> = children
-                        .iter()
-                        .map(|c| emit_node_with_mode(c, mode, fields, props, scope_id))
-                        .collect();
-                    format!(
-                        r#"std::collections::HashMap::from([("default", {})])"#,
-                        if slot_vnodes.len() == 1 {
-                            slot_vnodes[0].clone()
-                        } else {
-                            format!(
-                                "velox_dom::h(\"slot\", velox_dom::Props::new(), vec![{}])",
-                                slot_vnodes.join(", ")
-                            )
-                        }
-                    )
+                    slots_map_expr(children, &|c| {
+                        emit_node_with_mode(c, mode, fields, props, scope_id)
+                    })
                 } else {
                     "std::collections::HashMap::new()".to_string()
                 };
@@ -2099,7 +2155,7 @@ fn emit_node_with_mode(
                         .collect();
 
                     return format!(
-                        r#"{{ let __props = {props_expr}; let __callbacks = {callback_map}; {comp_name}::render_with_callbacks(__props, &__callbacks, &[{callback_names}]) }}"#,
+                        r#"{{ {dispatch}let __props = {props_expr}; let __callbacks = {callback_map}; {comp_name}::render_with_callbacks(__props, &__callbacks, &[{callback_names}]) }}"#,
                         callback_names = callback_names
                             .iter()
                             .map(|n| format!("\"{}\"", n))
@@ -2116,7 +2172,7 @@ fn emit_node_with_mode(
                     .collect();
 
                 return format!(
-                    r#"{{ let __props = {props_expr}; let __callbacks = {callback_map}; let __slots = {slots_expr}; {comp_name}::render_with_slots(__props, &__callbacks, &[{callback_names}], &__slots) }}"#,
+                    r#"{{ {dispatch}let __props = {props_expr}; let __callbacks = {callback_map}; let __slots = {slots_expr}; {comp_name}::render_with_slots(__props, &__callbacks, &[{callback_names}], &__slots) }}"#,
                     callback_names = callback_names
                         .iter()
                         .map(|n| format!("\"{}\"", n))
@@ -2230,6 +2286,7 @@ fn emit_node_with_mode(
                             &tmp_elem,
                             Some(&for_info.item_name),
                             Some(&for_info.index_name),
+                            mode,
                             props,
                             scope_id,
                         )
@@ -2371,18 +2428,64 @@ fn component_props_arg(
     for a in clean_attrs {
         if let AttrKind::Bind = a.kind {
             let expr = a.value.clone().unwrap_or_else(|| a.name.clone());
-            let value = bind_attr_value(&a.name, &expr, item_name, idx_name);
             let declared = props.child_field(comp_name, &a.name);
             let value = match declared {
-                Some(f) => props_field_value(f, &value),
+                // A function-typed prop is handed over, not converted. Every
+                // other type below is reached through the resolver and arrives
+                // as a `String`, and `format!("{}", closure)` is a type error at
+                // best — so the string path is never taken for one.
+                Some(f) if is_function_prop_type(&f.ty) && !is_handler_name(&expr) => {
+                    format!(
+                        "{name}: compile_error!(\"velox: <{comp_name}> prop `{name}` is a function, and this parent bound it to `{expr}`; a function prop takes the NAME of a method on this component's State, because the handler is invoked through this component's own event dispatcher — bind it as :{name}=\\\"on_confirm\\\"\")",
+                        name = a.name
+                    )
+                }
+                // A callback the builder cannot construct. `function_prop_value`
+                // emits one closure and one signature — `Fn(&str)`, no return
+                // value — so a child declaring `Option<Box<dyn Fn(String) ->
+                // bool>>` cannot be handed anything at all. Without this arm it
+                // went down the conversion path below and came out as a quoted
+                // string, which failed as a type error inside a props literal
+                // the author never wrote. Refusing here names the prop, the type
+                // they declared, and the signature that works.
+                Some(f)
+                    if is_function_prop_type(&f.ty) && !is_buildable_function_prop_type(&f.ty) =>
+                {
+                    let name = a.name.clone();
+                    let ty = f.ty.clone();
+                    format!(
+                        "{name}: compile_error!(\"velox: <{comp_name}> declares prop `{name}` as `{ty}`, and this parent bound a method name to it. The generated handler is a `Fn(&str)` that returns nothing and dispatches by name, so this generator cannot produce that signature. Declare the prop `Option<Box<dyn Fn(&str)>>` (or `Box<dyn Fn(&str)>`) and have the child call it as `f(payload)`\")"
+                    )
+                }
+                Some(f) if is_function_prop_type(&f.ty) => {
+                    // The name is prefixed HERE, as every other arm does, rather
+                    // than inside `function_prop_value` — the value builder is
+                    // about the closure's shape, not about struct-literal
+                    // punctuation, and an unprefixed value in this list is a
+                    // literal with a field name missing (E0063), which is what
+                    // the other arms guard against by construction.
+                    format!(
+                        "{}: {}",
+                        a.name,
+                        function_prop_value(comp_name, f, expr.trim())
+                    )
+                }
+                Some(f) => {
+                    let value = bind_attr_value(&a.name, &expr, item_name, idx_name);
+                    format!("{}: {}", a.name, props_field_value(f, &value))
+                }
                 // The child is not visible from here, so there is no declared
                 // type to convert to. A `String` is what every resolver lookup
                 // produces, and a child that wanted anything else will not
                 // compile — which is the honest outcome, not a missing prop.
-                None => value,
+                None => format!(
+                    "{}: {}",
+                    a.name,
+                    bind_attr_value(&a.name, &expr, item_name, idx_name)
+                ),
             };
             bound.push(a.name.clone());
-            fields.push(format!("{}: {}", a.name, value));
+            fields.push(value);
         }
     }
     // A field the child declares but the parent never bound is a hole in a
@@ -2400,13 +2503,25 @@ fn component_props_arg(
     // The `compile_error!` is the field's VALUE rather than a bare omission so
     // the literal stays exhaustive: rustc then reports exactly these errors,
     // one per prop, and no E0063 cascade on top.
+    //
+    // An `Option` prop is the one declaration that says what the omission
+    // MEANS, so there is nothing to guess: `None` is the value the author asked
+    // for by declaring it optional, and filling it is reading the type rather
+    // than inventing a default. That is what makes a callback a prop at all —
+    // `<Modal :on_cancel="close">` and `<Modal>` are both legal parents, and
+    // without this the second could not compile.
     for declared in props.child_fields(comp_name) {
-        if !bound.contains(&declared.name) {
-            fields.push(format!(
-                "{}: compile_error!(\"velox: <{comp_name}> declares prop `{}` and this parent did not bind it; bind it on <{comp_name}> or drop the prop from its Props struct\")",
-                declared.name, declared.name
-            ));
+        if bound.contains(&declared.name) {
+            continue;
         }
+        if is_optional_type(&declared.ty) {
+            fields.push(format!("{}: None", declared.name));
+            continue;
+        }
+        fields.push(format!(
+            "{}: compile_error!(\"velox: <{comp_name}> declares prop `{}` and this parent did not bind it; bind it on <{comp_name}> or drop the prop from its Props struct\")",
+            declared.name, declared.name
+        ));
     }
     (
         true,
@@ -2843,6 +2958,7 @@ fn emit_children_with_mode(
                                 &tmp_elem,
                                 Some(&for_info.item_name),
                                 Some(&for_info.index_name),
+                                mode,
                                 props,
                                 scope_id,
                             )
@@ -2929,6 +3045,7 @@ fn emit_node_with_ctx_state(
     n: &Node,
     item_name: Option<&str>,
     idx_name: Option<&str>,
+    mode: TransformMode,
     props: PropsChannel<'_>,
     scope_id: Option<&str>,
 ) -> String {
@@ -2978,16 +3095,16 @@ fn emit_node_with_ctx_state(
             let attrs = &attrs2;
             // Handle <slot> inside v-for context
             if tag == "slot" {
-                let slot_name = attrs
-                    .iter()
-                    .find(|a| a.name == "name" && matches!(a.kind, AttrKind::Static))
-                    .and_then(|a| a.value.clone())
-                    .unwrap_or_else(|| "default".to_string());
+                // Folded the same way as the parent's key — see
+                // `normalize_slot_name`.
+                let slot_name = slot_outlet_name(attrs);
 
                 // Fallback children rendered with ctx state
                 let fallback_children: Vec<String> = children
                     .iter()
-                    .map(|c| emit_node_with_ctx_state(c, item_name, idx_name, props, scope_id))
+                    .map(|c| {
+                        emit_node_with_ctx_state(c, item_name, idx_name, mode, props, scope_id)
+                    })
                     .collect();
                 let fallback = format!("vec![{}]", fallback_children.join(", "));
 
@@ -3026,6 +3143,7 @@ fn emit_node_with_ctx_state(
                     },
                     item_name,
                     idx_name,
+                    mode,
                     props,
                     scope_id,
                 );
@@ -3071,7 +3189,8 @@ fn emit_node_with_ctx_state(
                     children: children.clone(),
                     self_closing: false,
                 };
-                let inner = emit_node_with_ctx_state(&tmp, item_name, idx_name, props, scope_id);
+                let inner =
+                    emit_node_with_ctx_state(&tmp, item_name, idx_name, mode, props, scope_id);
                 return format!(
                     r#"if {} {{ {} }} else {{ text("") }}"#,
                     expr_if.trim(),
@@ -3100,23 +3219,33 @@ fn emit_node_with_ctx_state(
                 );
                 let callbacks = collect_component_callbacks(&clean_attrs);
 
-                // Build slots map from default slot children.
-                let slots_expr = if has_slot_children {
-                    let slot_vnodes: Vec<String> = children
-                        .iter()
-                        .map(|c| emit_node_with_ctx_state(c, item_name, idx_name, props, scope_id))
-                        .collect();
-                    format!(
-                        r#"std::collections::HashMap::from([(\"default\", {})])"#,
-                        if slot_vnodes.len() == 1 {
-                            slot_vnodes[0].clone()
-                        } else {
-                            format!(
-                                "velox_dom::h(\"slot\", velox_dom::Props::new(), vec![{}])",
-                                slot_vnodes.join(", ")
-                            )
-                        }
+                // A component in a loop body is reached from the same render
+                // path as one outside it, so the handlers it binds are
+                // registered the same way — with the loop's own `item` still in
+                // scope for the dispatcher to close over.
+                //
+                // State mode only, exactly as outside the loop: the registration
+                // closes over `state` (`emit_dispatch_registrations` emits
+                // `Arc::downgrade(&state)`), and only the State path binds
+                // `state` as the `Arc<State>` that call needs. This function is
+                // reached from Props mode too — a `v-for` over a declared `Vec`
+                // field lands here — and there `state` is either absent
+                // (E0425) or a plain `script_rs::State` (E0308). Resolve mode
+                // has no `State` to dispatch through at all.
+                let dispatch = if mode == TransformMode::State {
+                    emit_dispatch_registrations(
+                        comp_name,
+                        &component_dispatch_handlers(&clean_attrs, comp_name, &props),
                     )
+                } else {
+                    String::new()
+                };
+
+                // One map entry per slot the children name; see `slots_map_expr`.
+                let slots_expr = if has_slot_children {
+                    slots_map_expr(children, &|c| {
+                        emit_node_with_ctx_state(c, item_name, idx_name, mode, props, scope_id)
+                    })
                 } else {
                     "std::collections::HashMap::new()".to_string()
                 };
@@ -3124,11 +3253,11 @@ fn emit_node_with_ctx_state(
                 if callbacks.is_empty() {
                     if !has_slot_children {
                         return format!(
-                            r#"{{ let __props = {props_expr}; {comp_name}::render_with_props(__props) }}"#,
+                            r#"{{ {dispatch}let __props = {props_expr}; {comp_name}::render_with_props(__props) }}"#,
                         );
                     }
                     return format!(
-                        r#"{{ let __props = {props_expr}; let __slots = {slots_expr}; {comp_name}::render_with_slots(__props, &__slots) }}"#,
+                        r#"{{ {dispatch}let __props = {props_expr}; let __slots = {slots_expr}; {comp_name}::render_with_slots_only(__props, &__slots) }}"#,
                     );
                 }
 
@@ -3141,7 +3270,7 @@ fn emit_node_with_ctx_state(
                         .collect();
 
                     return format!(
-                        r#"{{ let __props = {props_expr}; let __callbacks = {callback_map}; {comp_name}::render_with_callbacks(__props, &__callbacks, &[{callback_names}]) }}"#,
+                        r#"{{ {dispatch}let __props = {props_expr}; let __callbacks = {callback_map}; {comp_name}::render_with_callbacks(__props, &__callbacks, &[{callback_names}]) }}"#,
                         callback_names = callback_names
                             .iter()
                             .map(|n| format!("\"{}\"", n))
@@ -3158,7 +3287,7 @@ fn emit_node_with_ctx_state(
                     .collect();
 
                 return format!(
-                    r#"{{ let __props = {props_expr}; let __callbacks = {callback_map}; let __slots = {slots_expr}; {comp_name}::render_with_slots(__props, &__callbacks, &[{callback_names}], &__slots) }}"#,
+                    r#"{{ {dispatch}let __props = {props_expr}; let __callbacks = {callback_map}; let __slots = {slots_expr}; {comp_name}::render_with_slots(__props, &__callbacks, &[{callback_names}], &__slots) }}"#,
                     callback_names = callback_names
                         .iter()
                         .map(|n| format!("\"{}\"", n))
@@ -3172,7 +3301,7 @@ fn emit_node_with_ctx_state(
             let mut k_items: Vec<String> = Vec::new();
             for c in children {
                 k_items.push(emit_node_with_ctx_state(
-                    c, item_name, idx_name, props, scope_id,
+                    c, item_name, idx_name, mode, props, scope_id,
                 ));
             }
             let kids = format!("vec![{}]", k_items.join(", "));
@@ -3325,6 +3454,545 @@ fn format_callback_map(callbacks: &[(String, String)]) -> String {
         .iter()
         .map(|(event, handler)| format!("({}, {})", string_lit(event), string_lit(handler)))
         .collect();
+    format!("std::collections::HashMap::from([{}])", entries.join(", "))
+}
+
+/// --- Function-typed props -------------------------------------------------
+///
+/// A prop whose declared type is a closure is the one binding that cannot go
+/// through the resolver. Every other prop arrives at the boundary as a
+/// `String` — that is the shape `resolve()` returns and the shape the literal
+/// converts from — and a closure has no string that can be called back. So a
+/// function prop is passed THROUGH: the parent's own dispatcher goes into the
+/// props literal as a closure, and the child calls it.
+///
+/// Passing it through the same registry `@event` uses is what keeps the two
+/// syntaxes to one mechanism. The parent's `make_on_event` already owns an arm
+/// per handler with the arity the method declared, so the closure re-enters the
+/// dispatcher by NAME rather than calling the method itself: the child states
+/// which handler it wants, and the parent — the only side that knows what
+/// `on_confirm` means — decides what running it looks like. A zero-argument
+/// handler and a payload handler therefore both work through the same emitted
+/// closure, and the child never carries a `State` reference around to make the
+/// call itself.
+///
+/// The contract, in the terms a component author writes against:
+///
+/// - Declare `on_confirm: Option<Box<dyn Fn(&str)>>` in the child's `Props`.
+/// - The parent binds `:on_confirm="on_confirm"`, where `on_confirm` is the
+///   name of a zero- or one-argument method on the PARENT's `State`.
+/// - The child calls it as `props.on_confirm.as_ref().map(|f| f("payload"))`,
+///   or through the generated `script_rs::emit`-equivalent path.
+/// - `Option` is what makes the binding optional: a parent that leaves an
+///   optional function prop unbound compiles, and a parent that leaves a
+///   required one unbound gets the same `compile_error!` that names it as every
+///   other unbound prop does.
+///
+/// The containers a `Props` struct conventionally puts around a callback, and
+/// the constructor that rebuilds each one.
+///
+/// ONE list, read by the two functions that must not disagree: the predicate
+/// that recognises a function prop ([`fn_prop_core`]) and the builder that wraps
+/// the emitted closure ([`wrap_by_declared_type`]). A wrapper one of them
+/// recognises and the other does not is a prop that is correctly identified and
+/// then filled with a value of the wrong shape — a type error inside generated
+/// code, which is the failure mode this module is written to avoid.
+///
+/// The fully-qualified spellings come before the bare ones because the peel is a
+/// prefix strip rather than a token match: `std::rc::Rc<` has to be tried
+/// before `Rc<`, or the bare marker would match and leave `::` behind.
+const PROP_TYPE_WRAPPERS: [(&str, &str); 9] = [
+    ("std::option::Option<", "Some"),
+    ("Option<", "Some"),
+    ("Box<", "Box::new"),
+    ("std::rc::Rc<", "std::rc::Rc::new"),
+    ("std::sync::Arc<", "std::sync::Arc::new"),
+    ("std::cell::RefCell<", "std::cell::RefCell::new"),
+    ("Rc<", "std::rc::Rc::new"),
+    ("Arc<", "std::sync::Arc::new"),
+    ("RefCell<", "std::cell::RefCell::new"),
+];
+
+/// The closure type a declared `Props` type wraps down to, with the containers
+/// peeled off and a `dyn ` dropped — `Option<Box<dyn Fn(&str)>>` gives
+/// `Fn(&str)`, the bare `dyn Fn(&str)` gives `Fn(&str)`.
+fn fn_prop_core(ty: &str) -> Option<&str> {
+    let mut inner = ty.trim();
+    let mut peeled = false;
+    loop {
+        // The LONGEST matching marker wins, so `std::rc::Rc<` beats `Rc<`.
+        let Some(marker) = PROP_TYPE_WRAPPERS
+            .iter()
+            .filter(|(marker, _)| inner.starts_with(marker))
+            .map(|(marker, _)| *marker)
+            .max_by_key(|marker| marker.len())
+        else {
+            break;
+        };
+        inner = inner[marker.len()..].trim_end_matches('>').trim();
+        peeled = true;
+    }
+    if !peeled {
+        return None;
+    }
+    Some(inner.strip_prefix("dyn ").unwrap_or(inner).trim())
+}
+
+/// Is `ty` a callback the parent has to hand OVER rather than convert?
+///
+/// This is a RECOGNITION question and is deliberately broad: a `Props` field
+/// whose type names a closure is a callback, whatever the argument list says, and
+/// recognising it is what routes it away from the `String`-conversion path at
+/// all. How much of that the builder can actually produce is a separate question,
+/// asked by [`is_buildable_function_prop_type`].
+fn is_function_prop_type(ty: &str) -> bool {
+    // Deliberately a prefix test rather than a parse: the generator has no type
+    // information for the argument list, and a `Props` field whose type starts
+    // with `Fn` is a callback far more often than anything else.
+    fn_prop_core(ty).is_some_and(|core| core.starts_with("Fn"))
+}
+
+/// Can `function_prop_value` build a value for a prop declared `ty`?
+///
+/// It emits exactly one closure —
+/// `move |__vx_payload: &str| { Comp::dispatch_emit(name, __vx_payload); }` — so
+/// exactly one signature is buildable: one borrowed payload in, nothing out.
+/// `FnMut` and `FnOnce` are accepted alongside `Fn` because a closure that
+/// implements `Fn` satisfies all three, which is what makes
+/// `RefCell<Box<dyn FnMut(&str)>>` a shape the wrappers can reach.
+///
+/// This exists so the generator can REFUSE what it cannot build.
+/// `Option<Box<dyn Fn(String) -> bool>>` passes [`is_function_prop_type`], and
+/// without this question the author got a type error deep inside a props literal
+/// they never wrote, pointing into `OUT_DIR`. With it they get a
+/// `compile_error!` naming the prop, the type they declared, and the signature
+/// that works — the same deliberate refusal the call-binding case in
+/// `generate_component_props_expr` already emits.
+fn is_buildable_function_prop_type(ty: &str) -> bool {
+    fn_prop_core(ty).is_some_and(|core| matches!(core, "Fn(&str)" | "FnMut(&str)" | "FnOnce(&str)"))
+}
+
+/// Is `ty` an `Option<…>`, i.e. a field a parent may legitimately leave unbound?
+///
+/// Both spellings count. `std::option::Option<String>` is what an author gets
+/// from writing the path out in full, and it names the same type as `Option<`;
+/// treating it as a REQUIRED prop would emit the `compile_error!` for a field
+/// the author explicitly declared optional.
+fn is_optional_type(ty: &str) -> bool {
+    let ty = ty.trim();
+    PROP_TYPE_WRAPPERS
+        .iter()
+        .filter(|(marker, _)| marker.ends_with("Option<"))
+        .any(|(marker, _)| ty.starts_with(marker))
+}
+
+/// Is `expr` a name the parent can HAND OVER — one identifier, and nothing else?
+///
+/// A function prop is a different question from the one `is_bare_identifier`
+/// asks, and it is asked of different syntax. That one answers whether a
+/// resolver KEY can be rendered as text, and the guard in
+/// `tests/answerability_decides_in_one_place.rs` holds it to a single predicate
+/// on purpose. This one answers whether the generator can BUILD A CLOSURE that
+/// re-enters the parent's dispatcher by this name: it has to name the handler,
+/// and a call or a member path is an expression it would have to re-evaluate
+/// inside the closure, whose own captures would not survive the move. Filing
+/// that under `is_bare_identifier` would put a props-path decision inside a
+/// decision named for answerability, and the guard's whole point is that
+/// nothing else gets to do that.
+///
+/// The two agree on every expression the generator can see today — the
+/// difference is only which question the answer is filed under.
+fn is_handler_name(expr: &str) -> bool {
+    let expr = expr.trim();
+    !expr.is_empty()
+        && !expr.starts_with(|c: char| c.is_ascii_digit())
+        && expr.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+/// The function-typed prop bindings on one component tag, as
+/// `(prop field name, handler name)` pairs.
+///
+/// The binding is a bare name, the restriction [`is_handler_name`] states: the
+/// closure the parent hands over is built from the parent's own `State`, so the
+/// generator has to name the handler to dispatch it. A bind that is a function
+/// prop and not a bare name is reported at the call site by a `compile_error!`
+/// naming the constraint, rather than failing as a type error inside a
+/// stringified prop.
+fn collect_function_prop_bindings(
+    attrs: &[TemplateAttr],
+    comp_name: &str,
+    props: &PropsChannel<'_>,
+) -> Vec<(String, String)> {
+    let mut out: Vec<(String, String)> = Vec::new();
+    for a in attrs {
+        if a.kind != AttrKind::Bind {
+            continue;
+        }
+        let Some(field) = props.child_field(comp_name, &a.name) else {
+            continue;
+        };
+        if !is_function_prop_type(&field.ty) {
+            continue;
+        }
+        let expr = a.value.clone().unwrap_or_else(|| a.name.clone());
+        if is_handler_name(&expr) {
+            out.push((a.name.clone(), expr.trim().to_string()));
+        }
+    }
+    out
+}
+
+/// The Rust value a function-typed prop binding takes in the parent's props
+/// literal: a closure that hands the payload to the child's handler registry,
+/// by handler name.
+///
+/// The closure calls `{comp_name}::dispatch_emit(name, payload)` — the child's
+/// OWN static entry point — rather than a dispatcher local to this render. Two
+/// consequences, both wanted:
+///
+/// * It needs no `State` in scope, so a function prop is expressible on every
+///   render path, including `resolve`, which has none.
+/// * The `State` the handler finally runs against is the one the STATE render
+///   registered (see `emit_dispatch_registrations`), not a throwaway built for
+///   the render that happened to build this literal. Dispatching through a local
+///   dispatcher would have handed the child a handler over a `State` that no
+///   longer exists by the time the child fires.
+///
+/// So the value is the closure and the wrapper the child's DECLARED type asks
+/// for — read off the type, never assumed, because the parent is filling in
+/// somebody else's struct field: `Option<Box<dyn Fn(&str)>>` is the shape a
+/// Confirm should declare, and it is a `Box` around a `Fn`, NOT the
+/// `Rc<RefCell<…>>` the registry itself stores. Those are two different
+/// contracts and conflating them produces a literal that does not coerce.
+fn function_prop_value(comp_name: &str, field: &PropField, handler: &str) -> String {
+    let body = format!(
+        "move |__vx_payload: &str| {{ {comp_name}::dispatch_emit({}, __vx_payload); }}",
+        string_lit(handler)
+    );
+    wrap_by_declared_type(field.ty.trim(), body)
+}
+
+/// Apply exactly the wrappers the declared type names, outermost first.
+///
+/// Each wrapper is peeled off the front of the type and its constructor pushed
+/// onto a list, which is then applied in reverse — so `Option<Box<dyn Fn(&str)>>`
+/// peels as `Option` then `Box` and rebuilds as `Some(Box::new(closure))`. An
+/// unknown wrapper (a named type alias, a `Signal`, a tuple) peels nothing and
+/// leaves the bare closure, which is the right answer for `dyn Fn(&str)`, and a
+/// type error the author can see for anything else.
+fn wrap_by_declared_type(ty: &str, body: String) -> String {
+    let mut ctors: Vec<&str> = Vec::new();
+    let mut rest = ty.trim();
+    loop {
+        // The LONGEST matching marker wins, so `std::rc::Rc<` is peeled as
+        // itself rather than as the `Rc<` that its tail also starts with.
+        let Some((marker, ctor)) = PROP_TYPE_WRAPPERS
+            .iter()
+            .filter(|(marker, _)| rest.starts_with(marker))
+            .max_by_key(|(marker, _)| marker.len())
+        else {
+            break;
+        };
+        ctors.push(ctor);
+        rest = &rest[marker.len()..];
+    }
+    ctors
+        .into_iter()
+        .rev()
+        .fold(body, |inner, ctor| format!("{ctor}({inner})"))
+}
+
+/// The statements a parent emits immediately before it renders a child, so
+/// every handler the parent bound on that tag is callable by the child.
+///
+/// One dispatcher per handler, not one per child: the dispatcher borrows its
+/// `State`, so each closure needs its own instance to `move`, and the
+/// alternative — a shared `&mut` behind an `Rc` — would mean the child can only
+/// ever hold one handler.
+///
+/// `handlers` are the handler NAMES the parent bound on this tag, and the name is
+/// both halves of what gets emitted: it is the registry key the child's `emit`
+/// resolves to, and it is what the parent's own `make_on_event` is asked for.
+/// That is the same name twice because `make_on_event` matches on handler names
+/// — it is the dispatcher every `@click="fire"` in this component's template goes
+/// through, so its arms are keyed by method name and nothing else. Asking it for
+/// the EVENT instead (`@confirm="on_confirm"` -> `"confirm"`) reaches no arm at
+/// all: the closure runs, the `match` falls through to its wildcard, and the
+/// payload is dropped with nothing to show for it.
+///
+/// # The registry holds a WEAK state, and that is load-bearing
+///
+/// The child fires long after this render returned — from its own event handler,
+/// from a click — so the registry cannot borrow the `State` and has to own
+/// something. Owning an `Arc` clone means the LAST reference to a component's
+/// `State` lives in a `thread_local!`, so the `State` is not destroyed when the
+/// app drops it but when the THREAD exits, inside that thread-local's own
+/// destructor. A component `State` holds `Signal`s, and a live `Signal` holds an
+/// `EffectHandle` whose `Drop` calls `mark_stopped`, which reads a `thread_local!`
+/// in `velox-core` — by then already destroyed. `thread_local!` destructors run in
+/// reverse construction order across crates, so the ordering is not ours to
+/// control, and `mark_stopped`'s `LocalKey::with` panics with `AccessError`. A
+/// panic in a destructor aborts the process, so this shows up as the whole test
+/// binary dying at exit rather than as a failed assertion.
+///
+/// A `Weak` inverts the ownership: the registry no longer extends the `State`'s
+/// life, so the `State` is destroyed when the app drops it — while every
+/// thread-local is still alive, which is the only ordering in which a `Signal`'s
+/// `Drop` is allowed to touch one. The cost is that a handler fired after the app
+/// dropped the `State` is a no-op rather than a resurrection of freed state,
+/// which is the correct way round: a component whose state is gone has no method
+/// left to run.
+///
+/// So the dispatcher is built per CALL, from an upgraded `Weak`, rather than once
+/// per render: `make_on_event` takes an `Arc` by value, and there is no `Arc` to
+/// give it at registration time. That is one `Arc` upgrade and one small closure
+/// per dispatched event, against a re-render per keystroke.
+///
+/// Only the State render path emits this. The `resolve` path has no `State` to
+/// dispatch through at all, and the props path has only just built a `State`
+/// that belongs to this render and dies with it — registering into it would
+/// hand the child a handler whose `State` is stale by the time it fires.
+fn emit_dispatch_registrations(comp_name: &str, handlers: &[String]) -> String {
+    if handlers.is_empty() {
+        return String::new();
+    }
+    let mut out = String::new();
+    for (i, handler) in handlers.iter().enumerate() {
+        out.push_str(&format!(
+            "let __vx_state_{i} = std::sync::Arc::downgrade(&state); \
+             {comp_name}::set_emit_dispatch({name}, std::rc::Rc::new(std::cell::RefCell::new(\
+             move |__vx_payload: &str| {{ \
+             if let Some(__vx_state) = __vx_state_{i}.upgrade() {{ \
+             let mut __vx_dispatch = make_on_event(__vx_state); \
+             __vx_dispatch({name}, Some(__vx_payload)); \
+             }} \
+             }}))); ",
+            name = string_lit(handler),
+        ));
+    }
+    out
+}
+
+/// Every handler name a child on this tag can be reached by: the `@event`
+/// bindings plus the function-typed prop bindings, deduplicated so one handler
+/// bound twice registers once.
+///
+/// For `@confirm="on_confirm"` that is `on_confirm`, and for a function prop
+/// `:on_confirm="on_confirm"` it is also `on_confirm` — but for the opposite
+/// reason, and the difference is the whole reason the function-prop case keys on
+/// the handler and not on the prop field: `function_prop_value` builds the
+/// closure the child receives as `dispatch_emit(<bound name>)`, so the bound name
+/// is what `dispatch_emit` will look the dispatcher up under. Registering the
+/// prop field name instead finds nothing when the two differ
+/// (`:on_confirm="handle_ok"`), and the child's call is dropped at run time.
+fn component_dispatch_handlers(
+    clean_attrs: &[TemplateAttr],
+    comp_name: &str,
+    props: &PropsChannel<'_>,
+) -> Vec<String> {
+    let mut out: Vec<String> = collect_component_callbacks(clean_attrs)
+        .into_iter()
+        .map(|(_event, handler)| handler)
+        .collect();
+    for (_prop_name, handler) in collect_function_prop_bindings(clean_attrs, comp_name, props) {
+        if !out.contains(&handler) {
+            out.push(handler);
+        }
+    }
+    out
+}
+
+/// Handler names a function-typed prop binding introduces, so the parent's
+/// dispatcher emits an arm for each.
+///
+/// `:on_confirm="on_confirm"` needs the arm `@confirm="on_confirm"` gets: the
+/// method the child calls still lives on the parent's `State`, so the parent
+/// has to own it. Without this the closure would dispatch to a name with no arm
+/// and the child's call would be dropped at run time — the same silent no-op
+/// `emit` had before the dispatch registry existed, one layer down.
+fn collect_function_prop_handlers(nodes: &[Node], props: &PropsChannel<'_>) -> Vec<String> {
+    fn walk(node: &Node, props: &PropsChannel<'_>, out: &mut Vec<String>) {
+        let Node::Element {
+            attrs, children, ..
+        } = node
+        else {
+            return;
+        };
+        if let Some(comp_name) = attrs
+            .iter()
+            .find(|a| a.name == "data-velox-component" && a.kind == AttrKind::Static)
+            .and_then(|a| a.value.clone())
+        {
+            for (_, handler) in collect_function_prop_bindings(attrs, &comp_name, props) {
+                if !out.contains(&handler) {
+                    out.push(handler);
+                }
+            }
+        }
+        for c in children {
+            walk(c, props, out);
+        }
+    }
+    let mut out: Vec<String> = Vec::new();
+    for n in nodes {
+        walk(n, props, &mut out);
+    }
+    out
+}
+
+// --- Named slots ----------------------------------------------------------
+
+/// The slot NAME a child element is bound to, from `v-slot:foo` or the `#foo`
+/// shorthand. `None` for a child that names no slot, which is the default slot.
+///
+/// `pub(crate)` for the crate's unit tests: this and the two functions below are
+/// pure AST transforms, and the only way to say what they do to a node is to hand
+/// them one. Asserting it through the generated Rust does not work — the props
+/// builder ignores `AttrKind::Directive`, so whether the `slot:` attribute was
+/// stripped is invisible in the output and the assertion would hold either way.
+pub(crate) fn slot_binding(node: &Node) -> Option<String> {
+    let Node::Element { attrs, .. } = node else {
+        return None;
+    };
+    for a in attrs {
+        if !matches!(a.kind, AttrKind::Directive) {
+            continue;
+        }
+        // The parser folds both spellings into one name: `v-slot:foo` arrives as
+        // `slot:foo` (the `v-` prefix is stripped and the name is kebab-cased by
+        // `normalize_directive_name`), and `#foo` is mapped onto the same
+        // spelling so the two cannot drift apart downstream. The name is
+        // therefore kebab-case, which is also what `<slot name="foo-bar">` on the
+        // child side has to say to match `v-slot:fooBar`.
+        if let Some(name) = a.name.strip_prefix("slot:") {
+            let name = name.trim();
+            if !name.is_empty() {
+                return Some(name.to_string());
+            }
+        }
+    }
+    None
+}
+
+/// The element with its slot binding removed, so `v-slot:footer` is not also
+/// emitted as an unknown directive on the slot content.
+///
+/// The binding names the slot; it is not an attribute of the content. Leaving it
+/// on is a latent defect rather than a present one: `emit_props_in_loop` emits
+/// `AttrKind::Static` and `AttrKind::Bind` and ignores `AttrKind::Directive`
+/// entirely, so today the binding would be dropped anyway. It is removed HERE so
+/// that the content node is correct on its own terms, and so the guarantee does
+/// not silently stop holding the moment a directive becomes something the props
+/// builder emits — at which point every `<p v-slot:footer>` would start writing
+/// a `slot:footer` attribute into the caller's DOM.
+pub(crate) fn strip_slot_binding(node: &Node) -> Node {
+    let Node::Element {
+        tag,
+        attrs,
+        children,
+        self_closing,
+    } = node
+    else {
+        return node.clone();
+    };
+    let attrs: Vec<TemplateAttr> = attrs
+        .iter()
+        .filter(|a| !(a.kind == AttrKind::Directive && a.name.starts_with("slot:")))
+        .cloned()
+        .collect();
+    Node::Element {
+        tag: tag.clone(),
+        attrs,
+        children: children.clone(),
+        self_closing: *self_closing,
+    }
+}
+
+/// What a slot-bound child element contributes to its slot, with the binding
+/// itself removed.
+///
+/// A `<template v-slot:footer>` wrapper contributes its CHILDREN, not itself:
+/// `template` is not an element the renderer knows, so a fragment bound through
+/// one has to be flattened or it renders as an inert `<template>` node with the
+/// caller's content inside it. A plain element (`<h1 v-slot:header>`) is its own
+/// content. Either way the `v-slot:` / `#` attribute comes off: it named the
+/// slot, it is not an attribute of the content, and leaving it on would emit a
+/// `slot:footer` directive the emitter has no handler for.
+pub(crate) fn slot_content(node: &Node) -> Vec<Node> {
+    match node {
+        Node::Element { tag, children, .. }
+            if tag == "template" && slot_binding(node).is_some() =>
+        {
+            children.clone()
+        }
+        other => vec![strip_slot_binding(other)],
+    }
+}
+
+/// Build the `HashMap` a parent hands a child as its slots: slot name to the
+/// already-rendered `VNode` the child reads back out of `render_slot`.
+///
+/// Children are grouped by the slot they name. Several children may name the
+/// same slot (`<p v-slot:footer>a</p><p v-slot:footer>b</p>`) and land in one
+/// entry as a `<slot>` wrapper element, which is the same shape a multi-child
+/// default slot already has. A child that names no slot is the default slot,
+/// and the default slot is a real entry in the same map — there is no separate
+/// path for it.
+///
+/// # Slotted content carries the CALLER's scope id, so a child's `scoped` CSS
+/// cannot style it
+///
+/// `emit` is called with THIS component's `scope_id`, and every node it produces
+/// is tagged with it. Slot content is produced by the CALLER's `emit`, with the
+/// caller's `scope_id` — so a node a caller passes into a slot carries the
+/// caller's `data-v-*`, never this component's. A `scoped` style block here
+/// cannot reach it: its selectors are suffixed with this component's scope
+/// attribute, and no slotted node has it. The caller's own `scoped` CSS can
+/// reach it, because the nodes are the caller's own.
+///
+/// This is a consequence of WHERE slot content is evaluated, not a defect to fix
+/// here, and it is not fixable by a different data structure: the content is a
+/// fragment of the caller's template, built from the caller's bindings, and any
+/// arrangement that let a child reach into it would have to hand the child the
+/// caller's bindings — which is a scoped-slots channel this framework does not
+/// have. The consequence for component authors is a rule, not a caveat: **a core
+/// component whose slotted regions need styling must ship an UNSCOPED `<style>`
+/// block and be styled by class name.** A Modal with a header, a body and a
+/// footer is exactly that case. The alternative — unscoped-by-default for
+/// components that take slots — would leak the child's styles back out to every
+/// element of the same tag in the app.
+fn slots_map_expr(children: &[Node], emit: &dyn Fn(&Node) -> String) -> String {
+    let mut groups: Vec<(String, Vec<Node>)> = Vec::new();
+    for child in children {
+        let name = slot_binding(child).unwrap_or_else(|| "default".to_string());
+        let content = slot_content(child);
+        match groups.iter_mut().find(|(existing, _)| *existing == name) {
+            Some((_, nodes)) => nodes.extend(content),
+            None => groups.push((name, content)),
+        }
+    }
+    let entries: Vec<String> = groups
+        .iter()
+        .filter(|(_, nodes)| !nodes.is_empty())
+        .map(|(name, nodes)| {
+            let vnodes: Vec<String> = nodes.iter().map(emit).collect();
+            let vnode = if vnodes.len() == 1 {
+                vnodes[0].clone()
+            } else {
+                format!(
+                    "velox_dom::h(\"slot\", velox_dom::Props::new(), vec![{}])",
+                    vnodes.join(", ")
+                )
+            };
+            format!("({}, {vnode})", string_lit(name))
+        })
+        .collect();
+    if entries.is_empty() {
+        // No entry at all: an empty array literal leaves the map's key and value
+        // types to inference from a call that may not constrain them, and the
+        // child's fallback is what an empty slot should render anyway.
+        return "std::collections::HashMap::new()".to_string();
+    }
     format!("std::collections::HashMap::from([{}])", entries.join(", "))
 }
 

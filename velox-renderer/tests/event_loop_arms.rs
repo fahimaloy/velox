@@ -498,14 +498,113 @@ fn each_loop_routes_editing_keys_through_the_shared_editor() {
             .find("VirtualKeyCode::Q")
             .unwrap_or_else(|| panic!("{lp}: the keyboard arm lost Q (quit)"));
         let editor = arm.find("edit_action_for_key").expect("checked above");
-        let exits = arm.matches("*control_flow = ControlFlow::Exit;").count();
-        assert!(
-            exits == 2,
-            "{lp}: R and Q must both exit the loop, found {exits}"
-        );
         assert!(
             r < editor && q < editor,
             "{lp}: the reload/quit arms come first"
+        );
+        // R and Q share one arm because they do one thing: run the destroy hooks
+        // and leave the loop, where the dev server restarts the app. Asserted as
+        // "the arm they share actually exits" rather than as a count of exit
+        // statements, so merging them (which is what happened when the focus
+        // guard below landed) is not a failure in itself — losing the exit is.
+        let exits = arm.matches("*control_flow = ControlFlow::Exit;").count();
+        assert_eq!(
+            exits, 1,
+            "{lp}: the arm carrying both R and Q must exit the loop exactly once"
+        );
+    }
+}
+
+/// Each loop dispatches `@keydown` from its keyboard arm, additively.
+///
+/// The placement is the whole contract, so it is asserted as placement rather
+/// than as a presence check:
+///
+/// - **Before** the `match keycode`, not inside one of its arms. Inside an arm it
+///   would either miss the editing keys routed to `_` or — worse, if a future
+///   author put it in the R/Q arm — fire only for the two keys that quit the app.
+/// - **Outside** the `match`, and returning no control signal, so it cannot
+///   swallow a keystroke. The editing branch is a *sibling* of the dispatch, not
+///   a fallthrough target, and a key reaches both.
+///
+/// `keydown_focus.rs` pins the behaviour of what runs here; this pins that both
+/// loops run it, which is the drift that bit the HMR loop's keyboard arm before.
+#[test]
+fn each_loop_dispatches_keydown_additively_before_routing_the_key() {
+    for lp in event_loops() {
+        let arm = arm_span(&lp.closure, "WindowEvent::KeyboardInput");
+        let dispatch = arm.find("dispatch_keydown(").unwrap_or_else(|| {
+            panic!(
+                "{lp}: the keyboard arm never dispatches `on:keydown`, so an authored \
+                     @keydown binding compiles and then never runs"
+            )
+        });
+        let key_match = arm
+            .find("match keycode")
+            .unwrap_or_else(|| panic!("{lp}: the keyboard arm lost its key match"));
+        let editor = arm
+            .find("edit_action_for_key")
+            .expect("each_loop_routes_editing_keys_through_the_shared_editor covers this");
+        assert!(
+            dispatch < key_match,
+            "{lp}: the @keydown dispatch must sit before `match keycode`, or it would run only \
+             for whichever keys that match names"
+        );
+        assert!(
+            dispatch < editor,
+            "{lp}: the @keydown dispatch must sit before the editing branch, or the two would \
+             have to be ordered by hand for every key"
+        );
+        // The dispatch takes the same focus state the editing branch does, so a
+        // grant made here is visible to the edit that follows it in the same
+        // press — the ordering above is only meaningful if they share state.
+        for needle in ["&mut input_targets", "&mut focused_input", "&mut on_event"] {
+            let after = &arm[dispatch..];
+            assert!(
+                after.contains(needle),
+                "{lp}: the @keydown dispatch must be handed `{needle}`"
+            );
+        }
+    }
+}
+
+/// Neither loop may fire the reload/quit shortcut while a text field is focused.
+///
+/// This is the bug that made typing "r" into a field kill the application: the
+/// arms were gated only on `input.state == ElementState::Pressed`, so a printable
+/// key and a developer shortcut were indistinguishable. With nothing focused the
+/// keys are still the only way out of the window, so the gate cannot be "always
+/// off" either — it has to be a question about focus.
+///
+/// The gate itself is pinned behaviourally in `focus_blur_api.rs`
+/// (`any_input_focused`); this pins that both loops actually ask it, in the arm,
+/// before the exit — and that the key falls through to the editor rather than
+/// being swallowed when the gate is closed.
+#[test]
+fn each_loop_withholds_reload_and_quit_while_a_text_field_has_focus() {
+    for lp in event_loops() {
+        let arm = arm_span(&lp.closure, "WindowEvent::KeyboardInput");
+        let guard = arm
+            .find("any_input_focused(&input_targets)")
+            .unwrap_or_else(|| {
+                panic!(
+                    "{lp}: the reload/quit arm is not gated on focus, so typing \"r\" into a \
+                     text field exits the app"
+                )
+            });
+        let exit = arm
+            .find("*control_flow = ControlFlow::Exit;")
+            .unwrap_or_else(|| panic!("{lp}: the reload/quit arm never exits"));
+        assert!(
+            guard < exit,
+            "{lp}: the focus guard must be evaluated before the loop exits"
+        );
+        // With the gate closed the key has to reach the editor, or the character
+        // is swallowed instead of typed: a match guard falls through to `_`, an
+        // `if` inside the arm body does not.
+        assert!(
+            arm.contains("edit_action_for_key(keycode, shift_held)"),
+            "{lp}: a withheld reload key must still fall through to the editor"
         );
     }
 }

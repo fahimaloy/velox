@@ -10,11 +10,46 @@ quoted =  { dq | sq }
 
 attribute = { ident ~ (WS* ~ "=" ~ WS* ~ quoted)? }
 
-template_open = { "<template" ~ (WS+ ~ attribute)* ~ WS* ~ ">" }
+// A named slot is written with a nested `<template v-slot:foo>`, or its `#foo`
+// shorthand, so `template_open` has to accept a name `ident` cannot spell: the
+// slot name follows a `:` or a `#`, neither of which is in the identifier
+// character set. The `= "slotProps"` value is parsed and discarded — nothing
+// binds a slot prop (see `read_attribute` in template_parse.rs) — but it has to
+// be CONSUMED here, or the `>` this rule ends on lands in the middle of the
+// author's tag.
+slot_name = @{ (ASCII_ALPHANUMERIC | "_" | "-")+ }
+slot_attr = { ("v-slot" ~ ":" | "#") ~ slot_name ~ (WS* ~ "=" ~ WS* ~ quoted)? }
+
+// `slot_attr` is tried FIRST, and that order is load-bearing. PEG choice is
+// ordered and not longest-match, so with `attribute` first the input
+// `v-slot:header` parses as the identifier `v-slot` (which is a complete
+// `attribute` on its own), leaving `:header>` for a rule that cannot take it —
+// and the block does not parse at all.
+template_open = { "<template" ~ (WS+ ~ (slot_attr | attribute))* ~ WS* ~ ">" }
 script_open   = { "<script" ~ (WS+ ~ attribute)* ~ WS* ~ ">" }
 style_open    = { "<style" ~ (WS+ ~ attribute)* ~ WS* ~ ">" }
 
-template_body = @{ (!"</template>" ~ ANY)* }
+// A `<template>` body, NESTING-AWARE.
+//
+// The obvious spelling — "anything up to the first `</template>`" — ends the
+// SFC-level block at the close tag of a nested `<template v-slot:foo>`, and
+// everything after it (the rest of the markup, then `<script>`) then fails to
+// parse as a file. A named slot is the one construct that puts a `<template>`
+// inside a template, so this is not an edge case: it is the syntax the whole
+// named-slot feature is written in.
+//
+// Each repetition step takes a NESTED BLOCK if one starts here and otherwise
+// one character that cannot begin the close tag. The nesting has to be the
+// first alternative rather than a lookahead that excludes a nested open tag: a
+// negative predicate that tests for the close tag alone lets the nested
+// `<template` be consumed as ordinary text one character at a time, and the
+// body then still ends at the nested close tag — the same truncation, quieter.
+//
+// `nested_template` is a non-atomic rule called from an atomic one, so it is
+// matched but produces no tokens: the body stays the single raw string the
+// hand-written template parser downstream expects.
+nested_template = { template_open ~ template_body ~ "</template>" }
+template_body  = @{ (nested_template | !"</template>" ~ ANY)* }
 script_body   = @{ (!"</script>" ~ ANY)* }
 style_body    = @{ (!"</style>" ~ ANY)* }
 

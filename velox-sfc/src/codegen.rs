@@ -108,6 +108,18 @@ fn to_stub_rs_inner(
          clippy::useless_format, unused_variables)]\n",
     );
 
+    // The component module opens BEFORE the emit infrastructure, so the
+    // infrastructure is part of it rather than a sibling of it. Both halves of
+    // the emit path reach it from inside the module — `script_rs::emit` as
+    // `super::emit`, `render_with_callbacks` as a bare `set_emit_callbacks` —
+    // and neither path resolves when the registry sits one level out. The
+    // helper was written for the unwrapped form (where the file IS the module,
+    // so the two levels are the same one) and the wrapped form never compiled a
+    // component that emitted.
+    if wrap_module {
+        out.push_str(&format!("pub mod {} {}\n", name, open));
+    }
+
     // If any component in the template uses @event, we need the emit module
     if needs_emit_infra {
         out.push_str(&format!("{indent}use std::cell::RefCell;\n"));
@@ -127,9 +139,6 @@ fn to_stub_rs_inner(
         out.push('\n');
     }
 
-    if wrap_module {
-        out.push_str(&format!("pub mod {} {}\n", name, open));
-    }
     out.push_str(&format!(
         "{indent}pub const TEMPLATE: &str = r#\"{}\"#;\n",
         escape_raw_string(&processed_template)
@@ -228,15 +237,19 @@ fn to_stub_rs_inner(
         out.push_str(&format!("{indent}{stripped}\n"));
     }
 
-    // If the template has <slot> elements, also generate render_with_slots
-    // (slots-only variant) so parents can pass slot content without callbacks.
-    let has_slots = t.contains("<slot");
-    if has_slots {
-        let render_slots = generate_render_with_slots_only_inside_module();
-        for line in render_slots.lines() {
-            let stripped = line.strip_prefix("    ").unwrap_or(line);
-            out.push_str(&format!("{indent}{stripped}\n"));
-        }
+    // The slots-only entry point, for a parent that passes slot content and no
+    // `@event`. Emitted unconditionally, and under its own name: Rust has no
+    // overloading, so sharing `render_with_slots` with the four-argument
+    // variant above made the two definitions collide (E0428) in every component
+    // whose template has a `<slot>`, while gating it on `t.contains("<slot")`
+    // left a parent calling it against a child without one with no such
+    // function to call (E0599). One name per arity, always present, is the only
+    // arrangement where the call site can be generated without knowing what the
+    // child's template contains.
+    let render_slots = generate_render_with_slots_only_inside_module();
+    for line in render_slots.lines() {
+        let stripped = line.strip_prefix("    ").unwrap_or(line);
+        out.push_str(&format!("{indent}{stripped}\n"));
     }
 
     if wrap_module {
@@ -437,14 +450,59 @@ fn pad_child_combinators(raw: &str) -> String {
 
 /// Generate the global emit infrastructure: Callbacks type, emit function,
 /// set_callback function, and slots thread-local using thread-local storage.
+///
+/// Two registries live here, and they answer different questions about the same
+/// `@event` binding:
+///
+/// - `EMIT_CALLBACKS` maps an EVENT to the handler NAME the parent wrote
+///   (`@confirm="on_confirm"` -> `confirm` -> `on_confirm`). The child reads it
+///   in [`emit`], because the child is the side that knows which event it just
+///   emitted.
+/// - `EMIT_DISPATCH` maps that handler NAME to the CALL that runs it, registered
+///   by the parent through [`set_emit_dispatch`] at the moment it renders the
+///   child. The parent is the side that has a `State` to call the method on, so
+///   this is the only registry that can turn a name into a running handler.
+///
+/// Neither alone is enough, which is why the lookup in `emit` goes through both:
+/// the first says which method the author meant, the second is the only thing
+/// that can reach it. The pair is also what a function-typed prop reuses — see
+/// `dispatch_emit`.
+///
+/// The registries are per generated FILE, not global to the crate. A child
+/// resolves its own emit against its own module, which is why the parent has to
+/// name the child (`Child::set_emit_dispatch(..)`) rather than reach a shared
+/// table: each component module carries its own copy of this infrastructure and
+/// nothing else in the crate can name it.
 fn generate_emit_infrastructure() -> String {
     r#"    /// Type alias for callback maps passed to child components.
     pub type Callbacks = std::collections::HashMap<&'static str, &'static str>;
+
+    /// One handler a parent hands a child, as something the child can call.
+    ///
+    /// `Rc<RefCell<dyn FnMut(&str)>>`, and the shape is not decoration — both
+    /// halves of it are load-bearing:
+    ///
+    /// - The `Rc` is what makes a re-entrant call possible. A `Box<dyn FnMut>`
+    ///   is owned by the registry cell, so calling it means calling it while
+    ///   that cell is still borrowed, and a handler that emitted in turn would
+    ///   panic on the second borrow. Cloning the handle out first leaves the
+    ///   registry unborrowed for the whole call. The registry is thread-local,
+    ///   so the handle never has to be `Send`.
+    /// - The inner `RefCell` is what makes the handle callable at all. `Fn`/`FnMut`
+    ///   are implemented for `Box<F>` and for `&F`, but NOT for `Rc<F>`, so
+    ///   `Rc<dyn FnMut(..)>` cannot be called without a `DerefMut` that `Rc` does
+    ///   not implement. The inner cell is where the `&mut` comes from; the
+    ///   registration itself is never removed, so a handler that panics does not
+    ///   take its own binding down with it.
+    pub type EventHandler = std::rc::Rc<std::cell::RefCell<dyn FnMut(&str)>>;
 
     // Thread-local callback registry for emit system.
     // Stores event name -> handler function name mappings.
     thread_local! {
         static EMIT_CALLBACKS: RefCell<HashMap<String, String>> = RefCell::new(HashMap::new());
+        // Handler name -> the call that runs it. Written by the parent that
+        // rendered this component, read by `emit` and `dispatch_emit`.
+        static EMIT_DISPATCH: RefCell<HashMap<String, EventHandler>> = RefCell::new(HashMap::new());
         static SLOTS: RefCell<HashMap<String, velox_dom::VNode>> = RefCell::new(HashMap::new());
     }
 
@@ -471,14 +529,53 @@ fn generate_emit_infrastructure() -> String {
         });
     }
 
+    /// Register the call that runs one handler, keyed by the handler NAME the
+    /// parent wrote on the tag (`@confirm="on_confirm"` registers `on_confirm`).
+    ///
+    /// A parent calls this for every handler it binds, immediately before it
+    /// calls `render_with_callbacks` / `render_with_slots`, and the call it
+    /// passes is its own event dispatcher: so the payload a child emits lands on
+    /// the parent's `State` method, with the arity the method declared already
+    /// decided by the dispatcher.
+    ///
+    /// Registering a name twice replaces the call, so one component rendered
+    /// twice in a pass under different handlers is last-wins rather than both.
+    pub fn set_emit_dispatch(handler: &str, call: EventHandler) {
+        EMIT_DISPATCH.with(|cell| {
+            cell.borrow_mut().insert(handler.to_string(), call);
+        });
+    }
+
+    /// Run the handler registered under `handler` with `payload`.
+    ///
+    /// This is the entry point a FUNCTION-TYPED prop goes through: a parent
+    /// binding `:on_confirm="on_confirm"` hands the child a closure that calls
+    /// this with the name it read off the binding, so a child that prefers a
+    /// callable prop over `emit("..")` reaches exactly the same handler.
+    ///
+    /// Returns whether a handler was registered, so a caller can tell a handler
+    /// that ran and decided to do nothing from one that was never bound.
+    pub fn dispatch_emit(handler: &str, payload: &str) -> bool {
+        // Clone the handle out so the call happens with the registry cell
+        // unborrowed — a handler that emits in turn reaches this function again
+        // while its own call is still on the stack.
+        let call = EMIT_DISPATCH.with(|cell| cell.borrow().get(handler).cloned());
+        let Some(call) = call else { return false };
+        (call.borrow_mut())(payload);
+        true
+    }
+
     /// Emit an event from a child component to its parent.
-    /// Looks up the registered callback and returns the handler name.
-    /// The caller is responsible for invoking the handler on their State.
-    pub fn emit(event: &str, _payload: &str) -> Option<String> {
-        EMIT_CALLBACKS.with(|cell| {
-            let map = cell.borrow();
-            map.get(event).cloned()
-        })
+    ///
+    /// Resolves the handler the parent bound for `event` and RUNS it: the
+    /// dispatcher the parent registered is invoked with `payload`, which is what
+    /// reaches the parent's `State` method. Returns the handler name it
+    /// resolved, or `None` when the parent bound no handler for this event —
+    /// the one case where an emit has nowhere to go.
+    pub fn emit(event: &str, payload: &str) -> Option<String> {
+        let handler = EMIT_CALLBACKS.with(|cell| cell.borrow().get(event).cloned())?;
+        dispatch_emit(&handler, payload);
+        Some(handler)
     }
 
     /// Look up slot content by name. Returns the slot VNode if found,
@@ -502,13 +599,20 @@ fn generate_emit_infrastructure() -> String {
 /// Generate emit helpers that go inside the component's script_rs module.
 fn generate_component_emit_helpers() -> String {
     r#"
-        /// Emit an event to the parent component's handler.
-        /// Looks up the callback name from the thread-local registry.
+        /// Emit an event to the parent component that rendered this one.
+        ///
+        /// `event` names the binding on the parent's side: the parent wrote
+        /// `@confirm="on_confirm"` on the tag that rendered this component, and
+        /// `emit("confirm", payload)` runs that parent's `on_confirm` with
+        /// `payload`. The parent owns the call — it is the side with the `State`
+        /// the method lives on — so this component never names a handler, only
+        /// the event it wants the parent to hear about.
+        ///
+        /// A parent that bound no handler for this event has nothing to run, and
+        /// that is the one case where the emit goes nowhere: it is not an error,
+        /// because `@event` on a component tag is opt-in per event.
         pub fn emit(event: &str, payload: &str) {
-            if let Some(_handler_name) = super::emit(event, payload) {
-                // The handler will be invoked via the parent's on_event dispatcher.
-                // The handler_name corresponds to a method on the parent's State.
-            }
+            let _handler = super::emit(event, payload);
         }
 "#
     .to_string()
@@ -584,14 +688,18 @@ fn generate_render_with_callbacks_inside_module() -> String {
     .to_string()
 }
 
-/// Generate `render_with_slots` function that accepts props and slots from a parent.
-/// This is called when a parent passes slot content to a child component
-/// (without callbacks). Goes INSIDE the module (before the closing brace).
+/// Generate the `render_with_slots_only` function: props and slots from a
+/// parent, with no `@event` bound. Goes INSIDE the module (before the closing
+/// brace).
 fn generate_render_with_slots_only_inside_module() -> String {
     r#"
     /// Render this component with slot content from a parent component.
     /// The slots map maps slot names to pre-rendered VNode trees.
-    pub fn render_with_slots(
+    ///
+    /// Distinct from `render_with_slots` above rather than another arity of it:
+    /// Rust resolves calls by name, so two functions with one name is a
+    /// duplicate definition however many arguments each takes.
+    pub fn render_with_slots_only(
         props: PropsArg,
         slots: &std::collections::HashMap<&str, velox_dom::VNode>,
     ) -> velox_dom::VNode {
@@ -602,6 +710,19 @@ fn generate_render_with_slots_only_inside_module() -> String {
     .to_string()
 }
 
+/// Turn `raw` into a Rust identifier safe to interpolate into generated code:
+/// lowercased, with anything that cannot appear in an identifier replaced.
+///
+/// PRIVATE, and deliberately so. It was `pub(crate)` on the stated ground that
+/// the template half of codegen names generated locals with it
+/// (`template_codegen::function_prop_value`) and the two halves have to agree on
+/// what a safe name is. That consumer does not exist: the only references to this
+/// function in the crate were its definition and the one call site below. A
+/// justification naming a consumer that is not there is worse than no
+/// justification — it describes an agreement the code has not made, and the next
+/// reader trusts it. If `template_codegen` ever DOES need to name a local from a
+/// prop field, it should call this — and then this should become `pub(crate)`
+/// again, with that caller named in this comment.
 fn sanitize_ident(raw: &str) -> String {
     let mut out = String::with_capacity(raw.len());
     for (i, ch) in raw.chars().enumerate() {

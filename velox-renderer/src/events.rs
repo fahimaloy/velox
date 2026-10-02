@@ -512,6 +512,279 @@ pub fn focused_input_index(targets: &[InputTarget]) -> Option<usize> {
     targets.iter().position(|t| t.focused)
 }
 
+/// Whether *any* text input currently holds keyboard focus.
+///
+/// This is the gate on app-level single-key shortcuts — `r` to reload, `q` to
+/// quit. Those keys are text while a field is focused, so an unguarded shortcut
+/// means typing "r" into a search box exits the process. The loops must ask this
+/// before acting on one, and a shortcut that is withheld here must fall through
+/// to the editor so the character still reaches the field.
+///
+/// Note this is deliberately *not* `focused_input_index(..).is_some()` in the
+/// loops: the question "is the user typing?" and the question "which field is
+/// focused?" have different answers the moment the target vector is rebuilt
+/// between two events, and the loops should not be able to drift into asking
+/// the wrong one.
+pub fn any_input_focused(targets: &[InputTarget]) -> bool {
+    targets.iter().any(|t| t.focused)
+}
+
+/// The structural path of the focused input, if any.
+///
+/// `InputTarget::focused` is the single source of truth for focus; this is a
+/// derived read of it in the shape both event loops keep a local of, so a caller
+/// that wants "the path of the focused input" reads it here instead of
+/// re-deriving it from an index.
+pub fn focused_input_path(targets: &[InputTarget]) -> Option<Vec<usize>> {
+    focused_input_index(targets).map(|i| targets[i].path.clone())
+}
+
+/// Move keyboard focus to `targets[index]`, blurring whichever input held it.
+///
+/// Returns `true` when focus actually moved, so the caller can decide whether to
+/// repaint.
+///
+/// Focus is single-valued by construction: every other target's flag is cleared,
+/// so [`focused_input_index`] can never report a stale first-of-two. Two targets
+/// flagged at once is not a state the editor can represent — it would send
+/// keystrokes to whichever one happens to come first in the vector.
+///
+/// An out-of-range `index` is a no-op returning `false`, not a panic: the index
+/// comes from hit testing or from a caller holding an index into a vector it
+/// built itself, and a target list rebuilt underneath it is an ordinary event
+/// rather than a bug worth taking the window down for.
+pub fn focus_input(targets: &mut [InputTarget], index: usize) -> bool {
+    if index >= targets.len() {
+        return false;
+    }
+    let mut changed = false;
+    for (i, t) in targets.iter_mut().enumerate() {
+        let want = i == index;
+        if t.focused != want {
+            t.focused = want;
+            changed = true;
+        }
+    }
+    changed
+}
+
+/// Index of the input target whose structural `path` equals `path`.
+///
+/// This is the bridge from a *stable* name to the `usize` [`focus_input`]
+/// speaks. The index into `targets` is a paint-order position the author cannot
+/// see and cannot keep: insert an input above theirs, or reorder the list they
+/// live in, and it shifts. The structural path is derived from the tree, so it
+/// survives both — which is why authored focus bindings resolve through a
+/// `data-focus-id` to a path, and from there through this function to an index.
+///
+/// Returns the first match in vector order. Two targets cannot normally share a
+/// path (`collect_input_targets` emits one per text input node), so "first" is
+/// only a determinism guarantee, not a preference.
+pub fn input_index_by_path(targets: &[InputTarget], path: &[usize]) -> Option<usize> {
+    targets.iter().position(|t| t.path == path)
+}
+
+/// Structural path of the first element declaring `data-focus-id="id"`.
+///
+/// The other half of the stable-name bridge: [`input_index_by_path`] turns a
+/// path into the `usize` the focus API speaks, this turns the name an author
+/// writes into that path.
+///
+/// The two live here, ungated, rather than in the skia-gated loop code, because
+/// neither needs a window or a backend — they are tree and vector lookups. That
+/// is what lets a headless caller (an embedding host, or a test) resolve and
+/// apply an authored focus binding without pulling in the native backend, and it
+/// keeps "what does `data-focus-id` mean" in one file instead of splitting the
+/// definition from the resolution.
+///
+/// Ids are the author's to keep unique. A duplicate resolves to the first
+/// element in document order, which is total and deterministic — deliberately
+/// not a panic and deliberately not "the last one wins", so a template with a
+/// duplicated id behaves the same on every run.
+pub fn find_focus_id_path(node: &VNode, path: &[usize], id: &str) -> Option<Vec<usize>> {
+    let VNode::Element {
+        props, children, ..
+    } = node
+    else {
+        return None;
+    };
+    if props
+        .attrs
+        .get("data-focus-id")
+        .is_some_and(|v| v.trim() == id)
+    {
+        return Some(path.to_vec());
+    }
+    for (i, child) in children.iter().enumerate() {
+        let mut child_path = path.to_vec();
+        child_path.push(i);
+        if let Some(found) = find_focus_id_path(child, &child_path, id) {
+            return Some(found);
+        }
+    }
+    None
+}
+
+/// Everything one key press has to reach, gathered from the current tree in a
+/// single pass.
+///
+/// A key press has no pointer, so unlike a click there is no hit test and no
+/// single "target" element — what a key can mean is whatever the author attached
+/// it to. Collecting both halves in one walk keeps them in the same document
+/// order and, more importantly, keeps the two effects (focus grants and handler
+/// calls) decided together: a key that both focuses a field and calls a handler
+/// must not be able to do one without the other.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct KeydownPlan {
+    /// `on:keydown` handler names, in document order.
+    pub handlers: Vec<String>,
+    /// Paths of elements whose `data-focus-on` names this key, in document
+    /// order.
+    pub focus_paths: Vec<Vec<usize>>,
+}
+
+/// Plan one key press, named `key_name`, against `vnode`.
+///
+/// Focus grants come from a *declarative* pair of attributes on the input
+/// itself, not from the handler: `data-focus-on="F2"` says which key focuses
+/// this field, `data-focus-id="composer"` says what it is called. The
+/// alternative — an author handler calling into the renderer to move focus —
+/// cannot be expressed from generated component code at all, because the
+/// `State` a `.vx` compiles to has no handle on the event loop's target vector;
+/// the key would reach the app and then have nowhere to go. Keeping the grant in
+/// the tree makes "which key focuses this field" one declarative fact instead of
+/// two halves that can disagree.
+///
+/// This is a *plan*, not an action: it reads the tree and reports. Applying it is
+/// [`apply_keydown`], so the read half is testable — and reusable — without a
+/// window.
+pub fn plan_keydown(vnode: &VNode, key_name: &str) -> KeydownPlan {
+    let mut plan = KeydownPlan::default();
+    collect_keydown(vnode, &[], key_name, &mut plan);
+    plan
+}
+
+fn collect_keydown(node: &VNode, path: &[usize], key_name: &str, plan: &mut KeydownPlan) {
+    let VNode::Element {
+        props, children, ..
+    } = node
+    else {
+        return;
+    };
+    // A keydown listener has no per-element gating the way a click does — there
+    // is no cursor to hit-test — so every `on:keydown` in the tree is invoked,
+    // in document order. An author puts the binding in one place; a nested
+    // binding is an additional observer, not a competing handler.
+    if let Some(handler) = props.attrs.get("on:keydown")
+        && !handler.is_empty()
+    {
+        plan.handlers.push(handler.clone());
+    }
+    // Case-insensitive so `data-focus-on="f2"` still works: this is compared
+    // against the same string the handler compares against, and an author who
+    // writes `key == "F2"` should not silently fail to focus because the
+    // attribute was lower-cased.
+    if props
+        .attrs
+        .get("data-focus-on")
+        .is_some_and(|v| v.trim().eq_ignore_ascii_case(key_name))
+    {
+        plan.focus_paths.push(path.to_vec());
+    }
+    for (i, child) in children.iter().enumerate() {
+        let mut child_path = path.to_vec();
+        child_path.push(i);
+        collect_keydown(child, &child_path, key_name, plan);
+    }
+}
+
+/// Apply a [`KeydownPlan`]: grant every focus it asked for, then invoke every
+/// handler with `key_name` as the payload.
+///
+/// Returns `true` when the caller must repaint — either focus moved or a
+/// handler ran and may have changed state.
+///
+/// `value_len` supplies the current char length of the value at a path, so a
+/// freshly focused field can put its caret at the end and the next keystroke
+/// appends. It is a callback because the answer lives in the VNode and this
+/// module deliberately knows nothing about views — the same reason
+/// [`preserve_input_state`] takes one.
+///
+/// Handlers run for every plan regardless of what the focus half did, and this
+/// function returns no instruction to consume the key. That is the whole
+/// additive contract: the editing keys a `@keydown` binding can name
+/// (`Backspace`, `Enter`, the arrows) are exactly the ones the editor also maps,
+/// and both run on the same press. A dispatch that could swallow a keystroke
+/// would make `@keydown` a footgun that breaks the text editor whenever one is
+/// present, which is exactly why there is no `preventDefault` here and the
+/// payload is a bare name.
+///
+/// The loop calls this before its reload/quit guard, so the binding an author
+/// writes is the binding that runs for every key, and adding one never changes
+/// which keys the app treats as text.
+pub fn apply_keydown(
+    plan: &KeydownPlan,
+    key_name: &str,
+    input_targets: &mut [InputTarget],
+    focused_input: &mut Option<Vec<usize>>,
+    value_len: &dyn Fn(&[usize]) -> usize,
+    on_event: &mut impl FnMut(&str, Option<&str>),
+) -> bool {
+    let mut focus_changed = false;
+    for path in &plan.focus_paths {
+        // `focus_input` is the only writer of the `focused` flag and it clears
+        // every other target's, so two grants in one press cannot both stick.
+        // It reports `false` when nothing moved, which is what keeps a repeat of
+        // the same key from yanking the caret back to the end of the value
+        // mid-sentence.
+        let Some(idx) = input_index_by_path(input_targets, path) else {
+            // The element asked for focus but produced no input target: not a
+            // text input, or laid out away. Not an error — a key that matches
+            // nothing simply does nothing.
+            continue;
+        };
+        if focus_input(input_targets, idx) {
+            // Focus gain looks like a fresh click: caret to the end of the value,
+            // no selection, caret solid.
+            input_targets[idx].blink_on = true;
+            input_targets[idx].anchor = None;
+            input_targets[idx].cursor = value_len(path);
+            // The mirror is the loops' index-free copy of focus. It has to move
+            // here, in the same breath as the flag, because a caller that
+            // updated one and not the other would send the next keystroke to a
+            // field the two disagree about.
+            *focused_input = Some(input_targets[idx].path.clone());
+            focus_changed = true;
+        }
+    }
+    for handler in &plan.handlers {
+        on_event(handler, Some(key_name));
+    }
+    focus_changed || !plan.handlers.is_empty()
+}
+
+/// Drop keyboard focus from every input, discarding any selection with it.
+///
+/// Returns `true` when something changed — i.e. when the caller must repaint to
+/// take the focus ring and the selection highlight off the screen.
+///
+/// The caret position is deliberately *kept*: losing focus is not the same as
+/// forgetting where you were, so clicking back into a field restores the caret
+/// rather than dumping the user at the end of the value. Esc is the deliberate
+/// exception and clears everything — see [`EditAction::Blur`].
+pub fn blur_focused_input(targets: &mut [InputTarget]) -> bool {
+    let mut changed = false;
+    for t in targets.iter_mut() {
+        if t.focused || t.anchor.is_some() {
+            t.focused = false;
+            t.anchor = None;
+            t.blink_on = true;
+            changed = true;
+        }
+    }
+    changed
+}
+
 /// Carry per-input edit state (focus / caret / anchor / blink phase) across a
 /// target rebuild, matched by `path`.
 ///
@@ -684,6 +957,16 @@ pub enum EditAction {
     Insert(char),
     /// Delete the selection, then submit.
     Submit,
+    /// Leave the field: drop keyboard focus, the selection and the caret.
+    ///
+    /// Esc is the one key that ends an editing session rather than editing the
+    /// text, so it takes every piece of caret state with it. That is what
+    /// distinguishes it from [`blur_focused_input`], which keeps the caret so
+    /// clicking back into a field restores the position: Esc is an explicit
+    /// "I am done here", a click on empty space is just a click.
+    ///
+    /// The field's value is untouched, so no `on:input` is dispatched.
+    Blur,
 }
 
 /// Outcome of applying an [`EditAction`].
@@ -693,8 +976,10 @@ pub struct EditResult {
     pub value: Option<String>,
     /// True when the action should submit the field (Return).
     pub submit: bool,
-    /// True when the caret or the selection moved. A pure caret move repaints
-    /// without dispatching anything to the app.
+    /// True when the field's focus, caret or selection changed. A pure caret
+    /// move repaints without dispatching anything to the app; so does a blur,
+    /// which changes what is painted (the focus ring and the selection
+    /// highlight go away) without changing the text.
     pub moved: bool,
 }
 
@@ -829,6 +1114,15 @@ pub fn apply_edit(target: &mut InputTarget, value: &str, action: EditAction) -> 
             }
             target.anchor = None;
             res.submit = true;
+        }
+        EditAction::Blur => {
+            // Report a repaint only when there was something on screen to take
+            // away: Esc with nothing focused must stay free, exactly like any
+            // other keypress that changes nothing.
+            res.moved = target.focused || sel.is_some();
+            target.focused = false;
+            target.anchor = None;
+            cursor = 0;
         }
     }
 

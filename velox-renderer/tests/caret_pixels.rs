@@ -33,9 +33,14 @@ const W: i32 = 320;
 const H: i32 = 120;
 
 /// Box constants fixed by the field's box, not by glyph measurement.
-const BORDER_INSET: f32 = 1.0; // `input_rect = rect deflated by 1.0`
-const TEXT_PAD: f32 = 4.0; // value text origin is `input_rect.left + 4.0`
-
+///
+/// The value text's origin is NOT spelled out here as `box.x + 1.0 + 4.0`
+/// any more: the painter reads its insets from `input_metrics::input_text_metrics`,
+/// so a literal pair of constants in the test would be a second, frozen copy of
+/// the painter's arithmetic — precisely the drift `input_metrics` exists to
+/// end. `text_origin_x` calls the painter's own function instead, which is
+/// still not re-deriving glyph math: no measuring, no advance summing.
+///
 /// Literal colors the painter is specified to emit.
 const BG: [u8; 4] = [255, 255, 255, 255];
 const ACCENT: [u8; 4] = [52, 120, 246, 255]; // focus ring / tick / selection hue
@@ -66,9 +71,59 @@ fn input_box(v: &VNode) -> velox_dom::layout::Rect {
     layout.children[0].rect
 }
 
-/// Where the value text begins: inner left edge + the text padding.
-fn text_origin_x(box_: &velox_dom::layout::Rect) -> f32 {
-    box_.x as f32 + BORDER_INSET + TEXT_PAD
+/// The CASCADED style string the painter actually received for the field in
+/// `v`.
+///
+/// Not the authored `field_style()`: the UA sheet contributes `padding` and a
+/// `min-height` to every `<input>`, and the painter reads the merged string.
+/// Reading the authored string here would make this helper disagree with the
+/// screen for every field the UA sheet touches.
+fn cascaded_input_style(v: &VNode) -> Option<String> {
+    fn walk(node: &VNode) -> Option<String> {
+        match node {
+            VNode::Text(_) => None,
+            VNode::Element {
+                tag,
+                props,
+                children,
+            } => {
+                if tag == "input" {
+                    return props.attrs.get("style").cloned();
+                }
+                children.iter().find_map(walk)
+            }
+        }
+    }
+    let styled = velox_style::apply_with_cascade(v, &Stylesheet::default());
+    walk(&styled)
+}
+
+/// The painter's geometry for the field in `v`, in the same logical px and
+/// against the same computed style string the paint lane used.
+fn text_metrics(
+    v: &VNode,
+    box_: &velox_dom::layout::Rect,
+) -> velox_renderer::input_metrics::InputTextMetrics {
+    velox_renderer::input_metrics::input_text_metrics(
+        cascaded_input_style(v).as_deref(),
+        *box_,
+        (W as f32, H as f32),
+        // The root default the paint lane inherits into a bare `VNode`.
+        velox_dom::layout::DEFAULT_ROOT_FONT_SIZE,
+    )
+}
+
+/// Where the value text begins, from the ONE geometry authority the painter
+/// itself reads.
+///
+/// This is a delegation, not a re-derivation: `input_text_metrics` resolves
+/// border widths and padding sides from the COMPUTED style, which is why
+/// `padding`, `padding-left` and an explicit `12px` all agree here for the same
+/// reason they agree on screen. Calling it is what lets this test keep
+/// asserting "the caret is where the glyph is" without freezing a second copy
+/// of the insets as test-local constants.
+fn text_origin_x(v: &VNode, box_: &velox_dom::layout::Rect) -> f32 {
+    text_metrics(v, box_).text_left
 }
 
 fn field_style() -> &'static str {
@@ -254,7 +309,7 @@ fn caret_x_is_the_measured_prefix_width() {
     assert!(!cols.is_empty(), "empty focused value painted no caret");
     assert_eq!(
         cols[0] as f32,
-        text_origin_x(&box_),
+        text_origin_x(&v, &box_),
         "empty-value caret is not at the text origin (box.x + border + padding)"
     );
 
@@ -280,11 +335,12 @@ fn caret_x_is_the_measured_prefix_width() {
 
     let at0 = locate("mmmmmmmm", "0");
     let at_end = locate("mmmmmmmm", "8");
-    let run_box = input_box(&focused("mmmmmmmm", "8"));
+    let run_vnode = focused("mmmmmmmm", "8");
+    let run_box = input_box(&run_vnode);
 
     assert_eq!(
         at0 as f32,
-        text_origin_x(&run_box),
+        text_origin_x(&run_vnode, &run_box),
         "caret at index 0 is not at the text origin"
     );
     assert!(
@@ -395,7 +451,7 @@ fn selection_paints_a_highlight_behind_the_text() {
     // right of the origin — a band that began at the text origin would mean
     // the selection ignored its start index.
     assert!(
-        changed[0] as f32 > text_origin_x(&box_),
+        changed[0] as f32 > text_origin_x(&selected, &box_),
         "selection starting at index 2 began at the text origin ({}) — the \
          start index is not being measured",
         changed[0]
@@ -470,20 +526,22 @@ fn caret_does_not_touch_a_sibling_element() {
     // Control: the field itself DID change, so the sibling comparison is live.
     // Locate the changed row rather than assuming one — the bar spans the
     // text line box, which is inset from the field box.
-    let bx = input_box(&scene_with_sibling(vec![
+    let sibling_vnode = scene_with_sibling(vec![
         ("value", ""),
         ("caret", "0"),
         ("caret_blink", "true"),
         ("focused", "true"),
-    ]));
-    let rows = col_rows(&on, &off, text_origin_x(&bx) as i32);
+    ]);
+    let bx = input_box(&sibling_vnode);
+    let caret_x = text_origin_x(&sibling_vnode, &bx) as i32;
+    let rows = col_rows(&on, &off, caret_x);
     assert!(
         !rows.is_empty(),
         "the field itself did not change — the sibling comparison is vacuous"
     );
     assert_ne!(
-        px(&on, text_origin_x(&bx) as i32, rows[rows.len() / 2]),
-        px(&off, text_origin_x(&bx) as i32, rows[rows.len() / 2]),
+        px(&on, caret_x, rows[rows.len() / 2]),
+        px(&off, caret_x, rows[rows.len() / 2]),
         "the caret column did not change between the blink states"
     );
 }
@@ -500,7 +558,7 @@ fn focus_ring_is_visible_and_distinct_from_the_border() {
     // The ring is inset 2px inside the inner rect and 2px thick, so its
     // vertical run occupies columns [inner_left+1, inner_left+3]. Column
     // inner_left+2 is solidly ring.
-    let ring_x = box_.x + BORDER_INSET as i32 + 2;
+    let ring_x = text_metrics(&f, &box_).pad_left as i32 + 2;
     let hits = (box_.y + 6..box_.y + box_.h - 6)
         .filter(|y| px(&fr, ring_x, *y) == ACCENT)
         .count();
@@ -541,6 +599,92 @@ fn focus_ring_is_visible_and_distinct_from_the_border() {
         px(&fr, ring_x, edge_y),
         ACCENT,
         "ring column is not the accent"
+    );
+}
+
+/// A focused field whose border is dashed must still paint a SOLID focus ring.
+///
+/// The painter's stroke paint is frame-scoped, so `border: 2px dashed` left its
+/// `[6, 6]` dash intervals installed on the shared stroke when the ring was drawn
+/// and the ring came out dashed. This is the same class of defect as the inset
+/// bug above: the ring is what makes a focused field legible, and a dashed ring
+/// defeats it.
+///
+/// Anti-circularity: the ring column is read from the LAYOUT BOX plus the
+/// border width this fixture declares (`2px`) and the documented 2px ring inset
+/// — box constants, not glyph math, and not the painter's own inset helper. The
+/// "must be solid" claim is then checked by CONTIGUITY along that column, which
+/// no choice of constants can fake: a dash has to break the run.
+#[test]
+fn a_dashed_border_does_not_make_the_focus_ring_dashed() {
+    const DASHED: &str = "width:200px;height:40px;font-size:15px;border:2px dashed #888888";
+    let dashed_vnode = |focused: bool| {
+        let mut attrs = vec![
+            ("value", ""),
+            ("caret", "0"),
+            ("sel_start", "0"),
+            ("sel_end", "0"),
+        ];
+        attrs.push(("focused", if focused { "true" } else { "false" }));
+        let mut p = Props::new()
+            .set("type", "text")
+            .set("style", DASHED)
+            .set("caret_blink", "true");
+        for (k, v) in attrs {
+            p = p.set(k, v);
+        }
+        h(
+            "div",
+            Props::new().set("style", PAGE),
+            vec![h("input", p, vec![])],
+        )
+    };
+
+    let f = dashed_vnode(true);
+    let u = dashed_vnode(false);
+    let box_ = input_box(&f);
+    let fr = render(&f);
+    let ur = render(&u);
+
+    // Ring geometry from box constants: border 2px + the documented 2px inset.
+    const BORDER: i32 = 2;
+    const RING_INSET: i32 = 2;
+    let ring_x = box_.x + BORDER + RING_INSET;
+
+    // The ring's vertical run, sampled well inside the corners so the rounded
+    // ends cannot be mistaken for a break.
+    let top = box_.y + BORDER + RING_INSET + 4;
+    let bottom = box_.y + box_.h - BORDER - RING_INSET - 4;
+    assert!(
+        bottom > top,
+        "fixture field is too short to sample a ring run"
+    );
+
+    // Control first: unfocused has NO ring, so "continuous" cannot be satisfied
+    // by the page or the border simply being painted here.
+    let unfocused_accent = (top..bottom)
+        .filter(|y| px(&ur, ring_x, *y) == ACCENT)
+        .count();
+    assert_eq!(
+        unfocused_accent, 0,
+        "unfocused dashed field already has accent at x={ring_x}; the fixture cannot \
+         distinguish a ring"
+    );
+
+    // A dash interval for a 2px border is [6, 6], so 12px of column contains a
+    // whole period. Require the ENTIRE run to be accent: a dash necessarily
+    // breaks it.
+    let gaps: Vec<i32> = (top..bottom)
+        .filter(|y| px(&fr, ring_x, *y) != ACCENT)
+        .collect();
+    assert!(
+        gaps.is_empty(),
+        "the focus ring on a `border: 2px dashed` field is not solid: {}/{} pixels in \
+         the ring column x={ring_x} (y {top}..{bottom}) are not the accent colour, first \
+         at y={:?}. The stroke paint carried the border's dash into the ring.",
+        gaps.len(),
+        bottom - top,
+        gaps.first()
     );
 }
 
@@ -633,7 +777,7 @@ fn a_long_value_clips_the_caret_inside_the_field() {
         "caret core reached x={last}, past the field's inner clip"
     );
     assert!(
-        cols[0] as f32 >= text_origin_x(&box_),
+        cols[0] as f32 >= text_origin_x(&v, &box_),
         "caret core started left of the text origin"
     );
 
@@ -651,12 +795,13 @@ fn a_long_value_clips_the_caret_inside_the_field() {
         }
     }
     // The overflowed caret really is drawn ON the clip edge, not absent.
-    // `content_right` is the inner rect less the text padding; the core is
-    // the 2px run starting there. Deriving it from the box, not from the
-    // caret code, is what makes this an independent check.
-    let content_right = box_.x + box_.w - BORDER_INSET as i32 - TEXT_PAD as i32;
+    // `content_right` — the rightmost x a glyph may occupy, which the painter
+    // clamps the caret's measured advance to — is read from the geometry
+    // authority the painter also reads, so this pins the clamp to the
+    // CONTENT EDGE rather than to a frozen pair of constants.
+    let content_right = text_metrics(&v, &box_).content_right.round() as i32;
     assert_eq!(
         cols[0], content_right,
-        "an overflowing caret is not parked on the clip edge"
+        "an overflowing caret is not parked on the content edge (x={content_right})"
     );
 }

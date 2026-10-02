@@ -14,6 +14,45 @@ Four audits were run before writing this. Every claim below marked
 **[verified]** was re-checked against source by the planner; the rest is
 audit output that has not been independently confirmed.
 
+### Audit reliability warning
+
+Two of the four audits shipped false claims, both caught in review rather
+than in use:
+
+- The plan/progress audit named `velox-renderer/src/lib.rs:1014` as the
+  `into_direct_context` call site. It is `Ok(SkiaRenderer)` in the
+  non-native stub; the real site was `lib.rs:884` and the edit actually
+  needed was the re-export at `:1115`. It also missed a fifth defective
+  site entirely, and listed two sites that were correct only by accident
+  of drop order.
+- The same audit's "Phase-6 proptest 6.3" does not exist. There is no
+  `proptest` dependency in any `Cargo.toml`, no `proptest!` macro in any
+  `.rs`, and no commit in the project's history that ever added one.
+  `velox-style` has no `[dev-dependencies]` section at all.
+
+Per AGENTS.md this is the documented failure mode — an empty or
+UNKNOWN caller set means "the index could not answer", not "nothing
+depends on this". Treat every remaining unverified audit claim as a
+hypothesis, not a finding.
+
+### Two reconcilers, opposite fates
+
+The README's "Virtual DOM diffing" claim needs a distinction the brief
+got half wrong, because it changes what should be written:
+
+- `velox_renderer::reconcile_keyed_children` — **DELETED**. Grep returns
+  only prose in test comments. Recorded in `docs/RECONCILER.md` and
+  `CHANGELOG.md:29`.
+- `velox_dom::diff::diff` — **still ships**, exported at
+  `velox-dom/src/lib.rs:67`, complete and duplicate-key safe. It has zero
+  production callers; only tests.
+
+So the machinery is half-present. The README's error was not the
+existence of a reconciler, it was implying a reconciler participates in
+rendering. `docs/RECONCILER.md` is unambiguous: the loop is immediate-mode,
+`compute_layout` runs fresh on every frame, and there is no retained tree
+to diff against.
+
 ---
 
 ## Findings that shape the plan
@@ -239,6 +278,118 @@ focusable thing.
   worktree at HEAD — byte-identical failures — so not a regression, but
   CI cannot be green until they are regenerated or corrected.
 
+### F18 — A Windows-only test assertion will fail `P2` (known, unverifiable here)
+
+`velox-renderer/src/presenter.rs` gates `force_backend` on a **runtime**
+bool — `if cfg!(target_os = "linux")` — not a compile-time `#[cfg]`. On
+Windows the body is skipped, so `WINIT_UNIX_BACKEND` is never set, yet
+the test helper at `:512-520` asserts
+`std::env::var("WINIT_UNIX_BACKEND").as_deref() == Ok("x11")`. That
+assertion can only hold on Linux.
+
+It is invisible to the `skia-native-non-unix` CI job because that job runs
+a bare `cargo check`, which does not build `#[cfg(test)]` code. It will
+surface the first time anyone runs `cargo test` on Windows.
+
+Deliberately NOT fixed here: there is no non-unix rustup target
+installed and `skia-bindings` cannot download in this environment, so any
+fix would be an untested `#[cfg]` guess. Fixing it blind would replace a
+known, precisely-located latent bug with an unknown one. Fix when a
+Windows test run can actually verify it.
+
+---
+
+**The trap that decides how a theme must be built.** `scope_css` /
+`scope_single_selector` (`velox-sfc/src/codegen.rs:307-308`, `:388-409`)
+append `[data-v-<hash>]` to **every compound including the leftmost**,
+and the id is **per component** (`:281-288`). `append_scope_attr`
+(`:2676-2682`) tags only that component's own elements.
+
+So a rule in `App.vx`'s scoped block written as `.dark .todo-item`
+compiles to `.dark[data-v-APP] .todo-item[data-v-APP]` — while
+`<Todos/>`'s elements carry `data-v-TODOS` (children are inlined into the
+parent's VNode tree, `template_codegen.rs:2067`). **It never matches.**
+
+A theme class on the root is therefore *necessary but not sufficient*.
+Every component that must respond to the theme needs its OWN `.dark`
+rules inside its OWN scoped block. The duplicated dark rules are the
+correct shape, not a workaround. The corollary: an **unscoped** block in
+`App.vx` *does* reach child components, because the cascade walks the
+whole inlined tree (`velox-style/src/lib.rs:845-848`).
+
+### F17 — Theme mechanism verdict, with the traps that define it
+
+The cascade has **no specificity and no `!important`**: rules apply in
+source order, last match wins (`velox-style/src/lib.rs:812-823`). This
+makes *ordering* the entire override mechanism — base rules first,
+theme overrides last — and makes appending the only way a user can
+override.
+
+**What works today.** Attribute selectors work (`lib.rs:114-124`,
+exact-string `=` only — no `~=`/`^=`/`|=`). Descendant and ancestor
+matching work: `match_prefix` walks the ancestor chain
+(`:634-666`) and `Descendant` scans all of it (`:651`), checking the
+ancestor's `class` (`:107-113`). Root `:class="{ dark: is_dark }"`
+object syntax is proven at pixel level
+(`velox-sfc/tests/root_vif_class_behaviour.rs:158`) and re-themes the
+frame because the cascade re-runs per frame.
+
+**Adopted mechanism:** root `:class` object binding + per-component
+`.dark` descendant rules written LAST in each component's single scoped
+block. Zero framework change. Override surface = appending your own
+`.dark …` rules.
+
+**Silent-failure traps recorded so they are not re-learned:**
+
+| trap | behaviour |
+|---|---|
+| `--custom-prop` / `var(--x)` | inert; no `--` arm (`velox-dom/src/style.rs:1761`), no `var()` pass, and lint never reports it (`lint_css_tests.rs:132`) |
+| `@media (prefers-color-scheme: dark)` | flattened in **unconditionally** (`velox-style/src/lib.rs:249-268`) — dark wins in light mode |
+| `+` / `~` combinators | do not exist; parse as tag `+` (`:549` → `:476-486`), never match, zero tests cover them |
+| a second `<style scoped>` block | silently **replaces** the first (`velox-sfc/src/sfc.rs:283-286`) |
+| `:class="cond ? 'a' : 'b'"` | always `""` (`template_codegen.rs:4465-4469` + `:919`); only a stderr warning (`:5135-5139`) |
+| `:style="cond ? 'a' : 'b'"` | same, and inline outranks every sheet rule (`:674-685`) |
+| parent scoped rule reaching a child's elements | never matches (F16) |
+| `:hover` on an arbitrary node | only `button` / `on:click` / class `btn` (`events.rs:150-159`) |
+
+Two prior line refs in this plan were stale and are corrected: the cascade
+insert is `:820`, and `@media` is `:249-268`.
+
+**Deferred by design:** custom properties are the only mechanism that
+naturally crosses the component boundary, since they inherit via
+`filter_inheritable`. That is the strongest argument for building them
+later — a cascade change in three sub-parts, with no painter work if
+substitution happens before the value lands in the `style` string.
+
+---
+
+`examples/todo/tests/render_proof.rs:290-293` asserts
+`typed_dark_pixels > empty_dark_pixels + 5`, where `dark_pixels_in`
+(`:90-110`) counts pixels with **every channel `< 120`**.
+
+That measure was correct only while the painter hardcoded a white input
+box with near-black value text. A4 removed the hardcoding, so the input
+now honours the author's background — `#1e293b` = (30, 41, 59), every
+channel below 120, so the **background itself** counts as dark — while
+the typed value `#e2e8f0` = (226, 232, 240) and the derived placeholder
+≈(138, 146, 158) both sit above the threshold and are excluded. Typing
+therefore *reduces* the dark count, and the assertion is inverted for
+any dark-themed input.
+
+Verified not to be an sfc regression: stubbing `emit_dispatch_registrations`
+to emit nothing reproduces identical numbers, `grep -rn "emit(\|
+define_emits\|dispatch_emit" examples/todo/src/` returns nothing, and every
+VNode-level assertion in the same test passes — including
+`input.get("value") == Some("Ship the rewrite")`. Codegen is right; the
+probe is wrong.
+
+The fix is to stop measuring brightness. Count pixels that **differ from
+the input's own resolved background colour** — an ink measure rather than
+a dark measure. That is theme-independent, which is exactly what
+requirement 7 needs: the same assertion must hold in light and dark mode.
+A brightness threshold cannot express that, because which end of the
+scale counts as "ink" is a property of the theme, not of the text.
+
 ---
 
 ## Sequencing
@@ -443,9 +594,113 @@ rule win outright. Required for real override semantics, and a
 precondition for user-styleable core components in the long run. Cascade
 rewrite — its own cycle.
 
-### D6 — Remove dead non-optional dependencies `P2`
+### D6 — Remove dead non-optional dependencies `P0` (was `P2`)
 
 `pollster`, `wgpu_glyph`, `ab_glyph` at `velox-renderer/Cargo.toml:41,43,44`.
+
+**Promoted to P0 during D9 triage.** `grep -rn 'wgpu_glyph\|ab_glyph'`
+over `velox-renderer/src`, `velox-renderer/tests` and `examples/`
+returns 0 hits — all three are genuinely unused. `wgpu_glyph` is the
+sole reason the transitive chain `wgpu_glyph → glyph_brush →
+glyph_brush_draw_cache → crossbeam-deque → crossbeam-epoch 0.9.18` exists
+at all, and `crossbeam-epoch` carries RUSTSEC-2026-0204. Deleting three
+unused lines removes a vulnerable crate from the shipped graph, which is
+the only available fix: the advisory has no patched version.
+
+### D7 — Make `skia-native` build on non-unix `P0`
+
+Found while fixing A1. The GPU path is **unbuildable on Windows and
+macOS**: the stub `SkiaGlContext` (`skia_gl.rs:436`) has no
+`into_direct_context`, and `skia_surface.rs` calls
+`create_context_from_winit`, which only exists in `unix_impl`. Every gate
+so far has run on Linux, so this rot was invisible.
+
+"Publishable" means it builds cross-platform. Add a
+`cargo check --features skia-native` job for a non-unix target to CI so
+this cannot rot again, and either implement the stub or make the feature
+fail with a clear message instead of a missing-method error.
+
+### D8 — Record the `create_direct_context` API break `P1`
+
+`velox_renderer::create_direct_context()` now returns `GlDirectContext`
+rather than `skia_safe::gpu::DirectContext`. Callers use `.dctx()` /
+`.dctx_mut()` / `.gl()` / `.into_parts()`. Needs a CHANGELOG entry when
+the release is cut.
+
+### D9 — Triage the `cargo audit` findings `P0` — DONE (analysis), needs recording
+
+`cargo audit --json` reports **5 vulnerabilities and 0 warnings**. The
+"9 further advisories" claim is false; the advisory DB has no warnings
+for this tree. All five list **no patched version**, so none can be
+resolved by upgrading. They have to be resolved or justified per
+advisory, which is what the table below does.
+
+| advisory | package | reached via | verdict |
+|---|---|---|---|
+| RUSTSEC-2026-0204 | crossbeam-epoch 0.9.18 | `wgpu_glyph` → `glyph_brush` → `glyph_brush_draw_cache` → `crossbeam-deque` | **RESOLVE BY DELETION** — see below |
+| RUSTSEC-2026-0194 | quick-xml 0.38.4 | `softbuffer` → `wayland-client` → `wayland-scanner` (proc-macro) | waive — build-time only |
+| RUSTSEC-2026-0195 | quick-xml 0.38.4 | same | waive — build-time only |
+| RUSTSEC-2026-0067 | tar 0.4.44 | `skia-safe` → `skia-bindings` (build-dep) | waive — build-time only |
+| RUSTSEC-2026-0068 | tar 0.4.44 | same | waive — build-time only |
+
+**RUSTSEC-2026-0204 is fixed by D6, not by a version bump.** The whole
+chain exists only because `wgpu_glyph` is declared at
+`velox-renderer/Cargo.toml:43` while being completely unused: `grep -rn
+'wgpu_glyph\|ab_glyph'` over `velox-renderer/src`, `velox-renderer/tests`
+and `examples/` returns **0 hits**. `ab_glyph` (`:44`) and `pollster`
+(`:41`) are dead the same way. Deleting three unused lines removes a
+transitive vulnerable crate from the graph, so D6 is a security task, not
+just hygiene.
+
+**The four waivers are the same argument, and it is verifiable.** Both
+`quick-xml` and `tar` reach velox only at build time:
+
+- `cargo tree -i tar --edges normal` returns **zero** edges. `tar` is
+  reached solely through `skia-bindings`, a `[build-dependencies]` entry.
+- `quick-xml` is reached only through `wayland-scanner`, which is a
+  **proc-macro**. Proc-macros compile to host dylibs that run during
+  compilation; their code is not linked into the artifact a downstream
+  user builds. The path also goes through `softbuffer`, which is optional
+  and enabled only under `skia-native` on unix
+  (`velox-renderer/Cargo.toml:21,30`).
+
+Both vulnerabilities are memory-safety and resource-exhaustion issues in
+parsers. velox feeds neither parser untrusted input: one unpacks a
+vendored Skia tarball at build time, the other reads Wayland protocol
+XML that ships with `wayland-scanner`. A downstream velox user cannot
+reach either code path.
+
+Recording this matters because `cargo audit` does not distinguish
+build-dependencies from runtime dependencies, which is exactly why the
+raw count of 5 looks worse than the exposure. The CI job should encode
+the per-advisory justification rather than carry an undifferentiated
+ignore list.
+
+### D10 — Stop the feature leak that makes `build-test` non-minimal `P1`
+
+`velox-cli/Cargo.toml:52` dev-depends on `velox-renderer` with
+`features = ["skia-native"]`, and the example crates build-depend on
+`velox-cli`. Verified with `cargo tree -e features -i velox-renderer
+--workspace`: `skia-native` is enabled workspace-wide, so **every**
+workspace-wide cargo command compiles Skia natively.
+
+Consequence: the `continue-on-error: true` on the `renderer-features`
+job is decorative. `build-test` already catches a Skia failure first, so
+that flag implies a permissiveness CI does not actually have. Either
+feature-gate the dev-dependency properly or stop implying the
+separation.
+
+### D11 — Cross-frame focus is keyed by structural path `P2`
+
+`preserve_input_state` (`events.rs:526-540`) restores focus by matching
+`t.path == p.path`. An `<input>` inside a reordered `v-for` therefore
+hands its focus and caret to whichever item now occupies its index.
+
+This is the accepted cost of the immediate-mode loop — `:key` is a
+declared non-goal, not an oversight — but it interacts with A7: F2-focus
+is only meaningful if focus survives the reorder it is meant to target.
+Record it in the A7 notes so the focus API is not documented as more
+durable than it is.
 
 ---
 

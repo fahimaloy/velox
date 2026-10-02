@@ -450,7 +450,51 @@ fn fixtures_are_current() {
         stale.is_empty(),
         "the committed generated fixtures are stale, so every test below would be \
          asserting on code the compiler no longer emits:\n  {}\n\
-         (run the fixture writer to update them)",
+         (run `cargo test -p velox-sfc --test props_collection -- --ignored write_fixtures` to update them)",
+        stale.join("\n  ")
+    );
+}
+
+/// Rewrite the committed fixtures from what the compiler produces now.
+///
+/// `#[ignore]`d, and the only way the fixtures change: they are compiler output,
+/// so a change to the generator has to be a deliberate act with the diff in
+/// front of you, not a side effect of running the suite. `fixtures_are_current`
+/// then holds the result in place — every run after this one fails if either the
+/// fixtures or the generator moved without the other.
+///
+/// `#[ignore]` is one guard; this is the second. `--ignored` is a single flag
+/// someone types to see the full list of tests, so a test that rewrites four
+/// committed files should not be one keystroke away either. Run without
+/// `VELOX_WRITE_FIXTURES=1` it writes nothing and reports which fixtures are
+/// stale, which is what a run of `--ignored` should be able to do safely; with
+/// the variable set it writes. The two tests then have distinct jobs and neither
+/// can be mistaken for the other: `fixtures_are_current` fails, `write_fixtures`
+/// (bare) reports, `write_fixtures` (flagged) rewrites.
+#[test]
+#[ignore = "fixture writer: rewrites committed compiler output (needs VELOX_WRITE_FIXTURES=1)"]
+fn write_fixtures() {
+    let base = vx_tree();
+    let authorised = std::env::var_os("VELOX_WRITE_FIXTURES").is_some();
+    let mut stale = Vec::new();
+    for (name, source, mode) in fixture_sources() {
+        let generated = generate(source, name, &base, mode);
+        let path = fixture_path(name);
+        let current = std::fs::read_to_string(&path).unwrap_or_default();
+        if current == generated {
+            continue;
+        }
+        stale.push(path.display().to_string());
+        if authorised {
+            std::fs::write(&path, generated)
+                .unwrap_or_else(|e| panic!("{name}: write fixture: {e}"));
+        }
+    }
+    assert!(
+        authorised || stale.is_empty(),
+        "these committed fixtures differ from what the compiler produces now, and this \
+         run was not authorised to rewrite them:\n  {}\n\
+         re-run with VELOX_WRITE_FIXTURES=1 to update them",
         stale.join("\n  ")
     );
 }

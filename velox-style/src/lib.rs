@@ -40,12 +40,48 @@ pub enum Combinator {
     Child,
 }
 
+/// Attribute the cascade writes `::placeholder` declarations onto.
+///
+/// A pseudo-element needs its own attribute because the element's own `style`
+/// is the value-text style. `velox-renderer` reads this one only when the
+/// field is empty, so the two can never be confused.
+pub const PLACEHOLDER_STYLE_ATTR: &str = "style:placeholder";
+
+/// Whether a `::placeholder` selector's target is a form control that is
+/// currently SHOWING its placeholder.
+///
+/// Three conditions, all of them load-bearing:
+/// * it is an `<input>` — `textarea::placeholder` is not supported, because the
+///   painter has no placeholder pass for the multi-line control and claiming it
+///   would be a false parity claim;
+/// * it carries a non-empty `placeholder`;
+/// * its `value` is empty or absent — a filled field shows the value, not the
+///   placeholder, so a `::placeholder` rule must not win there.
+fn shows_placeholder(tag: &str, props: &Props) -> bool {
+    tag == "input"
+        && props
+            .attrs
+            .get("placeholder")
+            .is_some_and(|p| !p.trim().is_empty())
+        && props.attrs.get("value").is_none_or(|v| v.is_empty())
+}
+
 /// A single part of a CSS selector (e.g., `h1`, `.class`, `h1.class`, `[attr]`).
 #[derive(Debug, Clone, PartialEq)]
 pub struct SelectorPart {
     pub tag: String,
     pub class: String,
     pub hover: bool,
+    /// This part targets the `::placeholder` pseudo-element of a form control,
+    /// i.e. the selector ended in `::placeholder`.
+    ///
+    /// Why a flag and not a general pseudo-element enum: `::placeholder` is
+    /// the ONLY pseudo-element Velox has any notion of, because an `<input>`
+    /// has no child node for a general pseudo-element to style — the
+    /// placeholder is not a child, it is a string the painter draws when the
+    /// value is empty. A general enum would advertise support that does not
+    /// exist.
+    pub placeholder: bool,
     pub attr_name: String,
     pub attr_value: Option<String>,
     /// Combinator that connected this part to the part on its left in the
@@ -56,6 +92,15 @@ pub struct SelectorPart {
 impl SelectorPart {
     fn matches_element(&self, tag: &str, props: &Props, hovered: bool) -> bool {
         if self.hover && !hovered {
+            return false;
+        }
+        // `::placeholder` matches only where a placeholder is actually
+        // VISIBLE. Before this flag existed the selector was silently
+        // truncated to `input` (see `parse_selector_part`), so
+        // `input::placeholder { color: red }` matched every input and painted
+        // the VALUE red — the opposite of what the author wrote, and the more
+        // damaging of the two failure modes because it looks intentional.
+        if self.placeholder && !shows_placeholder(tag, props) {
             return false;
         }
         let tag_ok = self.tag.is_empty() || self.tag == "*" || self.tag == tag;
@@ -118,6 +163,34 @@ impl CompoundSelector {
     #[allow(dead_code)]
     fn is_class_only(&self) -> bool {
         self.parts.len() == 1 && self.parts[0].is_class_only()
+    }
+
+    /// Whether any part of this selector names the `::placeholder`
+    /// pseudo-element (e.g. `input::placeholder`, `.field::placeholder`).
+    fn has_placeholder(&self) -> bool {
+        self.parts.iter().any(|p| p.placeholder)
+    }
+
+    /// Whether this selector's `::placeholder` part is the selector's SUBJECT:
+    /// its only `::placeholder` part, and the rightmost one.
+    ///
+    /// `::placeholder` is a pseudo-ELEMENT, and a pseudo-element is not a node.
+    /// It is the string the painter draws inside an empty control, so it has no
+    /// box of its own and therefore cannot be an ANCESTOR of anything. CSS lets
+    /// it appear as the subject only, so `.wrap input::placeholder` is real CSS
+    /// (the placeholder of an input inside `.wrap`) and stays accepted, while
+    /// `.field::placeholder .row` is not: its subject is `.row` and the
+    /// placeholder is a link in the chain, which no node can satisfy.
+    ///
+    /// The distinction matters because the cascade writes a placeholder rule's
+    /// declarations to a DIFFERENT attribute from the element's own (see
+    /// `PLACEHOLDER_STYLE_ATTR`). A rule whose placeholder part is not the
+    /// subject matched an ordinary element and would land in that element's own
+    /// `style`, repainting it — the opposite of what the author wrote, and
+    /// silently so, because the rule looks like it was honoured.
+    fn placeholder_is_subject(&self) -> bool {
+        self.parts.last().is_some_and(|p| p.placeholder)
+            && self.parts.iter().filter(|p| p.placeholder).count() == 1
     }
 }
 
@@ -261,6 +334,51 @@ impl<'i> cssparser::AtRuleParser<'i> for DeclarationParser {
 
 /// Parse a single selector part (tag, .class, tag.class, [attr], [attr="val"], etc.) with optional :hover.
 /// Attribute selectors: `[attr]`, `[attr="value"]`, `[attr='value']` appended to tag/class (e.g. `.btn[data-v-abc]`).
+/// Split a selector part's trailing pseudos off its name.
+///
+/// Returns `(name, hover, placeholder)`. Handles the single-colon form
+/// (`:hover`) and the DOUBLE-colon pseudo-element form (`::placeholder`)
+/// separately, which the previous `split_once(':')` could not: for
+/// `input::placeholder` it produced `pseudo == ":placeholder"`, which matched
+/// neither `"hover"` nor anything else, so the pseudo was dropped and the rule
+/// silently became a plain `input` rule.
+///
+/// An unknown pseudo is NOT an error and does not reject the selector — the
+/// previous behaviour for `:focus`, `::before` and friends was to ignore them,
+/// and silently dropping an unknown pseudo is strictly better than discarding
+/// the rule an author wrote around it. What changed is only that the one
+/// pseudo-element Velox actually implements is now seen.
+fn split_pseudos(base_trimmed: &str) -> (String, bool, bool) {
+    let Some(colon) = base_trimmed.find(':') else {
+        return (base_trimmed.to_string(), false, false);
+    };
+    let name = base_trimmed[..colon].trim().to_string();
+    // Everything after the first colon, then peel one leading colon per
+    // pseudo: `::placeholder` -> `:placeholder` -> `placeholder`.
+    let mut rest = base_trimmed[colon + 1..].trim_start_matches(':');
+    let mut hover = false;
+    let mut placeholder = false;
+    // Only two pseudos exist, so one pass over the `:`-separated tail is
+    // enough; the loop only exists so `::placeholder:hover` (harmless) does
+    // not lose either flag.
+    while !rest.is_empty() {
+        let (pseudo, tail) = match rest.split_once(':') {
+            Some((p, t)) => (p, Some(t)),
+            None => (rest, None),
+        };
+        match pseudo.trim().to_ascii_lowercase().as_str() {
+            "hover" => hover = true,
+            "placeholder" => placeholder = true,
+            _ => {}
+        }
+        match tail {
+            Some(t) => rest = t.trim_start_matches(':'),
+            None => break,
+        }
+    }
+    (name, hover, placeholder)
+}
+
 fn parse_selector_part(raw: &str) -> Option<SelectorPart> {
     // Robustly extract attribute selector: find '[' and matching ']' (first ']' after '[')
     // Allows trailing pseudo like `.btn[data-v-x]:hover`.
@@ -318,6 +436,7 @@ fn parse_selector_part(raw: &str) -> Option<SelectorPart> {
                 tag: String::new(),
                 class: String::new(),
                 hover: false,
+                placeholder: false,
                 attr_name,
                 attr_value,
                 combinator: Combinator::None,
@@ -325,17 +444,14 @@ fn parse_selector_part(raw: &str) -> Option<SelectorPart> {
         }
     }
 
-    let (name_raw, hover) = if let Some((base, pseudo)) = base_trimmed.split_once(':') {
-        (base.trim().to_string(), pseudo.trim() == "hover")
-    } else {
-        (base_trimmed.to_string(), false)
-    };
+    let (name_raw, hover, placeholder) = split_pseudos(base_trimmed);
     // Allow `*` universal selector: treat like empty tag (matches any tag)
     if name_raw == "*" {
         return Some(SelectorPart {
             tag: "*".to_string(),
             class: String::new(),
             hover,
+            placeholder,
             attr_name,
             attr_value,
             combinator: Combinator::None,
@@ -350,6 +466,7 @@ fn parse_selector_part(raw: &str) -> Option<SelectorPart> {
             tag: String::new(),
             class: String::new(),
             hover,
+            placeholder,
             attr_name,
             attr_value,
             combinator: Combinator::None,
@@ -364,6 +481,7 @@ fn parse_selector_part(raw: &str) -> Option<SelectorPart> {
             tag: String::new(),
             class: class.to_string(),
             hover,
+            placeholder,
             attr_name,
             attr_value,
             combinator: Combinator::None,
@@ -378,6 +496,7 @@ fn parse_selector_part(raw: &str) -> Option<SelectorPart> {
             tag: tag.to_string(),
             class: class.to_string(),
             hover,
+            placeholder,
             attr_name,
             attr_value,
             combinator: Combinator::None,
@@ -387,6 +506,7 @@ fn parse_selector_part(raw: &str) -> Option<SelectorPart> {
             tag: name_raw,
             class: String::new(),
             hover,
+            placeholder,
             attr_name,
             attr_value,
             combinator: Combinator::None,
@@ -706,12 +826,37 @@ where
             } => {
                 let hovered = is_hovered(tag, props);
                 let mut acc: HashMap<String, String> = inherited.clone();
+                // Declarations from `::placeholder` rules, kept APART from the
+                // element's own. They cannot go into `style`: an `<input>`'s
+                // `style` is what the painter reads the VALUE's colour and
+                // geometry from, so `input::placeholder { color: red }` landing
+                // there would paint the value red. They are not inherited
+                // either — a placeholder never inherits from its own element's
+                // `color` through this path, because the element's colour is
+                // exactly what a placeholder is dimmed FROM.
+                let mut pseudo_acc: HashMap<String, String> = HashMap::new();
                 // Match all selectors against this element, passing the ancestor chain
                 // so compound selectors (e.g., `.header h1`) can walk up the tree.
                 for rule in &sheet.rules {
                     if matches_selector(&rule.selector, tag, props, hovered, ancestors) {
+                        let target = if rule.selector.has_placeholder() {
+                            // A selector that names `::placeholder` anywhere but
+                            // on its own subject matches no element in real CSS,
+                            // so its declarations must reach NOBODY. Keying off
+                            // the last part alone is what made `.a::placeholder
+                            // .b` repaint `.b`: the placeholder part sat in the
+                            // chain, `.b` was the subject, the last part had no
+                            // placeholder flag, and the declarations fell into
+                            // `.b`'s own `style`.
+                            if !rule.selector.placeholder_is_subject() {
+                                continue;
+                            }
+                            &mut pseudo_acc
+                        } else {
+                            &mut acc
+                        };
                         for (k, v) in &rule.decls {
-                            acc.insert(k.clone(), v.clone());
+                            target.insert(k.clone(), v.clone());
                         }
                     }
                 }
@@ -720,6 +865,16 @@ where
                 let final_style = merged.clone();
                 if !final_style.is_empty() {
                     new_props = new_props.set("style", final_style.clone());
+                }
+                if !pseudo_acc.is_empty() {
+                    let merged_pseudo = merge_styles(
+                        new_props
+                            .attrs
+                            .get(PLACEHOLDER_STYLE_ATTR)
+                            .map(|s| s.as_str()),
+                        &pseudo_acc,
+                    );
+                    new_props = new_props.set(PLACEHOLDER_STYLE_ATTR, merged_pseudo);
                 }
                 let inherit_next = filter_inheritable(Some(&final_style));
                 // Build child ancestors: this element + current ancestors
@@ -762,6 +917,18 @@ pub fn compute_styles_for_node(
         // Apply matching rules from stylesheet
         for rule in &sheet.rules {
             if matches_selector(&rule.selector, tag, props, is_hovered, ancestors) {
+                // `ComputedStyle` is the element's OWN resolved style, so it can
+                // never hold `::placeholder` declarations — the painter reads the
+                // placeholder's colour and geometry from
+                // `PLACEHOLDER_STYLE_ATTR` instead, and a placeholder's colour
+                // here would paint the VALUE. A rule whose placeholder part is
+                // not the selector's subject matches nothing at all, so it is
+                // skipped too. `apply_styles_with_hover` makes both distinctions
+                // by routing into a second accumulator; this function has one
+                // accumulator, so both cases collapse into "drop the rule".
+                if rule.selector.has_placeholder() {
+                    continue;
+                }
                 for (prop, value) in &rule.decls {
                     computed.set_property(prop, value);
                 }
@@ -775,4 +942,309 @@ pub fn compute_styles_for_node(
     }
 
     computed
+}
+
+#[cfg(test)]
+mod placeholder_tests {
+    use super::*;
+    use velox_dom::h;
+
+    // ── split_pseudos ────────────────────────────────────────────────────
+    //
+    // The regression that mattered: the old parser used `split_once(':')`,
+    // which turns `input::placeholder` into `pseudo == ":placeholder"` — one
+    // colon too many, matching neither `"hover"` nor anything else. The pseudo
+    // was silently dropped and `input::placeholder { color: red }` degraded
+    // into a plain `input` rule, which paints the VALUE text red. Every one of
+    // these is the shape that bug took.
+
+    #[test]
+    fn a_double_colon_pseudo_element_is_not_mistaken_for_a_single_colon_one() {
+        let (name, hover, placeholder) = split_pseudos("input::placeholder");
+        assert_eq!(name, "input");
+        assert!(placeholder, "`::placeholder` was not recognised");
+        assert!(!hover, "`::placeholder` must not also set :hover");
+    }
+
+    #[test]
+    fn the_single_colon_pseudo_classes_still_parse() {
+        assert_eq!(
+            split_pseudos("div:hover"),
+            ("div".to_string(), true, false),
+            ":hover regressed while ::placeholder was being added"
+        );
+    }
+
+    #[test]
+    fn a_selector_with_no_pseudo_is_untouched() {
+        assert_eq!(
+            split_pseudos(".field"),
+            (".field".to_string(), false, false)
+        );
+        assert_eq!(split_pseudos("input"), ("input".to_string(), false, false));
+    }
+
+    #[test]
+    fn a_class_with_a_placeholder_pseudo_keeps_its_class() {
+        let (name, hover, placeholder) = split_pseudos(".field::placeholder");
+        assert_eq!(name, ".field");
+        assert!(placeholder);
+        assert!(!hover);
+    }
+
+    #[test]
+    fn two_pseudos_in_one_selector_keep_both_flags() {
+        let (name, hover, placeholder) = split_pseudos("input::placeholder:hover");
+        assert_eq!(name, "input");
+        assert!(placeholder);
+        assert!(hover);
+    }
+
+    #[test]
+    fn an_unknown_pseudo_is_ignored_rather_than_rejecting_the_selector() {
+        // The pre-existing behaviour for `:focus` / `::before` was to ignore
+        // them, and dropping the whole rule would be a regression.
+        let (name, hover, placeholder) = split_pseudos("input::before");
+        assert_eq!(name, "input");
+        assert!(!placeholder);
+        assert!(!hover);
+    }
+
+    #[test]
+    fn the_placeholder_pseudo_is_case_insensitive() {
+        assert!(
+            split_pseudos("input::PLACEHOLDER").2,
+            "CSS pseudo-element names are ASCII case-insensitive"
+        );
+    }
+
+    // ── shows_placeholder ────────────────────────────────────────────────
+
+    fn props(pairs: &[(&str, &str)]) -> Props {
+        let mut p = Props::new();
+        for (k, v) in pairs {
+            p = p.set(*k, *v);
+        }
+        p
+    }
+
+    #[test]
+    fn a_placeholder_only_matches_a_control_that_is_showing_it() {
+        assert!(shows_placeholder(
+            "input",
+            &props(&[("placeholder", "hint")])
+        ));
+        assert!(shows_placeholder(
+            "input",
+            &props(&[("placeholder", "hint"), ("value", "")])
+        ));
+    }
+
+    #[test]
+    fn a_filled_input_is_not_showing_its_placeholder() {
+        assert!(
+            !shows_placeholder("input", &props(&[("placeholder", "hint"), ("value", "x")])),
+            "a ::placeholder rule that matched a filled field would repaint the \
+             VALUE text, which is how the double-colon bug presented"
+        );
+    }
+
+    #[test]
+    fn an_input_with_no_placeholder_attribute_does_not_match() {
+        assert!(!shows_placeholder("input", &props(&[])));
+        assert!(!shows_placeholder(
+            "input",
+            &props(&[("placeholder", "   ")])
+        ));
+    }
+
+    #[test]
+    fn a_non_input_never_shows_a_placeholder() {
+        assert!(!shows_placeholder(
+            "div",
+            &props(&[("placeholder", "hint")])
+        ));
+        assert!(!shows_placeholder(
+            "textarea",
+            &props(&[("placeholder", "hint")])
+        ));
+    }
+
+    // ── end to end through the cascade ───────────────────────────────────
+
+    fn styled_input(pairs: &[(&str, &str)], sheet: &Stylesheet) -> Props {
+        let tree = h("div", Props::new(), vec![h("input", props(pairs), vec![])]);
+        let mut out = None;
+        fn walk(node: &VNode, out: &mut Option<Props>) {
+            if let VNode::Element {
+                tag,
+                props,
+                children,
+            } = node
+            {
+                if tag == "input" {
+                    *out = Some(props.clone());
+                }
+                for c in children {
+                    walk(c, out);
+                }
+            }
+        }
+        walk(&apply_with_cascade(&tree, sheet), &mut out);
+        out.expect("the input must survive the cascade")
+    }
+
+    #[test]
+    fn a_placeholder_rule_lands_on_its_own_attribute_and_not_on_style() {
+        let sheet = Stylesheet::parse("input::placeholder { color: #ff0000; }");
+        let p = styled_input(&[("placeholder", "hint")], &sheet);
+        assert_eq!(
+            p.attrs.get(PLACEHOLDER_STYLE_ATTR).map(String::as_str),
+            Some("color: #ff0000;"),
+            "the ::placeholder declarations did not reach {PLACEHOLDER_STYLE_ATTR}"
+        );
+        assert!(
+            p.attrs.get("style").is_none_or(|s| !s.contains("ff0000")),
+            "the ::placeholder colour leaked into the element's own `style`, \
+             which is the VALUE text's style: the two would fight"
+        );
+    }
+
+    #[test]
+    fn a_placeholder_rule_does_not_land_on_a_filled_field() {
+        let sheet = Stylesheet::parse("input::placeholder { color: #ff0000; }");
+        let p = styled_input(&[("placeholder", "hint"), ("value", "typed")], &sheet);
+        assert!(
+            !p.attrs.contains_key(PLACEHOLDER_STYLE_ATTR),
+            "the ::placeholder rule applied to a field showing a value"
+        );
+    }
+
+    #[test]
+    fn a_placeholder_rule_is_not_inherited_by_descendants() {
+        // The declarations live on a separate attribute precisely so they
+        // cannot flow down the tree the way `style` does.
+        let sheet = Stylesheet::parse("input::placeholder { color: #ff0000; }");
+        let tree = h(
+            "div",
+            Props::new(),
+            vec![h(
+                "input",
+                props(&[("placeholder", "hint")]),
+                vec![h("span", Props::new(), vec![])],
+            )],
+        );
+        let styled = apply_with_cascade(&tree, &sheet);
+        let child = match &styled {
+            VNode::Element { children, .. } => match &children[0] {
+                VNode::Element { children, .. } => match &children[0] {
+                    VNode::Element { props, .. } => props.clone(),
+                    _ => panic!("expected an element"),
+                },
+                _ => panic!("expected an element"),
+            },
+            _ => panic!("expected an element"),
+        };
+        assert!(
+            !child.attrs.contains_key(PLACEHOLDER_STYLE_ATTR),
+            "the placeholder declarations were inherited by a child element"
+        );
+    }
+
+    // ── has_placeholder / placeholder_is_subject ──────────────────────────
+    //
+    // The routing table these two decide. `apply_styles_with_hover` asks them
+    // once per matching rule, so a `false` here is the difference between a
+    // declaration painting a placeholder and painting an ordinary element.
+
+    fn sel(css: &str) -> CompoundSelector {
+        Stylesheet::parse(&format!("{css} {{ color: red; }}"))
+            .rules
+            .into_iter()
+            .next()
+            .expect("the fixture must parse to exactly one rule")
+            .selector
+    }
+
+    #[test]
+    fn a_selector_with_no_placeholder_part_is_not_a_placeholder_selector() {
+        let s = sel(".wrap input.b .c");
+        assert!(!s.has_placeholder(), "no part names ::placeholder");
+        assert!(
+            !s.placeholder_is_subject(),
+            "a selector with no ::placeholder has no placeholder subject"
+        );
+    }
+
+    #[test]
+    fn a_placeholder_as_the_sole_subject_part_is_accepted() {
+        for css in [
+            "input::placeholder",
+            ".field::placeholder",
+            "*::placeholder",
+        ] {
+            let s = sel(css);
+            assert!(s.has_placeholder(), "{css}: no part named ::placeholder");
+            assert!(
+                s.placeholder_is_subject(),
+                "{css}: a sole ::placeholder part on the subject is real CSS"
+            );
+        }
+    }
+
+    #[test]
+    fn a_placeholder_after_a_descendant_chain_is_still_the_subject() {
+        // `.wrap` is a chain link, `input::placeholder` is the subject. This is
+        // valid CSS and must keep routing to the placeholder attribute; the
+        // rejection below is about the placeholder being the LINK, not about the
+        // selector having more than one part.
+        for css in [".wrap input::placeholder", ".wrap > input::placeholder"] {
+            let s = sel(css);
+            assert!(
+                s.placeholder_is_subject(),
+                "{css}: the rightmost part is the ::placeholder subject, so this \
+                 is valid CSS and must be accepted"
+            );
+        }
+    }
+
+    #[test]
+    fn a_placeholder_that_is_not_the_subject_is_rejected() {
+        for css in [".a::placeholder .b", ".a::placeholder > .b"] {
+            let s = sel(css);
+            assert!(s.has_placeholder(), "{css}: a part does name ::placeholder");
+            assert!(
+                !s.placeholder_is_subject(),
+                "{css}: the ::placeholder part is a chain LINK, not the subject. \
+                 A pseudo-element has no box, so it cannot be an ancestor; real \
+                 CSS matches nothing here and Velox must not paint the subject."
+            );
+        }
+    }
+
+    #[test]
+    fn a_placeholder_in_the_chain_order_does_not_change_the_subject() {
+        // The mirror of the case above, and the one that shows which end of the
+        // chain decides. `.a .b::placeholder` still ends in the placeholder, so
+        // it styles `.b`'s placeholder and is valid CSS — it is the ORDER that
+        // matters, not the presence of another part.
+        let s = sel(".a .b::placeholder");
+        assert!(
+            s.placeholder_is_subject(),
+            ".a .b::placeholder ends in the subject and is real CSS"
+        );
+    }
+
+    #[test]
+    fn a_second_placeholder_part_disqualifies_the_selector() {
+        // Two ::placeholder parts: the subject carries one, but a LINK carries
+        // one too, and the link alone is already illegal. Guarding only on the
+        // last part would accept this and reintroduce the original defect.
+        let s = sel(".a::placeholder .b::placeholder");
+        assert!(
+            !s.placeholder_is_subject(),
+            "a ::placeholder in the chain disqualifies the selector even when \
+             the subject also has one"
+        );
+    }
 }

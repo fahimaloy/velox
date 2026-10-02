@@ -1,5 +1,5 @@
 <template>
-  <div class="todo-input">
+  <div class="field" :class="{ dark: dark }">
     <input
       type="text"
       class="input"
@@ -11,9 +11,32 @@
 </template>
 
 <script setup>
+// The composer field. It owns how the field LOOKS and nothing else: the text
+// belongs to `Todos`, and so does the decision of what happens when the user
+// types.
+//
+// `.field` exists only to hold the theme class, and it cannot be styled by a
+// `.dark …` rule in this same block: the cascade matches a selector's leftmost
+// part only against a STRICT ancestor (velox-style/src/lib.rs `match_prefix`),
+// and the element carrying the class is never its own ancestor. So the carrier
+// is a wrapper and the surface lives one level down.
+//
+// The field's own defaults are declared here rather than inherited from the
+// page, so the component is usable on its own. `dark` is a prop because of the
+// wrapper note in the template above.
+//
+// The author's `padding`, `background` and `border` on an `<input>` are honoured
+// by the renderer, and `::placeholder` is a real pseudo-class: the cascade keeps
+// those declarations on a SEPARATE `style:placeholder` attribute
+// (velox-style/src/lib.rs:812, `PLACEHOLDER_STYLE_ATTR`) so they cannot repaint
+// the value, and the box painter reads them when the value is empty
+// (velox-renderer/src/skia_render.rs `placeholder_color`). A placeholder's
+// colour is otherwise DERIVED from the field's own text colour, so the one below
+// is a decision rather than an absence.
 pub struct Props {
     pub value: String,
     pub placeholder: String,
+    pub dark: bool,
 }
 
 pub struct State {
@@ -26,7 +49,8 @@ impl State {
             props: Props {
                 value: String::new(),
                 placeholder: String::from("What needs to be done?"),
-            }
+                dark: false,
+            },
         }
     }
 
@@ -38,24 +62,56 @@ impl State {
         self.props.placeholder.clone()
     }
 
-    // The root dispatcher routes the input handler to the owning Todos state.
-    // This signature keeps the generated component handler well-formed.
+    pub fn dark(&self) -> bool {
+        self.props.dark
+    }
+
+    // The root dispatcher routes a typed event to the owning `Todos` state, so
+    // this signature exists only to keep the generated component handler well
+    // formed. `Todos::on_input` is where the text actually lands.
     pub fn on_input(&self) {}
 }
 </script>
 
 <style scoped>
-.todo-input {
+.field {
     display: flex;
-    gap: 8px;
-}
-.input {
-    flex: 1;
-    padding: 10px 12px;
+    flex: 1 1 auto;
+    min-width: 0;
+    font-family: "Inter", "Noto Sans", "DejaVu Sans", sans-serif;
     font-size: 15px;
+    line-height: 1.5;
+}
+
+/* 44px tall with 14px of side padding: the two numbers that decide whether a
+   text field feels like a control or like a line in a paragraph. `min-width: 0`
+   is what lets the field shrink inside the composer's flex row instead of
+   refusing to. */
+.input {
+    flex: 1 1 auto;
+    width: 100%;
+    min-width: 0;
+    height: 44px;
+    padding: 0 14px;
+    border: 1px solid #dedbd3;
     border-radius: 8px;
-    border: 1px solid #3a3a5c;
-    background: #16213e;
-    color: #e6edf3;
+    /* Exactly the composer's own fill, so the field reads as part of one
+       surface instead of a box sitting inside a box. */
+    background: #ffffff;
+    color: #14181b;
+    font-size: 15px;
+}
+.input::placeholder {
+    color: #6b7377;
+}
+
+/* Dark overrides — source order decides the winner, so they come last. */
+.dark .input {
+    border: 1px solid #333d45;
+    background: #161b1f;
+    color: #e8ecec;
+}
+.dark .input::placeholder {
+    color: #75818a;
 }
 </style>

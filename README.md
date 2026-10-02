@@ -4,10 +4,14 @@ Velox is a modular Rust UI framework for building reactive, component-driven des
 
 It provides:
 - **SFC compiler** for `.vx` components (`<template>`, `<script setup>`, `<style>`)
-- **Virtual DOM + layout engine**
+- **Layout engine** over a `VNode` tree (block + flex), driven by an
+  immediate-mode render loop
 - **CSS parser/cascade engine**
 - **Renderer backends** (`skia-native`)
 - **CLI** for scaffolding, building, linting, and running apps
+
+Not provided: there is no reconciler on the render path. See
+[DOM & Layout](#dom--layout) for exactly what exists and what does not.
 
 ---
 
@@ -44,7 +48,8 @@ The Velox repository is organized into modular crates:
 
 - **`velox-core`** — Reactive primitives (signals/effects/lifecycle)
 - **`velox-sfc`** — SFC parsing + template codegen + component resolver
-- **`velox-dom`** — VNode types, diffing, layout
+- **`velox-dom`** — `VNode` types, block/flex layout, CSS style resolution, and a
+  keyed-diff module that is complete but has no production caller
 - **`velox-style`** — CSS parsing, selectors, style application
 - **`velox-renderer`** — Rendering + events (`skia-native` backend)
 - **`velox-cli`** — Developer workflow commands
@@ -246,15 +251,23 @@ velox run
 ```bash
 cd my-first-app
 
-# Start dev server with hot reload (watches the current directory by default)
+# Start the dev server: it watches the current directory by default,
+# and rebuilds + restarts the app when a file changes
 velox dev
 
 # In another terminal, edit src/App.vx and save
-# → App reloads automatically
+# → the app is recompiled from scratch and restarted
 
-# Press 'r' in the dev terminal to manually reload
+# Press 'r' in the dev terminal to rebuild and restart by hand
 # Press 'q' to quit
 ```
+
+`velox dev` is a **watch-and-rebuild loop, not hot reload.** The change is
+detected quickly (the watcher is `notify`/inotify, not a poll), but what happens
+next is a full `cargo build` followed by killing and re-spawning the app. Nothing
+is patched into a running process, and no in-process state survives the
+restart. Treat the rebuild time as the cost of every save. The mechanism is
+described precisely under [`velox dev`](#3-velox-dev-options).
 
 ### Run Examples
 
@@ -309,7 +322,7 @@ velox init ../projects/myapp
 **After init:**
 ```bash
 cd myapp
-velox dev         # Start with hot reload
+velox dev         # Watch, rebuild and restart on every change
 velox run         # Build and run once
 velox run --release  # Release build
 ```
@@ -357,7 +370,8 @@ velox build examples/counter/src/App.vx
 
 #### 3. `velox dev [options]`
 
-Start a development server with hot reload.
+Start the development server: watch the project, and on every change run a full
+`cargo build` and restart the app.
 
 **Syntax:**
 ```bash
@@ -373,18 +387,34 @@ the current one. It may be given only once.
 
 **Examples:**
 ```bash
-# Watch the current project directory with auto-reload
+# Watch the current project directory, rebuilding and restarting on change
 velox dev
 
 # Build and watch a project rooted at another path
 velox dev --watch ../my-app
 ```
 
-**Workflow:**
-- File changes are reported by the OS (inotify on Linux), not by polling, so a save is picked up in milliseconds
-- `target/`, `.git`, `.vscode`, `.idea` and dot-directories are excluded — `cargo build` writes thousands of files into `target/`, and watching it exhausts the kernel's watch budget
-- App rebuilds and restarts
-- Press `r` to manually reload
+**What actually happens on a save — there is no hot reload here.**
+- File changes are reported by the OS (`notify`/inotify on Linux), not by
+  polling, so the *change* is noticed within milliseconds
+- `target/`, `.git`, `.vscode`, `.idea` and dot-directories are excluded —
+  `cargo build` writes thousands of files into `target/`, and watching it
+  exhausts the kernel's watch budget
+- A burst of saves is coalesced into one rebuild
+- The app is told `HmrMessage::FullReload` over the HMR channel, killed and
+  reaped, then `cargo build` runs to completion and the app is re-spawned
+- **Every kind of change takes that same path.** A `<style>` edit is classified
+  as a stylesheet swap by `react_to_change`, but
+  `ChangeReaction::needs_rebuild()` returns `true` for every change kind today
+  (`velox-cli/src/commands/dev.rs`), so the swap is not taken: a CSS edit costs
+  a full rebuild and a restart exactly like a `<script>` edit. The classifier is
+  correct and tested; the boolean that would skip the rebuild is a deliberate
+  stop pending an `HmrMessage::StyleUpdate` that does not exist yet.
+- `HmrMessage::HotReload` exists in the protocol but is explicitly documented as
+  "module-level HMR not yet implemented" and is treated as a `FullReload`
+- No in-process state survives a restart — component state, focus, caret,
+  selection and scroll offsets are all rebuilt from scratch
+- Press `r` to rebuild and restart by hand
 - Press `q` to quit
 
 **Inotify watch limit (Linux):** watching is backed by inotify, a finite kernel
@@ -484,7 +514,7 @@ cd myapp
 velox dev
 
 # 3. In another terminal, edit src/App.vx
-#    Save the file and watch it reload automatically
+#    Save the file: the app is rebuilt from scratch and restarted
 
 # 4. When ready, build for distribution
 velox run --release
@@ -548,8 +578,8 @@ velox dev
 $ velox lint src/App.vx          # Check syntax
 $ velox build src/App.vx         # Rebuild
 
-# 4. Watch terminal 1 for app reload
-#    Changes appear automatically
+# 4. Watch terminal 1 for the rebuild and restart to finish
+#    (a full cargo build, then the app restarts)
 
 # 5. Kill dev server when done
 # (In terminal 1, press q)
@@ -613,16 +643,61 @@ cargo run -p velox-example-showcase
 
 ### Styling
 - CSS parsing with style application to VNode tree
-- Text styling: `font-size`, `font-weight`, `line-height`, `text-decoration`, `font-style`
-- Visual effects: `border-radius`, `box-shadow`, `opacity`
+- Text styling that is actually painted: `font-size`, `font-weight`,
+  `line-height`, `text-decoration`
+- Visual effects that are actually painted: `border-radius`, `opacity`
 - CSS selectors and inline style synthesis
 
+**Parsed but not painted.** These declarations parse, survive the cascade, and
+produce no visual change. `velox lint` reports each one when a `.vx` file
+declares it, so a project using one gets a warning rather than a silent no-op.
+The list is authoritative in `velox-dom`'s `ComputedStyle::PARSED_BUT_UNRENDERED`,
+and it currently includes `box-shadow`, `font-style`, `letter-spacing`,
+`visibility`, `overflow-x`, `overflow-y`, `background-image`, `transition`,
+`border-style`, `border-color`, and `transform` (read only to force a stacking
+context, never applied as a visual transform). Two worth calling out:
+
+- **`box-shadow`** — `set_property` stores a parsed `BoxShadow` value, and the
+  value is correct, but no painter looks it up. The string `"box-shadow"` does
+  not appear anywhere in `velox-renderer`. Declaring it changes nothing.
+- **`font-style`** — `set_property` arms it and the cascade inherits it, but the
+  renderer's `TextRenderConfig.font_style` field is only ever written by
+  `Default::default()`. No builder method sets it and nothing copies it from the
+  computed style, so `font-style: italic` renders upright.
+
 ### DOM & Layout
-- Virtual DOM diffing and efficient patching
+- Block and flex layout over the current `VNode` tree, recomputed from the tree
+  each frame
 - Block layout engine with sizing, margins, padding
 - Positioning: `static | relative | absolute | fixed | sticky`
 - Z-index and stacking context
 - Overflow clipping and scroll offsets
+
+**There is no diffing or patching on the render path.** This is the one place
+where the shape of the architecture is worth stating plainly, because "virtual
+DOM" usually implies the opposite:
+
+- The render loop is **immediate-mode**. `run_window_vnode_skia` takes the
+  `&VNode` it is given, runs `compute_layout` over the whole tree, and paints
+  it. There is no retained tree, no previous frame to compare against, and no
+  patch applier.
+- `velox-dom` does contain a complete, duplicate-key-safe keyed reconciler
+  (`diff::diff`, emitting `Patch::MoveChild` for a reorder rather than an
+  insert/remove pair). **It has zero production callers.** Only tests call it.
+- The renderer's own keyed reconciler, `reconcile_keyed_children`, was
+  **deleted**: it had no production callers, and on a key match it pushed the
+  previous node and discarded the incoming one, so a keyed child whose text
+  changed kept stale content.
+- `:key` is a deliberate **non-goal**, not an oversight. It compiles and lands as
+  a plain runtime `key` string attribute; it does not reorder, diff, or preserve
+  identity. Reorder correctness comes from `VNode` child order, because
+  `compute_layout` lays children out in `VNode` order.
+- The price, paid today: an `<input>` inside a reordered `v-for` loses its focus
+  and caret to whichever item now occupies its index, because all cross-frame
+  state is keyed by structural path, never by `key`.
+
+The full decision record, including what would reopen it, is in
+[`docs/RECONCILER.md`](docs/RECONCILER.md).
 
 ### Rendering & Events
 - Event binding for common UI events: `click`, `input`, `change`, keyboard, mouse events
@@ -659,11 +734,77 @@ Templates use canonical directives:
 
 ## Release Checklist
 
-Before publishing a new version, verify:
+### What CI actually gates
+
+CI runs on **every push and every pull request, on every branch**
+(`.github/workflows/ci.yml`). The previous trigger was
+`branches: [ main, master, alpha ]`, so feature branches ran no checks at all —
+including the branch this cycle's work landed on. Nothing in the repository
+records whether a pull request is *required* to pass these checks before merge;
+that is a GitHub branch-protection setting and is not visible from the source
+tree.
+
+The blocking jobs are:
+
+| Job | Blocks on |
+|---|---|
+| `build-test` | `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace --no-fail-fast` |
+| `renderer-features` | `cargo test -p velox-renderer --features skia` |
+| `docker` | `docker build --target test`, which re-runs `cargo test --workspace --no-fail-fast` inside the image |
+| `coverage` | An instrumented line-coverage run must succeed. See the caveat below |
+| `dependency-audit` | `cargo audit`, minus five recorded waivers |
+| `property-tests` | Nothing — it is a no-op today. See the caveat below |
+
+Note that `build-test` is not feature-minimal: `velox-cli` declares
+`velox-renderer` with `features = ["skia-native"]` as a **dev-dependency**, and
+the example crates build-depend on `velox-cli`, so feature unification turns
+`skia-native` on for any workspace-wide cargo command. `cargo test --workspace`
+therefore already compiles Skia natively. The `continue-on-error: true` on the
+`--features skia-native` build step in `renderer-features` is not what keeps a
+Skia compile failure from blocking a merge — `build-test` catches it first.
+
+### What CI does **not** gate — read this before cutting a release
+
+- **Coverage is measured, not enforced.** The `coverage` job runs
+  `cargo llvm-cov --workspace --summary-only --fail-under "${COVERAGE_MIN}"` with
+  `COVERAGE_MIN: 0` in the workflow's `env`. No instrumented baseline has been
+  measured on this workspace, so there is no floor to enforce; the job fails only
+  if coverage cannot be collected at all. Setting that one variable to a number
+  below a locally measured baseline turns it into a real gate.
+- **Dependency advisories are partially waived.** `cargo audit` currently reports
+  5 vulnerabilities in this graph; the job ignores five recorded RUSTSEC IDs
+  (documented inline in the workflow) so that it is green today and red on
+  anything new. It also treats `unmaintained` and `unsound` as non-blocking, so
+  9 further advisories are reported without failing the job.
+- **Property tests are not gated, because none exist.** The `property-tests` job
+  probes for a `proptest!` macro and only installs `cargo-proptest` if it finds
+  one. There is no `proptest` dependency in any `Cargo.toml`, in this repository
+  or anywhere in its history, so the job currently does nothing.
+- **The GPU pixel proofs never run.** Twelve `velox-renderer/tests/skia_*.rs`
+  files carry a file-level `#![ignore = "requires skia-native feature and GPU
+  hardware"]` (so every test inside them is skipped), and
+  `velox-renderer/src/skia_render.rs` ignores two more individually. GitHub's
+  `ubuntu-latest` runners have no GPU, so all of them are skipped. Several are
+  checksum-pinned render proofs, which means a change that silently alters pixels
+  would **not** be caught by CI.
+- **No release-profile build.** No job runs `cargo build --workspace --release`.
+- **No scaffolding or example smoke test.** Nothing runs `velox init`, and no job
+  runs an example app.
+- **The slow external-`cargo` compile tests are skipped.** Three tests in
+  `velox-sfc/tests/integration_compile.rs` shell out to a second `cargo`, and
+  `velox-renderer/tests/frame_cost_bench.rs` is a measurement tool. All four are
+  `#[ignore]`'d, so the default `cargo test` pass skips them. They matter when
+  changing the codegen or the compile pipeline, and the commands are below.
+
+### Manual steps still required
+
+CI does not replace these. Run them before publishing:
 
 ```bash
-# 1. Run full test suite
+# 1. Run the full test suite, then the ignored compile/measurement tests
 cargo test --workspace --all-targets
+cargo test -p velox-sfc --test integration_compile -- --ignored
+cargo test -p velox-renderer --test frame_cost_bench -- --ignored --nocapture
 
 # 2. Build everything in release mode
 cargo build --workspace --release
@@ -678,6 +819,8 @@ cd ..
 # 4. Build and test examples
 cargo run -p velox-cli -- lint examples   # lints every example .vx file
 cargo run -p velox-example-counter
+cargo run -p velox-example-todo
+cargo run -p velox-example-showcase
 
 # 5. Final manual review
 # - Verify documentation accuracy
@@ -691,10 +834,15 @@ cargo run -p velox-example-counter
 
 This repository is currently in active stabilization for the first stable release. When contributing:
 
-- Ensure all tests pass: `cargo test --workspace --all-targets`
+- CI runs on every push and every pull request, on every branch. The command that
+  actually blocks you is `build-test`, which runs `cargo fmt --all -- --check`,
+  `cargo clippy --workspace --all-targets -- -D warnings`, and
+  `cargo test --workspace --no-fail-fast`.
 - Build in release mode to catch optimizations: `cargo build --workspace --release`
+  (not covered by CI)
 - Manual verification of examples recommended before PRs
-- Update relevant documentation when changing behavior
+- Update relevant documentation when changing behavior — including this README,
+  which is expected to describe the tree as it is
 
 ---
 

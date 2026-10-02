@@ -1,10 +1,49 @@
 name: CI
 
 on:
+  # Every push and every pull request, on every branch.
+  #
+  # The previous trigger was `branches: [ main, master, alpha ]`. A push filter
+  # matches the branch being pushed *to*, so no feature branch ran CI at all —
+  # including the branch this cycle's work lands on. `push:` is left unfiltered
+  # so a branch is checked before it opens a pull request, and so a pushed fix is
+  # re-checked after new commits land on top of it.
   push:
-    branches: [ main, master, alpha ]
+    branches: [ '**' ]
   pull_request:
-    branches: [ main, master, alpha ]
+    branches: [ '**' ]
+
+env:
+  # Minimum LINE coverage enforced by the `coverage` job.
+  #
+  # MEASURED, not guessed. `cargo llvm-cov --workspace --summary-only` on this
+  # workspace at 2026-10-02 reports 77.52% lines / 77.21% regions
+  # (25,616 of 24,977... precisely: 24,977 lines, 5,616 missed -> 77.52%;
+  # 37,229 regions, 8,484 missed -> 77.21%).
+  #
+  # Why this was 0 until now: `--fail-under 0` cannot fail, so the job was a
+  # green box that enforced nothing while costing a SECOND instrumented native
+  # Skia build — resolving the workspace turns on `velox-renderer/skia-native`
+  # (via `velox-cli`'s dev-dependency and the example crates' build-depends),
+  # and an instrumented run compiles Skia again with coverage counters on.
+  # Nothing was gained by that build except a number nobody read.
+  #
+  # 76 is the floor, deliberately BELOW the measured 77.52% so ordinary work
+  # does not redden CI: a coverage gate that fails on unrelated changes trains
+  # people to reach for `--no-fail-fast` or to ignore the red. 76 still catches
+  # the real regression — a large block of code losing its tests, which moves
+  # the number by whole points.
+  #
+  # Re-measure before raising it, and never set this ABOVE the measured value:
+  # that turns CI red for everyone on the next unrelated change. To re-measure:
+  #   rustup component add llvm-tools-preview
+  #   cargo install cargo-llvm-cov --locked
+  #   cargo llvm-cov --workspace --summary-only --no-fail-fast
+  # (--no-fail-fast so one red target does not cost you the measurement.)
+  # NOTE: a target whose tests FAIL is excluded from the reported total, so a
+  # red build silently lowers the denominator. Read the per-file table, not
+  # just the TOTAL, when a number looks better than expected.
+  COVERAGE_MIN: 76
 
 jobs:
   build-test:
@@ -22,6 +61,231 @@ jobs:
       - name: Test (workspace)
         run: cargo test --workspace --no-fail-fast
 
+  coverage:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+      - name: Install cargo-llvm-cov
+        run: cargo install cargo-llvm-cov --locked
+      # Expect a slow first run: resolving the workspace turns on
+      # `velox-renderer/skia-native`, because `velox-cli` declares it as a
+      # dev-dependency feature and the example crates build-depend on `velox-cli`.
+      # Any workspace-wide cargo command therefore compiles Skia natively, and an
+      # instrumented run compiles it a second time with coverage counters on.
+      - name: Measure line coverage
+        run: cargo llvm-cov --workspace --summary-only --no-fail-fast --fail-under "${COVERAGE_MIN}"
+
+  dependency-audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --locked
+      # Recorded 2026-10-02. `cargo audit` reports exactly 5 vulnerabilities in
+      # this graph. All five report NO patched version, so none of them can be
+      # closed by upgrading a dependency — the only real choices are "stop
+      # depending on the crate" or "waive it with a reason". Each is waived
+      # below, with the reason attached to the id. Anything NOT in this list
+      # fails the job, so this is a baseline for *new* advisories, not a blanket
+      # suppression.
+      #
+      # Four are build-time only: they are reached through a crate that either
+      # runs in a build script or is a proc-macro, so none of them is linked
+      # into any artifact this repo produces.
+      #   RUSTSEC-2026-0067  tar 0.4.44 — `unpack_in` follows symlinks.
+      #   RUSTSEC-2026-0068  tar 0.4.44 — ignores PAX size headers.
+      #                      `cargo tree -i tar` shows one path and it is a
+      #                      [build-dependencies] edge:
+      #                      tar <- skia-bindings <- skia-safe <- velox-renderer.
+      #                      `tar` unpacks the Skia source tarball during
+      #                      `skia-bindings`' build script; it is not in the
+      #                      runtime graph at all.
+      #   RUSTSEC-2026-0194  quick-xml 0.38.4 — quadratic blowup on duplicate
+      #                      attributes.
+      #   RUSTSEC-2026-0195  quick-xml 0.38.4 — unbounded namespace allocation.
+      #                      `cargo tree -i quick-xml` shows one path, and
+      #                      `cargo tree` labels the next crate
+      #                      `wayland-scanner v0.31.8 (proc-macro)`:
+      #                      quick-xml <- wayland-scanner (proc-macro) <-
+      #                      wayland-client <- softbuffer <- velox-renderer.
+      #                      A proc-macro dependency runs on the host at
+      #                      compile time; it cannot be linked into a binary.
+      #                      Also gated: `softbuffer` is optional and only
+      #                      pulled in by the `skia-native` feature.
+      #                      Two notes on scoping this, because the lock carries
+      #                      both: (a) the versions above are the ones this path
+      #                      pins today, and a `cargo update` can move any of
+      #                      them without changing the advisories; (b) Cargo.lock
+      #                      ALSO contains a `wayland-scanner 0.29.5` line, which
+      #                      depends on `xml-rs` rather than `quick-xml` and is
+      #                      therefore a different path from the one waived above
+      #                      — do not read the presence of 0.29.5 as a second
+      #                      quick-xml exposure, and do not read the waiver as
+      #                      covering it.
+      #
+      # The fifth is dev-dependency only, and is the one judgement call here.
+      #   RUSTSEC-2026-0204  crossbeam-epoch 0.9.18 — `fmt::Pointer` on an
+      #                      invalid pointer. `cargo tree -i crossbeam-epoch`
+      #                      shows the only path:
+      #                      crossbeam-epoch <- crossbeam-deque <- rayon-core <-
+      #                      rayon <- criterion 0.5.1
+      #                      and `criterion` is reached only through
+      #                      [dev-dependencies] of `velox-core` and
+      #                      `velox-renderer`. `cargo tree -i crossbeam-epoch
+      #                      --workspace -e normal` prints "nothing to print",
+      #                      i.e. there is no non-dev edge to it anywhere.
+      #
+      # Why criterion stays, since deleting it would close this advisory
+      # outright and is the only remaining option:
+      #   * It powers two real harnesses — `velox-core/benches/signal_read.rs`
+      #     (the `Signal::get` subscriber walk, the O(n) part of a read inside a
+      #     live effect) and `velox-renderer/benches/skia_render_bench.rs`
+      #     (`render_vnode_to_raster_png` at 50/200/500 nodes). Neither is
+      #     reachable except through criterion: they use `Criterion`,
+      #     `criterion_main!`/`criterion_group!`, and `BenchmarkId`
+      #     (`skia_render_bench.rs:2-3,43-48`; `signal_read.rs:28,85-86`).
+      #   * What would be lost is not just convenience. Criterion supplies
+      #     warm-up, repeated sampling with outlier rejection, and — the part
+      #     that actually catches a regression across commits — baseline
+      #     comparison via `--save-baseline` / `--baseline`. A hand-rolled
+      #     `std::time::Instant` loop yields one number with no interval and
+      #     nothing to diff against, and both benches would need their
+      #     parameter sweeps re-implemented by hand.
+      #   * Correcting a claim that used to justify keeping it: the outstanding
+      #     `layout_us` <= 400 us gate does NOT depend on criterion. It is
+      #     measured by `velox-renderer/tests/frame_cost_bench.rs`, which times
+      #     with plain `std::time::Instant` (`:49,158,160`) under
+      #     `#[test] #[ignore]`. Removing criterion would not touch that gate.
+      #     So the justification for keeping it rests on the two `benches/`
+      #     harnesses, not on the 400 us budget.
+      #   * Nothing ships. All six crates in this workspace are `publish =
+      #     false`, so there is no published artifact for this dependency to
+      #     reach, and `criterion` is a dev-dependency besides. Deleting the
+      #     measurement apparatus to silence an advisory that can never be
+      #     delivered to a user is the wrong trade; this records that as a
+      #     decision with a re-check trigger instead — if criterion ever
+      #     grows a patched crossbeam-epoch, take the upgrade and drop this
+      #     waiver.
+      #
+      # `cargo audit` also reports 8 non-blocking `unmaintained`/`unsound`
+      # warnings (6 distinct advisory ids; `rand` and `memmap2` are each
+      # reported once per version in the graph). They do not fail the job
+      # because `cargo audit` exits non-zero only on vulnerabilities, and none
+      # of the 8 is in the `--ignore` list above. Measured 2026-10-02, with the
+      # path each one arrives on:
+      #   RUSTSEC-2024-0384  instant 0.1.13    — winit 0.28.7 <- velox-renderer
+      #   RUSTSEC-2025-0057  fxhash 0.2.1      — selectors 0.23.0 <- velox-style
+      #   RUSTSEC-2026-0192  ttf-parser 0.25.1 — ab_glyph <- sctk-adwaita <-
+      #                                         winit 0.28.7 <- velox-renderer
+      #   RUSTSEC-2026-0190  anyhow 1.0.100    — velox-cli, [build-dependencies]
+      #   RUSTSEC-2026-0186  memmap2 0.5.10    — sctk-adwaita <- winit <-
+      #                                         velox-renderer
+      #   RUSTSEC-2026-0186  memmap2 0.9.9     — softbuffer 0.3.4 <-
+      #                                         velox-renderer
+      #   RUSTSEC-2026-0097  rand 0.7.3        — phf_generator 0.8.0 <-
+      #                                         phf_codegen [build-deps] <-
+      #                                         selectors <- velox-style
+      #   RUSTSEC-2026-0097  rand 0.8.5        — phf_generator 0.10.0 <-
+      #                                         phf_macros (proc-macro) <- phf <-
+      #                                         cssparser <- velox-style
+      #
+      # A previous revision of this comment claimed that two of these
+      # (`ttf-parser`, `rand`) existed only because `ab_glyph` and `wgpu_glyph`
+      # were declared as non-optional dependencies of `velox-renderer`, and
+      # that removing them would clear both. The removals are real —
+      # `pollster`, `wgpu_glyph` and `ab_glyph` are no longer declared in
+      # `velox-renderer/Cargo.toml`, and `wgpu`/`glyph_brush`/`wgpu_glyph`/
+      # `pollster` are gone from `Cargo.lock` — but the claim about the
+      # warnings was wrong on both counts, so this list is stated from a fresh
+      # measurement instead of from that prediction:
+      #   * `ttf-parser` is still here, and not because of a `velox-renderer`
+      #     declaration: `ab_glyph` survives transitively via `sctk-adwaita`,
+      #     which `winit 0.28.7` depends on. Deleting our direct edge to
+      #     `ab_glyph` cannot remove it.
+      #   * `rand` is still here, and never came via `wgpu_glyph` — it comes
+      #     from `phf_generator` on both paths, reached from `velox-style`'s
+      #     `selectors` and `cssparser`, and on both it is a build-dependency or
+      #     proc-macro, so it is compile-time only.
+      # Of the 8, four are reachable only at build time (`anyhow`, both `rand`).
+      # Nothing here is waived with an `--ignore`; they are left as the
+      # non-blocking category they are, and clearing them means changing
+      # `winit`/`velox-style` dependencies rather than anything in this repo.
+      #
+      # There are deliberately no inline `#` comments on the `--ignore` lines
+      # below. This `run` is a `\`-continued shell command, and a `#` preceded
+      # by whitespace starts a shell comment that swallows the rest of the
+      # line *including its trailing backslash* — the continuation would be
+      # commented out and every later `--ignore` would be silently dropped,
+      # turning a documented waiver into a red job or, worse, a false pass.
+      # The per-advisory reasons live in this comment block instead.
+      - name: Audit dependencies
+        run: |
+          cargo audit \
+            --ignore RUSTSEC-2026-0067 \
+            --ignore RUSTSEC-2026-0068 \
+            --ignore RUSTSEC-2026-0194 \
+            --ignore RUSTSEC-2026-0195 \
+            --ignore RUSTSEC-2026-0204
+
+  property-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+      # As of 2026-10-02 this workspace contains no `proptest!` macro, no
+      # `proptest` entry in any `Cargo.toml`, and no `proptest` dev-dependency in
+      # any crate. So there is nothing for a proptest runner to execute yet, and
+      # this job currently no-ops rather than pretending to a gate it does not
+      # have. The probe below flips it on automatically the first time a
+      # `proptest!` block is added anywhere in the workspace, so adding property
+      # tests needs no workflow edit.
+      #
+      # The probe's directory list must cover EVERY crate, including
+      # `examples/`. It previously named six directories and omitted all three
+      # example crates, so a `proptest!` added under `examples/todo/tests/` —
+      # where this workspace's `render_proof.rs` proofs live — would never turn
+      # the job on, and the runner would sit there never executing the tests it
+      # was added to gate. `velox_web/` is a nested copy that is not part of this
+      # workspace (see .gitignore) and is deliberately not searched.
+      - name: Detect property tests
+        id: probe
+        run: |
+          if grep -rqs --include='*.rs' 'proptest!' \
+            velox-cli velox-core velox-dom velox-renderer velox-sfc velox-style \
+            examples
+          then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Run proptests
+        if: steps.probe.outputs.present == 'true'
+        # Not yet budgeted, and not yet reachable. Turning this on costs what
+        # `build-test` already pays for, twice over: the same feature unification
+        # turns on `velox-renderer/skia-native`, so `cargo proptest --workspace`
+        # compiles Skia natively from source, unbudgeted in this job. That is
+        # recorded here rather than left to be discovered when the probe flips.
+        # Before the first `proptest!` lands, either add `cargo proptest` to the
+        # `build-test` job — which already builds Skia, so the cost is
+        # incremental — or give this job its own budget. Running it here as a
+        # separate job doubles the most expensive build in CI.
+        run: |
+          cargo install cargo-proptest --locked
+          cargo proptest --workspace
+
   renderer-features:
     runs-on: ubuntu-latest
     steps:
@@ -32,9 +296,55 @@ jobs:
         uses: Swatinem/rust-cache@v2
       - name: Test skia API (no native)
         run: cargo test -p velox-renderer --features skia
+      # Allowed to fail, but note it is not the only thing compiling Skia:
+      # `velox-cli` dev-depends on `velox-renderer` with `features =
+      # ["skia-native"]`, and the example crates build-depend on `velox-cli`, so
+      # `build-test`'s `cargo test --workspace` already turns `skia-native` on by
+      # feature unification. A Skia compile failure still blocks via `build-test`.
       - name: Build skia-native (allowed to fail)
         continue-on-error: true
         run: cargo build -p velox-renderer --features skia-native
+
+  # The `skia-native` GPU path has a real implementation only on unix, so every
+  # other job here runs on Linux and the rest of the feature was never compiled
+  # for a non-unix target. It did not build there at all: `skia_surface.rs`
+  # calls `crate::skia_gl::create_context_from_winit`, which existed only inside
+  # `skia_gl.rs`'s `unix` block, and `Cargo.toml` declared `raw-window-handle`,
+  # `egl`, `glow` and `softbuffer` under `[target.'cfg(unix)'.dependencies]` even
+  # though `skia_surface.rs` and `presenter.rs` name them unconditionally. This
+  # job is what keeps the non-unix configuration compiling: it fails the moment
+  # the `not(unix)` side of `skia_gl.rs` stops answering for the shared call
+  # site, which no Linux gate can see.
+  #
+  # `runs-on: windows-latest` is the point of the job, not an accident of
+  # convenience: the target must be genuinely non-unix. A `macos-latest` runner
+  # is `cfg(unix)` and would compile the EGL/GL implementation instead of the
+  # stub, proving nothing about this. Cross-checking from Linux with
+  # `--target x86_64-pc-windows-msvc` is not an equivalent substitute either:
+  # `skia-bindings` compiles Skia from source for whatever `--target` names, and
+  # its prebuilt binary cache has no entry for this version (the Linux build log
+  # reads `DOWNLOAD AND INSTALL FAILED: curl error code: "22"` followed by
+  # `STARTING A FULL BUILD`), so a cross build spends the job compiling Skia for
+  # a toolchain that is not installed and fails before it ever reaches our code.
+  skia-native-non-unix:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+      # `skia-bindings` drives Skia's own build with ninja (CMake ships with the
+      # Visual Studio image); without it the native build cannot start.
+      - name: Install Skia build tools
+        run: choco install ninja --no-progress --yes
+      # Library target only, and NOT `continue-on-error`: this job's whole job is
+      # to be the gate that catches non-unix rot, and a check that reports
+      # success when the feature does not compile is worse than no check. It is
+      # slow (a full native Skia build) and that is the cost of proving the
+      # feature builds off unix.
+      - name: Check skia-native on a non-unix target
+        run: cargo check -p velox-renderer --features skia-native
 
   docker:
     runs-on: ubuntu-latest

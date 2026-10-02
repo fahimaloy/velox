@@ -1,0 +1,338 @@
+<template>
+  <div :class="{ dark: dark }">
+    <div class="overlay" @click="modal_scrim">
+      <div class="panel" @click="modal_panel">
+        <div class="head">
+          <h2 class="title">{{ title }}</h2>
+          <button class="dismiss" @click="modal_dismiss">
+            <span class="dismiss-mark">×</span>
+          </button>
+        </div>
+        <div class="body">
+          <p class="body-text">{{ body }}</p>
+        </div>
+        <div class="foot">
+          <button class="cancel" @click="modal_cancel">{{ cancel_label }}</button>
+          <button class="confirm" @click="modal_confirm">{{ confirm_label }}</button>
+        </div>
+      </div>
+    </div>
+  </div>
+</template>
+
+<script setup>
+// A general-purpose dialog: a scrim over the window, a panel with a heading, a
+// message, and a dismiss / confirm pair.
+//
+// The root element is the theme carrier, and it carries no class of its own —
+// only the `dark` flag. The cascade matches a selector's leftmost part only
+// against a STRICT ancestor (velox-style/src/lib.rs `match_prefix`), so the
+// element holding the class can never be the one a `.dark …` rule styles.
+// Comments live here and in the style block because this template parser has no
+// comment syntax of its own.
+//
+//   <Modal :title="t" :body="b" :confirm_label="ok" :cancel_label="no"
+//          :dark="dark" @dismiss="close" @confirm="save" />
+//
+// Render it behind a `v-if`; the component has no internal open state, because
+// the caller is the side that knows when the question is being asked.
+//
+// Events
+//   dismiss  the ✕ button, the Cancel button, and clicking the scrim
+//   confirm  the primary button
+//
+// For a destructive question use `Confirm.vx`, which is the same shape with a
+// warning badge and a danger-coloured primary action.
+//
+// The × in the dismiss button is a literal character rather than a character
+// reference: nothing in Velox decodes `&#215;`, and U+00D7 is in Latin-1 so no
+// font can be missing it.
+//
+// Every declared prop must be bound by the parent, so the API here is
+// deliberately small and complete: a `Props` field the parent leaves unbound
+// becomes a `compile_error!` naming the field rather than a silent default
+// (velox-sfc/src/template_codegen.rs `component_props_arg`).
+//
+// There is no Esc-to-close and no focus trap. Only `on:click` and `on:input` are
+// ever read (velox-sfc `collect_handlers`), so a `@keydown` would compile to an
+// inert string attribute and look wired while doing nothing; and Velox has no
+// focus traversal for a trap to move. The visible ✕ and the labelled Cancel are
+// the honest affordance until that plumbing lands.
+//
+// Every visual decision below is a DEFAULT, and the cascade is source-ordered
+// with no specificity and no `!important` (velox-style/src/lib.rs:812) — so a
+// caller who wants a different panel appends their own rules to their own block
+// and the later declaration wins. Appending to `.dark .panel` is how you
+// restyle dark mode. Because a component's scoped CSS cannot reach anything it
+// did not render, that is the only seam there is: a caller restyles the SURFACE,
+// never the copy inside it.
+//
+// Two details are load-bearing rather than stylistic:
+//
+//  * Backdrop dismissal uses TWO handlers rather than one. Velox hit-tests the
+//    most deeply nested target and does not bubble
+//    (velox-renderer/src/events.rs `hit_test_click`), so a single handler on the
+//    overlay would also fire for clicks on the panel's own padding. Giving the
+//    panel its own no-op handler puts it later in the collection order, which is
+//    what makes it win the hit test and swallow those clicks.
+//
+//  * Every handler name is prefixed with `modal_`. The root dispatcher keys its
+//    arms by handler NAME alone (`extra_by_name(...).or_insert(...)` in
+//    velox-sfc `collect_tree_handlers_inner`), so two sibling components that
+//    both named a button handler `on_dismiss` would leave the second arm
+//    unreachable — the first component would win and the other would be dead.
+//
+// Named slots are the obvious next API for this component and are deliberately
+// NOT used yet: `emit_slot_node` (velox-sfc/src/template_codegen.rs:1543-1564)
+// hands `render_slot` a fallback closure built by `emit_children_with_mode`,
+// which returns a `Vec<VNode>` statement block, while the helper wants a single
+// `VNode` — so a `<slot>` outside a `v-for` does not compile. The `v-for` path
+// at :3045 gets this right by wrapping the children in an `h("slot", …)` element.
+// Until that is fixed, body and footer copy arrive as props.
+pub struct Props {
+    pub title: String,
+    pub body: String,
+    pub confirm_label: String,
+    pub cancel_label: String,
+    pub dark: bool,
+}
+
+pub struct State {
+    pub props: Props,
+}
+
+impl State {
+    pub fn new() -> Self {
+        Self {
+            props: Props {
+                title: String::from("Dialog"),
+                body: String::new(),
+                confirm_label: String::from("Done"),
+                cancel_label: String::from("Cancel"),
+                dark: false,
+            },
+        }
+    }
+
+    pub fn title(&self) -> String {
+        self.props.title.clone()
+    }
+
+    pub fn body(&self) -> String {
+        self.props.body.clone()
+    }
+
+    pub fn confirm_label(&self) -> String {
+        self.props.confirm_label.clone()
+    }
+
+    pub fn cancel_label(&self) -> String {
+        self.props.cancel_label.clone()
+    }
+
+    pub fn dark(&self) -> bool {
+        self.props.dark
+    }
+
+    // The parent binds `@dismiss` / `@confirm` on the tag that rendered this
+    // component; `emit` runs the handler the parent named, with this component's
+    // payload. A parent that bound nothing for an event has nothing to run and
+    // the emit is simply dropped.
+    pub fn modal_dismiss(&self) {
+        emit("dismiss", "");
+    }
+
+    pub fn modal_confirm(&self) {
+        emit("confirm", "ok");
+    }
+
+    // Clicked the scrim itself, outside the panel.
+    pub fn modal_scrim(&self) {
+        emit("dismiss", "");
+    }
+
+    // Clicked Cancel. The same event as the ✕, and deliberately its OWN method:
+    // the root dispatcher emits one match arm per `@click` occurrence in this
+    // template, so binding both buttons to `modal_dismiss` would emit the arm
+    // twice and the second copy is dead code (`rustc` calls it an unreachable
+    // pattern). Two names, one event.
+    pub fn modal_cancel(&self) {
+        emit("dismiss", "");
+    }
+
+    // Clicked the panel. Present only to win the hit test against the overlay
+    // handler above; a dialog must not close because its own body was clicked.
+    pub fn modal_panel(&self) {}
+}
+</script>
+
+<style scoped>
+/* The carrier needs no rule at all — the overlay below is out of flow, so this
+   wrapper contributes nothing to the page and exists only to carry `dark`. */
+.overlay {
+    position: fixed;
+    top: 0;
+    left: 0;
+    /* `position: fixed` resolves its box against the viewport however deeply it
+       is nested (velox-dom/src/layout.rs `out_of_flow_containing_block`), so the
+       scrim covers the window and not just this component's subtree. */
+    width: 100%;
+    height: 100%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 24px;
+    background: rgba(20, 24, 27, 0.34);
+    font-family: "Inter", "Noto Sans", "DejaVu Sans", sans-serif;
+    font-size: 15px;
+    line-height: 1.5;
+}
+.panel {
+    display: flex;
+    flex-direction: column;
+    width: 100%;
+    max-width: 440px;
+    padding: 22px;
+    border: 1px solid #dedbd3;
+    border-radius: 14px;
+    background: #ffffff;
+    color: #14181b;
+}
+.head {
+    display: flex;
+    flex-direction: row;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 14px;
+}
+.title {
+    flex: 1 1 auto;
+    min-width: 0;
+    margin: 0;
+    font-size: 17px;
+    font-weight: 700;
+    line-height: 1.3;
+    color: #14181b;
+}
+.dismiss {
+    flex: 0 0 auto;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 28px;
+    height: 28px;
+    padding: 0;
+    border: 1px solid transparent;
+    border-radius: 999px;
+    background: #ffffff;
+    color: #6b7377;
+}
+.dismiss:hover {
+    border: 1px solid #dedbd3;
+    background: #f6f5f2;
+    color: #14181b;
+}
+.dismiss-mark {
+    display: block;
+    font-size: 16px;
+    line-height: 1;
+}
+.body {
+    display: flex;
+    flex-direction: column;
+    margin-top: 10px;
+}
+.body-text {
+    margin: 0;
+    font-size: 14px;
+    line-height: 1.55;
+    color: #5a6469;
+}
+.foot {
+    display: flex;
+    flex-direction: row;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 8px;
+    margin-top: 22px;
+}
+.cancel {
+    flex: 0 0 auto;
+    height: 36px;
+    padding: 0 16px;
+    border: 1px solid #dedbd3;
+    border-radius: 8px;
+    background: #ffffff;
+    color: #5a6469;
+    font-size: 14px;
+    font-weight: 600;
+    text-align: center;
+}
+.cancel:hover {
+    border: 1px solid #c4bfb4;
+    background: #f6f5f2;
+    color: #14181b;
+}
+.confirm {
+    flex: 0 0 auto;
+    height: 36px;
+    padding: 0 18px;
+    border: 1px solid #0d6e66;
+    border-radius: 8px;
+    background: #0d6e66;
+    color: #ffffff;
+    font-size: 14px;
+    font-weight: 600;
+    text-align: center;
+}
+.confirm:hover {
+    border: 1px solid #0a5750;
+    background: #0a5750;
+}
+
+/* Dark overrides — source order decides the winner (velox-style/src/lib.rs
+   `apply_with_cascade`), so they come last. */
+.dark .overlay {
+    background: rgba(3, 5, 6, 0.66);
+}
+.dark .panel {
+    border: 1px solid #242c31;
+    background: #181e22;
+    color: #e8ecec;
+}
+.dark .title {
+    color: #e8ecec;
+}
+.dark .dismiss {
+    border: 1px solid transparent;
+    background: #181e22;
+    color: #75818a;
+}
+.dark .dismiss:hover {
+    border: 1px solid #333d45;
+    background: #222a2f;
+    color: #e8ecec;
+}
+.dark .body-text {
+    color: #a3aeb2;
+}
+.dark .cancel {
+    border: 1px solid #333d45;
+    background: #181e22;
+    color: #a3aeb2;
+}
+.dark .cancel:hover {
+    border: 1px solid #414c55;
+    background: #222a2f;
+    color: #e8ecec;
+}
+.dark .confirm {
+    border: 1px solid #4fd1c5;
+    background: #4fd1c5;
+    color: #08110f;
+}
+.dark .confirm:hover {
+    border: 1px solid #6fe0d5;
+    background: #6fe0d5;
+}
+</style>

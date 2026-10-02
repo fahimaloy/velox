@@ -363,6 +363,35 @@ fn read_ident(bytes: &[u8], i: &mut usize) -> String {
 }
 
 fn read_attribute(bytes: &[u8], i: &mut usize) -> Option<TemplateAttr> {
+    // `#` is the slot shorthand (`#footer="slotProps"`), so it opens an attribute
+    // name the way `:` and `@` do. It is read here rather than added to the
+    // character class below so a bare `#` in an attribute position stays the
+    // skipped token it was instead of becoming an attribute named `#`.
+    if *i < bytes.len() && bytes[*i] == b'#' {
+        *i += 1;
+        let name = read_ident(bytes, i);
+        if name.is_empty() {
+            return None;
+        }
+        return Some(TemplateAttr {
+            // `#foo` names the same slot `v-slot:foo` does, so the two spellings
+            // are folded onto one name here and nothing downstream has to know
+            // which was written. Both go through `normalize_directive_name` so
+            // `#footerBar` and `v-slot:footerBar` agree on `slot:footer-bar` —
+            // a slot name is kebab-case whichever way it was authored.
+            //
+            // The `= "slotProps"` value is parsed and kept, but nothing binds it:
+            // a slot prop would have to be a channel from the child's `<slot>`
+            // back into the caller's fragment, and the fragment is rendered by
+            // the caller with the caller's bindings and no way to receive one.
+            // So a shorthand that uses the name gets the ordinary "cannot be
+            // resolved" report from the render pass, naming it as a key nothing
+            // can supply — rather than silently rendering empty.
+            name: format!("slot:{}", normalize_directive_name(&name)),
+            value: read_attr_value(bytes, i),
+            kind: AttrKind::Directive,
+        });
+    }
     let name_start = *i;
     while *i < bytes.len() {
         let c = bytes[*i] as char;
@@ -377,13 +406,7 @@ fn read_attribute(bytes: &[u8], i: &mut usize) -> Option<TemplateAttr> {
     }
     let raw_name = String::from_utf8(bytes[name_start..*i].to_vec()).ok()?;
 
-    skip_ws(bytes, i);
-    let mut value: Option<String> = None;
-    if *i < bytes.len() && bytes[*i] == b'=' {
-        *i += 1;
-        skip_ws(bytes, i);
-        value = read_quoted(bytes, i);
-    }
+    let value = read_attr_value(bytes, i);
 
     let (kind, name) = if let Some(rest) = raw_name.strip_prefix(':') {
         (AttrKind::Bind, rest.to_string())
@@ -399,6 +422,19 @@ fn read_attribute(bytes: &[u8], i: &mut usize) -> Option<TemplateAttr> {
     };
 
     Some(TemplateAttr { name, value, kind })
+}
+
+/// The `= "..."` tail of an attribute, if it has one. A trailing bare token is
+/// not a value: the parser has no unquoted-value form to offer, and guessing one
+/// would swallow the next attribute.
+fn read_attr_value(bytes: &[u8], i: &mut usize) -> Option<String> {
+    skip_ws(bytes, i);
+    if *i < bytes.len() && bytes[*i] == b'=' {
+        *i += 1;
+        skip_ws(bytes, i);
+        return read_quoted(bytes, i);
+    }
+    None
 }
 
 fn read_quoted(bytes: &[u8], i: &mut usize) -> Option<String> {
@@ -421,7 +457,18 @@ fn read_quoted(bytes: &[u8], i: &mut usize) -> Option<String> {
     Some(s)
 }
 
-fn normalize_directive_name(s: &str) -> String {
+/// Fold a directive name to kebab-case: `v-slot:footerBar` → `slot:footer-bar`.
+///
+/// `pub(crate)` because a slot name is written on BOTH sides of a component
+/// boundary and both sides have to fold it the same way. This is the parent's
+/// side (a `v-slot:` / `#` directive on content being passed in);
+/// `template_codegen::normalize_slot_name` is the child's side (a static
+/// `name="footerBar"` on a `<slot>` outlet) and calls this. They are one
+/// decision, so they are one function — a second implementation here would be
+/// free to drift and the drift is invisible: a parent writing
+/// `v-slot:footerBar` and a child writing `name="footerBar"` would then simply
+/// never match, and the child would render its fallback with nothing said.
+pub(crate) fn normalize_directive_name(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for ch in s.chars() {
         if ch == '_' {

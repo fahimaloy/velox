@@ -220,11 +220,6 @@ fn with_hover_ids(vnode: &velox_dom::VNode, next_id: &mut u32) -> velox_dom::VNo
 #[cfg(feature = "skia-native")]
 const CARET_BLINK_MS: u64 = 530;
 
-/// Default font size (px) assumed for caret hit testing when the cascaded
-/// style carries no `font-size`.
-#[cfg(feature = "skia-native")]
-const DEFAULT_INPUT_FONT_SIZE: f32 = 16.0;
-
 /// Posts a recurring `UserEvent` to the winit event loop so the caret blink has
 /// a clock.
 ///
@@ -347,36 +342,51 @@ fn style_decl<'s>(style: &'s str, key: &str) -> Option<&'s str> {
         .map(|(_, v)| v.trim())
 }
 
-/// Parse a `px` length, rejecting non-finite and non-positive values.
+/// The painter's own geometry for a text input's value text: content edges
+/// **and** the font size its advances are measured at.
+///
+/// The click-to-caret mapping is relative to `text_left`, so padding shifts
+/// the caret to match the painted glyphs.
+///
+/// This delegates to [`crate::input_metrics::input_text_metrics`] rather than
+/// reading the authored string. It used to look up the literal key
+/// `padding-left`, which is never present: the cascade does not expand
+/// shorthands, so `padding: 6px 10px` survives under the key `padding` and the
+/// lookup missed it, returning `rect.x + 0` while the paint lane drew glyphs at
+/// `text_left`. Click-to-caret therefore disagreed with the painted glyphs by
+/// the whole left padding, and only an inline `padding-left` happened to work.
+/// Reading the *computed* side is the fix; the paint lane already calls the
+/// same function, so the two lanes can no longer drift.
+///
+/// Returning the whole struct — rather than just `.text_left` — is what makes
+/// the second half of the bug unrepresentable. The origin used to be shared
+/// while the font size was re-derived by a lane-local `parse_px` that accepted
+/// only a literal `px` suffix, so `em`/`%`/`rem` and bare inheritance all
+/// collapsed to a fallback and every advance came out `16/14` too wide: a
+/// click at the far end of the value landed the caret about one character
+/// short for every seven clicked. One call, both fields.
+///
+/// `viewport` is the **logical** `(w, h)` the paint lane resolves `vw`/`vh`
+/// against, so `padding-left: 2vw` lands the caret on the glyph in both lanes.
 #[cfg(feature = "skia-native")]
-fn parse_px(v: &str) -> Option<f32> {
-    let n = v.trim().strip_suffix("px")?.trim().parse::<f32>().ok()?;
-    (n.is_finite() && n > 0.0).then_some(n)
-}
-
-/// Effective font size (px) of a styled element, for caret hit testing.
-#[cfg(feature = "skia-native")]
-fn resolve_font_size(props: &velox_dom::Props) -> f32 {
-    props
-        .attrs
-        .get("style")
-        .and_then(|s| style_decl(s, "font-size"))
-        .and_then(parse_px)
-        .unwrap_or(DEFAULT_INPUT_FONT_SIZE)
-}
-
-/// Left content edge of a text input: the box origin plus `padding-left`.
-/// The click-to-caret mapping is relative to this, so padding shifts the caret
-/// to match the painted glyphs.
-#[cfg(feature = "skia-native")]
-fn resolve_text_origin_x(props: &velox_dom::Props, rect: velox_dom::layout::Rect) -> f32 {
-    let pad = props
-        .attrs
-        .get("style")
-        .and_then(|s| style_decl(s, "padding-left"))
-        .and_then(parse_px)
-        .unwrap_or(0.0);
-    rect.x as f32 + pad
+fn resolve_text_metrics(
+    props: &velox_dom::Props,
+    rect: velox_dom::layout::Rect,
+    viewport: (f32, f32),
+) -> crate::input_metrics::InputTextMetrics {
+    crate::input_metrics::input_text_metrics(
+        props.attrs.get("style").map(|s| s.as_str()),
+        rect,
+        viewport,
+        // This lane has no inheritance context, so it cannot read the parent's
+        // size. The painter's root `TextStyle` IS that context — the size an
+        // element that declares no `font-size` of its own paints at — so its
+        // constant is the stand-in, and it must be the same number in both
+        // lanes. Passing `DEFAULT_ROOT_FONT_SIZE` (16) here instead meant a field
+        // with no `font-size` was measured 16/14 too wide and its `em` padding
+        // resolved against 16 while paint used 14.
+        crate::skia_render::PAINT_ROOT_FONT_SIZE,
+    )
 }
 
 /// The `value` attribute of the element at `path`, if it is an element.
@@ -425,11 +435,16 @@ fn dispatch_input_value(
 /// Shared by both event loops — that shared call is what keeps the HMR loop
 /// from drifting away from the plain one again. Returns `true` when the caller
 /// must repaint.
+///
+/// Public because a host that drives its own key handling needs the same
+/// sequence the loops run, and because "is a keypress additive?" is only
+/// testable if both halves of a keypress can be driven in one test.
 #[cfg(feature = "skia-native")]
-fn apply_edit_to_focused(
+pub fn apply_edit_to_focused(
     input_targets: &mut [crate::events::InputTarget],
     action: crate::events::EditAction,
     last_vnode: &Option<VNode>,
+    focused_input: &mut Option<Vec<usize>>,
     on_event: &mut impl FnMut(&str, Option<&str>),
 ) -> bool {
     let Some(idx) = crate::events::focused_input_index(input_targets) else {
@@ -449,13 +464,26 @@ fn apply_edit_to_focused(
     } else if let Some(new_value) = &res.value {
         dispatch_input_value(last_vnode, &path, new_value, on_event);
     }
+    // `InputTarget::focused` is the single source of truth for focus; the
+    // loop's `focused_input` is its index-free mirror, so it has to follow
+    // whatever the action did to the flag rather than drift one keypress
+    // behind it. Every action except `Blur` leaves focus alone.
+    if matches!(action, crate::events::EditAction::Blur) {
+        *focused_input = None;
+    }
     res.needs_repaint()
 }
 
 /// Resolve the VirtualKeyCode of a key event into an editing action, honouring
 /// the Shift modifier. Returns `None` for keys that are not editing commands.
+///
+/// The match is closed on purpose: it is the *editor's* vocabulary, and a key
+/// that is not an editing command has no business acquiring one just because an
+/// app also listens for it. The author-facing listening vocabulary is
+/// [`key_name`], and the two are peers rather than a chain — see
+/// [`dispatch_keydown`], which runs both on the same press.
 #[cfg(feature = "skia-native")]
-fn edit_action_for_key(
+pub fn edit_action_for_key(
     keycode: winit::event::VirtualKeyCode,
     shift: bool,
 ) -> Option<crate::events::EditAction> {
@@ -469,8 +497,181 @@ fn edit_action_for_key(
         K::Back => EditAction::Backspace,
         K::Delete => EditAction::Delete,
         K::Return => EditAction::Submit,
+        // Esc ends the editing session: focus, selection and caret go, the
+        // value stays. This match is closed — there is no fallthrough to user
+        // code — so Esc belongs here or the user has no way out of a field.
+        K::Escape => EditAction::Blur,
         _ => return None,
     })
+}
+
+/// Stable, author-facing name for a key press.
+///
+/// This is the whole payload contract of `@keydown`, and it is a *string*, not
+/// the winit enum, for three reasons:
+///
+/// - the enum is a dependency's type, so putting it in a `.vx` handler's
+///   signature would leak `winit` (and an optional feature) into every app;
+/// - winit spells its variants `Key1`, `Numpad0`, `LWin`; an author writes
+///   `"1"`, `"0"`, `"MetaLeft"`-or-`"Super"`, never the crate's spelling;
+/// - a name is a *value*, so it can be compared, matched, printed and stored,
+///   which is what an `if key == "F2"` branch needs.
+///
+/// The vocabulary is the DOM `KeyboardEvent.key` convention where the two
+/// disagree (`"Enter"` not `"Return"`, `" "`-as-`"Space"`, `"Escape"`), and
+/// upper-case bare letters so a shifted key is the *same* name as an unshifted
+/// one — `shift` is not reported, and folding it into the name would mean an
+/// author cannot tell `a` from `A` when they cannot tell them apart either.
+/// Anything outside the table becomes `"Unidentified"`.
+#[cfg(feature = "skia-native")]
+pub fn key_name(keycode: winit::event::VirtualKeyCode) -> &'static str {
+    use winit::event::VirtualKeyCode as K;
+    match keycode {
+        K::A => "A",
+        K::B => "B",
+        K::C => "C",
+        K::D => "D",
+        K::E => "E",
+        K::F => "F",
+        K::G => "G",
+        K::H => "H",
+        K::I => "I",
+        K::J => "J",
+        K::K => "K",
+        K::L => "L",
+        K::M => "M",
+        K::N => "N",
+        K::O => "O",
+        K::P => "P",
+        K::Q => "Q",
+        K::R => "R",
+        K::S => "S",
+        K::T => "T",
+        K::U => "U",
+        K::V => "V",
+        K::W => "W",
+        K::X => "X",
+        K::Y => "Y",
+        K::Z => "Z",
+        K::Key0 => "0",
+        K::Key1 => "1",
+        K::Key2 => "2",
+        K::Key3 => "3",
+        K::Key4 => "4",
+        K::Key5 => "5",
+        K::Key6 => "6",
+        K::Key7 => "7",
+        K::Key8 => "8",
+        K::Key9 => "9",
+        K::F1 => "F1",
+        K::F2 => "F2",
+        K::F3 => "F3",
+        K::F4 => "F4",
+        K::F5 => "F5",
+        K::F6 => "F6",
+        K::F7 => "F7",
+        K::F8 => "F8",
+        K::F9 => "F9",
+        K::F10 => "F10",
+        K::F11 => "F11",
+        K::F12 => "F12",
+        K::Up => "ArrowUp",
+        K::Down => "ArrowDown",
+        K::Left => "ArrowLeft",
+        K::Right => "ArrowRight",
+        K::Back => "Backspace",
+        K::Delete => "Delete",
+        K::Insert => "Insert",
+        K::Home => "Home",
+        K::End => "End",
+        K::PageUp => "PageUp",
+        K::PageDown => "PageDown",
+        K::Return | K::NumpadEnter => "Enter",
+        K::Escape => "Escape",
+        K::Tab => "Tab",
+        K::Space => "Space",
+        K::LShift | K::RShift => "Shift",
+        K::LControl | K::RControl => "Control",
+        K::LAlt | K::RAlt => "Alt",
+        K::LWin | K::RWin => "Meta",
+        _ => "Unidentified",
+    }
+}
+
+/// Focus the input the author named `data-focus-id="id"`.
+///
+/// The stable-name entry point, for a caller that already knows *which* field it
+/// means — a host embedding the renderer that drives focus itself, or a test.
+/// Resolution runs through the same [`crate::events::find_focus_id_path`] the
+/// `@keydown` grant uses, so "focus the composer" means one thing in this
+/// codebase no matter which door it came through.
+///
+/// Returns `true` when focus actually moved, so an already-focused field is not
+/// mistaken for a change and does not have its caret reset.
+#[cfg(feature = "skia-native")]
+pub fn focus_input_by_id(
+    input_targets: &mut [crate::events::InputTarget],
+    last_vnode: &Option<VNode>,
+    focused_input: &mut Option<Vec<usize>>,
+    id: &str,
+) -> bool {
+    let Some(vnode) = last_vnode.as_ref() else {
+        return false;
+    };
+    let Some(path) = crate::events::find_focus_id_path(vnode, &[], id) else {
+        return false;
+    };
+    // Expressed as a one-focus `KeydownPlan` so this and the key path run the
+    // same grant code — the flag, the caret, the anchor, the blink and the
+    // index-free mirror are all written in exactly one place.
+    let plan = crate::events::KeydownPlan {
+        focus_paths: vec![path],
+        ..Default::default()
+    };
+    crate::events::apply_keydown(
+        &plan,
+        "",
+        input_targets,
+        focused_input,
+        &|p: &[usize]| input_value_char_len(vnode, p),
+        &mut (|_: &str, _: Option<&str>| {}),
+    )
+}
+
+/// Route one key press to the app: declarative focus grants plus every
+/// `on:keydown` handler, with the key's [`key_name`] as the payload.
+///
+/// Shared by both event loops, for the same reason `apply_edit_to_focused` is:
+/// the HMR loop drifting from the plain one is not a theoretical risk, it is the
+/// specific bug that indirection exists to prevent. Returns `true` when the
+/// caller must repaint.
+///
+/// Both loops call this from the key arm *before* the reload/quit guard and
+/// outside the `match` that routes editing keys, and it returns no instruction
+/// to consume the key. That placement is the additive contract made structural
+/// instead of documented: `dispatch_keydown` and the editing branch are
+/// siblings, so swallowing a keystroke would take deleting the adjacency to do.
+#[cfg(feature = "skia-native")]
+pub fn dispatch_keydown(
+    keycode: winit::event::VirtualKeyCode,
+    input_targets: &mut [crate::events::InputTarget],
+    last_vnode: &Option<VNode>,
+    focused_input: &mut Option<Vec<usize>>,
+    on_event: &mut impl FnMut(&str, Option<&str>),
+) -> bool {
+    let name = crate::key_name(keycode);
+    let Some(vnode) = last_vnode.as_ref() else {
+        return false;
+    };
+    let plan = crate::events::plan_keydown(vnode, name);
+    crate::events::apply_keydown(
+        &plan,
+        name,
+        input_targets,
+        focused_input,
+        &|p: &[usize]| input_value_char_len(vnode, p),
+        on_event,
+    )
 }
 
 /// Inject the caret/selection/focus contract onto every text input in the tree.
@@ -566,6 +767,28 @@ fn resolve_font_family(props: &velox_dom::Props) -> String {
         .to_string()
 }
 
+/// The **logical** `(w, h)` the paint lane will resolve `vw`/`vh` against this
+/// frame, read from the live surface.
+///
+/// Read from the surface, not a constant, precisely so it cannot disagree with
+/// paint: `render_frame` resolves viewport units against the same surface
+/// dimensions through the same [`logical_size`] rounding. A surface-less
+/// (headless) renderer yields `(0.0, 0.0)`, which only matters for
+/// viewport-unit padding — and there is nothing painted to disagree with.
+#[cfg(feature = "skia-native")]
+fn surface_logical_viewport(
+    renderer: &skia_backend::SkiaRenderer,
+    scale_factor: f32,
+) -> (f32, f32) {
+    match &renderer.surface {
+        Some(s) => {
+            let (w, h) = logical_size(s.width, s.height, scale_factor);
+            (w as f32, h as f32)
+        }
+        None => (0.0, 0.0),
+    }
+}
+
 /// Move keyboard focus to the text input under the cursor (or drop focus),
 /// and place the caret.
 ///
@@ -582,6 +805,12 @@ fn resolve_font_family(props: &velox_dom::Props) -> String {
 ///
 /// Returns `true` when the caller must repaint — i.e. focus actually changed or
 /// the caret moved.
+///
+/// `viewport` is the **logical** `(w, h)` the paint lane uses this frame (see
+/// [`surface_logical_viewport`]). It is threaded in rather than reconstructed
+/// here because the caret's origin is computed from the same lengths paint
+/// resolves: pass a different viewport and a `vw`/`vh` field puts its caret in
+/// one place and its glyphs in another.
 #[cfg(feature = "skia-native")]
 fn apply_click_focus(
     input_targets: &mut [crate::events::InputTarget],
@@ -590,25 +819,15 @@ fn apply_click_focus(
     x: f32,
     y: f32,
     scale_factor: f32,
+    viewport: (f32, f32),
 ) -> bool {
     let Some(idx) = crate::events::hit_test_input_index(input_targets, x, y) else {
         // Clicked empty space: blur. Clearing the selection is what stops a
         // stale highlight from surviving on a field the user has left. The
         // caret position is deliberately kept, so re-entering the field
         // restores where the user was.
-        let mut changed = false;
-        for t in input_targets.iter_mut() {
-            if t.focused || t.anchor.is_some() {
-                t.focused = false;
-                t.anchor = None;
-                t.blink_on = true;
-                changed = true;
-            }
-        }
-        if focused_input.take().is_some() {
-            changed = true;
-        }
-        return changed;
+        let changed = crate::events::blur_focused_input(input_targets);
+        return changed || focused_input.take().is_some();
     };
 
     let was_focused = input_targets[idx].focused;
@@ -621,20 +840,31 @@ fn apply_click_focus(
     {
         let value = props.attrs.get("value").cloned().unwrap_or_default();
         value_len = Some(value.chars().count());
-        let font_size = resolve_font_size(props);
+        // ONE call for both the origin and the font size. Taking the origin
+        // from here and the size from anywhere else is the defect this shape
+        // removes: two lanes that must agree, each holding its own constant.
+        let metrics = resolve_text_metrics(props, rect, viewport);
+        let font_size = metrics.font_size;
         let config = crate::text::TextRenderConfig::new(&resolve_font_family(props), font_size);
-        let origin_x = resolve_text_origin_x(props, rect);
         // Measure through the renderer's own text stack (single measure path,
         // skia-aware under `skia-native`) rather than a local heuristic, so the
         // caret lands on the glyph the paint lane will actually draw.
         let measure =
             |s: &str| crate::text::TextMeasurer::measure_with_scale(s, &config, scale_factor).0;
         caret = Some(crate::events::click_to_char_index(
-            &value, rect, x, origin_x, font_size, &measure,
+            &value,
+            rect,
+            x,
+            metrics.text_left,
+            font_size,
+            &measure,
         ));
     }
 
-    input_targets[idx].focused = true;
+    // The one place focus is granted. `focus_input` also blurs any other field
+    // that held focus, so a click straight from one field to another cannot
+    // leave two of them flagged.
+    crate::events::focus_input(input_targets, idx);
     input_targets[idx].blink_on = true;
     // A plain click is never a selection-extension; it collapses one.
     input_targets[idx].anchor = None;
@@ -652,6 +882,11 @@ fn apply_click_focus(
 pub mod event_binding;
 pub mod events;
 pub mod hmr;
+// The single authority on an `<input>`'s content-box geometry. Public so both
+// `skia_render`'s paint lane and `lib.rs`'s hit-test lane reach the SAME
+// function instead of each growing an inset of its own, and so a test can
+// assert against it without re-deriving the painter's arithmetic.
+pub mod input_metrics;
 pub mod text;
 pub mod viewport;
 
@@ -1111,8 +1346,12 @@ pub fn skia_draw_test_frame() -> Result<(), String> {
 }
 
 /// Convenience wrapper to create a Skia `DirectContext` from the crate root.
+///
+/// Returns the owning `GlDirectContext` pair, which holds the headless EGL
+/// context alongside the `DirectContext`: handing back a bare `DirectContext`
+/// would return a handle whose GL context had already been destroyed.
 #[cfg(all(feature = "skia-native", unix))]
-pub fn create_direct_context() -> Result<skia_safe::gpu::DirectContext, String> {
+pub fn create_direct_context() -> Result<crate::skia_gl::GlDirectContext, String> {
     crate::skia_gl::create_direct_context()
 }
 
@@ -1857,6 +2096,7 @@ where
                             mouse_pos.0,
                             mouse_pos.1,
                             scale_factor,
+                            surface_logical_viewport(&renderer, scale_factor),
                         );
                         let mut handled_click = false;
                         if let Some((handler, payload_opt)) =
@@ -1939,13 +2179,36 @@ where
                         if let Some(keycode) = input.virtual_keycode
                             && input.state == ElementState::Pressed
                         {
-                            match keycode {
-                                VirtualKeyCode::R => {
-                                    // Trigger reload (app will exit, dev server will restart it)
-                                    velox_core::lifecycle::run_all_destroy_hooks();
-                                    *control_flow = ControlFlow::Exit;
+                            // `@keydown` bindings first, and additively: this
+                            // grants focus and calls handlers, it never
+                            // consumes the key, so every branch below still
+                            // runs exactly as it did before any keydown
+                            // binding existed.
+                            if crate::dispatch_keydown(
+                                keycode,
+                                &mut input_targets,
+                                &last_vnode,
+                                &mut focused_input,
+                                &mut on_event,
+                            ) {
+                                arm_blink_deadline(&mut blink_deadline);
+                                velox_core::lifecycle::run_all_updated_hooks();
+                                if let Some(w) = window_opt.as_ref() {
+                                    w.request_redraw();
                                 }
-                                VirtualKeyCode::Q => {
+                            }
+                            match keycode {
+                                // Reload (app exits, dev server restarts it) and quit.
+                                // Both are withheld while a text field has focus: with a
+                                // field focused these keys are *text*, so an unguarded
+                                // shortcut means typing "r" into a search box kills the
+                                // application. With nothing focused they are the only way
+                                // out of the window. When the guard fails the key falls
+                                // through to the editor below, which is what lets the
+                                // character still reach the field.
+                                VirtualKeyCode::R | VirtualKeyCode::Q
+                                    if !crate::events::any_input_focused(&input_targets) =>
+                                {
                                     velox_core::lifecycle::run_all_destroy_hooks();
                                     *control_flow = ControlFlow::Exit;
                                 }
@@ -1960,6 +2223,7 @@ where
                                             &mut input_targets,
                                             action,
                                             &last_vnode,
+                                            &mut focused_input,
                                             &mut on_event,
                                         );
                                         if changed {
@@ -1996,6 +2260,7 @@ where
                                 &mut input_targets,
                                 crate::events::EditAction::Insert(c),
                                 &last_vnode,
+                                &mut focused_input,
                                 &mut on_event,
                             )
                         {
@@ -2548,6 +2813,7 @@ where
                             mouse_pos.0,
                             mouse_pos.1,
                             scale_factor,
+                            surface_logical_viewport(&renderer, scale_factor),
                         );
                         let mut handled_click = false;
                         if let Some((handler, payload_opt)) =
@@ -2629,13 +2895,32 @@ where
                         if let Some(keycode) = input.virtual_keycode
                             && input.state == ElementState::Pressed
                         {
-                            match keycode {
-                                VirtualKeyCode::R => {
-                                    // Trigger reload (app will exit, dev server will restart it)
-                                    velox_core::lifecycle::run_all_destroy_hooks();
-                                    *control_flow = ControlFlow::Exit;
+                            // `@keydown` bindings, identical to the plain
+                            // loop's — including the additive contract, which
+                            // is what stops an HMR session from losing F2-focus
+                            // the moment a rebuild is watched.
+                            if crate::dispatch_keydown(
+                                keycode,
+                                &mut input_targets,
+                                &last_vnode,
+                                &mut focused_input,
+                                &mut on_event,
+                            ) {
+                                crate::arm_blink_deadline(&mut blink_deadline);
+                                velox_core::lifecycle::run_all_updated_hooks();
+                                if let Some(w) = window_opt.as_ref() {
+                                    w.request_redraw();
                                 }
-                                VirtualKeyCode::Q => {
+                            }
+                            match keycode {
+                                // Reload / quit. Identical to the plain loop's arm
+                                // including the focus guard — an unguarded shortcut
+                                // here would mean typing "r" into a field exits the
+                                // process under HMR only, which is the kind of drift
+                                // that survives review because it is "the other loop".
+                                VirtualKeyCode::R | VirtualKeyCode::Q
+                                    if !crate::events::any_input_focused(&input_targets) =>
+                                {
                                     velox_core::lifecycle::run_all_destroy_hooks();
                                     *control_flow = ControlFlow::Exit;
                                 }
@@ -2650,6 +2935,7 @@ where
                                             &mut input_targets,
                                             action,
                                             &last_vnode,
+                                            &mut focused_input,
                                             &mut on_event,
                                         );
                                         if changed {
@@ -2679,6 +2965,7 @@ where
                                 &mut input_targets,
                                 crate::events::EditAction::Insert(c),
                                 &last_vnode,
+                                &mut focused_input,
                                 &mut on_event,
                             )
                         {
@@ -2992,6 +3279,10 @@ mod edit_focus_tests {
         /// loop has painted a frame but has not published it as `last_vnode`.
         vnode: Option<VNode>,
         inputs: Vec<InputTarget>,
+        /// The loops' index-free mirror of "which input is focused". It is
+        /// asserted on below, because after Esc it has to follow the blur
+        /// rather than keep naming a field that is no longer focused.
+        focused: Option<Vec<usize>>,
     }
 
     fn scene(attrs: &[(&str, &str)]) -> Scene {
@@ -3024,6 +3315,7 @@ mod edit_focus_tests {
         Scene {
             vnode: Some(vnode),
             inputs,
+            focused: None,
         }
     }
 
@@ -3046,18 +3338,28 @@ mod edit_focus_tests {
             let mut sink = |name: &str, data: Option<&str>| {
                 log.push((name.to_string(), data.map(str::to_string)))
             };
-            apply_edit_to_focused(&mut s.inputs, action, &s.vnode, &mut sink)
+            apply_edit_to_focused(&mut s.inputs, action, &s.vnode, &mut s.focused, &mut sink)
         };
         (repaint, log)
     }
 
-    /// Click at (x, y), returning whether the caller must repaint. The
-    /// `focused_input` out-param is deliberately never asserted on anywhere in
-    /// this module: nothing reads it, and asserting on it would make its
-    /// eventual removal look like a behaviour change.
+    /// Click at (x, y), returning whether the caller must repaint. `focused` is
+    /// the loop's own mirror of the focus flag, kept in `Scene` so the blur tests
+    /// can assert it alongside the flag itself.
     fn run_click(s: &mut Scene, x: f32, y: f32) -> bool {
-        let mut focused_input: Option<Vec<usize>> = None;
-        apply_click_focus(&mut s.inputs, &s.vnode, &mut focused_input, x, y, 1.0)
+        // The viewport the loops pass is the live surface's logical size; this
+        // module has no surface, so it passes the page it laid out against
+        // (`W` x `H`) at scale 1. Only viewport-unit lengths (`vw`/`vh`) can
+        // tell the two apart, and none of the fixtures below declare one.
+        apply_click_focus(
+            &mut s.inputs,
+            &s.vnode,
+            &mut s.focused,
+            x,
+            y,
+            1.0,
+            (W as f32, H as f32),
+        )
     }
 
     // -- apply_edit_to_focused ------------------------------------------------
@@ -3180,6 +3482,10 @@ mod edit_focus_tests {
             (K::Back, false, Backspace),
             (K::Delete, false, Delete),
             (K::Return, false, Submit),
+            // Esc is an editing key even though it changes no text: it is the
+            // only way out of a field, and the match has no fallthrough to user
+            // code, so anything absent here simply cannot happen.
+            (K::Escape, false, Blur),
         ];
         for (key, shift, want) in cases {
             assert_eq!(
@@ -3192,24 +3498,96 @@ mod edit_focus_tests {
 
     /// A printable key must map to `None`: characters reach the editor through
     /// `ReceivedCharacter`, so claiming one here would insert it twice.
+    ///
+    /// `Escape` is deliberately *not* in this list. It used to be, and that
+    /// assertion was what pinned the bug: with Esc mapping to `None` and no
+    /// other code handling it, the key was inert and a focused field could not
+    /// be left. Esc maps to [`EditAction::Blur`] and the blur behaviour is
+    /// asserted below.
     #[test]
     fn non_editing_keys_produce_no_action() {
-        for key in [
-            K::A,
-            K::R,
-            K::Key1,
-            K::Space,
-            K::Escape,
-            K::Tab,
-            K::Up,
-            K::Down,
-        ] {
+        for key in [K::A, K::R, K::Key1, K::Space, K::Tab, K::Up, K::Down] {
             assert_eq!(
                 edit_action_for_key(key, false),
                 None,
                 "{key:?} is not an editing key"
             );
         }
+    }
+
+    // -- Esc unfocuses --------------------------------------------------------
+
+    /// Esc on a focused field drops focus, the selection and the caret, and
+    /// leaves the text alone.
+    ///
+    /// The caret goes because Esc is an explicit "I am done here" rather than a
+    /// click that wandered off — that is the difference from the empty-space
+    /// blur above, which deliberately keeps the caret. The value must not
+    /// change: Esc is not an edit, so the app must not be woken with an
+    /// `on:input` it did not cause.
+    #[test]
+    fn escape_on_a_focused_field_blurs_it_and_drops_its_caret_and_selection() {
+        let mut s = scene(&[]).focused_at(4);
+        s.inputs[0].anchor = Some(1);
+        assert_eq!(s.inputs[0].selection(), Some((1, 4)));
+
+        let (repaint, log) = run_edit(&mut s, EditAction::Blur);
+
+        assert!(
+            repaint,
+            "the focus ring and highlight disappear, so it repaints"
+        );
+        assert!(!s.inputs[0].focused, "Esc must leave the field");
+        assert_eq!(
+            s.inputs[0].anchor, None,
+            "a selection cannot outlive the focus"
+        );
+        assert_eq!(s.inputs[0].cursor, 0, "Esc clears the caret");
+        assert!(
+            s.inputs[0].blink_on,
+            "the caret comes back solid, not blinking"
+        );
+        assert!(
+            log.is_empty(),
+            "Esc changes no text, so nothing is dispatched"
+        );
+        assert_eq!(
+            s.focused, None,
+            "the loop's mirror of the focus must follow the blur, or it names a \
+             field that is no longer focused"
+        );
+    }
+
+    /// Esc with nothing focused is free — no repaint, no dispatch.
+    ///
+    /// Same contract as every other no-op keypress: the loops branch on
+    /// `needs_repaint()`, and a wake-up here would repaint for nothing.
+    #[test]
+    fn escape_with_nothing_focused_is_a_no_op() {
+        let mut s = scene(&[]);
+        assert!(!s.inputs[0].focused);
+        let (repaint, log) = run_edit(&mut s, EditAction::Blur);
+        assert!(
+            !repaint,
+            "there was no focus to drop, so there is nothing to redraw"
+        );
+        assert!(log.is_empty());
+        assert_eq!(s.focused, None);
+    }
+
+    /// Esc reaches the editor at all only because the key map claims it, so pin
+    /// the mapping through the same call the loops make.
+    #[test]
+    fn escape_is_routed_to_the_blur_action() {
+        assert_eq!(
+            edit_action_for_key(K::Escape, false),
+            Some(EditAction::Blur)
+        );
+        assert_eq!(
+            edit_action_for_key(K::Escape, true),
+            Some(EditAction::Blur),
+            "Shift does not change what Esc means"
+        );
     }
 
     // -- apply_click_focus ----------------------------------------------------
@@ -3234,6 +3612,214 @@ mod edit_focus_tests {
         assert_eq!(
             s.inputs[0].cursor, 0,
             "clicking the first glyph must move the caret there, not leave it at the end"
+        );
+    }
+
+    /// The regression this lane had: the origin was computed from a lookup of
+    /// the literal key `padding-left`, which the cascade never writes for an
+    /// authored shorthand. `padding: 6px 30px` therefore resolved to
+    /// `rect.x + 0` while the painter drew the first glyph at `rect.x + 30`, so
+    /// every caret sat 30px left of the glyph it claimed to be on. With the
+    /// field focused, a click on the *first* glyph was measured 30px further
+    /// right than it is and landed past the end of the value.
+    #[test]
+    fn shorthand_padding_places_the_caret_on_the_painted_glyph() {
+        const SHORTHAND_STYLE: &str = "position:absolute;left:20px;top:20px;width:200px;height:40px;font-size:15px;padding:6px 30px";
+        let mut s = scene(&[("style", SHORTHAND_STYLE)]).focused_at(5);
+        let rect = s.inputs[0].rect;
+        assert_eq!(rect.x, 20, "fixture must stay absolutely positioned");
+        let text_left = rect.x as f32 + 30.0;
+
+        assert!(run_click(&mut s, text_left + 1.0, TEXT_Y));
+        assert_eq!(
+            s.inputs[0].cursor, 0,
+            "a click on the first glyph must put the caret before it, whatever \
+             syntax the author used for the padding"
+        );
+    }
+
+    /// The origin is not merely "shifted": it must equal the painter's
+    /// `text_left` for every spelling of the same declaration, because both
+    /// lanes now read the same computed value out of
+    /// `input_metrics::input_text_metrics`.
+    #[test]
+    fn text_origin_agrees_with_the_paint_authority_for_every_padding_spelling() {
+        use velox_dom::Props;
+        let rect = velox_dom::layout::Rect {
+            x: 20,
+            y: 20,
+            w: 200,
+            h: 40,
+        };
+        let viewport = (W as f32, H as f32);
+        let authored = [
+            "padding: 6px 30px",
+            "padding-left: 30px",
+            "padding: 6px 30px; padding-left: 30px",
+            "padding-left: 30px; padding: 6px 30px",
+            "padding: 30px 6px 6px 30px",
+        ];
+        for decl in authored {
+            let props = Props::new().set("style", decl);
+            assert_eq!(
+                super::resolve_text_metrics(&props, rect, viewport).text_left,
+                50.0,
+                "`{decl}` must resolve the same first-glyph x as the paint lane"
+            );
+            // …and the authority itself, not a local copy of it.
+            let authority = crate::input_metrics::input_text_metrics(
+                props.attrs.get("style").map(|s| s.as_str()),
+                rect,
+                viewport,
+                velox_dom::layout::DEFAULT_ROOT_FONT_SIZE,
+            );
+            assert_eq!(
+                super::resolve_text_metrics(&props, rect, viewport).text_left,
+                authority.text_left,
+                "`{decl}`: the hit-test lane must not re-derive what paint computed"
+            );
+        }
+        // A viewport-unit left padding must resolve against the viewport the
+        // caller threaded in — the same one paint resolves `vw` against.
+        let props = Props::new().set("style", "padding-left: 5vw");
+        assert_eq!(
+            super::resolve_text_metrics(&props, rect, viewport).text_left,
+            rect.x as f32 + 0.05 * W as f32
+        );
+    }
+
+    /// The caret index a click at `click_x` leaves on a field styled `style`.
+    ///
+    /// The field is pre-focused on purpose: `apply_click_focus` sends the caret
+    /// to the END of the value on focus gain, so a never-focused fixture would
+    /// report "end of value" for every click x and any comparison built on it
+    /// would pass without ever running the code under test.
+    ///
+    /// Overriding `style` and `value` on top of `FIELD_STYLE` matters for the
+    /// same reason: `FIELD_STYLE` pins `font-size:15px`, and every fixture that
+    /// inherits it silently opts out of the undeclared-font-size case these
+    /// tests exist to cover.
+    fn caret_from_click(style: &str, value: &str, click_x: f32) -> usize {
+        let mut s = scene(&[("style", style), ("value", value)]).focused_at(0);
+        assert!(
+            run_click(&mut s, click_x, TEXT_Y),
+            "the click at x={click_x} must land on the field, not on empty space"
+        );
+        s.inputs[0].cursor
+    }
+
+    /// Assert that two styles describing visually identical fields answer
+    /// identically at every click x across the field, and that the answers are
+    /// non-degenerate.
+    ///
+    /// `equal_windows` sweeps the whole field rather than probing one x on
+    /// purpose. A single probe can land on a char boundary where two disagreeing
+    /// advances happen to round to the same index, and the test would pass with
+    /// the defect still in place; sweeping makes that unfalsifiable at one lucky
+    /// coordinate.
+    fn assert_carets_agree_across_field(equal: (&str, &str), value: &str) {
+        let (a, b) = equal;
+        // Collect the WHOLE profile before asserting, so a failure reports how
+        // far apart the two lanes end up rather than only the first coordinate
+        // where they parted.
+        let mut profile: Vec<(f32, usize, usize)> = Vec::new();
+        let mut indices: Vec<usize> = Vec::new();
+        let mut x = 20.0;
+        while x <= 219.0 {
+            let ca = caret_from_click(a, value, x);
+            let cb = caret_from_click(b, value, x);
+            if ca != cb {
+                profile.push((x, ca, cb));
+            }
+            indices.push(ca);
+            x += 1.0;
+        }
+        let worst = profile
+            .iter()
+            .map(|&(_, u, v)| (u as i64 - v as i64).abs())
+            .max()
+            .unwrap_or(0);
+        assert!(
+            profile.is_empty(),
+            "`{a}` and `{b}` paint identically, so the caret must land on the same \
+             glyph at every click x. They disagree at {} of 200 coordinates, by up \
+             to {worst} character(s); first divergence: {:?}",
+            profile.len(),
+            profile.first()
+        );
+        // Anti-vacuity: a lane that ignored the click entirely, or that always
+        // answered "end of value", would satisfy the equality above trivially.
+        let len = value.chars().count();
+        assert!(
+            indices.iter().any(|&i| i > 0 && i < len),
+            "every click resolved to an end-of-value caret, so this compared \
+             nothing: {indices:?}"
+        );
+    }
+
+    /// The click-to-caret lane must measure advances at the size the PAINT lane
+    /// draws them at, and must not hold a second answer to "how big is this
+    /// field".
+    ///
+    /// The proof is differential and needs no font metric, no geometry constant
+    /// and no knowledge of which face is bundled: an input that declares no
+    /// `font-size` paints at the painter's root size — that is what "declares
+    /// none" means — which is by definition the same size an input declaring
+    /// that size *explicitly* paints at. The two fixtures are therefore
+    /// identical on screen, so a click at the same x must leave the caret on
+    /// the same glyph, whatever each lane measured with.
+    ///
+    /// This is exactly the shipped-boilerplate-shaped hole: the UA sheet
+    /// declares no `font-size` for `input`, so a field that never says it
+    /// inherits 14px from the painter's root `TextStyle` while the hit-test lane
+    /// fell back to its own 16px. Every advance came out `16/14` wide, so a
+    /// click at the far end of the value landed the caret roughly one character
+    /// short for every seven clicked.
+    #[test]
+    fn the_caret_lane_measures_at_the_size_an_undeclared_font_size_paints_at() {
+        // Wide glyphs, and enough of them that a 14%-wide advance error cannot
+        // hide inside one character's slack over the 200px field.
+        assert_carets_agree_across_field(
+            (
+                "position:absolute;left:20px;top:20px;width:200px;height:40px",
+                "position:absolute;left:20px;top:20px;width:200px;height:40px;font-size:14px",
+            ),
+            &"M".repeat(20),
+        );
+    }
+
+    /// The origin half of the same defect, which survived after the origin was
+    /// first routed through the shared authority: an `em` padding resolves
+    /// against the ELEMENT's font size, so an element that inherits its size has
+    /// to resolve `4em` against the inherited size in *both* lanes. The hit-test
+    /// lane passed its own 16px where paint inherits 14px, so the caret sat a
+    /// whole `4em` — 16px — to the right of the glyph it claimed to be on.
+    #[test]
+    fn em_padding_resolves_against_the_same_inherited_size_in_both_lanes() {
+        // Vertical padding stays 0 so the only thing under test is the
+        // horizontal origin, and the field's box cannot move out from under the
+        // literal click coordinates the sweep uses.
+        assert_carets_agree_across_field(
+            (
+                "position:absolute;left:20px;top:20px;width:200px;height:40px;padding:0 4em",
+                "position:absolute;left:20px;top:20px;width:200px;height:40px;padding:0 4em;font-size:14px",
+            ),
+            &"M".repeat(20),
+        );
+    }
+
+    /// A relative `font-size` is resolved against the inherited size by the
+    /// cascade, so `2em` on a field that inherits 14px paints at 28px — and
+    /// nothing about that declaration contains a `px` suffix for a lane-local
+    /// literal parser to find.
+    #[test]
+    fn a_relative_font_size_reaches_the_caret_lane_at_its_resolved_size() {
+        assert_carets_agree_across_field(
+            (
+                "position:absolute;left:20px;top:20px;width:200px;height:40px;font-size:2em",
+                "position:absolute;left:20px;top:20px;width:200px;height:40px;font-size:28px",
+            ),
+            &"M".repeat(20),
         );
     }
 

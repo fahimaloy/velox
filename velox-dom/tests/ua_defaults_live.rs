@@ -488,6 +488,163 @@ fn textarea_uses_pre_wrap() {
 // assertion would pass before and after. `textarea_uses_pre_wrap` above is
 // kept because it fails on the pre-change tree.
 
+// ===== D: `input` ==========================================================
+//
+// `ua.css` claims three declarations for `input`, and all three were untested:
+//   input { padding: 6px 10px; min-height: 24px; color: #000000; }
+//
+// Each is pinned below through the real cascade, on its own, because they are
+// independent: `padding` is a geometry reader, `min-height` is a geometry
+// reader that only shows once the padding is overridden, and `color` has no
+// geometry reader at all so it is pinned on the post-cascade string (this
+// file's stated rule for exactly that case — see the module docs).
+
+/// `padding` reaches layout. The observable is the line box INSIDE the field,
+/// which the padding offsets; `LayoutNode` carries no padding field of its own.
+#[test]
+fn an_input_takes_the_ua_padding() {
+    let root = h(
+        "div",
+        Props::new(),
+        vec![h(
+            "input",
+            Props::from_inline("width:200px"),
+            vec![text("hi")],
+        )],
+    );
+    let laid = cascade_layout(&root);
+    let input = &laid.children[0];
+    let line = input
+        .children
+        .first()
+        .unwrap_or_else(|| panic!("an input containing text must produce a line box: {input:?}"));
+    assert_eq!(
+        line.rect.x - input.rect.x,
+        10,
+        "ua.css `input {{ padding: 6px 10px }}` must inset the content 10px \
+         horizontally"
+    );
+    assert_eq!(
+        line.rect.y - input.rect.y,
+        6,
+        "ua.css `input {{ padding: 6px 10px }}` must inset the content 6px \
+         vertically"
+    );
+}
+
+/// `min-height` is a FLOOR, so it is invisible while the UA padding alone
+/// already exceeds it (a `padding: 0` field is 6+6+22 = 34px tall from the
+/// padding alone). Overriding the author's padding to 0 is what isolates it:
+/// then the only thing that can produce 24px is `min-height` itself, and
+/// without the UA rule the field collapses to its 22px line box.
+#[test]
+fn an_input_keeps_a_24px_floor_even_with_its_padding_removed() {
+    let root = h(
+        "div",
+        Props::new(),
+        vec![h(
+            "input",
+            Props::from_inline("width:200px;padding:0"),
+            vec![text("hi")],
+        )],
+    );
+    let laid = cascade_layout(&root);
+    let input = &laid.children[0];
+    assert_eq!(
+        input.rect.h, 24,
+        "ua.css `input {{ min-height: 24px }}` must hold the field at 24px once \
+         the author's `padding: 0` has removed the padding that would otherwise \
+         hide the floor; without it the field is only as tall as its text"
+    );
+}
+
+/// `color` has no layout reader — it is consumed by the renderer's
+/// `parse_text_style` — so this file's convention applies and the observable is
+/// the post-cascade style string, byte-for-byte what that parser receives.
+///
+/// This is the second half of the same bug as the padding: the renderer paints
+/// the white fallback fill behind a field that declares no colour of its own,
+/// so an input inheriting a near-white page colour would be near-white on white.
+#[test]
+fn an_input_takes_the_ua_text_colour() {
+    let root = h("div", Props::new(), vec![h("input", Props::new(), vec![])]);
+    let styled = cascade(&root);
+    assert_eq!(
+        computed(&styled, "input", "color").as_deref(),
+        Some("#000000"),
+        "ua.css `input {{ color: #000000 }}` must reach the post-cascade style \
+         string that `parse_text_style` reads"
+    );
+}
+
+/// An author's own colour must still win, or a component stylesheet could never
+/// put a field on a dark surface. This is the other half of the `color` rule's
+/// rationale, and it is a cascade fact rather than a `ua.css` fact.
+#[test]
+fn an_author_colour_still_beats_the_ua_input_colour() {
+    let root = h(
+        "div",
+        Props::new(),
+        vec![h("input", Props::from_inline("color:#ff0000"), vec![])],
+    );
+    let styled = cascade(&root);
+    assert_eq!(
+        computed(&styled, "input", "color").as_deref(),
+        Some("#ff0000"),
+        "the UA `input` colour must lose to the element's own inline `color`"
+    );
+}
+
+// ===== D: THE `input` RULE'S KNOWN DEVIATION ================================
+//
+// The rule above is unconditioned on input type, so `checkbox` and `radio`
+// inherit `padding: 6px 10px`, the 24px floor, and a forced black — none of
+// which belongs on a control whose painted area is a 13x13 box. This is a real
+// deviation from the browser, and it is DOCUMENTED rather than fixed, because
+// the obvious fix is worse than the deviation:
+//
+//   Velox cannot express `:not([type=checkbox])`. It does not reject the
+//   selector and it does not ignore the bracket — `split_pseudos`
+//   (velox-style/src/lib.rs) drops the unrecognised `not(...)` pseudo and
+//   `parse_selector_part` hoists `[type=checkbox]` out as a REQUIREMENT, so
+//   `input:not([type=checkbox])` parses to exactly `input[type=checkbox]`: the
+//   condition is INVERTED. Conditioning the rule that way would apply the
+//   padding and the black to the checkbox and NOT to the text field — strictly
+//   worse than leaving it unconditioned.
+//
+//   Pinned in velox-style/tests/unsupported_not_pseudo.rs. If `:not()` is ever
+//   implemented, THAT test is what has to change, and the fix available to
+//   `ua.css` opens up at the same time.
+
+#[test]
+fn the_input_rule_is_unconditioned_on_input_type_and_that_deviation_is_pinned() {
+    for ty in ["text", "password", "checkbox", "radio"] {
+        let root = h(
+            "div",
+            Props::new(),
+            vec![h(
+                "input",
+                Props::new()
+                    .set("type", ty)
+                    .set("style", "width:200px;padding:0"),
+                vec![text("hi")],
+            )],
+        );
+        let styled = cascade(&root);
+        let laid = compute_layout(&styled, 800, 600);
+        assert_eq!(
+            computed(&styled, "input", "color").as_deref(),
+            Some("#000000"),
+            "type={ty}: the UA input rule is NOT conditioned on type, so this \
+             is the pinned deviation, not an accident. See the section comment."
+        );
+        assert_eq!(
+            laid.children[0].rect.h, 24,
+            "type={ty}: the 24px floor is unconditioned too"
+        );
+    }
+}
+
 // ===== D: strong / b ========================================================
 
 #[test]

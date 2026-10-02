@@ -143,7 +143,14 @@ fn suggest_pest_error(expected: &[String], unexpected: &[String], block: &str) -
 /// Map a Pest `Rule` to a human-readable name (block-level where possible).
 fn rule_to_block_name(rule: &Rule) -> String {
     match rule {
-        Rule::template | Rule::template_open | Rule::template_body => "<template>".to_string(),
+        Rule::template | Rule::template_open | Rule::template_body | Rule::nested_template => {
+            "<template>".to_string()
+        }
+        // A nested `<template v-slot:foo>` is still a template block as far as a
+        // syntax error inside it is concerned, and it is the only place a slot
+        // binding can appear, so a name here has to say which.
+        Rule::slot_attr => "slot binding (v-slot:name or #name)".to_string(),
+        Rule::slot_name => "slot name".to_string(),
         Rule::script | Rule::script_open | Rule::script_body => "<script>".to_string(),
         Rule::style | Rule::style_open | Rule::style_body => "<style>".to_string(),
         Rule::attribute => "attribute".to_string(),
@@ -186,8 +193,129 @@ fn infer_block_context(source: &str, error_line: usize) -> String {
     last_block.to_string()
 }
 
+/// How many literal `<template` openers one SFC may contain before `parse_sfc`
+/// refuses the file, bounding the pest grammar's own recursion.
+///
+/// This is deliberately NOT [`crate::template_parse::MAX_TEMPLATE_DEPTH`]. That
+/// constant bounds the hand-written element builder's open-element `Vec`, which
+/// is a different stack in a different parser — reached only after pest has
+/// already returned. Nothing bounded this one: `grammar.pest:51-52` spells the
+/// nesting as
+///
+/// ```text
+/// nested_template = { template_open ~ template_body ~ "</template>" }
+/// template_body  = @{ (nested_template | !"</template>" ~ ANY)* }
+/// ```
+///
+/// — mutual recursion with no ceiling of its own. A file made of nothing but
+/// `<template` openers drives one recursive `template_body` frame per opener
+/// with nothing to stop it, so the ceiling has to live OUTSIDE the grammar: pest
+/// offers no way to parameterise a rule's depth.
+///
+/// 256 matches `MAX_TEMPLATE_DEPTH` and borrows its rationale (see that
+/// constant's doc): several times deeper than any hand-written template needs,
+/// so reaching this means the input is machine-generated or malformed rather
+/// than merely elaborate.
+///
+/// # Why counting occurrences is enough
+///
+/// Every level of `nested_template` consumes a distinct literal `<template` —
+/// that is what `template_open` starts with. So the number of those substrings in
+/// the source is an UPPER BOUND on the grammar's real recursion depth: this
+/// guard can never wave a recursion bomb through. It can, however, reject a file
+/// whose count is inflated by `<template` text the grammar would not open on
+/// (inside an attribute value, a comment, or a `<script>` body holding a code
+/// sample). This scan makes no attempt to exclude those, because proving a
+/// position is inert requires modelling the grammar's own state, and getting
+/// that wrong in a guard whose only job is to be an upper bound turns the guard
+/// into the hazard. The trade is explicit: a file carrying more than 256
+/// `<template` strings anywhere is rejected with an actionable message. Any such
+/// file is already pathological. One exclusion IS safe and IS made, in
+/// `nested_template_openers`: a `<template` not followed by whitespace or `>`
+/// cannot be what `template_open` matches, so a `<templates>` tag is not counted.
+pub const MAX_NESTED_TEMPLATE_DEPTH: usize = 256;
+
+/// Count the literal `<template` openers the grammar could recurse on, and the
+/// byte offset of the first one past [`MAX_NESTED_TEMPLATE_DEPTH`]. See that
+/// constant for why the raw count is the right thing to compare, and what it
+/// deliberately does not try to exclude.
+///
+/// Returns `(count, offending_offset)`, with the offset `0` when nothing
+/// exceeds the limit — no caller reports a position it did not fail on.
+fn nested_template_openers(source: &str) -> (usize, usize) {
+    const OPEN: &str = "<template";
+    // `template_open` is `"<template" ~ (WS+ ~ (slot_attr | attribute))* ~ WS*
+    // ~ ">"`, so the character after the literal is either one of the grammar's
+    // four whitespace characters or the `>` itself — never anything else. That
+    // is exactly what tells a nested block from `<templates>`, and matching it
+    // here means the count is the number of things the grammar can ACTUALLY
+    // open on rather than the number of strings that start the same way. It
+    // still only ever REDUCES the count, so the upper-bound property that makes
+    // this a sound guard is untouched.
+    const WS: [char; 4] = [' ', '\t', '\r', '\n'];
+    let mut count = 0usize;
+    let mut offending_offset = 0usize;
+    // `char_indices`, not a byte counter: `source[i..]` panics if `i` lands in
+    // the middle of a multi-byte character, and a `.vx` file may well contain
+    // one. Every position yielded here is a character boundary. Once
+    // `starts_with(OPEN)` holds, `i + OPEN.len()` is a boundary too — ASCII bytes
+    // never occur inside a multi-byte sequence — so the lookahead below is safe.
+    for (i, _) in source.char_indices() {
+        if !source[i..].starts_with(OPEN) {
+            continue;
+        }
+        let opens_a_block = source[i + OPEN.len()..]
+            .chars()
+            .next()
+            .is_some_and(|after| after == '>' || WS.contains(&after));
+        if !opens_a_block {
+            continue;
+        }
+        // The (MAX + 1)th opener is the first one past the ceiling. It is not
+        // necessarily the last, and byte 0 is never it: every SFC opens with
+        // a top-level `<template>`, so pointing a reader there would send
+        // them to a tag they cannot change.
+        if count == MAX_NESTED_TEMPLATE_DEPTH {
+            offending_offset = i;
+        }
+        count += 1;
+    }
+    (count, offending_offset)
+}
+
+/// Refuse a file whose `<template` count exceeds
+/// [`MAX_NESTED_TEMPLATE_DEPTH`], before pest is handed it.
+fn check_nested_template_depth(source: &str) -> Result<(), String> {
+    let (openers, offending_offset) = nested_template_openers(source);
+    if openers <= MAX_NESTED_TEMPLATE_DEPTH {
+        return Ok(());
+    }
+    let (line, col) = crate::diagnostic::line_col_at(source, offending_offset);
+    Err(crate::diagnostic::render_parse_error(
+        source,
+        line,
+        col,
+        "<template".len(),
+        &format!(
+            "{openers} nested `<template` blocks exceed the limit of \
+             {MAX_NESTED_TEMPLATE_DEPTH}"
+        ),
+        Some(
+            "nest fewer than 256 `<template` blocks deep, or flatten the markup — \
+             a `<template v-slot:name>` block is the only thing that nests, so this \
+             means a slot-fragment tree far deeper than any real template",
+        ),
+    ))
+}
+
 pub fn parse_sfc(source: &str) -> Result<Sfc, String> {
     let mut sfc = Sfc::default();
+
+    // BEFORE handing the source to pest: the grammar's `template_body` /
+    // `nested_template` pair recurses once per `<template` with no ceiling of
+    // its own, so the bound has to be enforced out here. See
+    // `MAX_NESTED_TEMPLATE_DEPTH`.
+    check_nested_template_depth(source)?;
 
     // Parse the root and immediately descend into the `file` node.
     let mut pairs =

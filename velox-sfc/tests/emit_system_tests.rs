@@ -283,12 +283,24 @@ fn codegen_generates_render_with_slots_for_slot_template() {
     );
 }
 
-/// Test that a component without <slot> elements does NOT generate
-/// the render_with_slots (slots-only variant) inside the component module,
-/// but still has render_with_callbacks. Note that the SLOTS thread-local
+/// Test that the two slots entry points do not share a name.
+///
+/// A component exposes `render_with_slots` (props + callbacks + slots) and
+/// `render_with_slots_only` (props + slots), and they have to be two NAMES:
+/// Rust resolves a call by name, so one name for two arities is a duplicate
+/// definition (E0428) in every module that has both — which is every component
+/// whose template contains a `<slot>`, i.e. every component anyone would write a
+/// named slot into.
+///
+/// The count is over `fn render_with_slots(` with the parenthesis, so the
+/// four-argument entry point is counted exactly and the slots-only one is not
+/// counted as a second copy of it. The slots-only entry point is emitted
+/// unconditionally: a parent generates its call without knowing whether the
+/// child's template contains a `<slot>`, so gating the function on that would
+/// leave the call with nothing to resolve to. Note that the SLOTS thread-local
 /// is always generated as part of the shared emit infrastructure.
 #[test]
-fn codegen_no_render_with_slots_when_no_slot_elements() {
+fn the_two_slots_entry_points_do_not_share_a_name() {
     let source = r#"
 <template>
   <div>Hello World</div>
@@ -310,17 +322,58 @@ fn codegen_no_render_with_slots_when_no_slot_elements() {
         rs.contains("render_with_callbacks"),
         "Should have render_with_callbacks"
     );
-    // Should NOT generate the 2-arg render_with_slots (slots-only variant).
-    // The slots-only variant body is: set_slots(slots); render_with_props(props)
-    // without set_emit_callbacks. Count occurrences of render_with_slots —
-    // there should be only ONE (the 4-arg variant from emit infrastructure).
-    // The slots-only variant would add a SECOND one.
-    let slots_count = rs.matches("fn render_with_slots").count();
+    // Exactly one `render_with_slots`, and it is the four-argument one.
+    let slots_count = rs.matches("fn render_with_slots(").count();
     assert_eq!(
         slots_count, 1,
         "Should have exactly 1 render_with_slots (4-arg variant only), found {}",
         slots_count
     );
+    // The slots-only entry point is present, under its own name, and its body is
+    // the slots half alone: `set_slots(slots); render_with_props(props)`.
+    let only_count = rs.matches("fn render_with_slots_only(").count();
+    assert_eq!(
+        only_count, 1,
+        "the slots-only entry point should be emitted exactly once, found {only_count}"
+    );
+    // The parameter list, read by its SHAPE rather than by two substring tests
+    // joined with `||`. A disjunction of negations passes whenever either
+    // disjunct holds, so it says nothing about the thing it names — and it
+    // happened to hold here only because the first disjunct was false at the
+    // 4-space indent `to_stub_rs` actually produces. Whitespace is removed first
+    // so the assertion is about the signature, not about which wrapper or
+    // indentation the test happened to call.
+    let compact: String = rs.chars().filter(|c| !c.is_whitespace()).collect();
+    assert!(
+        compact.contains("fnrender_with_slots_only(props:PropsArg,slots:"),
+        "the slots-only entry point must take exactly props and slots, so a parent \
+         that binds slots but no @event has a call it can make. Its signature was not \
+         found in:\n{rs}"
+    );
+    assert!(
+        !compact.contains("fnrender_with_slots_only(props:PropsArg,callbacks"),
+        "render_with_slots_only must not have grown a callbacks parameter — that is \
+         `render_with_slots`\'s job, and two functions with one name do not overload in \
+         Rust. Its signature was:\n{rs}"
+    );
+}
+
+/// A component that DOES use `<slot>` is the case the collision above was
+/// invisible in: it emits both entry points, and they must coexist.
+#[test]
+fn both_slots_entry_points_coexist_in_a_component_that_uses_slot() {
+    let source = r#"
+<template>
+  <div><slot name="body" /></div>
+</template>
+
+<script setup>
+</script>
+"#;
+    let sfc = parse_sfc(source).expect("should parse");
+    let rs = to_stub_rs(&sfc, "SlottedComponent");
+    assert_eq!(rs.matches("fn render_with_slots(").count(), 1);
+    assert_eq!(rs.matches("fn render_with_slots_only(").count(), 1);
 }
 
 /// Test that <slot> elements in a component template generate render_slot() calls

@@ -257,3 +257,148 @@ fn scoped_style_prefixes_selectors_with_scope_id() {
         plain
     );
 }
+
+// ---------------------------------------------------------------------------
+// Named slots: the three pure AST transforms behind `slots_map_expr`
+// ---------------------------------------------------------------------------
+//
+// These are asserted on the NODE rather than on generated Rust, and that is the
+// whole point of putting them here. `strip_slot_binding` removes an
+// `AttrKind::Directive` from the content, and `emit_props_in_loop` emits only
+// `AttrKind::Static` and `AttrKind::Bind` — so whether the `v-slot:` attribute
+// was stripped is not observable in the generated source, and an integration
+// assertion about it holds whether the strip happens or not. A test that cannot
+// fail is a test that reports nothing.
+
+use crate::template_codegen::{slot_binding, slot_content, strip_slot_binding};
+
+/// The element a `v-slot:` / `#` fragment is written as in these tests.
+fn slot_bound(tag: &str, directive: &str, children: Vec<Node>) -> Node {
+    Node::Element {
+        tag: tag.to_string(),
+        attrs: vec![
+            TemplateAttr {
+                name: directive.to_string(),
+                value: None,
+                kind: AttrKind::Directive,
+            },
+            TemplateAttr {
+                name: "class".to_string(),
+                value: Some("own".to_string()),
+                kind: AttrKind::Static,
+            },
+        ],
+        children,
+        self_closing: false,
+    }
+}
+
+fn text_node(t: &str) -> Node {
+    Node::Text(t.to_string())
+}
+
+/// A `<template v-slot:x>` contributes its CHILDREN, not itself.
+///
+/// `template` is not an element the renderer knows, so a fragment bound through
+/// one has to be flattened or it renders as an inert `<template>` node with the
+/// caller's content inside it.
+#[test]
+fn a_template_fragment_contributes_its_children_not_itself() {
+    let node = slot_bound(
+        "template",
+        "slot:header",
+        vec![text_node("a"), text_node("b")],
+    );
+    let content = slot_content(&node);
+    assert_eq!(
+        content.len(),
+        2,
+        "the `<template>` wrapper must be flattened away, leaving its two children \
+         as the slot's content. Got {content:?}"
+    );
+    assert!(matches!(&content[0], Node::Text(t) if t == "a"));
+    assert!(matches!(&content[1], Node::Text(t) if t == "b"));
+}
+
+/// A PLAIN element is its own content, and keeps its own attributes.
+///
+/// This is the half of `slot_content` that flattening is not, and without it
+/// `<h1 v-slot:header class="lead">` would lose its `class` — the caller wrote
+/// that markup, and the child is not entitled to drop it.
+#[test]
+fn a_plain_element_is_its_own_content_and_keeps_its_own_attributes() {
+    let node = slot_bound("h1", "slot:header", vec![text_node("title")]);
+    let content = slot_content(&node);
+    assert_eq!(
+        content.len(),
+        1,
+        "expected the element itself, got {content:?}"
+    );
+    let Node::Element { tag, attrs, .. } = &content[0] else {
+        panic!("expected an element, got {:?}", content[0]);
+    };
+    assert_eq!(tag, "h1");
+    assert!(
+        attrs
+            .iter()
+            .any(|a| a.name == "class" && a.value.as_deref() == Some("own")),
+        "the element's own `class` must survive the slot pass. Got {attrs:?}"
+    );
+}
+
+/// The `v-slot:` binding comes OFF the content it named, and only it does.
+///
+/// It named the slot; it is not an attribute of the content. It is removed by
+/// name-prefix, so this also pins that the filter is not "drop the first
+/// directive" — the `class` is the first attribute here and has to stay.
+#[test]
+fn the_slot_binding_is_stripped_and_nothing_else_is() {
+    let node = slot_bound("p", "slot:footer", vec![text_node("x")]);
+    let stripped = strip_slot_binding(&node);
+    let Node::Element { attrs, .. } = &stripped else {
+        panic!("expected an element, got {stripped:?}");
+    };
+    assert!(
+        !attrs
+            .iter()
+            .any(|a| a.kind == AttrKind::Directive && a.name.starts_with("slot:")),
+        "the `v-slot:` binding must not survive onto the content. Got {attrs:?}"
+    );
+    assert_eq!(
+        attrs.len(),
+        1,
+        "only the `slot:` directive goes; every other attribute is markup the \
+         caller wrote. Got {attrs:?}"
+    );
+}
+
+/// The name is read off the folded directive, for both spellings.
+///
+/// The parser folds `v-slot:footerBar` and `#footerBar` onto `slot:footer-bar`
+/// before either arrives here, so this reads the same string for both. The
+/// assertion is that no OTHER fold is attempted on top: the name in the map key
+/// is exactly what the attribute says.
+#[test]
+fn the_slot_name_is_read_off_the_directive_unchanged() {
+    let bound = slot_bound("p", "slot:footer-bar", vec![]);
+    assert_eq!(
+        slot_binding(&bound).as_deref(),
+        Some("footer-bar"),
+        "the name is taken from the attribute as it arrived, not re-folded. The \
+         parser already folded it."
+    );
+    let unnamed = Node::Element {
+        tag: "p".to_string(),
+        attrs: vec![],
+        children: vec![],
+        self_closing: false,
+    };
+    assert_eq!(
+        slot_binding(&unnamed),
+        None,
+        "a child that names no slot is the default slot, which is `None` here and \
+         becomes the key `\"default\"` in `slots_map_expr`. Not the string \
+         `\"default\"`: a child that names a slot called `default` would then be \
+         indistinguishable from one that names none."
+    );
+}

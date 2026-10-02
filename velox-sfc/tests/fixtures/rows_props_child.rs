@@ -6,10 +6,32 @@ use std::collections::HashMap;
 /// Type alias for callback maps passed to child components.
 pub type Callbacks = std::collections::HashMap<&'static str, &'static str>;
 
+/// One handler a parent hands a child, as something the child can call.
+///
+/// `Rc<RefCell<dyn FnMut(&str)>>`, and the shape is not decoration — both
+/// halves of it are load-bearing:
+///
+/// - The `Rc` is what makes a re-entrant call possible. A `Box<dyn FnMut>`
+///   is owned by the registry cell, so calling it means calling it while
+///   that cell is still borrowed, and a handler that emitted in turn would
+///   panic on the second borrow. Cloning the handle out first leaves the
+///   registry unborrowed for the whole call. The registry is thread-local,
+///   so the handle never has to be `Send`.
+/// - The inner `RefCell` is what makes the handle callable at all. `Fn`/`FnMut`
+///   are implemented for `Box<F>` and for `&F`, but NOT for `Rc<F>`, so
+///   `Rc<dyn FnMut(..)>` cannot be called without a `DerefMut` that `Rc` does
+///   not implement. The inner cell is where the `&mut` comes from; the
+///   registration itself is never removed, so a handler that panics does not
+///   take its own binding down with it.
+pub type EventHandler = std::rc::Rc<std::cell::RefCell<dyn FnMut(&str)>>;
+
 // Thread-local callback registry for emit system.
 // Stores event name -> handler function name mappings.
 thread_local! {
     static EMIT_CALLBACKS: RefCell<HashMap<String, String>> = RefCell::new(HashMap::new());
+    // Handler name -> the call that runs it. Written by the parent that
+    // rendered this component, read by `emit` and `dispatch_emit`.
+    static EMIT_DISPATCH: RefCell<HashMap<String, EventHandler>> = RefCell::new(HashMap::new());
     static SLOTS: RefCell<HashMap<String, velox_dom::VNode>> = RefCell::new(HashMap::new());
 }
 
@@ -36,14 +58,53 @@ pub fn set_slots(slots: &std::collections::HashMap<&str, velox_dom::VNode>) {
     });
 }
 
+/// Register the call that runs one handler, keyed by the handler NAME the
+/// parent wrote on the tag (`@confirm="on_confirm"` registers `on_confirm`).
+///
+/// A parent calls this for every handler it binds, immediately before it
+/// calls `render_with_callbacks` / `render_with_slots`, and the call it
+/// passes is its own event dispatcher: so the payload a child emits lands on
+/// the parent's `State` method, with the arity the method declared already
+/// decided by the dispatcher.
+///
+/// Registering a name twice replaces the call, so one component rendered
+/// twice in a pass under different handlers is last-wins rather than both.
+pub fn set_emit_dispatch(handler: &str, call: EventHandler) {
+    EMIT_DISPATCH.with(|cell| {
+        cell.borrow_mut().insert(handler.to_string(), call);
+    });
+}
+
+/// Run the handler registered under `handler` with `payload`.
+///
+/// This is the entry point a FUNCTION-TYPED prop goes through: a parent
+/// binding `:on_confirm="on_confirm"` hands the child a closure that calls
+/// this with the name it read off the binding, so a child that prefers a
+/// callable prop over `emit("..")` reaches exactly the same handler.
+///
+/// Returns whether a handler was registered, so a caller can tell a handler
+/// that ran and decided to do nothing from one that was never bound.
+pub fn dispatch_emit(handler: &str, payload: &str) -> bool {
+    // Clone the handle out so the call happens with the registry cell
+    // unborrowed — a handler that emits in turn reaches this function again
+    // while its own call is still on the stack.
+    let call = EMIT_DISPATCH.with(|cell| cell.borrow().get(handler).cloned());
+    let Some(call) = call else { return false };
+    (call.borrow_mut())(payload);
+    true
+}
+
 /// Emit an event from a child component to its parent.
-/// Looks up the registered callback and returns the handler name.
-/// The caller is responsible for invoking the handler on their State.
-pub fn emit(event: &str, _payload: &str) -> Option<String> {
-    EMIT_CALLBACKS.with(|cell| {
-        let map = cell.borrow();
-        map.get(event).cloned()
-    })
+///
+/// Resolves the handler the parent bound for `event` and RUNS it: the
+/// dispatcher the parent registered is invoked with `payload`, which is what
+/// reaches the parent's `State` method. Returns the handler name it
+/// resolved, or `None` when the parent bound no handler for this event —
+/// the one case where an emit has nowhere to go.
+pub fn emit(event: &str, payload: &str) -> Option<String> {
+    let handler = EMIT_CALLBACKS.with(|cell| cell.borrow().get(event).cloned())?;
+    dispatch_emit(&handler, payload);
+    Some(handler)
 }
 
 /// Look up slot content by name. Returns the slot VNode if found,
@@ -176,6 +237,20 @@ pub fn render_with_slots(
     slots: &std::collections::HashMap<&str, velox_dom::VNode>,
 ) -> velox_dom::VNode {
     set_emit_callbacks(callbacks);
+    set_slots(slots);
+    render_with_props(props)
+}
+
+/// Render this component with slot content from a parent component.
+/// The slots map maps slot names to pre-rendered VNode trees.
+///
+/// Distinct from `render_with_slots` above rather than another arity of it:
+/// Rust resolves calls by name, so two functions with one name is a
+/// duplicate definition however many arguments each takes.
+pub fn render_with_slots_only(
+    props: PropsArg,
+    slots: &std::collections::HashMap<&str, velox_dom::VNode>,
+) -> velox_dom::VNode {
     set_slots(slots);
     render_with_props(props)
 }
