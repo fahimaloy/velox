@@ -3,10 +3,15 @@
     <div class="app">
       <div class="shell">
         <header class="masthead">
-          <div class="brand">
-            <p class="eyebrow">VELOX</p>
-            <h1 class="title">{{ title }}</h1>
-            <p class="tagline">{{ tagline }}</p>
+          <div class="lockup">
+            <span class="mark">
+              <img class="mark-img" src="assets/velox-logo.svg" alt="Velox" />
+            </span>
+            <div class="brand">
+              <p class="eyebrow">VELOX</p>
+              <h1 class="title">{{ title }}</h1>
+              <p class="tagline">{{ tagline }}</p>
+            </div>
           </div>
           <button class="toggle" @click="toggle_theme">
             <span class="glyph" v-if="is_dark">☀</span>
@@ -82,6 +87,26 @@
 // `out_of_flow_containing_block`, and the paint sort in
 // velox-renderer/src/skia_render.rs), so they land above the page; and nothing
 // above them sets `overflow: hidden`, which would clip a fixed overlay.
+//
+// THE MARK IS AN IMAGE, and it is the only one on this page, so the three
+// things a first `<img>` gets wrong are all visible here and all avoided:
+//
+//   * `src` is a PATH RESOLVED AGAINST THE PROCESS WORKING DIRECTORY
+//     (`std::fs::read` in velox-renderer), not against this file. `velox dev`
+//     and `cargo run` both set it to the project root, which is why
+//     `assets/velox-logo.svg` works and why `src="/…"` or a path relative to
+//     `src/` would not.
+//   * The size is declared HERE, in CSS, not inherited from the file. An SVG is
+//     rasterised at its own intrinsic size and SCALED at draw time, so it is
+//     crisp at any size — but only because a size was declared. Nothing declares
+//     one here, and the element is laid out at 0x0, which paints nothing.
+//   * `alt` is not decoration. The accessibility tree reads it as this node's
+//     name (`a11y_name_for`, velox-renderer/src/lib.rs), so an image with no
+//     `alt` is an unnamed node.
+//
+// Both `.mark` and `.mark-img` carry a declared size for the same reason: a
+// child `width`/`height` is what the image rect is taken from, and the parent
+// only reserves the space.
 //
 // The toggle swaps one glyph for another rather than re-colouring one, and the
 // glyph names the theme you are IN rather than the one you would move to. They
@@ -358,6 +383,59 @@ impl State {
     align-items: flex-start;
     justify-content: space-between;
     gap: 24px;
+}
+/* The mark and the wordmark are ONE lockup. The plate is TOP-aligned to the
+   eyebrow, not centred on the brand column, and that is a measured choice rather
+   than a default: the brand column is three lines tall (eyebrow, 28px title, a
+   tagline that wraps), so `center` puts the plate's middle between the title and
+   the tagline and the mark reads as belonging to the tagline. Top-aligned, the
+   plate's own centre lands ON the title — the one line the mark introduces — and
+   the eyebrow tucks against its top-left, which is what a logo lockup looks like.
+   Verified by rendering every candidate at 1x (`scaffold_render_proof.rs`), which
+   is the only size that matters: this is measured in device pixels, not in
+   whatever the reader's screen happens to scale. */
+.lockup {
+    display: flex;
+    flex-direction: row;
+    align-items: flex-start;
+    gap: 16px;
+    min-width: 0;
+}
+/* A white plate rather than a bare `<img>`, and that is the whole reason this
+   works in BOTH themes: the logo is pure `stroke="black"` on transparency, so
+   against the dark page (#0A0E11) its ink is 1.09:1 — a black shape on a black
+   field, invisible. The plate is what the ink is measured against: #000000 on
+   #ffffff is 21:1 in either theme, so the mark is legible whether the page is
+   #f6f5f2 or #0A0E11, and it is the one surface in this template that does not
+   change with the theme. It carries the same #DFDBD2 hairline the dialog panels
+   use, because at 1.09:1 the plate's own edge would otherwise vanish against the
+   light page — the hairline is what you read as the plate's boundary, the same
+   way `.panel` relies on it. */
+.mark {
+    flex: 0 0 auto;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 64px;
+    height: 64px;
+    border: 1px solid #DFDBD2;
+    border-radius: 16px;
+    background: #ffffff;
+}
+/* 48px of logo in a 64px plate: an 8px inset all round, two steps on the space
+   scale.
+   The size is set by the RASTER, not by taste. An `<img src="…svg">` is
+   rasterised once at the file's own intrinsic size (106px here) and then scaled
+   at draw time with no mipmaps, so every extra factor of downscale is blur the
+   renderer cannot undo. The gear has 32 teeth around a 43px-radius ring: at 32px
+   drawn they land under a pixel and the whole mark collapses into a grey ring;
+   at 48px — a 2.2x reduction, barely over the 2x HiDPI line — the teeth and the
+   V's counter still separate. Everything smaller was rendered and looked at
+   before settling here. */
+.mark-img {
+    display: block;
+    width: 48px;
+    height: 48px;
 }
 /* The three brand lines are spaced by `gap`, not by three separate margins, so
    the rhythm survives an edit to any one of them. */

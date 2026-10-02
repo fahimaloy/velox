@@ -2,6 +2,11 @@
   <div :class="{ dark: dark }">
     <div class="overlay" @click="modal_scrim">
       <div class="panel" @click="modal_panel">
+        <div class="crest">
+          <span class="mark">
+            <img class="mark-img" src="assets/velox-logo.png" alt="Velox" />
+          </span>
+        </div>
         <div class="head">
           <h2 class="title">{{ title }}</h2>
           <button class="dismiss" @click="modal_dismiss">
@@ -83,12 +88,23 @@
 //    unreachable — the first component would win and the other would be dead.
 //
 // Named slots are the obvious next API for this component and are deliberately
-// NOT used yet: `emit_slot_node` (velox-sfc/src/template_codegen.rs:1587-1608)
+// NOT used yet: `emit_slot_node` (velox-sfc/src/template_codegen.rs:1587-1607)
 // hands `render_slot` a fallback closure built by `emit_children_with_mode`,
 // which returns a `Vec<VNode>` statement block, while the helper wants a single
 // `VNode` — so a `<slot>` outside a `v-for` does not compile. The `v-for` path
 // at :1608 gets this right by wrapping the children in an `h("slot", …)` element.
 // Until that is fixed, body and footer copy arrive as props.
+//
+// THE CREST IS THE REASON the About dialog shows a PNG at all, and it is
+// hard-coded here for the same reason the copy is: with slots unusable, anything
+// a caller wants INSIDE this panel has to be rendered by this file. What it
+// demonstrates is the second of the two supported `<img>` shapes — App.vx uses
+// the SVG, this uses the PNG of the same mark — and both resolve `src` against
+// the PROCESS WORKING DIRECTORY (`std::fs::read` in velox-renderer), which
+// `velox dev` sets to the project root. A file next to this component would need
+// `src/components/velox-logo.png` instead, and that path only works when the
+// process is started from the project root too — which is why both assets live
+// in `assets/` and neither is written into `src/`.
 pub struct Props {
     pub title: String,
     pub body: String,
@@ -198,12 +214,52 @@ impl State {
     background: #ffffff;
     color: #14181b;
 }
+/* The crest is its own row above the title rather than a third child of `.head`,
+   for two reasons. `.head` is `justify-content: space-between`, so a third child
+   would sit in the middle of the title and the dismiss button instead of beside
+   them; and a mark centred over the title reads as a masthead, which is what an
+   About dialog is. `.panel` is a column, so the row needs no width of its own. */
+.crest {
+    display: flex;
+    flex-direction: row;
+    justify-content: center;
+}
+/* The same white plate as `App.vx`'s `.mark`, and for the same reason: the logo
+   is `stroke="black"` on transparency, so against this panel in dark mode
+   (#1A2126) its ink would be 1.4:1 and the mark would be a black shape on a
+   near-black field. #000000 on #ffffff is 21:1 in both themes, so the plate is
+   theme-invariant here for the same reason it is there. */
+.mark {
+    flex: 0 0 auto;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 64px;
+    height: 64px;
+    border: 1px solid #DFDBD2;
+    border-radius: 16px;
+    background: #ffffff;
+}
+/* The PNG is the same mark as `App.vx`'s SVG, drawn at the same 48px, and for
+   the same reason: the file is rasterised at its own size (128px) and scaled at
+   draw time, so the drawn size is what decides whether the gear's teeth survive.
+   At 48px that is a 2.7x reduction — slightly softer than the SVG's 2.2x, and
+   deliberately, because the POINT of putting it here is that it is a different
+   FILE on a different code path: Skia's own PNG decoder rather than resvg. An
+   About dialog is where a caller already has a local raster and wants to show it,
+   so the template shows that the raster path works as well as the vector one. */
+.mark-img {
+    display: block;
+    width: 48px;
+    height: 48px;
+}
 .head {
     display: flex;
     flex-direction: row;
     align-items: flex-start;
     justify-content: space-between;
     gap: 16px;
+    margin-top: 16px;
 }
 .title {
     flex: 1 1 auto;

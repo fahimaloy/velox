@@ -24,6 +24,29 @@ pub fn find_velox_workspace_for_test() -> Option<std::path::PathBuf> {
     find_velox_workspace()
 }
 
+/// The static assets every `velox init` writes into `assets/`.
+///
+/// A table rather than two `write` calls because the set is the thing the
+/// template depends on: `App.vx` points `src` at `velox-logo.svg` and
+/// `Modal.vx` at `velox-logo.png`, and those two literals are the only reason
+/// these two files exist. Adding a third asset means adding its row here AND its
+/// `src` in a `.vx`; `every_asset_the_template_points_at_is_shipped` in
+/// `tests/logo_assets.rs` fails if either side moves alone.
+///
+/// The PNG is rasterised from the SVG by the renderer itself — run
+/// `cargo test -p velox-cli --test logo_assets -- --ignored regenerate` — so
+/// regenerating it needs no converter installed and no second copy of the mark.
+const ASSETS: &[(&str, &[u8])] = &[
+    (
+        "velox-logo.svg",
+        include_bytes!("../../templates/project/assets/velox-logo.svg"),
+    ),
+    (
+        "velox-logo.png",
+        include_bytes!("../../templates/project/assets/velox-logo.png"),
+    ),
+];
+
 /// Compute the relative path from `from` to `to`.
 /// For example, if `from` is `/a/b/c/project` and `to` is `/a/b/velox-core`,
 /// the result is `../../velox-core`.
@@ -103,6 +126,14 @@ pub fn init_project(name: &str) -> Result<PathBuf> {
     fs::create_dir_all(&project_dir)?;
     fs::create_dir_all(project_dir.join("src"))?;
     fs::create_dir_all(project_dir.join("assets"))?;
+
+    // Written through the `ASSETS` table so the scaffold's `assets/` and the
+    // `src="…"` literals in the `.vx` files below cannot drift apart: both come
+    // out of `templates/project/`, and `tests/logo_assets.rs` fails if a template
+    // points at a file this table does not write.
+    for (name, bytes) in ASSETS {
+        fs::write(project_dir.join("assets").join(name), bytes)?;
+    }
 
     // Write files from the shipped project template so `velox init` and the
     // checked-in template cannot drift into different event contracts.

@@ -401,6 +401,22 @@ const ROLES: &[(&str, &str, &str, &str, &str, &str)] = &[
     ),
     (
         "App.vx",
+        ".mark",
+        "border",
+        "light",
+        "border-decorative-light",
+        "#DFDBD2",
+    ),
+    (
+        "App.vx",
+        ".mark",
+        "background",
+        "light",
+        "card-light",
+        "#ffffff",
+    ),
+    (
+        "App.vx",
         ".dark .footnote",
         "color",
         "dark",
@@ -726,6 +742,22 @@ const ROLES: &[(&str, &str, &str, &str, &str, &str)] = &[
         "dark",
         "danger-hover-dark",
         "#FFA9A1",
+    ),
+    (
+        "components/Modal.vx",
+        ".mark",
+        "border",
+        "light",
+        "border-decorative-light",
+        "#DFDBD2",
+    ),
+    (
+        "components/Modal.vx",
+        ".mark",
+        "background",
+        "light",
+        "card-light",
+        "#ffffff",
     ),
     (
         "components/Modal.vx",
@@ -1094,6 +1126,14 @@ const ROLES: &[(&str, &str, &str, &str, &str, &str)] = &[
         "dark",
         "accent-hover-dark",
         "#5EEAD4",
+    ),
+    (
+        "components/TodoInput.vx",
+        ".input",
+        "border",
+        "light",
+        "border-none",
+        "transparent",
     ),
     (
         "components/TodoInput.vx",
@@ -2524,6 +2564,41 @@ const BOUNDARY_PAIRS: &[(&str, &str, &str, &str, &str, &str, f32)] = &[
 
 /// The quiet edges, held only to `DECORATIVE_FLOOR`.
 const DECORATIVE_PAIRS: &[(&str, &str, &str, &str, &str, &str, f32)] = &[
+    // The brand plate that holds the logo mark, in both places it appears.
+    //
+    // These assert the plate's own EDGE against the plate's own FILL, which is
+    // the pair that is actually on screen, and for the same reason `.panel`
+    // asserts its border against its own background rather than against the
+    // scrim behind it.
+    //
+    // What deliberately is NOT asserted here is the plate against the page in
+    // light mode: `#ffffff` on `#f6f5f2` is 1.09:1, under the floor. That is not
+    // a defect being hidden, it is what the hairline is FOR — in light mode you
+    // read the plate as its 1px `#DFDBD2` edge (1.38:1 against its own fill),
+    // not as a white shape on off-white. `#DFDBD2` on `#f6f5f2` is 1.27:1, so
+    // the edge is legible on both sides of the boundary.
+    //
+    // `.mark` carries no `.dark` override on purpose: the logo's ink is fixed
+    // black, so a theme-invariant white plate is what keeps the mark legible in
+    // both themes instead of producing a black-on-black hole.
+    (
+        "App.vx",
+        ".mark",
+        "border",
+        "App.vx",
+        ".mark",
+        "background",
+        DECORATIVE_FLOOR,
+    ),
+    (
+        "components/Modal.vx",
+        ".mark",
+        "border",
+        "components/Modal.vx",
+        ".mark",
+        "background",
+        DECORATIVE_FLOOR,
+    ),
     (
         "App.vx",
         ".rule",

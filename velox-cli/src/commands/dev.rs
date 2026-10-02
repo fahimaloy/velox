@@ -251,7 +251,11 @@ pub fn react_to_watch_error(message: &str) -> WatchReaction {
 /// This is why the watcher needs no polling and no second thread of its own:
 /// `notify` runs its event loop internally and calls the handler below.
 pub struct DirWatcher {
-    _watcher: notify::RecommendedWatcher,
+    // One `RecommendedWatcher` per root, so a caller that wants two directories
+    // watched holds one value whose lifetime has to match the dev loop's — rather
+    // than two `DirWatcher`s, which could not be handed a list and would have to
+    // be dropped in the right order.
+    _watchers: Vec<notify::RecommendedWatcher>,
 }
 
 impl DirWatcher {
@@ -266,6 +270,53 @@ impl DirWatcher {
     /// both of which are `Send`, which is what lets the whole watcher stay
     /// single-threaded from the dev loop's point of view.
     pub fn start(root: &Path, tx: mpsc::Sender<DevCmd>) -> Self {
+        Self::start_roots(std::slice::from_ref(&root.to_path_buf()), tx)
+    }
+
+    /// Start watching every root in `roots`, reporting to `tx`.
+    ///
+    /// Each root gets its OWN content cache and its OWN relative-path base, and
+    /// that is not tidiness:
+    ///
+    ///  * The cache has to be per root because its keys are root-relative. One
+    ///    shared cache would let `src/App.vx` and `assets/App.vx` collide, and a
+    ///    collision is not a near miss — `classify_observed` would diff the new
+    ///    content against the OTHER file's and report a confident wrong kind.
+    ///  * The base is per root for the same reason the single-root version strips
+    ///    its prefix: events arrive absolute, so an absolute key would miss every
+    ///    lookup and classify every change as `Script`.
+    ///
+    /// Two roots therefore mean two relative namespaces, and a change is reported
+    /// as the path below whichever root it is under. That is honest but not
+    /// unambiguous, so the dev server's banner names every root it watches instead
+    /// of printing one.
+    ///
+    /// A root that does not exist is SKIPPED rather than reported. Watching
+    /// `assets/` in a project that has no `assets/` is not a failure — a user who
+    /// removed a directory they do not use should still get a dev server — and it
+    /// is what lets the caller's root list stay declarative: name the directories
+    /// this project shape uses and let the watcher decide which are present.
+    pub fn start_roots(roots: &[PathBuf], tx: mpsc::Sender<DevCmd>) -> Self {
+        let mut watchers = Vec::new();
+        for root in roots {
+            if !root.is_dir() {
+                continue;
+            }
+            if let Some(w) = Self::watch_one(root, tx.clone()) {
+                watchers.push(w);
+            }
+        }
+        Self {
+            _watchers: watchers,
+        }
+    }
+
+    /// Watch one root, or `None` when `notify` could not be constructed for it.
+    ///
+    /// `None` rather than a no-op watcher because [`Self::start_roots`] has other
+    /// roots to get on with: a root that cannot be watched must not cost the dev
+    /// server the ones that can. The failure is already on `tx` when this returns.
+    fn watch_one(root: &Path, tx: mpsc::Sender<DevCmd>) -> Option<notify::RecommendedWatcher> {
         // Last-seen content per path, so a change can be classified against
         // what was there before. Shared with the handler; the handler runs on
         // notify's thread.
@@ -345,10 +396,10 @@ impl DirWatcher {
                     // `InotifyWatcher` is the concrete type on Linux and the
                     // recommended one everywhere; if construction itself failed there
                     // is nothing to hand back, so the dev loop runs without one and
-                    // has already been told why.
-                    return Self {
-                        _watcher: unavailable_watcher(),
-                    };
+                    // has already been told why. `start_roots` carries on with
+                    // whichever roots it CAN watch, so one that cannot be watched
+                    // does not stop the dev server from watching the others.
+                    return None;
                 }
             };
 
@@ -358,21 +409,8 @@ impl DirWatcher {
             });
         }
 
-        Self { _watcher: watcher }
+        Some(watcher)
     }
-}
-
-/// A no-op watcher, for the case where `notify` could not be constructed at all.
-///
-/// Exists so [`DirWatcher::start`] always returns something: the failure has
-/// already been reported to the user, and a dev server that exits immediately
-/// after saying "could not start a filesystem watcher" is less useful than one
-/// that stays up and can still be driven by hand with `r`.
-fn unavailable_watcher() -> notify::RecommendedWatcher {
-    // `recommended_watcher` has failed once already in this process, so this
-    // cannot realistically fail; if it somehow does, there is no third option
-    // that keeps the caller simpler.
-    notify::recommended_watcher(|_| {}).expect("notify watcher construction")
 }
 
 /// Read the current on-disk content of every non-ignored file under `root`.
@@ -1092,20 +1130,44 @@ impl Drop for HmrListener {
     }
 }
 
+/// The directories `velox dev` watches, and why there is more than one.
+///
+/// Two roots, deliberately. `src/` is the template, and `assets/` holds the
+/// images `App.vx` and `Modal.vx` point their `<img src>` at — so replacing
+/// `assets/velox-logo.svg` changes what the app draws and is exactly as much a
+/// rebuild as editing `App.vx` was. Watching `src/` alone made the one file a
+/// user is most likely to swap silently do nothing.
+///
+/// The project root is NOT the answer, and the reason is the budget rather than
+/// the semantics: `is_ignored` keeps `target/` out of the REPORTS, but `notify`
+/// has already walked it to get there, and inotify watches are a finite
+/// per-user resource (`fs.inotify.max_user_watches`, commonly 8192). Naming the
+/// two directories a scaffolded project actually has spends two watches and
+/// cannot regress into watching a build directory.
+///
+/// A project without an `assets/` directory still gets one root rather than an
+/// error: `DirWatcher::start_roots` skips a root that is not there.
+pub fn watch_roots(project_dir: &Path) -> Vec<PathBuf> {
+    let src = project_dir.join("src");
+    if src.is_dir() {
+        vec![src, project_dir.join("assets")]
+    } else {
+        // No `src/` at all: watch what IS there, which is what this did before
+        // the second root existed and is the only sensible reading of a project
+        // whose layout is not the one the template produces.
+        vec![project_dir.to_path_buf()]
+    }
+}
+
 /// Start the Velox dev server in `project_dir` (builds with `cargo run`,
-/// watching `<project_dir>/src` for changes).
+/// watching the roots [`watch_roots`] names for changes).
 ///
 /// Uses HMR: the dev server starts a TCP listener, spawns the app with
 /// `VELOX_HMR=1` and `VELOX_HMR_PORT=<port>`, and on file changes sends
 /// a `FullReload` message to the app. The app exits, and the dev server
 /// restarts it.
 pub fn dev_current(project_dir: &Path, release: bool) -> Result<()> {
-    let watch_dir = project_dir.join("src");
-    let watch_dir = if watch_dir.exists() {
-        watch_dir
-    } else {
-        project_dir.to_path_buf()
-    };
+    let watch_dirs = watch_roots(project_dir);
 
     // Bind the HMR port BEFORE the banner is drawn, so every line the user reads
     // is a statement about the run they are in. The bind is a local socket and
@@ -1132,7 +1194,7 @@ pub fn dev_current(project_dir: &Path, release: bool) -> Result<()> {
         ),
     };
 
-    print_banner(project_dir, release, &watch_dir, &hmr_status);
+    print_banner(project_dir, release, &watch_dirs, &hmr_status);
 
     let (tx, rx) = mpsc::channel::<DevCmd>();
     // `tx` stays alive in this scope for the whole function — the loop hands a
@@ -1171,7 +1233,10 @@ pub fn dev_current(project_dir: &Path, release: bool) -> Result<()> {
     // Watching starts here and the watcher lives to the end of the loop, because
     // dropping it releases the inotify watches. It is created after the channel
     // so a failure can be reported on the loop's own channel.
-    let _watcher = DirWatcher::start(&watch_dir, tx.clone());
+    // Must be held to the end of the loop: dropping a `DirWatcher` releases its
+    // inotify watches, so letting it fall out of scope early would silently turn
+    // hot reload off with no error anywhere.
+    let _watcher = DirWatcher::start_roots(&watch_dirs, tx.clone());
 
     loop {
         // True when something this iteration wants a rebuild for.
@@ -1197,7 +1262,7 @@ pub fn dev_current(project_dir: &Path, release: bool) -> Result<()> {
             }
             Ok(DevCmd::Clear) => {
                 clear_screen();
-                print_banner(project_dir, release, &watch_dir, &hmr_status);
+                print_banner(project_dir, release, &watch_dirs, &hmr_status);
                 if crashed {
                     println!(
                         "{} {}\n",
@@ -1378,7 +1443,7 @@ fn send_hmr_reload(slot: &HmrSlot) {
     }
 }
 
-fn print_banner(project_dir: &Path, release: bool, watch_dir: &Path, hmr: &HmrStatus) {
+fn print_banner(project_dir: &Path, release: bool, watch_dirs: &[PathBuf], hmr: &HmrStatus) {
     let name = project_dir
         .canonicalize()
         .ok()
@@ -1391,7 +1456,13 @@ fn print_banner(project_dir: &Path, release: bool, watch_dir: &Path, hmr: &HmrSt
         dim(&format!("v{}", env!("CARGO_PKG_VERSION")))
     );
     println!("  {} {}", bold("➤ Project:"), name);
-    println!("  {} {}", bold("➤ Watching:"), watch_dir.display());
+    // One line per root rather than one line with a joined path: the roots are
+    // watched independently, and a user who wants to know why swapping
+    // `assets/velox-logo.svg` did nothing needs to see that `assets/` is named
+    // here, not to mentally split a string.
+    for dir in watch_dirs {
+        println!("  {} {}", bold("➤ Watching:"), dir.display());
+    }
     println!(
         "  {} {}",
         bold("➤ HMR:"),

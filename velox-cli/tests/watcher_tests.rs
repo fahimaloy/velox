@@ -25,7 +25,7 @@ use std::time::{Duration, Instant};
 
 use velox_cli::commands::dev::{
     ChangeDebouncer, ChangeKind, DevCmd, DirWatcher, WatchReaction, classify_change,
-    react_to_watch_error,
+    react_to_watch_error, watch_roots,
 };
 
 static SEQ: AtomicU32 = AtomicU32::new(0);
@@ -556,4 +556,148 @@ fn reindented_style_content_is_still_style_only() {
     let before = sfc("<p>hi</p>", "let n = 0;", "p { color: red; }");
     let after = sfc("<p>hi</p>", "let n = 0;", "  p { color: red; }");
     assert_eq!(classify_change(&before, &after), ChangeKind::StyleOnly);
+}
+
+// ---------------------------------------------------------------------------
+// The roots `velox dev` watches
+// ---------------------------------------------------------------------------
+
+/// A scaffolded project watches `src/` AND `assets/`.
+///
+/// `App.vx` and `Modal.vx` point their `<img src>` at `assets/velox-logo.svg`
+/// and `assets/velox-logo.png`, so replacing one of those changes what the app
+/// draws. Before this, `velox dev` watched `<project>/src` only, and swapping the
+/// one file a user is most likely to swap did nothing at all — no rebuild, no
+/// message, no error. Watching the directory is the fix; this pins it so it
+/// cannot silently go back to one root.
+#[test]
+fn a_scaffolded_project_watches_src_and_assets() {
+    let tree = TempTree::new();
+    tree.write("src/App.vx", "<template><p>hi</p></template>");
+    tree.write("assets/velox-logo.svg", "<svg></svg>");
+    let roots = watch_roots(tree.path());
+    assert_eq!(
+        roots,
+        vec![tree.path().join("src"), tree.path().join("assets")],
+        "the project root is deliberately NOT watched — see watch_roots"
+    );
+}
+
+/// A project with no `assets/` still watches something.
+///
+/// `velox init` writes both files, but a user deletes directories. The point of
+/// listing `assets/` unconditionally is that the root list stays declarative; the
+/// watcher, not the caller, decides which roots exist. Asserting the list still
+/// names `assets/` is what keeps that decision in one place — if the caller
+/// started filtering, this would fail and the decision would have split.
+#[test]
+fn the_root_list_does_not_filter_out_a_missing_assets_dir() {
+    let tree = TempTree::new();
+    tree.write("src/App.vx", "<template><p>hi</p></template>");
+    let roots = watch_roots(tree.path());
+    assert!(
+        roots.iter().any(|r| r.ends_with("assets")),
+        "assets/ was dropped from the root list because it does not exist yet; \
+         that filtering belongs in DirWatcher::start_roots, not here: {:?}",
+        roots
+    );
+    // …and the watcher must not fall over the absence.
+    let (tx, rx) = mpsc::channel();
+    let _w = DirWatcher::start_roots(&roots, tx);
+    tree.write("src/App.vx", "<template><p>changed</p></template>");
+    let got = rx
+        .recv_timeout(Duration::from_secs(3))
+        .expect("a src/ change is still reported when assets/ is absent");
+    match got {
+        DevCmd::FileChanged { path, .. } => assert_eq!(path, PathBuf::from("App.vx")),
+        other => panic!("expected a FileChanged, got {other:?}"),
+    }
+}
+
+/// A change under `assets/` is reported, with a path relative to that root.
+///
+/// This is the actual behaviour the extra root buys, asserted end to end rather
+/// than by inspecting a list. It also pins the RELATIVE-ness: with two roots the
+/// reported path is ambiguous by construction — `App.vx` could be under either —
+/// which is why `print_banner` names every root rather than printing one.
+#[test]
+fn a_change_under_assets_is_reported_against_the_assets_root() {
+    let tree = TempTree::new();
+    tree.write("src/App.vx", "<template><p>hi</p></template>");
+    tree.write("assets/velox-logo.svg", "<svg version=\"1.1\"></svg>");
+    let (tx, rx) = mpsc::channel();
+    let _w = DirWatcher::start_roots(&watch_roots(tree.path()), tx);
+
+    // Binary content, because that is what swapping a logo actually is. A file
+    // that cannot be read as UTF-8 classifies as `Script`, which is correct: it
+    // is not a `.vx` sheet and not CSS, so the conservative kind is right.
+    let png: &[u8] = &[0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0xff];
+    std::fs::write(tree.path().join("assets/velox-logo.png"), png).expect("write png");
+
+    let got = rx
+        .recv_timeout(Duration::from_secs(3))
+        .expect("a new file under assets/ is reported");
+    match got {
+        DevCmd::FileChanged { path, kind } => {
+            assert_eq!(
+                path,
+                PathBuf::from("velox-logo.png"),
+                "path is relative to assets/"
+            );
+            assert_eq!(
+                kind,
+                ChangeKind::Script,
+                "an unreadable binary is not a template"
+            );
+        }
+        other => panic!("expected a FileChanged, got {other:?}"),
+    }
+}
+
+/// Two roots do not cross-contaminate their content caches.
+///
+/// `classify_observed` diffs new content against what it last saw under a
+/// root-relative key. One shared cache across roots would let `src/App.vx` and
+/// `assets/App.vx` collide, and a collision is not a near miss — the second file
+/// would be classified against the FIRST file's content and report a confident
+/// wrong kind. Editing `assets/App.vx` must therefore classify as `Script`, the
+/// same as editing `src/App.vx`, rather than as a style change because it happens
+/// to differ from an unrelated template.
+#[test]
+fn a_same_named_file_under_each_root_classifies_independently() {
+    let tree = TempTree::new();
+    tree.write(
+        "src/App.vx",
+        &sfc("<p>a</p>", "let n = 0;", "p { color: red; }"),
+    );
+    tree.write(
+        "assets/App.vx",
+        &sfc("<p>b</p>", "let n = 0;", "p { color: blue; }"),
+    );
+    let (tx, rx) = mpsc::channel();
+    let _w = DirWatcher::start_roots(&watch_roots(tree.path()), tx);
+
+    // Change only the TEMPLATE half of assets/App.vx. If the two roots shared a
+    // cache, the baseline this is diffed against would be src/App.vx's content.
+    std::fs::write(
+        tree.path().join("assets/App.vx"),
+        sfc("<p>b changed</p>", "let n = 0;", "p { color: blue; }"),
+    )
+    .expect("write");
+
+    let got = rx
+        .recv_timeout(Duration::from_secs(3))
+        .expect("the assets/ change is reported");
+    match got {
+        DevCmd::FileChanged { path, kind } => {
+            assert_eq!(path, PathBuf::from("App.vx"));
+            assert_eq!(
+                kind,
+                ChangeKind::Script,
+                "a template change must classify as Script even though a same-named file \
+                 exists under the other root"
+            );
+        }
+        other => panic!("expected a FileChanged, got {other:?}"),
+    }
 }

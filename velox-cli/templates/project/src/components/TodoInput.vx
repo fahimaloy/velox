@@ -87,20 +87,39 @@ impl State {
     line-height: 1.45;
 }
 
-/* 40px tall with 12px of side padding: the two numbers that decide whether a
-   text field feels like a control or like a line in a paragraph. It matches
-   `.add`, so the bar is exactly as tall as the two controls inside it. The
-   `#ffffff` is not decoration — the renderer paints a WHITE fallback fill on any
-   `<input>` that declares no background (velox-style/src/ua.css), so saying it
-   out loud is the only way to reach the card fill the bar already has.
-   `min-width: 0` is what lets the field shrink inside the composer's flex row
-   instead of refusing to. */
+/* 40px tall, with the text 12px from the plane's inner edge: the two numbers
+   that decide whether a text field feels like a control or like a line in a
+   paragraph. It matches `.add`, so the bar is exactly as tall as the two
+   controls inside it. The `#ffffff` is not decoration — the renderer paints a
+   WHITE fallback fill on any `<input>` that declares no background
+   (velox-style/src/ua.css), so saying it out loud is the only way to reach the
+   card fill the bar already has. `min-width: 0` is what lets the field shrink
+   inside the composer's flex row instead of refusing to.
+
+   `border: 1px solid transparent` is how "no edge of its own" is spelled here,
+   and it is load-bearing rather than a no-op. An `<input>` that declares NO
+   author border is not left unpainted: the box painter falls back to a hard 1px
+   `#c8c8c8` outline centred on the field's own edge
+   (velox-renderer/src/skia_render.rs, `field_radius` fallback). Against the
+   composer's plane that grey line read as a SECOND, square-cornered box inside
+   the bar — a bright vertical edge a few pixels left of `.add`, which is the
+   "the Add button is overlapping the input box" report. `border: 0` is not the
+   way out: the same painter forces `stroke_width = 1.0` whenever an author
+   border exists at all, so `0` still draws a 1px line. An author border of a
+   zero-alpha colour is what actually suppresses it, and `transparent` is
+   understood by both the cascade (velox-dom/src/style.rs) and the painter.
+
+   The 1px is a real border box, so the side padding is 11px to keep the text
+   12px from the plane's inner edge — exactly where it was before this border
+   existed — and `box-sizing: border-box` (velox-style/src/ua.css `*`) keeps the
+   field 40px tall. */
 .input {
     flex: 1 1 auto;
     width: 100%;
     min-width: 0;
     height: 40px;
-    padding: 0 12px;
+    padding: 0 11px;
+    border: 1px solid transparent;
     background: #ffffff;
     color: #14181b;
     font-size: 15px;
