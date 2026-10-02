@@ -163,7 +163,11 @@ pub mod skia_impl {
         left: f32,
     }
 
-    #[derive(Clone, Copy, Default)]
+    /// The two image filters `img-filter` can express. `Debug`/`PartialEq` are
+    /// for the parser tests, which assert what a rejected value did NOT parse
+    /// into — a dropped declaration and an empty `FilterSpec` paint the same
+    /// pixels, so the tests must compare the spec, not the frame.
+    #[derive(Clone, Copy, Debug, Default, PartialEq)]
     struct FilterSpec {
         blur_sigma: Option<f32>,
         brightness: Option<f32>,
@@ -333,7 +337,16 @@ pub mod skia_impl {
 
         for part in value.split_whitespace() {
             if let Some(l) = Length::parse(part) {
-                width = Some(l.to_px(font_size, super::REM_ROOT_FONT_SIZE, viewport));
+                let px = l.to_px(font_size, super::REM_ROOT_FONT_SIZE, viewport);
+                // Same non-finite rule as `parse_px_value`, on the other path
+                // into a length: `border: 1e999px solid red` resolved to an
+                // infinite stroke width. `apply_border_style` guards the width it
+                // scales a DASH by, but the caller hands the raw value to
+                // `set_stroke_width`, so the rejection has to happen here.
+                if !px.is_finite() {
+                    return None;
+                }
+                width = Some(px);
             } else if let Some(s) = BorderStyle::parse(part)
                 && style.is_none()
             {
@@ -440,14 +453,54 @@ pub mod skia_impl {
         )
     }
 
+    /// Read a bare px length, rejecting a non-finite one.
+    ///
+    /// `f32::parse` does not reject overflow: `"1e999".parse::<f32>()` is
+    /// `Ok(inf)`, and `inf.is_finite()` is false. So `border-radius: 1e999px`,
+    /// `blur(1e999px)`, `inset(1e999px)` and `line-height: 1e999px` all parse,
+    /// and each then carries a non-finite into a rect, a stroke width or a
+    /// colour matrix. None of those is a number a painter should ever see.
+    ///
+    /// **This guard is currently unproven by any test, and that is deliberate —
+    /// do not read the tests as evidence for it.** Removing it changes no
+    /// frame today, because every consumer happens to absorb the result:
+    /// `inset_rect` clamps with `.max(0.0)`, so an infinite inset collapses to a
+    /// zero-width rect that `needs_clip` then declines to apply. The guard is
+    /// here because that absorption is incidental, not designed. `inset_rect`'s
+    /// clamp is one line, and any future change to it — a different padding
+    /// source, a non-zero origin, a rect that skips the `needs_clip` check —
+    /// turns a rejected declaration back into a silently erased subtree. A
+    /// value the author cannot express should not survive parsing in the first
+    /// place; it does not need a downstream line to stay harmless.
+    ///
+    /// The one caller that DID have a live failure was `parse_border_value`
+    /// (`border: 1e999px solid red` reached `set_stroke_width` unguarded), and
+    /// it is fixed separately at its own call site because it resolves relative
+    /// units through `Length::parse`/`to_px` and cannot use this reader.
+    ///
+    /// The guard lives HERE, in the shared reader, rather than at each of the
+    /// four call sites: no caller can turn a non-finite number into a real
+    /// value on purpose, so a per-call-site guard is four chances to forget the
+    /// same line. `parse_padding` writes the identical check for the same
+    /// reason and cannot inherit this one, because it resolves relative units
+    /// through `Length::parse`/`to_px` instead of reading px text.
     fn parse_px_value(value: &str) -> Option<f32> {
-        value
-            .strip_suffix("px")
-            .and_then(|px| px.trim().parse::<f32>().ok())
+        let px = value.strip_suffix("px")?.trim().parse::<f32>().ok()?;
+        if !px.is_finite() {
+            return None;
+        }
+        Some(px)
     }
 
+    /// Read a unitless number, rejecting a non-finite one. Same reasoning as
+    /// `parse_px_value`: `opacity: 1e999` and `brightness(1e999)` both parse,
+    /// and both are nonsense rather than a large number.
     fn parse_float_value(value: &str) -> Option<f32> {
-        value.trim().parse::<f32>().ok()
+        let f = value.trim().parse::<f32>().ok()?;
+        if !f.is_finite() {
+            return None;
+        }
+        Some(f)
     }
 
     /// Parse a `padding` shorthand into resolved px sides.
@@ -519,19 +572,37 @@ pub mod skia_impl {
         }
     }
 
+    /// Parse `clip-path: inset(...)`, the only basic shape this renderer draws.
+    ///
+    /// 1, 2, 3 and 4-value shorthand, all in px. Everything else is REJECTED
+    /// (`None`, i.e. no clip at all) rather than approximated: `circle()`,
+    /// `ellipse()`, `polygon()` and `url(#svg-clip)` are other shapes with
+    /// their own reference boxes, and a percentage has no px reading here.
+    /// `parse_clip_inset` is matched case-sensitively, so `INSET(10px)` is a
+    /// rejected declaration and not a clipped one — pinned by
+    /// `velox-renderer/tests/clip_path_render.rs`.
+    ///
+    /// A negative component is a rejected declaration too. CSS 2.1 §4.3
+    /// ("negative values are invalid") applies: `inset(-10px)` must not be
+    /// allowed to EXPAND the clip rect the way a negative `padding` used to
+    /// invert a content box. `None` and a zero inset paint the same pixels, and
+    /// `None` is the honest reading of an invalid value.
     fn parse_clip_inset(value: &str) -> Option<ClipInsets> {
         let value = value.trim();
         if !value.starts_with("inset(") || !value.ends_with(')') {
             return None;
         }
         let inner = value.trim_start_matches("inset(").trim_end_matches(')');
+        // `inset(10px round 4px)` — the corner-radius half of the shape is
+        // accepted and ignored; the inset edges are the same either way.
         let inner = inner.split("round").next().unwrap_or(inner).trim();
         let mut parts: Vec<f32> = Vec::new();
         for part in inner.split_whitespace() {
-            if let Some(px) = parse_px_value(part) {
-                parts.push(px);
-            } else {
-                return None;
+            // `parse_px_value` has already rejected `1e999px` (non-finite) and
+            // anything that is not a px length (`50%`, `2em`, `wide`).
+            match parse_px_value(part) {
+                Some(px) if px >= 0.0 => parts.push(px),
+                _ => return None,
             }
         }
         let (top, right, bottom, left) = match parts.len() {
@@ -547,6 +618,61 @@ pub mod skia_impl {
             bottom,
             left,
         })
+    }
+
+    /// Parse an `img-filter` value into the two image filters this renderer can
+    /// actually draw. Deliberately NOT the CSS `filter` property — see the
+    /// `img-filter` arm in `parse_style_attr` for why the name was given up.
+    ///
+    /// All-or-nothing, which is CSS's own rule for a filter list (Filter
+    /// Effects 1 §2.1: an invalid filter list makes the declaration invalid at
+    /// computed-value time). An unknown function, an argument this renderer
+    /// cannot read, or a REPEATED function drops the whole value rather than
+    /// applying the half that parsed — the old `split(')')` loop kept whatever
+    /// it recognised and discarded the rest with no diagnostic, so
+    /// `blur(4px) grayscale(1)` blurred and silently dropped the grayscale,
+    /// and `blur(4px) blur(2px)` was last-wins on a one-field `FilterSpec`
+    /// where CSS composes. Half a declaration, applied, looks intentional; that
+    /// is the worst of the three possible outcomes and is no longer reachable.
+    fn parse_img_filter(value: &str) -> Option<FilterSpec> {
+        let value = value.trim();
+        if value.eq_ignore_ascii_case("none") {
+            return Some(FilterSpec::default());
+        }
+        let mut spec = FilterSpec::default();
+        // Walk `name(arg)` items rather than `split(')')`: the old loop matched
+        // whatever prefix it found and ignored the rest of the string, so
+        // `blur(2px` — no closing parenthesis at all — was applied as a blur.
+        // Requiring a `)` for every item makes a malformed list malformed.
+        let mut rest = value;
+        loop {
+            rest = rest.trim_start();
+            if rest.is_empty() {
+                return Some(spec);
+            }
+            let open = rest.find('(')?;
+            let close = rest.find(')')?;
+            let arg = rest[open + 1..close].trim();
+            match rest[..open].trim() {
+                "blur" => {
+                    if spec.blur_sigma.is_some() {
+                        return None;
+                    }
+                    spec.blur_sigma = Some(parse_px_value(arg)?.max(0.0));
+                }
+                "brightness" => {
+                    if spec.brightness.is_some() {
+                        return None;
+                    }
+                    spec.brightness = Some(parse_float_value(arg)?.max(0.0));
+                }
+                // `grayscale()`, `contrast()`, `opacity()`, a bare keyword, a
+                // name with no argument list: none of it is applied, and neither
+                // is anything beside it in the same declaration.
+                _ => return None,
+            }
+            rest = &rest[close + 1..];
+        }
     }
 
     /// `font_size` and `viewport` exist for `parse_border_value`'s relative
@@ -609,27 +735,28 @@ pub mod skia_impl {
                     let v = val.to_ascii_lowercase();
                     out.overflow_hidden = v == "hidden" || v == "scroll" || v == "auto";
                 } else if key == "clip-path" {
+                    // Non-inherited in real CSS (Masking 1 §3.1), so
+                    // `INHERITABLE` (velox-style/src/lib.rs) correctly omits it
+                    // and each element reads its own declaration.
                     out.clip_inset = parse_clip_inset(val);
                 } else if key == "opacity" {
                     if let Some(alpha) = parse_float_value(val) {
                         out.opacity = alpha.clamp(0.0, 1.0);
                     }
-                } else if key == "filter" {
-                    for part in val.split(')') {
-                        let part = part.trim();
-                        if part.is_empty() {
-                            continue;
-                        }
-                        if let Some(value) = part.strip_prefix("blur(")
-                            && let Some(px) = parse_px_value(value.trim())
-                        {
-                            out.filters.blur_sigma = Some(px.max(0.0));
-                        } else if let Some(value) = part.strip_prefix("brightness(")
-                            && let Some(f) = parse_float_value(value.trim())
-                        {
-                            out.filters.brightness = Some(f.max(0.0));
-                        }
-                    }
+                } else if key == "img-filter" {
+                    // NOT the CSS `filter` property, and no longer named it.
+                    // CSS `filter` is a composited post-pass over the element's
+                    // whole subtree (Filter Effects 1 §2.1), so honouring the name
+                    // on an `<img>`-only paint filter over-promised on two
+                    // counts at once: `filter: blur(4px)` on a div, on text, on a
+                    // background or a border was a total no-op (every call site
+                    // of `apply_img_filter` sits inside `if let Some(src)`), and
+                    // `filter: blur(4px) grayscale(1)` applied the blur and
+                    // dropped the grayscale. The name now says what it is: a
+                    // filter on the element's own image, honoured only where an
+                    // image is drawn. `parse_img_filter` is all-or-nothing, so
+                    // nothing here can half-apply.
+                    out.filters = parse_img_filter(val).unwrap_or_default();
                 } else if key == "z-index"
                     && let Ok(z) = val.parse::<i32>()
                 {
@@ -775,7 +902,11 @@ pub mod skia_impl {
                 } else if key == "text-overflow" {
                     text_style.ellipsis = val.trim().eq_ignore_ascii_case("ellipsis");
                 } else if key == "line-height" {
-                    if let Ok(lh) = val.trim().parse::<f32>() {
+                    // The unitless branch bypasses `parse_px_value`, so it needs
+                    // the same non-finite guard: `line-height: 1e999` parses, and
+                    // an infinite line height is a line box no later pass can
+                    // lay out.
+                    if let Some(lh) = val.trim().parse::<f32>().ok().filter(|lh| lh.is_finite()) {
                         text_style.line_height = lh;
                     } else if let Some(px) = parse_px_value(val.trim()) {
                         text_style.line_height = px / text_style.font_size;
@@ -815,6 +946,44 @@ pub mod skia_impl {
             let clip_rect = inset_rect(rect, inset);
             canvas.clip_rect(clip_rect, sk::ClipOp::Intersect, true);
         }
+        true
+    }
+
+    /// Establish the `clip-path` clip for the element's OWN box. Returns whether
+    /// a `restore()` is owed.
+    ///
+    /// This is deliberately NOT folded into `apply_clips`, because it is the one
+    /// clip that applies to the element itself rather than only to its
+    /// descendants: the reference box of an `inset()` basic shape is the border
+    /// box (Masking 1 §3.1), so the element's own background and border are
+    /// clipped along with its content. `apply_clips` was called only after those
+    /// two draws, so `clip-path: inset(20px)` on an element with a background
+    /// used to leave the fill full-bleed and clip only the text inside it.
+    ///
+    /// The other two clips must NOT be applied here, which is why this is a
+    /// separate call rather than `apply_clips` moved earlier:
+    ///
+    /// - `overflow: hidden` clips the element's CONTENT (CSS Overflow 3 §3.1),
+    ///   never its own border, and a Skia stroke is centred on the path, so
+    ///   clipping the border stroke to the box would shave the outer half off
+    ///   every overflowing element's border.
+    /// - `border-radius` only ROUNDS the element; the fill and the stroke are
+    ///   already drawn as that same `RRect` here, so clipping them to it would
+    ///   be a no-op at best and the same half-stroke loss at worst.
+    ///
+    /// Both stay where they were: `apply_clips` below still clips the subtree.
+    /// The cost is one extra save/restore per element that declares
+    /// `clip-path`, and only for those.
+    fn apply_clip_path(
+        canvas: &sk::Canvas,
+        rect: sk::Rect,
+        clip_inset: Option<ClipInsets>,
+    ) -> bool {
+        let Some(inset) = clip_inset else {
+            return false;
+        };
+        canvas.save();
+        canvas.clip_rect(inset_rect(rect, inset), sk::ClipOp::Intersect, true);
         true
     }
 
@@ -947,7 +1116,7 @@ pub mod skia_impl {
         sk::Color::from_argb(a, color.r(), color.g(), color.b())
     }
 
-    fn apply_filters_to_paint(paint: &mut sk::Paint, filters: FilterSpec) {
+    fn apply_img_filter(paint: &mut sk::Paint, filters: FilterSpec) {
         if let Some(sigma) = filters.blur_sigma
             && sigma > 0.0
         {
@@ -1147,7 +1316,7 @@ pub mod skia_impl {
     /// reason it can be cached by `src` alone: the paint walk hands this image
     /// to `draw_image_rect` with a `None` source rect, so Skia scales it into
     /// the layout rect at draw time. Nothing downstream -- layout, paint,
-    /// `opacity`, `filter: blur()/brightness()` -- knows or cares what size the
+    /// `opacity`, `img-filter: blur()/brightness()` -- knows or cares what size the
     /// bitmap happens to be, so one raster serves every box the element is
     /// later given, at every device scale, which is the opposite of the FONT
     /// cache (whose glyphs are rasterised at `scale` and must be re-synced).
@@ -1344,6 +1513,7 @@ pub mod skia_impl {
                     let mut clip_rrect = None;
                     let mut overflow_hidden = false;
                     let mut clip_inset = None;
+                    let mut did_box_clip = false;
                     let mut child_text_style = text_style;
                     let mut child_family = font_family.to_string();
                     let mut opacity = inherited_opacity;
@@ -1365,6 +1535,11 @@ pub mod skia_impl {
                         child_family = family;
                         opacity = (opacity * box_style.opacity).clamp(0.0, 1.0);
                         filters = box_style.filters;
+                        // Before the element's OWN two draws, deliberately: see
+                        // `apply_clip_path`. `overflow`/`border-radius` are not
+                        // applied here, and `apply_clips` still clips the
+                        // subtree below.
+                        did_box_clip = apply_clip_path(canvas, rect, clip_inset);
                         if let Some(bg) = box_style.background {
                             paints.fill.set_color(color_with_opacity(bg, opacity));
                             if let Some(rrect) = rrect {
@@ -1392,7 +1567,7 @@ pub mod skia_impl {
                         paints.image.set_image_filter(None);
                         paints.image.set_color_filter(None);
                         paints.image.set_alpha_f(opacity);
-                        apply_filters_to_paint(&mut paints.image, filters);
+                        apply_img_filter(&mut paints.image, filters);
                         if let Some(img) = images.load(src) {
                             canvas.draw_image_rect(img, None, rect, &paints.image);
                         }
@@ -1401,6 +1576,9 @@ pub mod skia_impl {
                     // Naive child layout: stack children vertically
                     let child_count = children.len().max(1);
                     let child_h = rect.height() / (child_count as f32);
+                    if did_box_clip {
+                        canvas.restore();
+                    }
                     let did_clip =
                         apply_clips(canvas, rect, clip_rrect, overflow_hidden, clip_inset);
                     let mut ordered: Vec<(i32, usize, &VNode)> = children
@@ -2472,6 +2650,7 @@ pub mod skia_impl {
                     let mut clip_rrect = None;
                     let mut overflow_hidden = false;
                     let mut clip_inset = None;
+                    let mut did_box_clip = false;
                     let mut child_text_style = text_style;
                     let mut child_family = font_family.to_string();
                     let mut opacity = inherited_opacity;
@@ -2487,6 +2666,17 @@ pub mod skia_impl {
                     let mut author_border: Option<BorderSpec> = None;
                     let mut author_radius: Option<f32> = None;
                     let mut author_padding: Option<Padding> = None;
+                    // The element's own border box, built ONCE and here rather
+                    // than in each of the four blocks that want it. The
+                    // `clip-path` clip has to be established before the two box
+                    // paints, and those are the first ones to need it, so a
+                    // binding declared further down could not serve them.
+                    let rect = sk::Rect::from_xywh(
+                        layout.rect.x as f32,
+                        layout.rect.y as f32,
+                        layout.rect.w as f32,
+                        layout.rect.h as f32,
+                    );
                     if let Some(s) = props.attrs.get("style") {
                         // As at the other call site: resolve the element's own
                         // font size before the border parser needs it for `em`.
@@ -2496,12 +2686,6 @@ pub mod skia_impl {
                         let (style, family) =
                             parse_text_style(s, text_style, font_family, viewport);
                         let box_style = parse_style_attr(s, style.font_size, viewport);
-                        let rect = sk::Rect::from_xywh(
-                            layout.rect.x as f32,
-                            layout.rect.y as f32,
-                            layout.rect.w as f32,
-                            layout.rect.h as f32,
-                        );
                         let rrect = box_style.radius.map(|r| sk::RRect::new_rect_xy(rect, r, r));
                         if let Some(rrect) = rrect {
                             clip_rrect = Some(rrect);
@@ -2516,6 +2700,15 @@ pub mod skia_impl {
                         child_family = family;
                         opacity = (opacity * box_style.opacity).clamp(0.0, 1.0);
                         filters = box_style.filters;
+                        // Before the element's OWN two draws, deliberately: see
+                        // `apply_clip_path`. `overflow`/`border-radius` are not
+                        // applied here, and `apply_clips` still clips the
+                        // subtree below.
+                        // Before the element's OWN two draws, deliberately: see
+                        // `apply_clip_path`. `overflow`/`border-radius` are not
+                        // applied here, and `apply_clips` still clips the
+                        // subtree below.
+                        did_box_clip = apply_clip_path(canvas, rect, clip_inset);
                         if let Some(bg) = box_style.background {
                             paints.fill.set_color(color_with_opacity(bg, opacity));
                             if let Some(rrect) = rrect {
@@ -2542,7 +2735,7 @@ pub mod skia_impl {
                         paints.image.set_image_filter(None);
                         paints.image.set_color_filter(None);
                         paints.image.set_alpha_f(opacity);
-                        apply_filters_to_paint(&mut paints.image, filters);
+                        apply_img_filter(&mut paints.image, filters);
                         if let Some(img) = images.load(src) {
                             let rect = sk::Rect::from_xywh(
                                 layout.rect.x as f32,
@@ -3015,12 +3208,13 @@ pub mod skia_impl {
                     }
 
                     // Render children in order using their layout nodes
-                    let rect = sk::Rect::from_xywh(
-                        layout.rect.x as f32,
-                        layout.rect.y as f32,
-                        layout.rect.w as f32,
-                        layout.rect.h as f32,
-                    );
+                    if did_box_clip {
+                        canvas.restore();
+                    }
+                    // The SUBTREE clip, and the arm's one save for it: radius,
+                    // `overflow: hidden` and `clip-path` all apply to
+                    // descendants, which is what this has always done. The
+                    // element's own box was clipped by `apply_clip_path` above.
                     let did_clip =
                         apply_clips(canvas, rect, clip_rrect, overflow_hidden, clip_inset);
                     // Scroll offset is applied in the layout itself (children rects
@@ -4780,6 +4974,190 @@ pub mod skia_impl {
                 padding_of("1px 2px 3px 4px 5px", 16.0).is_none(),
                 "a five-value shorthand is not CSS and must not be guessed at"
             );
+        }
+
+        // ===== `parse_px_value` / `parse_float_value`: the shared guard ====
+        //
+        // `f32::parse` ACCEPTS overflow: `"1e999".parse::<f32>()` is `Ok(inf)`.
+        // These are the four call sites that read a bare number, and each one
+        // poisoned something different when the value was non-finite, which is
+        // why the guard belongs in the shared reader rather than beside a caller.
+
+        #[test]
+        fn a_non_finite_px_value_is_rejected_by_the_shared_reader() {
+            assert_eq!(
+                parse_px_value("10px"),
+                Some(10.0),
+                "the guard must not reject ordinary values"
+            );
+            for value in ["1e999px", "-1e999px", "NaNpx", "infpx", "infinitypx"] {
+                assert!(
+                    parse_px_value(value).is_none(),
+                    "`{value}` parsed as a length; an infinite rect is not a length"
+                );
+            }
+        }
+
+        #[test]
+        fn a_non_finite_unitless_value_is_rejected_by_the_shared_reader() {
+            assert_eq!(parse_float_value("1.5"), Some(1.5));
+            for value in ["1e999", "-1e999", "NaN", "inf", "infinity"] {
+                assert!(
+                    parse_float_value(value).is_none(),
+                    "`{value}` parsed as a number; an infinite factor is not a number"
+                );
+            }
+        }
+
+        // The two callers that reach a length WITHOUT `parse_px_value`, and so
+        // have to carry the guard themselves. `border: 1e999px` resolved to an
+        // infinite stroke width; `line-height: 1e999` to an infinite line box.
+
+        #[test]
+        fn a_non_finite_border_width_is_rejected() {
+            assert!(
+                border_of("1e999px solid #ff0000", 16.0).is_none(),
+                "an infinite stroke width must be rejected, not handed to set_stroke_width"
+            );
+        }
+
+        #[test]
+        fn a_non_finite_line_height_is_rejected() {
+            let base = base_at_font_size(16.0);
+            for decl in ["line-height: 1e999", "line-height: 1e999px"] {
+                let (s, _f) = parse_text_style(decl, base, "default", (800.0, 600.0));
+                assert_eq!(
+                    s.line_height, 1.2,
+                    "`{decl}` parsed: an infinite line height is not a line box"
+                );
+            }
+        }
+
+        // ===== `parse_clip_inset` ============================================
+
+        #[test]
+        fn clip_inset_reads_all_four_shorthand_forms() {
+            let of = |v: &str| {
+                let i = parse_clip_inset(v).expect(v);
+                (i.top, i.right, i.bottom, i.left)
+            };
+            assert_eq!(of("inset(10px)"), (10.0, 10.0, 10.0, 10.0));
+            assert_eq!(of("inset(10px 20px)"), (10.0, 20.0, 10.0, 20.0));
+            assert_eq!(of("inset(10px 20px 30px)"), (10.0, 20.0, 30.0, 20.0));
+            assert_eq!(of("inset(10px 20px 30px 40px)"), (10.0, 20.0, 30.0, 40.0));
+            // The corner-radius half is accepted and ignored.
+            assert_eq!(of("inset(10px round 4px)"), (10.0, 10.0, 10.0, 10.0));
+        }
+
+        #[test]
+        fn clip_inset_rejects_the_shapes_and_values_it_cannot_draw() {
+            for value in [
+                // Other basic shapes, and a reference to an SVG clip.
+                "circle(50%)",
+                "ellipse(40px 20px)",
+                "polygon(0 0, 100px 0, 100px 100px)",
+                "url(#svg-clip)",
+                // Not px, and not resolvable without a basis this parser has.
+                "inset(10% 20%)",
+                "inset(10em)",
+                "inset(10)",
+                // Too many lengths for CSS Shapes 1 §2.1.
+                "inset(1px 2px 3px 4px 5px)",
+                // A negative component is invalid (CSS 2.1 §4.3) and must be
+                // dropped rather than EXPANDING the clip rect.
+                "inset(-10px)",
+                "inset(10px -20px)",
+                // Case-sensitive on purpose: `parse_style_attr`'s whole property
+                // dispatch is, so a half-case-insensitive parser would be worse.
+                "INSET(10px)",
+                // Non-finite, in any one position of the list.
+                "inset(1e999px)",
+                "inset(NaNpx)",
+                "inset(1e999px 10px 10px 10px)",
+                // The keywords are not `inset()` values.
+                "none",
+            ] {
+                assert!(
+                    parse_clip_inset(value).is_none(),
+                    "`{value}` produced a clip; it must be rejected as a whole declaration"
+                );
+            }
+        }
+
+        // ===== `parse_img_filter` ============================================
+
+        #[test]
+        fn img_filter_reads_the_two_functions_it_can_draw() {
+            let blur = parse_img_filter("blur(2px)").expect("blur");
+            assert_eq!(blur.blur_sigma, Some(2.0));
+            assert_eq!(blur.brightness, None);
+            let both = parse_img_filter("blur(2px) brightness(1.2)").expect("both");
+            assert_eq!(both.blur_sigma, Some(2.0));
+            assert_eq!(both.brightness, Some(1.2));
+            let none = parse_img_filter("none").expect("none");
+            assert_eq!(none.blur_sigma, None);
+            assert_eq!(none.brightness, None);
+        }
+
+        /// The half-application defect, pinned at the parser: an unknown
+        /// function or a repeated one drops the WHOLE list, so nothing beside it
+        /// can be applied on its own.
+        #[test]
+        fn img_filter_drops_a_list_it_cannot_apply_whole() {
+            for value in [
+                "grayscale(1)",
+                "blur(2px) grayscale(1)",
+                "blur(2px) blur(4px)",
+                "blur(2px) brightness(1.2) opacity(0.5)",
+                "nonsense(1)",
+                "blur",
+                "blur(2px",
+                "",
+                "   ",
+            ] {
+                let spec = parse_img_filter(value);
+                assert!(
+                    match spec {
+                        None => true,
+                        Some(s) => s.blur_sigma.is_none() && s.brightness.is_none(),
+                    },
+                    "`{value}` produced {spec:?}; a list that cannot be applied whole must \
+                     apply nothing"
+                );
+            }
+        }
+
+        /// A non-finite argument is the same class of failure as an unknown
+        /// function: it produces a value that cannot be painted, so the whole
+        /// list goes with it.
+        #[test]
+        fn img_filter_rejects_non_finite_arguments() {
+            for value in [
+                "brightness(1e999)",
+                "blur(1e999px)",
+                "blur(NaNpx)",
+                "brightness(NaN)",
+                "blur(2px) brightness(1e999)",
+            ] {
+                assert_eq!(
+                    parse_img_filter(value),
+                    None,
+                    "`{value}` parsed; an infinite filter factor is not a filter"
+                );
+            }
+        }
+
+        /// The CSS property name itself is inert now: `filter: blur(2px)` reaches
+        /// no arm at all, so it cannot half-apply on any element.
+        #[test]
+        fn the_css_filter_property_name_reads_nothing() {
+            let box_style =
+                parse_style_attr("filter: blur(2px) brightness(1.5)", 16.0, (800.0, 600.0));
+            assert_eq!(box_style.filters.blur_sigma, None);
+            assert_eq!(box_style.filters.brightness, None);
+
+            let renamed = parse_style_attr("img-filter: blur(2px)", 16.0, (800.0, 600.0));
+            assert_eq!(renamed.filters.blur_sigma, Some(2.0));
         }
 
         // The border half of the same `rem` rule. A `rem` border width has no

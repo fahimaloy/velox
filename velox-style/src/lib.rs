@@ -816,6 +816,12 @@ where
 /// (font-family, font-style, letter-spacing, text-align, vertical-align,
 /// visibility, cursor) — `text-decoration` is retained to avoid regressing
 /// behavior.
+///
+/// Pinned deliberately by this list's ABSENCE: `clip-path` (Masking 1 §3.1)
+/// and the renderer's `img-filter` (an image filter, not the CSS `filter`
+/// property, which is Filter Effects 1 §2.1) are both non-inherited in real
+/// CSS, so each element reads its own declaration and a descendant of a
+/// clipped box is not clipped unless it says so.
 const INHERITABLE: &[&str] = &[
     "color",
     "font-size",

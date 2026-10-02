@@ -213,6 +213,37 @@ fn a_function_after_other_tokens_does_not_eat_them() {
     assert_eq!(v, "1px solid rgba(0, 0, 0, 0.1)");
 }
 
+// --- The two properties whose parser bug was invisible from the pixels alone,
+// because BOTH of them were already reachable through an inline `style`
+// attribute. `clip-path` reached paint and clipped the text but not the
+// element's own background (`velox-renderer/tests/clip_path_render.rs`), and
+// `filter` reached only the `<img>` lane (`img_filter_render.rs`). Neither was
+// ever dead, so neither shows up in a class-rule rendering that differs from the
+// pre-fix one — the truncation was simply invisible until the value arrived
+// whole.
+
+#[test]
+fn a_multi_value_inset_survives_a_class_rule() {
+    // Two lengths, so a truncating parser that keeps the first argument and
+    // drops the rest is caught, not just one that keeps none.
+    let v = cascaded(
+        ".card { clip-path: inset(10px 20px); }",
+        "card",
+        "clip-path",
+    );
+    assert_eq!(v, "inset(10px 20px)");
+}
+
+#[test]
+fn a_two_function_filter_list_survives_a_class_rule() {
+    let v = cascaded(
+        ".thumb { img-filter: blur(4px) brightness(1.2); }",
+        "thumb",
+        "img-filter",
+    );
+    assert_eq!(v, "blur(4px) brightness(1.2)");
+}
+
 // --- Documented limitation, asserted so it cannot silently change: nothing in
 // velox-dom resolves `calc()` or substitutes `var()`. The parser now hands
 // them over INTACT; whether they are then RESOLVED is a separate defect with
