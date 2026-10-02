@@ -2845,7 +2845,21 @@ fn emit_children_with_mode(
                     }
 
                     let mut cond = String::new();
-                    cond.push_str(&format!(r#"{{ if {} {{ {} }}"#, expr_if.trim(), inner_if));
+                    // No outer `{ … }` around the whole conditional.
+                    //
+                    // The parens that used to wrap it were a real bug (a
+                    // conditional cannot be pushed as a parenthesized value), and
+                    // the block that replaced them was an over-correction: an
+                    // expression does not need braces, and wrapping one in them
+                    // emits `unused_braces` at every site whose body rustc can see
+                    // on one line. The braces still needed are the INNER ones —
+                    // the `if` arm's own block, which holds the component render's
+                    // `let __props` / `let __callbacks` bindings and therefore
+                    // cannot be an expression. Four such warnings ship in every
+                    // scaffolded app's generated `app.rs`; see
+                    // `codegen_unit_tests::v_if_else_emits_block_push`, which pins
+                    // both the shape and the per-render-fn count.
+                    cond.push_str(&format!(r#"if {} {{ {} }}"#, expr_if.trim(), inner_if));
                     for part in chain_parts.iter() {
                         cond.push(' ');
                         cond.push_str(part);
@@ -2856,7 +2870,6 @@ fn emit_children_with_mode(
                     } else {
                         cond.push_str(r#" else { text("") }"#);
                     }
-                    cond.push_str(" }");
                     out.push_str(&format!("__children.push({});\n", cond));
                     i = if j > i { j } else { i + 1 };
                     continue;

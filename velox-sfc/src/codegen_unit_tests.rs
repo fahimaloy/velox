@@ -158,11 +158,22 @@ fn v_if_else_emits_block_push() {
         "v-if/v-else must not be pushed as a parenthesized value: {}",
         rust
     );
-    // It must instead be pushed as a block that yields a single VNode:
-    //   __children.push({ if (...) { ... } else { ... } })
+    // It must instead be pushed as a BARE conditional expression — no parens
+    // (the bug above) and no outer block either:
+    //   __children.push(if (...) { ... } else { ... })
+    // The braces that remain are the `if` arm's own, which is where a component's
+    // `let __props` / `let __callbacks` bindings live. An outer `{ … }` around the
+    // whole expression is what emitted `unused_braces` in every scaffolded app's
+    // generated `app.rs` — four warnings, at the `v-if` sites whose body rustc can
+    // see on a single line (`UnusedBraces` is suppressed across multiple lines).
     assert!(
-        rust.contains("__children.push({"),
-        "expected block push for conditional: {}",
+        !rust.contains("__children.push({"),
+        "the conditional must not be wrapped in a redundant outer block: {}",
+        rust
+    );
+    assert!(
+        rust.contains("__children.push(if "),
+        "expected a bare conditional push: {}",
         rust
     );
     // Unconditional siblings must still be emitted:
@@ -191,11 +202,13 @@ fn v_if_else_resolves_to_single_branch() {
         "branches missing: {}",
         rust
     );
-    // And the push must be a single block per render function (one child added
-    // for the conditional), not two separate pushes that would desync layout's
-    // source_index. compile_template_to_rs emits two render fns (render_with
-    // and render_with_state) that both contain the conditional, so expect 2.
-    let pushes = rust.matches("__children.push({ if").count();
+    // And the push must be a single expression per render function (one child
+    // added for the conditional), not two separate pushes that would desync
+    // layout's source_index. compile_template_to_rs emits two render fns
+    // (render_with and render_with_state) that both contain the conditional, so
+    // expect 2. The count is the invariant; the shape it counts is pinned by
+    // `v_if_else_emits_block_push`.
+    let pushes = rust.matches("__children.push(if ").count();
     assert_eq!(
         pushes, 2,
         "expected one conditional push per render fn: {}",

@@ -949,12 +949,85 @@ fn run_build(
     let _ = tx.send(DevCmd::Built(outcome));
 }
 
+/// Whether hot reload is actually available in this `velox dev` run.
+///
+/// This exists because the honest answer is not knowable from the port number.
+/// The listener used to bind on its own thread, so a failure arrived as an
+/// `eprintln!` on that thread and stopped there: nothing carried it back, and the
+/// banner went on claiming `HMR enabled`. Binding happens synchronously in
+/// [`HmrListener::start`] now, so the outcome is an ordinary return value and this
+/// carries it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum HmrStatus {
+    Available,
+    /// The listener could not bind. `reason` is the OS error, kept verbatim so the
+    /// banner names the real cause (`port 31313 in use`) instead of shrugging.
+    Unavailable {
+        reason: String,
+    },
+}
+
+impl HmrStatus {
+    fn is_available(&self) -> bool {
+        matches!(self, HmrStatus::Available)
+    }
+
+    /// The `➤ HMR:` banner line. Says `unavailable` with the reason rather than
+    /// advertising auto-reload that cannot happen.
+    fn banner_line(&self, port: u16) -> String {
+        match self {
+            HmrStatus::Available => {
+                format!("port {port} (auto-reload on save)")
+            }
+            HmrStatus::Unavailable { reason } => {
+                format!("port {port} (unavailable: {reason})")
+            }
+        }
+    }
+
+    /// The line printed once the app process exists.
+    ///
+    /// This is the string that used to lie. It is a function of the bind result
+    /// and nothing else, so it cannot say `enabled` unless the listener is
+    /// actually listening.
+    fn app_started_line(&self) -> String {
+        match self {
+            HmrStatus::Available => "App started (HMR enabled)".to_string(),
+            HmrStatus::Unavailable { reason } => {
+                format!("App started (HMR unavailable: {reason})")
+            }
+        }
+    }
+}
+
+/// The one-line reason a bind failed, phrased for someone reading a terminal.
+///
+/// `AddrInUse` is by far the common case and it has a cause the user can act on,
+/// so it gets words; anything else passes the OS message through rather than
+/// inventing an explanation for it. Only ever reached when
+/// [`HmrStatus::Unavailable`] is built, so there is no path on which it produces a
+/// reason for a bind that actually succeeded.
+fn port_reason(e: &std::io::Error) -> String {
+    if e.kind() == std::io::ErrorKind::AddrInUse {
+        "in use by another process".to_string()
+    } else {
+        e.to_string()
+    }
+}
+
 /// Owns the HMR listener thread.
 ///
 /// The listener's `accept()` loop is non-blocking and polls, so it can be given a
 /// real shutdown path: `drop` sets the flag and joins. It is joined rather than
 /// detached because it owns a bound TCP socket, and a detached listener would
 /// keep the port until the process exited.
+///
+/// The socket is bound **here**, on the caller's thread, and only the already-bound
+/// listener is handed to the worker. That is what makes the failure observable: a
+/// bind that happened on the worker thread could only ever be reported by printing
+/// from it, which is how the banner came to lie. It is also why there is no
+/// `is_bound()` probe anywhere — a probe would race the thread, whereas a
+/// `Result` is a fact about a call that has already returned.
 pub struct HmrListener {
     slot: HmrSlot,
     shutdown: Arc<AtomicBool>,
@@ -962,26 +1035,21 @@ pub struct HmrListener {
 }
 
 impl HmrListener {
-    fn start(port: u16) -> Self {
+    /// Bind `port` and start accepting on it.
+    ///
+    /// Returns the `io::Error` from the bind, so the caller can report that HMR is
+    /// unavailable and carry on — continuing without hot reload is correct,
+    /// claiming to have it is not.
+    fn start(port: u16) -> std::io::Result<Self> {
+        let listener = std::net::TcpListener::bind(("127.0.0.1", port))?;
+        listener.set_nonblocking(true).ok();
+
         let slot: HmrSlot = Arc::new(Mutex::new(None));
         let shutdown = Arc::new(AtomicBool::new(false));
 
         let slot_clone = Arc::clone(&slot);
         let shutdown_clone = Arc::clone(&shutdown);
         let handle = thread::spawn(move || {
-            let listener = match std::net::TcpListener::bind(("127.0.0.1", port)) {
-                Ok(l) => l,
-                Err(e) => {
-                    eprintln!(
-                        "[velox] HMR server could not bind port {}: {} (continuing without HMR)",
-                        port, e
-                    );
-                    return;
-                }
-            };
-            listener.set_nonblocking(true).ok();
-            eprintln!("[velox] HMR dev server listening on 127.0.0.1:{}", port);
-
             // The flag is checked at the top of every iteration, and the only
             // blocking thing in the body is a bounded sleep, so `drop` never
             // waits long to join this thread.
@@ -1003,11 +1071,11 @@ impl HmrListener {
             }
         });
 
-        Self {
+        Ok(Self {
             slot,
             shutdown,
             handle: Some(handle),
-        }
+        })
     }
 
     pub fn slot(&self) -> &HmrSlot {
@@ -1039,7 +1107,32 @@ pub fn dev_current(project_dir: &Path, release: bool) -> Result<()> {
         project_dir.to_path_buf()
     };
 
-    print_banner(project_dir, release, &watch_dir);
+    // Bind the HMR port BEFORE the banner is drawn, so every line the user reads
+    // is a statement about the run they are in. The bind is a local socket and
+    // takes microseconds; the build that follows is what takes seconds.
+    //
+    // FOLLOW-UP (deliberately not done here): the port is hardcoded and not
+    // configurable. There is no `--hmr-port`, and no override path reaches the app
+    // either — `dev.rs` always exports `VELOX_HMR_PORT` from the same constant, so
+    // a stray listener on 31313 wedges hot reload for this project with no way out
+    // but finding and killing an unknown process. The fix is one flag threaded to
+    // both `HmrListener::start` and `VELOX_HMR_PORT`; adding a CLI surface is a
+    // separate decision from making the log honest.
+    let hmr_port = velox_renderer::DEFAULT_HMR_PORT;
+    let (hmr, hmr_status) = match HmrListener::start(hmr_port) {
+        Ok(listener) => {
+            eprintln!("[velox] HMR dev server listening on 127.0.0.1:{}", hmr_port);
+            (Some(listener), HmrStatus::Available)
+        }
+        Err(e) => (
+            None,
+            HmrStatus::Unavailable {
+                reason: format!("port {hmr_port} {}", port_reason(&e)),
+            },
+        ),
+    };
+
+    print_banner(project_dir, release, &watch_dir, &hmr_status);
 
     let (tx, rx) = mpsc::channel::<DevCmd>();
     // `tx` stays alive in this scope for the whole function — the loop hands a
@@ -1047,14 +1140,6 @@ pub fn dev_current(project_dir: &Path, release: bool) -> Result<()> {
     // channel. That is what makes `RecvTimeoutError::Disconnected` unreachable
     // here, so stdin EOF is detected on the reader's own handle instead.
     let stdin = InputSource::from_handle(spawn_stdin_reader(tx.clone()));
-
-    // Start HMR TCP server in a background thread.
-    // The app connects to this listener as a client.
-    // The connected stream is stored in a shared slot so we can send
-    // reload messages to the app when files change. `hmr` owns the thread and
-    // stops it when this function returns.
-    let hmr = HmrListener::start(velox_renderer::DEFAULT_HMR_PORT);
-    let hmr_port = velox_renderer::DEFAULT_HMR_PORT;
 
     let project = project_dir.to_path_buf();
     let bin = project_bin_name(project_dir);
@@ -1112,7 +1197,7 @@ pub fn dev_current(project_dir: &Path, release: bool) -> Result<()> {
             }
             Ok(DevCmd::Clear) => {
                 clear_screen();
-                print_banner(project_dir, release, &watch_dir);
+                print_banner(project_dir, release, &watch_dir, &hmr_status);
                 if crashed {
                     println!(
                         "{} {}\n",
@@ -1176,8 +1261,9 @@ pub fn dev_current(project_dir: &Path, release: bool) -> Result<()> {
                     match react_to(&outcome) {
                         BuildReaction::RunApp { elapsed } => {
                             println!("{} Compiled in {:.1}s", green("✓"), elapsed.as_secs_f32());
-                            child = spawn_app(&project, release, bin.clone(), hmr_port)
-                                .map(AppChild::new);
+                            child =
+                                spawn_app(&project, release, bin.clone(), hmr_port, &hmr_status)
+                                    .map(AppChild::new);
                             crashed = false;
                         }
                         // Not fatal. The watcher stays alive and the next save
@@ -1232,7 +1318,14 @@ pub fn dev_current(project_dir: &Path, release: bool) -> Result<()> {
             // old code gave it a 2 s grace here, which added up to 2 s to every
             // reload and bought nothing: the `kill()` that followed was
             // unconditional, so the grace only ever affected ordering.
-            send_hmr_reload(hmr.slot());
+            // Ask the app to exit so the rebuild can replace it. Only when HMR is
+            // actually listening: with no listener there is nobody to tell, and
+            // asking anyway printed `No HMR client connected — skipping reload`
+            // on every single save. The kill below is unconditional, so skipping
+            // the ask costs nothing but the noise.
+            if let Some(hmr) = hmr.as_ref() {
+                send_hmr_reload(hmr.slot());
+            }
             // Dropping `AppChild` sends the kill and reaps. No wait loop.
             drop(child.take());
             println!("{}", dim("⏳ Compiling..."));
@@ -1285,7 +1378,7 @@ fn send_hmr_reload(slot: &HmrSlot) {
     }
 }
 
-fn print_banner(project_dir: &Path, release: bool, watch_dir: &Path) {
+fn print_banner(project_dir: &Path, release: bool, watch_dir: &Path, hmr: &HmrStatus) {
     let name = project_dir
         .canonicalize()
         .ok()
@@ -1300,9 +1393,9 @@ fn print_banner(project_dir: &Path, release: bool, watch_dir: &Path) {
     println!("  {} {}", bold("➤ Project:"), name);
     println!("  {} {}", bold("➤ Watching:"), watch_dir.display());
     println!(
-        "  {} port {} (auto-reload on save)",
+        "  {} {}",
         bold("➤ HMR:"),
-        velox_renderer::DEFAULT_HMR_PORT
+        hmr.banner_line(velox_renderer::DEFAULT_HMR_PORT)
     );
     println!(
         "  {} {}",
@@ -1353,17 +1446,23 @@ fn spawn_stdin_reader(tx: mpsc::Sender<DevCmd>) -> JoinHandle<()> {
     })
 }
 
-/// Spawn the already-compiled app with HMR enabled.
+/// Spawn the already-compiled app, and tell it whether hot reload is real.
 ///
 /// Split from the build because the two have different blocking profiles. The
 /// build is the slow part and runs on a [`BuildWorker`] thread; this is a single
 /// `Command::spawn`, which returns as soon as the process exists and so is safe
 /// to call straight from the dev loop.
+///
+/// `hmr` is the outcome of the listener's bind, not the port it was asked for.
+/// When it says unavailable the app is started with `VELOX_HMR=0` so it does not
+/// connect to whatever stranger is holding the port, and the printed line names
+/// the port and the reason rather than claiming auto-reload.
 fn spawn_app(
     project_dir: &Path,
     release: bool,
     bin: Option<String>,
     hmr_port: u16,
+    hmr: &HmrStatus,
 ) -> Option<Child> {
     let mut run = Command::new("cargo");
     run.arg("run");
@@ -1373,16 +1472,22 @@ fn spawn_app(
     if let Some(ref name) = bin {
         run.arg("--bin").arg(name);
     }
-    // Enable HMR mode in the app — it will connect to our TCP server.
-    run.env("VELOX_HMR", "1")
-        .env("VELOX_HMR_PORT", hmr_port.to_string())
-        .current_dir(project_dir)
+    // Enable HMR mode in the app — it will connect to our TCP server — but only
+    // if that server is really listening. `hmr_config()` reads `VELOX_HMR == "1"`
+    // and nothing else, so "0" is how it is turned off.
+    if hmr.is_available() {
+        run.env("VELOX_HMR", "1")
+            .env("VELOX_HMR_PORT", hmr_port.to_string());
+    } else {
+        run.env("VELOX_HMR", "0");
+    }
+    run.current_dir(project_dir)
         .stdin(Stdio::null())
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit());
     match run.spawn() {
         Ok(c) => {
-            println!("{}", green("App started (HMR enabled)"));
+            println!("{}", green(&hmr.app_started_line()));
             Some(c)
         }
         Err(e) => {
@@ -1511,5 +1616,118 @@ mod tests {
             elapsed < Duration::from_millis(50),
             "10 000 debounce cycles took {elapsed:?}; the change path must not sleep"
         );
+    }
+
+    /// A port nobody is holding, chosen by the kernel. Never hardcode one: a test
+    /// that binds 31313 collides with a real `velox dev` on the same machine.
+    fn a_free_port() -> u16 {
+        let l = std::net::TcpListener::bind(("127.0.0.1", 0)).expect("bind an ephemeral port");
+        l.local_addr().expect("a local addr").port()
+    }
+
+    /// The banner must not claim hot reload when the listener could not bind.
+    ///
+    /// This is the defect: the line read `App started (HMR enabled)` on a run
+    /// where the bind had already failed on another thread and printed its own
+    /// complaint to stderr. The test drives the real `HmrListener::start` against
+    /// a port it is holding, so the `Unavailable` it builds is the one a real run
+    /// would build.
+    #[test]
+    fn a_port_in_use_makes_the_banner_say_unavailable_and_never_enabled() {
+        let squatter = std::net::TcpListener::bind(("127.0.0.1", 0)).expect("bind");
+        let port = squatter.local_addr().expect("a local addr").port();
+
+        let err = match HmrListener::start(port) {
+            Ok(_) => panic!("the port was already bound; the start must fail"),
+            Err(e) => e,
+        };
+        assert_eq!(
+            err.kind(),
+            std::io::ErrorKind::AddrInUse,
+            "expected AddrInUse on a held port, got {err:?}"
+        );
+
+        let status = HmrStatus::Unavailable {
+            reason: format!("port {port} {}", port_reason(&err)),
+        };
+        assert!(
+            !status.is_available(),
+            "a failed bind must not read as available"
+        );
+        let line = status.app_started_line();
+        assert!(
+            line.contains("unavailable") && line.contains(&port.to_string()),
+            "the started-app line must name the unavailable port and say so: {line:?}"
+        );
+        assert!(
+            !line.contains("enabled"),
+            "the started-app line claimed HMR on a run with no listener: {line:?}"
+        );
+        let banner = status.banner_line(port);
+        assert!(
+            !banner.contains("auto-reload"),
+            "the banner advertised auto-reload with no listener: {banner:?}"
+        );
+        assert!(
+            banner.contains("unavailable") && banner.contains("in use"),
+            "the banner must say why hot reload is missing: {banner:?}"
+        );
+    }
+
+    /// The other direction, so the honest string cannot be achieved by always
+    /// claiming failure.
+    #[test]
+    fn a_free_port_makes_the_banner_say_enabled() {
+        let port = a_free_port();
+        let listener = HmrListener::start(port).expect("a free port must bind");
+        assert!(
+            HmrStatus::Available.is_available(),
+            "a successful bind must read as available"
+        );
+        assert_eq!(
+            HmrStatus::Available.app_started_line(),
+            "App started (HMR enabled)"
+        );
+        assert!(
+            HmrStatus::Available
+                .banner_line(port)
+                .contains("auto-reload on save"),
+            "the banner must advertise auto-reload when the listener is up"
+        );
+        drop(listener);
+    }
+
+    /// The invariant behind test 4 of the task: after the listener is dropped the
+    /// port is free again.
+    ///
+    /// Asserted by re-binding, not by inspecting a flag. A `Drop` that stopped
+    /// joining the thread — or that stopped setting the shutdown flag — would keep
+    /// the socket until the process exited, and this is the test that notices: it
+    /// is the behaviour that makes a wedged port unrecoverable without `--hmr-port`.
+    #[test]
+    fn dropping_the_listener_frees_the_port() {
+        let port = a_free_port();
+        let listener = HmrListener::start(port).expect("a free port must bind");
+        // Still held: a second bind must fail while the listener is alive.
+        assert!(
+            std::net::TcpListener::bind(("127.0.0.1", port)).is_err(),
+            "the port was free while an HmrListener held it"
+        );
+        drop(listener);
+        std::net::TcpListener::bind(("127.0.0.1", port))
+            .expect("the port must be released once the listener is dropped");
+    }
+
+    /// `AddrInUse` is the case a user can act on, so it gets words rather than an
+    /// errno string. Any other error is passed through untouched: inventing an
+    /// explanation for one we do not recognise would be worse than quoting it.
+    #[test]
+    fn an_addr_in_use_reason_names_the_cause() {
+        assert_eq!(
+            port_reason(&std::io::Error::from(std::io::ErrorKind::AddrInUse)),
+            "in use by another process"
+        );
+        let other = std::io::Error::other("something else entirely");
+        assert_eq!(port_reason(&other), other.to_string());
     }
 }
