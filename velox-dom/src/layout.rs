@@ -4078,8 +4078,14 @@ pub fn compute_layout(node: &VNode, viewport_w: i32, viewport_h: i32) -> LayoutN
                         flex_grow: f32,
                         flex_shrink: f32,
                         align_self: String,
-                        /// `None` = the property imposes no constraint (absent,
-                        /// `auto`, or negative) — NOT zero.
+                        /// `None` = the property imposes no constraint. When
+                        /// a declaration is present and explicit (a real
+                        /// length, including `0`) that is the floor. When no
+                        /// declaration is present, or the authored value is
+                        /// the keyword `auto` (the property's initial value),
+                        /// this holds the §4.5 automatic minimum — the
+                        /// item's content-based minimum size — NOT zero and
+                        /// NOT no constraint.
                         min_main_size: Option<f32>,
                         max_main_size: Option<f32>,
                         /// The size this item's OWN box came out of the measure
@@ -4478,15 +4484,30 @@ pub fn compute_layout(node: &VNode, viewport_w: i32, viewport_h: i32) -> LayoutN
                             ln.rect.w as f32
                         };
 
-                        // A negative `min`/`max` main size is an invalid
-                        // declaration (CSS 2.1 §10.4), so it constrains nothing —
-                        // same rule `used_max_width` applies on the block flow.
-                        // Absent and `auto` are `None` for the same reason: no
-                        // constraint, and reading them as `0` would delete the
-                        // floor that every item without a `min-*` relies on.
-                        let min_main = style_lookup_len_full(
+                        // §4.5 — the automatic minimum size. The authored
+                        // `min-width`/`min-height` is the floor only when it
+                        // resolves to a real length. When it is absent, or the
+                        // keyword `auto` (the initial value), the floor is the
+                        // item's content-based minimum instead. An explicit
+                        // length — including `min-width: 0` — REPLACES that
+                        // floor; that is what makes `min-width: 0` the standard
+                        // escape hatch. `min-width: 0` and no `min-width` are
+                        // therefore distinguishable in this code path even
+                        // when both happen to floor at 0.
+                        //
+                        // Parsing note: `parse_length_value` returns `None` for
+                        // the keyword `auto`, and this branch keys the
+                        // automatic floor off exactly that `None` result for
+                        // an authored `auto` — if the parser ever started
+                        // returning `Some(0.0)` for `auto`, this branch would
+                        // stop firing and the floor would silently collapse to
+                        // the escape-hatch value. The distinguishing test
+                        // pins that.
+                        let min_key = if is_column { "min-height" } else { "min-width" };
+                        let raw_min = style_lookup_str(fc.style, min_key);
+                        let parsed_min = style_lookup_len_full(
                             fc.style,
-                            if is_column { "min-height" } else { "min-width" },
+                            min_key,
                             main_size as f32,
                             my_font_size,
                             root_font_size,
@@ -4495,6 +4516,74 @@ pub fn compute_layout(node: &VNode, viewport_w: i32, viewport_h: i32) -> LayoutN
                         )
                         .filter(|&v| v >= 0)
                         .map(|v| v as f32);
+                        // The content-based minimum, §4.5. Velox has no
+                        // min-content helper, so this is the narrow probe
+                        // analogue of the content-basis descent above: force
+                        // the content to wrap at every opportunity, then
+                        // measure the widest piece with `max_content_width`.
+                        // For a row item that is the longest unbreakable run
+                        // (e.g. the longest word); for a column item there is
+                        // nothing to wrap on the main axis, so the content
+                        // height of the item's own pre-measure is the floor.
+                        // APPROXIMATION, documented: children whose own
+                        // sizing clamps to the probe (e.g. an inline-block
+                        // that shrink-wraps at the probe width) under-report.
+                        let flex_auto_min_main = || {
+                            if is_column {
+                                ln.rect.h as f32
+                            } else {
+                                let (pad_l, pad_r, _, _) = style_box_sides_full(
+                                    fc.style,
+                                    "padding",
+                                    main_size as f32,
+                                    my_font_size,
+                                    root_font_size,
+                                    vw_f,
+                                    vh_f,
+                                );
+                                let (bor_l, bor_r, _, _) = style_border_widths(
+                                    fc.style,
+                                    main_size as f32,
+                                    my_font_size,
+                                    root_font_size,
+                                    vw_f,
+                                    vh_f,
+                                );
+                                let inset = pad_l + pad_r + bor_l + bor_r;
+                                let narrow = at(
+                                    fc.node,
+                                    0,
+                                    0,
+                                    1,
+                                    child_avail_h as i32,
+                                    viewport_w,
+                                    viewport_h,
+                                    ContainingBlock {
+                                        x: content_x,
+                                        y: content_y_start,
+                                        w: content_w,
+                                        h: content_h_available,
+                                    },
+                                    Some(fc.index),
+                                    root_font_size,
+                                    my_font_size,
+                                );
+                                max_content_width(&narrow) as f32 + inset as f32
+                            }
+                        };
+                        let min_main: Option<f32> = match (raw_min.as_deref(), parsed_min) {
+                            // No declaration: the property's initial value is
+                            // `auto`, so the automatic floor applies.
+                            (None, _) => Some(flex_auto_min_main()),
+                            // An authored `auto`: same floor, keyed off the
+                            // parser's `None` for that keyword.
+                            (Some(raw), None) if raw.trim().eq_ignore_ascii_case("auto") => {
+                                Some(flex_auto_min_main())
+                            }
+                            // Explicit length (including 0) or invalid: the
+                            // authored value is the floor, or no constraint.
+                            (Some(_), parsed) => parsed,
+                        };
                         let max_main = style_lookup_len_full(
                             fc.style,
                             if is_column { "max-height" } else { "max-width" },
@@ -4619,15 +4708,6 @@ pub fn compute_layout(node: &VNode, viewport_w: i32, viewport_h: i32) -> LayoutN
                     // Two-pass flex layout: pass 1 distributes flex + justify + computes per-line cross sizes
                     let pre_lines_len = lines.len();
                     for line in &mut lines {
-                        // §9.7.1: the free space is computed from the sum of the
-                        // HYPOTHETICAL main sizes (base clamped by min/max), not
-                        // from the sum of the raw bases. A sum site, so it reads
-                        // the hypothetical rather than assigning one.
-                        let total_basis: f32 = line
-                            .items
-                            .iter()
-                            .map(|&i| items[i].hypothetical_main_size)
-                            .sum();
                         let total_gap = if line.items.len() > 1 {
                             (line.items.len() as i32 - 1) as f32
                                 * if is_column {
@@ -4638,76 +4718,112 @@ pub fn compute_layout(node: &VNode, viewport_w: i32, viewport_h: i32) -> LayoutN
                         } else {
                             0.0
                         };
-                        let free_space = (main_size as f32) - total_basis - total_gap;
-                        if free_space > 0.0 {
-                            let total_grow: f32 =
-                                line.items.iter().map(|&i| items[i].flex_grow).sum();
-                            if total_grow > 0.0 {
-                                for &idx in &line.items {
-                                    let grow_amount =
-                                        (items[idx].flex_grow / total_grow) * free_space;
-                                    items[idx].target_main_size = clamp_to_min_max(
-                                        items[idx].target_main_size + grow_amount,
-                                        items[idx].min_main_size,
-                                        items[idx].max_main_size,
-                                    );
-                                }
-                            }
-                        } else if free_space < 0.0 {
-                            // §9.7.1: the shrink distribution is scaled by the
-                            // BASE size, not the hypothetical and not the
-                            // partially-updated target. Reading `flex_base_size`
-                            // here is what makes the loop order-independent —
-                            // reading a mutating field would make each item's
-                            // factor depend on which items were already shrunk.
-                            let total_shrink: f32 = line
+                        // §9.7.3 resolve loop, with the freeze-and-redistribute
+                        // step the spec attaches to a target that gets clamped
+                        // by min/max. Velox previously had the clamp but not
+                        // the re-run, which is why adding §4.5 floors would
+                        // otherwise leave the line under- or over-filled by
+                        // exactly the floored amount.
+                        //
+                        // The free space is measured against the BASE sizes
+                        // (the distribute target starts at the base, §9.7.3):
+                        // with a floor in play the hypothetical exceeds the
+                        // base by the floor amount, so a hypothetical-based
+                        // free space would feed that floor to the grow
+                        // distribution and the line would under-fill by it.
+                        // With no floors the two sums are identical, so this
+                        // changes nothing on previously-floored-less trees.
+                        let mut frozen = vec![false; line.items.len()];
+                        loop {
+                            let frozen_sum: f32 = line
                                 .items
                                 .iter()
-                                .map(|&i| items[i].flex_shrink * items[i].flex_base_size)
+                                .enumerate()
+                                .filter(|(pos, _)| frozen[*pos])
+                                .map(|(_, &i)| items[i].target_main_size)
                                 .sum();
-                            if total_shrink > 0.0 {
-                                for &idx in &line.items {
-                                    let shrink_factor = items[idx].flex_shrink
-                                        * items[idx].flex_base_size
-                                        / total_shrink;
-                                    let shrink_amount = shrink_factor * free_space.abs();
-                                    items[idx].target_main_size = clamp_to_min_max(
-                                        items[idx].target_main_size - shrink_amount,
-                                        items[idx].min_main_size,
-                                        items[idx].max_main_size,
-                                    );
+                            let unfrozen_base: f32 = line
+                                .items
+                                .iter()
+                                .enumerate()
+                                .filter(|(pos, _)| !frozen[*pos])
+                                .map(|(_, &i)| items[i].flex_base_size)
+                                .sum();
+                            let capacity = main_size as f32 - total_gap - frozen_sum;
+                            let free_space = capacity - unfrozen_base;
+                            // Every unfrozen item restarts from its base, per
+                            // the spec's re-run with frozen items pinned.
+                            for (pos, &i) in line.items.iter().enumerate() {
+                                if !frozen[pos] {
+                                    items[i].target_main_size = items[i].flex_base_size;
                                 }
                             }
-                        }
-                        // THE FIX. css-flexbox-1 §9.7.3 step 4 clamps the target
-                        // main size by min/max, and it does so for the resolved
-                        // value regardless of how resolution went. Both clamps
-                        // above sit INSIDE `if total_grow > 0.0` /
-                        // `if total_shrink > 0.0`, so three paths reached the
-                        // line sum below with nothing clamped at all:
-                        //
-                        //   1. `free_space < 0.0` and `total_shrink == 0.0` —
-                        //      every `flex-shrink: 0`, or every base is `0` so
-                        //      `flex_shrink * flex_base_size` sums to `0`;
-                        //   2. `free_space > 0.0` and `total_grow == 0.0`;
-                        //   3. `free_space == 0.0` exactly, so neither `> 0.0`
-                        //      nor `< 0.0` holds and the whole chain is skipped.
-                        //
-                        // Case 1 is the ordinary shape: `flex: 1 1 0` with a
-                        // `min-width` wider than the container. The base is 0,
-                        // `total_shrink` is `1 * 0 == 0`, and the unclamped base
-                        // is what reached `rect.w` — a `min-width` silently
-                        // dropped. Re-clamping inside either branch would be a
-                        // no-op (it already happens there); the pass has to be
-                        // unconditional and OUTSIDE the if/else chain, which is
-                        // why it is here. It is idempotent over the two branches
-                        // above, so it is not a second application of anything.
-                        for &idx in &line.items {
-                            items[idx].target_main_size = clamp_to_min_max(
-                                items[idx].target_main_size,
-                                items[idx].min_main_size,
-                                items[idx].max_main_size,
-                            );
+                            if free_space > 0.0 {
+                                let total_grow: f32 = line
+                                    .items
+                                    .iter()
+                                    .enumerate()
+                                    .filter(|(pos, _)| !frozen[*pos])
+                                    .map(|(_, &i)| items[i].flex_grow)
+                                    .sum();
+                                if total_grow > 0.0 {
+                                    for (pos, &i) in line.items.iter().enumerate() {
+                                        if !frozen[pos] {
+                                            let grow_amount =
+                                                (items[i].flex_grow / total_grow) * free_space;
+                                            items[i].target_main_size += grow_amount;
+                                        }
+                                    }
+                                }
+                            } else if free_space < 0.0 {
+                                // §9.7.1: shrink distributes proportional to
+                                // the BASE, never the partially-updated
+                                // target, so the loop stays order-independent.
+                                let total_shrink: f32 = line
+                                    .items
+                                    .iter()
+                                    .enumerate()
+                                    .filter(|(pos, _)| !frozen[*pos])
+                                    .map(|(_, &i)| items[i].flex_shrink * items[i].flex_base_size)
+                                    .sum();
+                                if total_shrink > 0.0 {
+                                    for (pos, &i) in line.items.iter().enumerate() {
+                                        if !frozen[pos] {
+                                            let shrink_factor = items[i].flex_shrink
+                                                * items[i].flex_base_size
+                                                / total_shrink;
+                                            let shrink_amount = shrink_factor * free_space.abs();
+                                            items[i].target_main_size -= shrink_amount;
+                                        }
+                                    }
+                                }
+                            }
+                            // THE FIX, kept from before: the target is
+                            // clamped UNCONDITIONALLY, even when no grow or
+                            // shrink branch ran (free_space == 0, or the
+                            // relevant factor sums to 0). Otherwise an
+                            // authored `min-width` would silently not apply on
+                            // those degenerate paths.
+                            let mut newly_frozen = false;
+                            for (pos, &i) in line.items.iter().enumerate() {
+                                if frozen[pos] {
+                                    continue;
+                                }
+                                let before = items[i].target_main_size;
+                                let after = clamp_to_min_max(
+                                    before,
+                                    items[i].min_main_size,
+                                    items[i].max_main_size,
+                                );
+                                items[i].target_main_size = after;
+                                if after != before {
+                                    frozen[pos] = true;
+                                    newly_frozen = true;
+                                }
+                            }
+                            if !newly_frozen {
+                                break;
+                            }
                         }
                         line.main_size = line
                             .items

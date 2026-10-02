@@ -131,11 +131,13 @@ fn a_min_width_is_honoured_when_positive_free_space_has_no_grow_factor() {
 /// after grow/shrink resolves. This asserts on the SUM, because the SUM is the
 /// only thing that distinguishes the two orderings.
 ///
-/// With the base unclamped (correct, §9.2):
-///   Σ hypothetical = 200 + 200 = 400, free = 300 − 400 = −100
-///   total_shrink = 1×0 + 1×200 = 200
-///   A factor = 0/200 = 0   → target 0 − 0   = 0   → clamp → 200
-///   B factor = 200/200 = 1 → target 200 − 100 = 100 → clamp → 100
+/// With the base unclamped (correct, §9.2), and free space measured against the
+/// BASES (§9.7.3 re-runs the resolve with pinned, clamped items frozen):
+///   Σ base = 0 + 200 = 200, free = 300 − 200 = +100 → grow
+///   A: 0 + 50 = 50 → clamp by min 200 → FROZEN at 200
+///   B: 200 + 50 = 250 → no clamp
+///   re-run with A frozen: capacity = 300 − 200 = 100, Σ base = 200,
+///   free = 100 − 200 = −100 → shrink: B → 200 − 100 = 100 → clamp ok
 ///   Σ = 300 — the row is exactly filled, no overflow.
 ///
 /// With the base clamped at read (the inversion this guards against):
