@@ -128,6 +128,15 @@ pub fn init_project(name: &str) -> Result<PathBuf> {
         project_dir.join("src/components/TodoItem.vx"),
         generate_todo_item_vx(),
     )?;
+    // `App.vx` renders both of these; see `generate_confirm_vx`.
+    fs::write(
+        project_dir.join("src/components/Confirm.vx"),
+        generate_confirm_vx(),
+    )?;
+    fs::write(
+        project_dir.join("src/components/Modal.vx"),
+        generate_modal_vx(),
+    )?;
 
     let readme = generate_readme(&package_name);
     fs::write(project_dir.join("README.md"), readme)?;
@@ -350,6 +359,20 @@ fn generate_todo_input_vx() -> String {
 
 fn generate_todo_item_vx() -> String {
     include_str!("../../templates/project/src/components/TodoItem.vx").to_string()
+}
+
+/// `App.vx` imports and renders `<Confirm>` and `<Modal>`, so `init` must write
+/// them. Omitting them made every scaffolded app fail to compile with E0433
+/// "could not find `confirm`/`modal` in `super`". `velox add` cannot supply
+/// them either — that is plan task B2, still unimplemented — and the
+/// `ComponentResolver::with_builtin` fallback (B6) is deferred, so an explicit
+/// import is the only route these two components currently have.
+fn generate_confirm_vx() -> String {
+    include_str!("../../templates/project/src/components/Confirm.vx").to_string()
+}
+
+fn generate_modal_vx() -> String {
+    include_str!("../../templates/project/src/components/Modal.vx").to_string()
 }
 
 #[doc(hidden)]

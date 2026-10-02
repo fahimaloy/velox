@@ -40,6 +40,9 @@ const H: i32 = 200;
 /// rule, and antialiased glyph edges cannot be mistaken for it.
 const PAGE: &str = "background:#000000;color:#ffffff";
 
+/// Antialiasing slack, in px, when a rule is compared against a text advance.
+const SLACK: i32 = 2;
+
 fn px(buf: &[u8], x: i32, y: i32) -> [u8; 4] {
     let i = ((y * W + x) * 4) as usize;
     [buf[i], buf[i + 1], buf[i + 2], buf[i + 3]]
@@ -275,10 +278,31 @@ fn a_later_none_clears_an_earlier_decoration_in_the_same_block() {
 
 // ── 5. measure-then-strike: the rule follows the WRAP ───────────────────
 
+/// The rule is drawn across the measured advance of the line it belongs to.
+///
+/// This is the assertion that used to be missing. "There is a band per line"
+/// passed while the rule on every line was drawn with line 0's width, because
+/// the painter resolved the same text `VNode` once per line box and always
+/// measured line 0 — the same defect that painted line 0's glyphs N times. So
+/// each band is now pinned to ITS line's advance: inside that line's box, and
+/// covering it. Any other line's width fails one or the other.
 #[test]
 fn the_rule_is_drawn_once_per_wrapped_line() {
+    let v = wrapped_para("text-decoration:line-through");
+    // Render first, then lay out the CASCADED tree: the render installs the real
+    // font measurer globally, so laying out first would compare the rule against
+    // a different face's advances; and `prepare_frame` cascades before it lays
+    // out (`skia_render.rs:1433-1436`), so the line boxes the paint followed are
+    // the cascaded ones.
+    let struck = render(&v);
+    let styled = velox_style::apply_with_cascade(&v, &Stylesheet::default());
+    let laid = velox_dom::layout::compute_layout(&styled, W, H);
+    let lines: Vec<_> = laid
+        .children
+        .iter()
+        .filter(|c| c.source_index.is_some())
+        .collect();
     let base = render(&wrapped_para(""));
-    let struck = render(&wrapped_para("text-decoration:line-through"));
     let found = bands(&base, &struck);
     assert!(
         found.len() >= 2,
@@ -287,17 +311,54 @@ fn the_rule_is_drawn_once_per_wrapped_line() {
          being drawn once per paragraph instead of once per visual line",
         found.len()
     );
+    assert_eq!(
+        found.len(),
+        lines.len(),
+        "one rule per line box: {lines:?} vs {found:?}"
+    );
     for (i, b) in found.iter().enumerate() {
+        let l = lines[i];
+        assert!(
+            b.height() <= 3,
+            "band {i} is {}px tall: a filled block, not a stroke",
+            b.height()
+        );
         assert!(
             b.width() >= 10,
             "band {i} spans only {}px: a rule clipped to a fixed width does not \
              track the run it belongs to",
             b.width()
         );
+        // Rows, not columns: each rule has to be struck through the text ON its
+        // own line. Columns are not compared against the line box, because the
+        // box width is not the advance of the line's text — layout includes a
+        // trailing space in it (measured here: box 74px for a line whose text
+        // advances 62px), so a correct rule is a few pixels narrower than its
+        // box and comparing the two would fail on a correct render.
         assert!(
-            b.height() <= 3,
-            "band {i} is {}px tall: a filled block, not a stroke",
-            b.height()
+            b.top >= l.rect.y - SLACK && b.bottom <= l.rect.y + l.rect.h - 1 + SLACK,
+            "band {i} occupies rows {}..{} but line box {i} is rows {}..{}: the rule \
+             is struck through some other line's text",
+            b.top,
+            b.bottom,
+            l.rect.y,
+            l.rect.y + l.rect.h - 1
+        );
+    }
+    // Each line's rule is struck at ITS advance. The three lines of this
+    // sentence advance to 62px, 67px and 42px, so three different widths is the
+    // whole assertion: a painter that resolved the text once and reused the
+    // result (which is what this defect did) strikes every line with line 0's
+    // width and all three bands come out identical.
+    for (i, w) in found.windows(2).enumerate() {
+        assert_ne!(
+            w[0].width(),
+            w[1].width(),
+            "bands {i} and {} are both {}px wide: line {}'s rule is struck at another \
+             line's advance. All bands: {found:?}",
+            i + 1,
+            w[0].width(),
+            i + 1
         );
     }
     // The bands must be ordered and separated — i.e. genuinely one per line,

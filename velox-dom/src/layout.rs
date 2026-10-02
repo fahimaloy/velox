@@ -1244,6 +1244,22 @@ fn flush_inline_run(
                 // Consecutive pieces of one text VNode are ONE LayoutNode. Two
                 // nodes pointing at the same text VNode would make the renderer
                 // draw the same string twice.
+                //
+                // "Consecutive" is scoped to THIS line on purpose. The invariant
+                // this merge maintains is one node per line box, in line order,
+                // each carrying the advance of the words on that line — NOT one
+                // node per text VNode. Merging across lines would produce a
+                // single rect covering every line, and then nothing would say
+                // where the line breaks fall: the line advance the painter would
+                // have to step by is `line-height` (1.2em by default,
+                // `skia_render.rs`), while the advance these line boxes are
+                // placed with is the strut box from `line_box_height`
+                // (`text_wrap.rs`), which for 14px type is ~22px rather than
+                // 16.8px. A merged node's lines would land several pixels above
+                // the boxes reserved for them. So the painter reads each line's
+                // own `rect` instead — see the `VNode::Text` arm of
+                // `render_with_layout`, and the contract pinned by
+                // `velox-dom/tests/text_wrap_one_node_per_line.rs`.
                 last.text.push_str(&p.text);
                 last.w = x + p.width - last.x;
                 last.ascent = last.ascent.max(p.ascent);

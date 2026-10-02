@@ -2109,6 +2109,25 @@ pub mod skia_impl {
             // Logical viewport, for `vw`/`vh` in `border-width`. Passed in
             // because a nested `fn` cannot capture `render_frame`'s locals.
             viewport: (f32, f32),
+            // How many words of THIS text `VNode` have already been painted, and
+            // the same tally for every other text VNode in the frame.
+            //
+            // A text VNode that wraps to N lines reaches the text arm N times,
+            // once per line box, and each visit has to take the NEXT line's words
+            // rather than the first line's again. A per-parent counter cannot do
+            // that: an inline element that wraps also gets one node PER LINE, each
+            // carrying the text node for its own line, so counting within one
+            // parent's children restarts at 0 on every one of them and line 0 is
+            // painted N times -- which is the defect this exists to remove.
+            //
+            // The tally is keyed by the ADDRESS of the `&VNode` this arm is
+            // painting, not by `source_index`: that is a sibling index, so two
+            // different parents' `children[0]` share it while being different
+            // VNodes, and keying on it makes the second of them start at the
+            // first one's word count and paint nothing. The address is exact for
+            // the length of a frame: the tree is borrowed throughout and cannot
+            // move or be rebuilt under it.
+            text_word_offset: &mut std::collections::HashMap<usize, usize>,
         ) {
             match node {
                 VNode::Element {
@@ -2709,6 +2728,7 @@ pub mod skia_impl {
                                 images,
                                 opacity,
                                 viewport,
+                                text_word_offset,
                             );
                         }
                     }
@@ -2753,14 +2773,44 @@ pub mod skia_impl {
                     if text_style.bold {
                         font.set_embolden(true);
                     }
-                    let line_height = font_size * text_style.line_height;
                     let layout_rect = sk::Rect::from_xywh(
                         layout.rect.x as f32,
                         layout.rect.y as f32,
                         layout.rect.w as f32,
                         layout.rect.h as f32,
                     );
-                    let lines = if text_style.ellipsis {
+                    let align_rect = if layout_rect.width() >= container_rect.width() - 0.5 {
+                        container_rect
+                    } else {
+                        layout_rect
+                    };
+                    // WHICH words of `t` are on THIS line, and the width they
+                    // measure to.
+                    //
+                    // A text VNode that wraps arrives here once per line: layout
+                    // emits one `LayoutNode` per line box, each carrying the same
+                    // `source_index` (`inline_leaf_node` is the only thing in
+                    // velox-dom that stamps one, and `inline_slots_to_nodes` runs
+                    // once per line). So a node owns exactly one line, and the
+                    // question is which one.
+                    //
+                    // It used to be answered by re-wrapping the WHOLE string at
+                    // `container_rect.width()` and stopping after line 0, because
+                    // `text_bottom` is one line below this node's own `y`. That
+                    // painted line 0 N times and dropped lines 1..N-1 entirely.
+                    //
+                    // The width to break at is `this line's own box width`, not a
+                    // width the painter re-derives. `rect.w` IS the measured
+                    // advance of the words layout put on this line, so consuming
+                    // words until the next one no longer fits in it reproduces
+                    // layout's own break, with no second wrap pass to disagree
+                    // with. That matters beyond the reported case: the old width
+                    // was the containing box, which for text inside an inline
+                    // element is that element's PER-LINE fragment box, so the
+                    // painter was breaking a different string on every line of one
+                    // paragraph. Where the words have run out the line is empty and
+                    // nothing is drawn, which is what an empty line box is.
+                    let (line, line_w) = if text_style.ellipsis {
                         // Single-line truncated with an ellipsis to the text box width.
                         let single = truncate_with_ellipsis(
                             t.as_str(),
@@ -2770,60 +2820,73 @@ pub mod skia_impl {
                             font_size,
                         );
                         let single_w = fonts.measure_text(font_family, font_size, &single);
-                        vec![(single, single_w)]
+                        (single, single_w)
                     } else {
-                        layout_text_lines(
-                            t.as_str(),
-                            container_rect.width(),
-                            fonts,
-                            font_family,
-                            font_size,
-                        )
+                        let key = node as *const VNode as usize;
+                        let from = text_word_offset.get(&key).copied().unwrap_or(0);
+                        // `rect.w` is layout's own line width, which it measured
+                        // WITH the trailing space it put at the end of the line —
+                        // measured, not rounded tight: the app's `.tagline` breaks
+                        // 509 / 167 while the words themselves advance 505 and
+                        // 167, so there is always a space's width of slack in
+                        // `rect.w` for this comparison. No epsilon is needed, and
+                        // adding one would be claiming a tolerance this does not
+                        // need.
+                        let limit = layout.rect.w as f32;
+                        let mut acc = String::new();
+                        let mut taken = from;
+                        for word in t.split_whitespace().skip(from) {
+                            let candidate = if acc.is_empty() {
+                                word.to_string()
+                            } else {
+                                format!("{} {}", acc, word)
+                            };
+                            // `acc.is_empty()` keeps a word wider than the box on
+                            // its own line, which is what layout's wrap does and
+                            // what a CSS engine must do rather than lose the word.
+                            if acc.is_empty()
+                                || fonts.measure_text(font_family, font_size, &candidate) <= limit
+                            {
+                                acc = candidate;
+                                taken += 1;
+                            } else {
+                                break;
+                            }
+                        }
+                        text_word_offset.insert(key, taken);
+                        let w = fonts.measure_text(font_family, font_size, &acc);
+                        (acc, w)
                     };
-                    let align_rect = if layout_rect.width() >= container_rect.width() - 0.5 {
-                        container_rect
+                    let ty = layout.rect.y as f32 + font_size;
+                    let padding = if align_rect.width() >= container_rect.width() - 0.5 {
+                        2.0
                     } else {
-                        layout_rect
+                        0.0
                     };
-                    let text_bottom =
-                        (layout.rect.y as f32) + (layout.rect.h as f32).max(line_height);
-                    for (idx, (line, line_w)) in lines.into_iter().enumerate() {
-                        let ty = layout.rect.y as f32 + font_size + (idx as f32) * line_height;
-                        if ty > text_bottom {
-                            break;
+                    let tx = match text_style.align {
+                        TextAlign::Left => align_rect.left + padding,
+                        TextAlign::Center => align_rect.left + (align_rect.width() - line_w) * 0.5,
+                        TextAlign::Right => {
+                            (align_rect.right - line_w - padding).max(align_rect.left + padding)
                         }
-                        let padding = if align_rect.width() >= container_rect.width() - 0.5 {
-                            2.0
-                        } else {
-                            0.0
-                        };
-                        let tx = match text_style.align {
-                            TextAlign::Left => align_rect.left + padding,
-                            TextAlign::Center => {
-                                align_rect.left + (align_rect.width() - line_w) * 0.5
-                            }
-                            TextAlign::Right => {
-                                (align_rect.right - line_w - padding).max(align_rect.left + padding)
-                            }
-                        };
-                        #[allow(unused_must_use)]
-                        {
-                            let _ = canvas.draw_str(line.as_str(), (tx, ty), &font, &paints.text);
-                        }
-                        // Measure-then-strike: `line_w` is this VISUAL line's measured advance
-                        // from the wrap pass above, so the rule lands across
-                        // every wrapped line, not just the first.
-                        draw_text_decorations(
-                            canvas,
-                            paints,
-                            text_style,
-                            tx,
-                            ty,
-                            line_w,
-                            font_size,
-                            inherited_opacity,
-                        );
+                    };
+                    #[allow(unused_must_use)]
+                    {
+                        let _ = canvas.draw_str(line.as_str(), (tx, ty), &font, &paints.text);
                     }
+                    // Measure-then-strike: `line_w` is THIS line's measured
+                    // advance, so the rule lands across the line this node owns
+                    // and not just the first.
+                    draw_text_decorations(
+                        canvas,
+                        paints,
+                        text_style,
+                        tx,
+                        ty,
+                        line_w,
+                        font_size,
+                        inherited_opacity,
+                    );
                 }
             }
         }
@@ -2846,6 +2909,7 @@ pub mod skia_impl {
             &mut images,
             1.0,
             (root_rect.width(), root_rect.height()),
+            &mut std::collections::HashMap::new(),
         );
         let debug_overlay = std::env::var("VELOX_DEBUG_HIT_RECTS")
             .ok()
