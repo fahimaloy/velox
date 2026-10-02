@@ -17,12 +17,20 @@
         <div class="meta">
           <span class="meta-count">{{ summary }}</span>
           <span class="meta-fill"></span>
-          <button class="ghost" v-if="can_clear" @click="open_clear">Clear completed</button>
-          <button class="ghost" @click="open_about">About</button>
+          <button class="ghost" v-if="can_clear" @click="open_clear">
+            <span class="btn-icon">⌫</span>
+            <span class="btn-label">Clear completed</span>
+          </button>
+          <button class="ghost" @click="open_about">
+            <span class="btn-icon">ℹ</span>
+            <span class="btn-label">About</span>
+          </button>
         </div>
         <span class="rule"></span>
 
-        <Todos />
+        <div class="work">
+          <Todos />
+        </div>
 
         <p class="footnote">{{ footnote }}</p>
       </div>
@@ -283,15 +291,56 @@ impl State {
    longer writes the default face into the cache under a name that missed, so
    this stays honestly inert rather than becoming permanently wrong. */
 
+/* THE DESIGN SYSTEM. Three scales and four surfaces, and every rule below is
+   one entry in one of them. The scales are the point: a value that is not on a
+   scale is a decision nobody has made yet.
+
+   TYPE — 11 / 12 / 13 / 15 / 20 / 28, the sizes libadwaita itself ships
+   (`.app` declares the 15 body size, and a child only ever names its own).
+     28 / 700  display   `.title`
+     20 / 700  headline  the dialogs' `.title` (Confirm.vx, Modal.vx)
+     15 / 400  body      the default, `.tagline`, `.todo-text`, `.input`
+     13 / 600  label     `.meta-count`, `.ghost`, the dialog buttons
+     12 / 400  caption   `.footnote`, `.empty`
+     11 / 700  overline  `.eyebrow`
+     16 / 400  icon      `.glyph`, `.btn-icon`, `.remove`, `.dismiss`
+
+   SPACE — 4 / 8 / 12 / 16 / 24 / 32 / 40 / 48, and nothing else. The page runs
+   on 24 between sections: masthead → meta → rule → list → footnote, with 16
+   between the meta row and the rule it sits above. Control heights are on the
+   same ladder (20 / 28 / 32 / 40) so a row of mixed controls lines up.
+
+   SURFACE — four levels, lightest is highest. `box-shadow` and `transform` are
+   both unread by the framework, so elevation is carried by VALUE plus a hairline
+   rather than a shadow, which is why the ladder is shallow and every level has
+   a matching edge.
+     page   #f6f5f2 / #0A0E11   the window behind everything
+     card   #ffffff / #141A1E   a raised plane: composer, rows, ghost buttons
+     raised #1A2126             a plane above the page: the dialog panels
+     inset  #EFEDE8 / #20282D   a recess, and the hover fill
+
+   INK — three text roles, one accent, one danger.
+     primary   #14181b / #EDF2F3
+     secondary #4A555B / #A8B4B9   labels, supporting copy, control labels
+     muted     #5F6A70 / #849299   captions, completed rows, the delete glyph
+     accent    #0d6e66 / #2DD4BF   spent exactly twice: `.eyebrow` and the
+                                  primary button
+     danger    #a3342c / #FF8A80   the destructive button and the delete hover
+
+   RADIUS — 8 for a control, 12 for a card, 16 for a panel, 999 for a circle.
+   Every one of them is a multiple of the space scale's base. */
+
 .app {
     width: 100%;
     min-height: 100vh;
     display: flex;
     flex-direction: column;
     align-items: center;
+    /* INERT, and deliberately so — see the note above this block. Kept because
+       it costs nothing and starts working the day the font cache does. */
     font-family: "Inter", "Noto Sans", "DejaVu Sans", sans-serif;
     font-size: 15px;
-    line-height: 1.5;
+    line-height: 1.45;
     background: #f6f5f2;
     color: #14181b;
 }
@@ -301,22 +350,25 @@ impl State {
     width: 100%;
     max-width: 620px;
     min-width: 0;
-    padding: 44px 24px 32px;
+    padding: 40px 24px 32px;
 }
 .masthead {
     display: flex;
     flex-direction: row;
     align-items: flex-start;
     justify-content: space-between;
-    gap: 20px;
+    gap: 24px;
 }
+/* The three brand lines are spaced by `gap`, not by three separate margins, so
+   the rhythm survives an edit to any one of them. */
 .brand {
     display: flex;
     flex-direction: column;
+    gap: 8px;
     min-width: 0;
 }
 .eyebrow {
-    margin: 0 0 10px;
+    margin: 0;
     font-size: 11px;
     font-weight: 700;
     line-height: 1.2;
@@ -324,48 +376,53 @@ impl State {
 }
 .title {
     margin: 0;
-    font-size: 27px;
+    font-size: 28px;
     font-weight: 700;
     line-height: 1.15;
     color: #14181b;
 }
 .tagline {
-    margin: 7px 0 0;
-    font-size: 14px;
+    margin: 0;
+    font-size: 15px;
     line-height: 1.45;
-    color: #5a6469;
+    color: #4A555B;
 }
-
-/* The theme control. It is a `<button>`, which is the only kind of element
-   `:hover` reaches besides one carrying `on:click` or a class literally `btn`
-   (velox-renderer/src/events.rs:150) — so the affordance is a border and a fill
-   change on a real button, not a hover on a bare div. */
 .toggle {
     flex: 0 0 auto;
     display: flex;
     align-items: center;
     justify-content: center;
-    width: 38px;
-    height: 38px;
+    width: 40px;
+    height: 40px;
     padding: 0;
-    /* The CONTROL border token, not the decorative one. This is a button you
-       can operate and it sits directly on the page, so its edge has to be
-       identifiable (WCAG 1.4.11, 3:1): `#D8D4CB` on the `#f6f5f2` page is
-       1.36:1, which is not a boundary at all. `.ghost` beside it already uses
-       `#868D92` — two buttons on one row must not disagree about their edge. */
     border: 1px solid #868D92;
     border-radius: 999px;
     background: #ffffff;
-    color: #5a6469;
+    color: #4A555B;
 }
 .toggle:hover {
     border: 1px solid #636A70;
     background: #EFEDE8;
     color: #14181b;
 }
+/* OPTICAL CENTRING. `justify-content: center` centres the glyph's ADVANCE, and
+   the advance is not the drawing: in the bundled DejaVu Sans the sun's ink sits
+   4.5px right of the centre of its advance and the crescent's sits 0.5px left of
+   it, so the sun reads visibly off-centre in a circle while the moon reads true.
+   There is no `transform` to nudge with and no second face to swap, and a
+   `<button>` will not take the obvious nudge: with exactly one child the layout
+   pass places that child at `content_x + (content_w - child_w) / 2`
+   (velox-dom/src/layout.rs:5922) and a `margin` on the child is never read, so
+   `margin-right` on `.glyph` does nothing at all. The one lever that IS read is
+   the button's own PADDING: a 4px right padding narrows `content_w` by 4 and so
+   moves the centred child, and the glyph inside it, 2px left.
+
+   Both states are pinned by `velox-cli/tests/scaffold_render_proof.rs`, which
+   measures the glyph's INK in the rasterised frame against the button's own fill
+   and fails if either drifts more than 1px off the button centre. */
 .glyph {
     display: block;
-    font-size: 15px;
+    font-size: 16px;
     line-height: 1;
 }
 .meta {
@@ -373,67 +430,84 @@ impl State {
     flex-direction: row;
     align-items: center;
     gap: 8px;
-    margin-top: 26px;
-    padding-bottom: 10px;
+    margin-top: 24px;
+    padding-bottom: 16px;
 }
 .meta-count {
     font-size: 13px;
-    line-height: 1.4;
-    color: #5a6469;
+    font-weight: 600;
+    line-height: 1.35;
+    color: #4A555B;
 }
 .meta-fill {
     flex: 1 1 auto;
 }
-
-/* A 1px divider as its own element. `border-bottom` is NOT a declaration
-   `ComputedStyle::set_property` has an arm for — only the `border` shorthand and
-   `border-width`/`border-style`/`border-color` exist, and the last two are in
-   `PARSED_BUT_UNRENDERED` — so a one-sided border is silently dropped. A
-   background on a 1px box is the only way to draw a rule. */
+/* Its own element because only the `border` shorthand and `border-width` are
+   read — `border-style` and `border-color` are in the renderer's
+   PARSED_BUT_UNRENDERED list — so a divider has to be a box with a fill. */
 .rule {
     display: block;
     width: 100%;
     height: 1px;
-    background: #e3e1db;
+    background: #dcdad3;
 }
+/* The section gap belongs to `.work`, the wrapper around the list, so the rule
+   above it and the list below it are 16 and 24 away from their neighbours
+   without either neighbour carrying a margin for a section it is not part of. */
+.work {
+    margin-top: 24px;
+}
+/* Icon BEFORE label, and both wrapped: a `<button>`'s contents are centred as a
+   flex row only when it has element children to lay out, and `white-space`
+   keeps a two-word label on one line in a 32px control. */
 .ghost {
     flex: 0 0 auto;
-    height: 28px;
-    padding: 0 10px;
+    display: flex;
+    flex-direction: row;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    height: 32px;
+    padding: 0 12px;
     border: 1px solid #868D92;
     border-radius: 8px;
     background: #ffffff;
-    color: #5a6469;
+    color: #4A555B;
     font-size: 13px;
     font-weight: 600;
-    text-align: center;
+    line-height: 1.35;
 }
 .ghost:hover {
     border: 1px solid #636A70;
     background: #EFEDE8;
     color: #14181b;
 }
+/* U+232B ERASE, for "Clear completed". The obvious candidate — a cross — is
+   already the delete glyph on every row, and a control that means "remove" and
+   a control that means "remove" must not look alike. U+2139 INFORMATION SOURCE
+   is the About icon; U+24D8 CIRCLED LATIN SMALL LETTER I, the character most
+   font sets would reach for, is NOT in DejaVu's cmap and paints as tofu, so it
+   was ruled out by measurement rather than by taste — see
+   `the_shipped_face_carries_every_glyph_the_template_uses`. */
+.btn-icon {
+    font-size: 16px;
+    line-height: 1;
+}
+.btn-label {
+    white-space: nowrap;
+}
 .footnote {
-    margin: 22px 0 0;
+    margin: 24px 0 0;
     font-size: 12px;
     line-height: 1.5;
-    color: #667076;
+    color: #5F6A70;
 }
 
-/* Dark overrides. Velox's cascade has no specificity and no `!important`
-   (velox-style/src/lib.rs:786 `apply_styles_with_hover`, whose cascade loop is
-   at :840 — last match wins), so every dark rule has to come AFTER the light
-   rule it beats, in this one block. This is also the shape a caller appends to
-   in order to restyle dark mode.
+/* ---- Dark -----------------------------------------------------------------
+   Same scales, same roles, different values: the ladder is re-stated in dark
+   tones rather than filtered, which is why each rule repeats a selector it
+   already has above it. */
 
-   The dark values are one value per ROLE, and the roles are the same names
-   light mode uses. The border tokens are deliberately three, not one:
-   decorative (`#364147`) separates a card from its page and stays quiet;
-   control (`#64727B`) is the resting edge of something you can operate and
-   clears 1.4.11's 3:1 for the first time in this template; control hover
-   (`#7F8C94`) is one obvious step above both. Two files used to disagree about
-   what a ghost-button hover looked like — the same interaction, two values —
-   which is exactly the drift the roles are here to prevent. */
 .dark .app {
     background: #0A0E11;
     color: #EDF2F3;
@@ -448,6 +522,11 @@ impl State {
     color: #A8B4B9;
 }
 .dark .toggle {
+    /* The measured half of the nudge `.glyph` documents: the sun's ink is 4.5px
+       right of its advance's centre, this moves it 2px left, and the crescent in
+       the light toggle needs no correction at all. Asymmetric padding is the only
+       lever here — see `.glyph`. */
+    padding: 0 4px 0 0;
     border: 1px solid #64727B;
     background: #141A1E;
     color: #A8B4B9;
@@ -457,17 +536,18 @@ impl State {
     background: #20282D;
     color: #EDF2F3;
 }
+/* The measured half of the nudge `.glyph` documents. Same sign, same cause. */
 .dark .meta-count {
     color: #A8B4B9;
 }
 .dark .rule {
-    background: #364147;
+    background: #313B42;
 }
 .dark .ghost {
-    /* `#64727B`, the control token, not the decorative `#364147` the cards use.
+    /* `#64727B`, the control token, not the decorative `#313B42` the cards use.
        A button's edge on the `#0A0E11` page has to clear 3:1 (WCAG 1.4.11) and
-       `#364147` is 1.85:1 — the same mistake the light `.toggle` used to make,
-       and the reason the border roles are three tokens rather than two. */
+       `#313B42` is 1.69:1 — which is also why the border roles are three tokens
+       rather than two. */
     border: 1px solid #64727B;
     background: #141A1E;
     color: #A8B4B9;

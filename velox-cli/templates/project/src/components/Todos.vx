@@ -7,7 +7,10 @@
         :dark="is_dark"
         @input="on_input"
       />
-      <button class="add" @click="add_todo">Add</button>
+      <button class="add" @click="add_todo">
+        <span class="btn-icon">+</span>
+        <span class="btn-label">Add</span>
+      </button>
     </div>
 
     <div class="list">
@@ -184,43 +187,75 @@ impl State {
 /* `font-family` / `font-size` / `line-height` are declared on the ROOT of every
    component in this template, so each one is self-contained and readable on its
    own; everything below inherits from here (velox-style/src/lib.rs:761). */
+/* `font-family` / `font-size` / `line-height` are declared on the ROOT of every
+   component in this template, so each one is self-contained and readable on its
+   own; everything below inherits from here (velox-style/src/lib.rs:761). The
+   scales themselves — type, space, surface, ink, radius — are declared once, at
+   the top of App.vx. */
 .todos {
     display: flex;
     flex-direction: column;
     font-family: "Inter", "Noto Sans", "DejaVu Sans", sans-serif;
     font-size: 15px;
-    line-height: 1.5;
+    line-height: 1.45;
     color: #14181b;
 }
 
-/* The composer is a well: one rounded surface, the field flush inside it, and
-   the one filled button on the right. Padding is what makes it read as a
-   container rather than three adjacent boxes. */
+/* The composer is an ENTRY BAR, not a container with three boxes in it: one
+   rounded plane with a single edge, the field flush inside it with no edge of
+   its own, and the one filled button on the right. The old version put a second
+   rounded box inside the first, which is what made the whole page read as a
+   form. The field's inset is the field's own `padding`, so the bar can sit at
+   `padding: 0` and be exactly as tall as the control inside it.
+
+   Its edge is the `#868D92` control token rather than the `#DFDBD2` decorative
+   one, because this is the one place on the page where an edge is a hit target
+   rather than a separation. */
 .composer {
     display: flex;
     flex-direction: row;
     align-items: center;
     gap: 8px;
-    padding: 7px;
-    border: 1px solid #D8D4CB;
+    padding: 0;
+    border: 1px solid #868D92;
     border-radius: 12px;
     background: #ffffff;
 }
+/* The one filled button on the page, and the accent's only other appearance
+   besides `.eyebrow`. A pill, because a filled control and an outlined one have
+   to be different SHAPES as well as different weights — at 40px tall next to a
+   32px outlined ghost the height alone already does that, and the pill says it
+   a second time. */
 .add {
     flex: 0 0 auto;
+    display: flex;
+    flex-direction: row;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
     height: 40px;
-    padding: 0 18px;
+    padding: 0 16px;
     border: 1px solid #0d6e66;
-    border-radius: 8px;
+    border-radius: 999px;
     background: #0d6e66;
     color: #ffffff;
     font-size: 15px;
     font-weight: 700;
-    text-align: center;
+    line-height: 1.35;
 }
 .add:hover {
     border: 1px solid #0a5750;
     background: #0a5750;
+}
+/* U+002B PLUS SIGN, verified present in the bundled face. It carries no ink of
+   its own — the button's `color` reaches it through the cascade — so it needs
+   no role of its own. */
+.btn-icon {
+    font-size: 16px;
+    line-height: 1;
+}
+.btn-label {
+    white-space: nowrap;
 }
 .list {
     display: flex;
@@ -228,23 +263,25 @@ impl State {
     gap: 8px;
     margin-top: 16px;
 }
+/* An empty list is a RECESS, not a card: there is nothing to raise, so it is
+   filled with the inset token and edged with the decorative one. */
 .empty {
     display: block;
     margin: 0;
-    padding: 32px 20px;
-    border: 1px solid #D8D4CB;
-    border-radius: 10px;
-    background: #ffffff;
-    color: #667076;
-    font-size: 14px;
+    padding: 32px 24px;
+    border: 1px solid #DFDBD2;
+    border-radius: 12px;
+    background: #EFEDE8;
+    color: #4A555B;
+    font-size: 15px;
     line-height: 1.5;
     text-align: center;
 }
 
-/* Dark overrides — source order decides the winner (velox-style/src/lib.rs
-   `apply_styles_with_hover`), so they come last. */
+/* ---- Dark: the same ladder, re-stated in dark tones. ---------------------- */
+
 .dark .composer {
-    border: 1px solid #364147;
+    border: 1px solid #64727B;
     background: #141A1E;
 }
 .dark .add {
@@ -257,8 +294,8 @@ impl State {
     background: #5EEAD4;
 }
 .dark .empty {
-    border: 1px solid #364147;
-    background: #141A1E;
-    color: #849299;
+    border: 1px solid #313B42;
+    background: #20282D;
+    color: #A8B4B9;
 }
 </style>

@@ -105,34 +105,43 @@ impl State {
 /* The row's own defaults, so the component stands on its own. The two wrappers
    are unstyled: `.row` is a plain block that the list's `gap` spaces, and
    `.todo-item` below is what fills it. */
+/* The row's own defaults, so the component stands on its own. The two wrappers
+   are unstyled: `.row` is a plain block that the list's `gap` spaces, and
+   `.todo-item` below is what fills it. The scales — type, space, surface, ink,
+   radius — are declared once, at the top of App.vx. */
 .row {
     display: block;
     width: 100%;
     font-family: "Inter", "Noto Sans", "DejaVu Sans", sans-serif;
     font-size: 15px;
-    line-height: 1.5;
+    line-height: 1.45;
 }
+/* A card, so the fill carries the layer and the edge only separates. `#DFDBD2`
+   is the decorative token, one step lighter than the `#D8D4CB` it replaces: at
+   1.38:1 on the fill it draws a line without drawing a BOX. */
 .todo-item {
     display: flex;
     flex-direction: row;
     align-items: flex-start;
     gap: 12px;
     width: 100%;
-    padding: 11px 12px;
-    border: 1px solid #D8D4CB;
-    border-radius: 10px;
+    padding: 12px;
+    border: 1px solid #DFDBD2;
+    border-radius: 12px;
     background: #ffffff;
 }
 
 /* `align-items: flex-start` above is what keeps a two-line task aligned with
-   the top of its check instead of drifting to the vertical middle. */
+   the top of its check instead of drifting to the vertical middle. 20px is the
+   smallest step on the control ladder, and at 12px of padding the row's rhythm
+   holds whatever the text does. */
 .check {
     flex: 0 0 auto;
     display: flex;
     align-items: center;
     justify-content: center;
-    width: 22px;
-    height: 22px;
+    width: 20px;
+    height: 20px;
     padding: 0;
     border: 1px solid #868D92;
     border-radius: 999px;
@@ -142,13 +151,18 @@ impl State {
 .check:hover {
     border: 1px solid #0d6e66;
 }
+/* U+2713 CHECK MARK, verified present in the bundled face. 12px inside a 20px
+   circle is the proportion a check has to have to read as a check. */
 .check-mark {
     display: block;
-    font-size: 13px;
+    font-size: 12px;
     font-weight: 700;
     line-height: 1;
     color: #ffffff;
 }
+/* `padding-top: 1px` is optical, not rhythm: a 15px glyph's cap height sits a
+   pixel below the box top, and without it the text reads low against the
+   check's circle. */
 .todo-text {
     flex: 1 1 auto;
     min-width: 0;
@@ -162,13 +176,13 @@ impl State {
     display: flex;
     align-items: center;
     justify-content: center;
-    width: 26px;
-    height: 26px;
+    width: 28px;
+    height: 28px;
     padding: 0;
     border: 1px solid transparent;
     border-radius: 8px;
     background: #ffffff;
-    color: #667076;
+    color: #5F6A70;
     font-size: 16px;
     line-height: 1;
     /* Its ONLY child is a bare text node — the × — not an element. `justify-
@@ -179,6 +193,8 @@ impl State {
        is visibly off-centre in its button. */
     text-align: center;
 }
+/* The destructive hover is the danger token at full strength, which is the only
+   place on the page a row's own chrome turns red. */
 .remove:hover {
     border: 1px solid #a3342c;
     background: #a3342c;
@@ -207,8 +223,9 @@ impl State {
     border: 1px solid #0a5750;
     background: #0a5750;
 }
+/* The muted ink role, so a finished row steps down rather than disappearing. */
 .completed .todo-text {
-    color: #667076;
+    color: #5F6A70;
     text-decoration: line-through;
 }
 
@@ -216,7 +233,7 @@ impl State {
    `apply_styles_with_hover`, cascade loop at :840), so they come last. The `.dark .completed …` pair
    has to come after BOTH `.completed …` and `.dark …` to beat them. */
 .dark .todo-item {
-    border: 1px solid #364147;
+    border: 1px solid #313B42;
     background: #141A1E;
 }
 .dark .check {

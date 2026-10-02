@@ -125,7 +125,7 @@ const ROLES: &[(&str, &str, &str, &str, &str, &str)] = &[
         "color",
         "light",
         "text-secondary-light",
-        "#5a6469",
+        "#4A555B",
     ),
     (
         "App.vx",
@@ -149,7 +149,7 @@ const ROLES: &[(&str, &str, &str, &str, &str, &str)] = &[
         "color",
         "light",
         "text-secondary-light",
-        "#5a6469",
+        "#4A555B",
     ),
     (
         "App.vx",
@@ -181,7 +181,7 @@ const ROLES: &[(&str, &str, &str, &str, &str, &str)] = &[
         "color",
         "light",
         "text-secondary-light",
-        "#5a6469",
+        "#4A555B",
     ),
     (
         "App.vx",
@@ -189,7 +189,7 @@ const ROLES: &[(&str, &str, &str, &str, &str, &str)] = &[
         "background",
         "light",
         "divider-light",
-        "#e3e1db",
+        "#dcdad3",
     ),
     (
         "App.vx",
@@ -213,7 +213,7 @@ const ROLES: &[(&str, &str, &str, &str, &str, &str)] = &[
         "color",
         "light",
         "text-secondary-light",
-        "#5a6469",
+        "#4A555B",
     ),
     (
         "App.vx",
@@ -245,7 +245,7 @@ const ROLES: &[(&str, &str, &str, &str, &str, &str)] = &[
         "color",
         "light",
         "text-muted-light",
-        "#667076",
+        "#5F6A70",
     ),
     (
         "App.vx",
@@ -349,7 +349,7 @@ const ROLES: &[(&str, &str, &str, &str, &str, &str)] = &[
         "background",
         "dark",
         "divider-dark",
-        "#364147",
+        "#313B42",
     ),
     (
         "App.vx",
@@ -421,7 +421,7 @@ const ROLES: &[(&str, &str, &str, &str, &str, &str)] = &[
         "border",
         "light",
         "border-decorative-light",
-        "#D8D4CB",
+        "#DFDBD2",
     ),
     (
         "components/Confirm.vx",
@@ -477,7 +477,7 @@ const ROLES: &[(&str, &str, &str, &str, &str, &str)] = &[
         "color",
         "light",
         "text-secondary-light",
-        "#5a6469",
+        "#4A555B",
     ),
     (
         "components/Confirm.vx",
@@ -501,7 +501,7 @@ const ROLES: &[(&str, &str, &str, &str, &str, &str)] = &[
         "color",
         "light",
         "text-secondary-light",
-        "#5a6469",
+        "#4A555B",
     ),
     (
         "components/Confirm.vx",
@@ -581,7 +581,7 @@ const ROLES: &[(&str, &str, &str, &str, &str, &str)] = &[
         "border",
         "dark",
         "border-decorative-dark",
-        "#364147",
+        "#313B42",
     ),
     (
         "components/Confirm.vx",
@@ -741,7 +741,7 @@ const ROLES: &[(&str, &str, &str, &str, &str, &str)] = &[
         "border",
         "light",
         "border-decorative-light",
-        "#D8D4CB",
+        "#DFDBD2",
     ),
     (
         "components/Modal.vx",
@@ -789,7 +789,7 @@ const ROLES: &[(&str, &str, &str, &str, &str, &str)] = &[
         "color",
         "light",
         "text-muted-light",
-        "#667076",
+        "#5F6A70",
     ),
     (
         "components/Modal.vx",
@@ -821,7 +821,7 @@ const ROLES: &[(&str, &str, &str, &str, &str, &str)] = &[
         "color",
         "light",
         "text-secondary-light",
-        "#5a6469",
+        "#4A555B",
     ),
     (
         "components/Modal.vx",
@@ -845,7 +845,7 @@ const ROLES: &[(&str, &str, &str, &str, &str, &str)] = &[
         "color",
         "light",
         "text-secondary-light",
-        "#5a6469",
+        "#4A555B",
     ),
     (
         "components/Modal.vx",
@@ -925,7 +925,7 @@ const ROLES: &[(&str, &str, &str, &str, &str, &str)] = &[
         "border",
         "dark",
         "border-decorative-dark",
-        "#364147",
+        "#313B42",
     ),
     (
         "components/Modal.vx",
@@ -1098,14 +1098,6 @@ const ROLES: &[(&str, &str, &str, &str, &str, &str)] = &[
     (
         "components/TodoInput.vx",
         ".input",
-        "border",
-        "light",
-        "border-control-light",
-        "#868D92",
-    ),
-    (
-        "components/TodoInput.vx",
-        ".input",
         "background",
         "light",
         "card-light",
@@ -1125,15 +1117,7 @@ const ROLES: &[(&str, &str, &str, &str, &str, &str)] = &[
         "color",
         "light",
         "text-muted-light",
-        "#667076",
-    ),
-    (
-        "components/TodoInput.vx",
-        ".dark .input",
-        "border",
-        "dark",
-        "border-control-dark",
-        "#64727B",
+        "#5F6A70",
     ),
     (
         "components/TodoInput.vx",
@@ -1165,7 +1149,7 @@ const ROLES: &[(&str, &str, &str, &str, &str, &str)] = &[
         "border",
         "light",
         "border-decorative-light",
-        "#D8D4CB",
+        "#DFDBD2",
     ),
     (
         "components/TodoItem.vx",
@@ -1245,7 +1229,7 @@ const ROLES: &[(&str, &str, &str, &str, &str, &str)] = &[
         "color",
         "light",
         "text-muted-light",
-        "#667076",
+        "#5F6A70",
     ),
     (
         "components/TodoItem.vx",
@@ -1309,7 +1293,7 @@ const ROLES: &[(&str, &str, &str, &str, &str, &str)] = &[
         "color",
         "light",
         "text-muted-light",
-        "#667076",
+        "#5F6A70",
     ),
     (
         "components/TodoItem.vx",
@@ -1317,7 +1301,7 @@ const ROLES: &[(&str, &str, &str, &str, &str, &str)] = &[
         "border",
         "dark",
         "border-decorative-dark",
-        "#364147",
+        "#313B42",
     ),
     (
         "components/TodoItem.vx",
@@ -1476,8 +1460,8 @@ const ROLES: &[(&str, &str, &str, &str, &str, &str)] = &[
         ".composer",
         "border",
         "light",
-        "border-decorative-light",
-        "#D8D4CB",
+        "border-control-light",
+        "#868D92",
     ),
     (
         "components/Todos.vx",
@@ -1533,31 +1517,31 @@ const ROLES: &[(&str, &str, &str, &str, &str, &str)] = &[
         "border",
         "light",
         "border-decorative-light",
-        "#D8D4CB",
+        "#DFDBD2",
     ),
     (
         "components/Todos.vx",
         ".empty",
         "background",
         "light",
-        "card-light",
-        "#ffffff",
+        "surface-hover-light",
+        "#EFEDE8",
     ),
     (
         "components/Todos.vx",
         ".empty",
         "color",
         "light",
-        "text-muted-light",
-        "#667076",
+        "text-secondary-light",
+        "#4A555B",
     ),
     (
         "components/Todos.vx",
         ".dark .composer",
         "border",
         "dark",
-        "border-decorative-dark",
-        "#364147",
+        "border-control-dark",
+        "#64727B",
     ),
     (
         "components/Todos.vx",
@@ -1613,23 +1597,23 @@ const ROLES: &[(&str, &str, &str, &str, &str, &str)] = &[
         "border",
         "dark",
         "border-decorative-dark",
-        "#364147",
+        "#313B42",
     ),
     (
         "components/Todos.vx",
         ".dark .empty",
         "background",
         "dark",
-        "card-dark",
-        "#141A1E",
+        "surface-hover-dark",
+        "#20282D",
     ),
     (
         "components/Todos.vx",
         ".dark .empty",
         "color",
         "dark",
-        "text-muted-dark",
-        "#849299",
+        "text-secondary-dark",
+        "#A8B4B9",
     ),
 ];
 
@@ -2217,12 +2201,16 @@ const TEXT_PAIRS: &[(&str, &str, &str, &str, &str, &str, f32)] = &[
 /// border against itself: `.accept` paints its border and its background the same
 /// value, so pairing those two would score 1.0:1 and prove nothing.
 const BOUNDARY_PAIRS: &[(&str, &str, &str, &str, &str, &str, f32)] = &[
+    // The composer's edge IS the text field's edge now: the field declares no
+    // border of its own, so this row replaces the `.input`/`border` pair it was
+    // moved out of. It is a boundary rather than a decoration because this is the
+    // one place on the page where an edge is a hit target.
     (
-        "components/TodoInput.vx",
-        ".input",
+        "components/Todos.vx",
+        ".composer",
         "border",
-        "components/TodoInput.vx",
-        ".input",
+        "components/Todos.vx",
+        ".composer",
         "background",
         3.0,
     ),
@@ -2470,8 +2458,8 @@ const BOUNDARY_PAIRS: &[(&str, &str, &str, &str, &str, &str, f32)] = &[
         3.0,
     ),
     (
-        "components/TodoInput.vx",
-        ".dark .input",
+        "components/Todos.vx",
+        ".dark .composer",
         "border",
         "components/Todos.vx",
         ".dark .composer",
@@ -2574,15 +2562,6 @@ const DECORATIVE_PAIRS: &[(&str, &str, &str, &str, &str, &str, f32)] = &[
     ),
     (
         "components/Todos.vx",
-        ".composer",
-        "border",
-        "components/Todos.vx",
-        ".composer",
-        "background",
-        DECORATIVE_FLOOR,
-    ),
-    (
-        "components/Todos.vx",
         ".empty",
         "border",
         "components/Todos.vx",
@@ -2637,15 +2616,6 @@ const DECORATIVE_PAIRS: &[(&str, &str, &str, &str, &str, &str, f32)] = &[
     ),
     (
         "components/Todos.vx",
-        ".dark .composer",
-        "border",
-        "components/Todos.vx",
-        ".dark .composer",
-        "background",
-        DECORATIVE_FLOOR,
-    ),
-    (
-        "components/Todos.vx",
         ".dark .empty",
         "border",
         "components/Todos.vx",
@@ -2677,7 +2647,7 @@ const ALLOWED_SHARINGS: &[(&str, &str, &[&str])] = &[
     ("dark", "#2DD4BF", &["accent-dark", "text-accent-dark"]),
     (
         "dark",
-        "#364147",
+        "#313B42",
         &["border-decorative-dark", "divider-dark"],
     ),
     ("dark", "#FF8A80", &["danger-dark", "text-danger-dark"]),

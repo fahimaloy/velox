@@ -74,40 +74,45 @@ impl State {
 </script>
 
 <style scoped>
+/* The field is the composer's INSET, not a box inside it: it has no edge and no
+   fill of its own, and its inset is its own `padding`. The one edge on this
+   control is the bar's, in Todos.vx — two nested rounded boxes is what made the
+   old page read as a form. The scales are declared once, at the top of App.vx. */
 .field {
     display: flex;
     flex: 1 1 auto;
     min-width: 0;
     font-family: "Inter", "Noto Sans", "DejaVu Sans", sans-serif;
     font-size: 15px;
-    line-height: 1.5;
+    line-height: 1.45;
 }
 
-/* 44px tall with 14px of side padding: the two numbers that decide whether a
-   text field feels like a control or like a line in a paragraph. `min-width: 0`
-   is what lets the field shrink inside the composer's flex row instead of
-   refusing to. */
+/* 40px tall with 12px of side padding: the two numbers that decide whether a
+   text field feels like a control or like a line in a paragraph. It matches
+   `.add`, so the bar is exactly as tall as the two controls inside it. The
+   `#ffffff` is not decoration — the renderer paints a WHITE fallback fill on any
+   `<input>` that declares no background (velox-style/src/ua.css), so saying it
+   out loud is the only way to reach the card fill the bar already has.
+   `min-width: 0` is what lets the field shrink inside the composer's flex row
+   instead of refusing to. */
 .input {
     flex: 1 1 auto;
     width: 100%;
     min-width: 0;
-    height: 44px;
-    padding: 0 14px;
-    border: 1px solid #868D92;
-    border-radius: 8px;
-    /* Exactly the composer's own fill, so the field reads as part of one
-       surface instead of a box sitting inside a box. */
+    height: 40px;
+    padding: 0 12px;
     background: #ffffff;
     color: #14181b;
     font-size: 15px;
 }
+/* The muted ink role — 4.75:1 on the inset fill, where the `#667076` this
+   replaces was 4.33:1 and failed 4.5 outright. */
 .input::placeholder {
-    color: #667076;
+    color: #5F6A70;
 }
 
 /* Dark overrides — source order decides the winner, so they come last. */
 .dark .input {
-    border: 1px solid #64727B;
     background: #141A1E;
     color: #EDF2F3;
 }
