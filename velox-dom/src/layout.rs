@@ -5395,15 +5395,37 @@ pub fn compute_layout(node: &VNode, viewport_w: i32, viewport_h: i32) -> LayoutN
                     let offset_y = ((content_h - child_h).max(0)) / 2;
                     child.rect.y = elem_y + bt + pt + offset_y;
 
-                    let align =
-                        style_lookup_str(style, "text-align").unwrap_or_else(|| "left".to_string());
-                    let child_w = child.rect.w;
-                    let offset_x = match align.as_str() {
-                        "center" => ((content_w - child_w).max(0)) / 2,
-                        "right" => (content_w - child_w).max(0),
-                        _ => 0,
-                    };
-                    child.rect.x = content_x + offset_x;
+                    // Horizontal: only when the author actually declared
+                    // `text-align`. Without it, `child.rect.x` is left exactly as
+                    // the flow above computed it -- the flex pass's
+                    // `justify-content` main-axis placement, or the block/inline
+                    // flow's own. The previous unconditional `child.rect.x =
+                    // content_x + offset_x` with a `left` default threw that away,
+                    // so `justify-content: center` was silently ignored on every
+                    // single-child button that did not ALSO carry `text-align:
+                    // center` (which is why `.remove` rendered ~8px left of
+                    // centre while `.toggle`/`.check`, being multi-child, were
+                    // fine).
+                    //
+                    // The discriminator is PRESENCE, not `== "center"`: `left` is
+                    // the initial value, so testing the value would make an
+                    // explicit `text-align: right` indistinguishable from
+                    // silence and lose it. Presence includes an INHERITED value:
+                    // `text-align` is in velox-style's `INHERITABLE` set, so the
+                    // cascade has already copied an ancestor's declaration into
+                    // this element's computed style string -- and a browser does
+                    // align a button's inline content by an inherited
+                    // `text-align`, so treating it as a real request matches
+                    // browsers.
+                    if let Some(align) = style_lookup_str(style, "text-align") {
+                        let child_w = child.rect.w;
+                        let offset_x = match align.as_str() {
+                            "center" => ((content_w - child_w).max(0)) / 2,
+                            "right" => (content_w - child_w).max(0),
+                            _ => 0,
+                        };
+                        child.rect.x = content_x + offset_x;
+                    }
                 }
 
                 // Scrollable overflow model: scrollHeight separation, is_scrollable, clip logic
