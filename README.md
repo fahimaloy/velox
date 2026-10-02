@@ -852,3 +852,26 @@ This repository is currently in active stabilization for the first stable releas
 - The CLI (`velox-cli`) is the primary developer-facing tool
 - Multiple renderer backends allow flexibility in deployment targets
 - The SFC compiler generates optimized Rust code from `.vx` components
+
+---
+
+## Licence and trademark
+
+**Code.** Everything in this repository is covered by the MIT licence in `LICENSE`, including the
+documentation and the assets committed alongside it.
+
+**The Velox logo.** `velox-logo.svg` and the derived `velox-cli/templates/project/assets/velox-logo.png`
+are covered by the same MIT licence as the rest of this repository.
+
+**"Velox" is a trademark of this project.** The licence grants you the right to copy, modify and
+redistribute the mark and the code; it does **not** grant you the right to use the name or the logo in
+a way that suggests the Velox project endorses your product. The MIT licence on the assets covers
+redistribution of the mark *as part of a Velox project or a derivative of this repository* — which is
+what `velox init` does when it writes the logo into a scaffolded app.
+
+**Why this is stated explicitly.** `velox init` embeds the mark into every project it scaffolds, so the
+CLI redistributes it. Without a statement, a scaffold that ships an unlicensed logo is a defect; with
+one, the boundary is written down instead of implied.
+
+If you want the logo in a project that is *not* derived from Velox, ask first — that is a trademark
+question, not a licence one.
