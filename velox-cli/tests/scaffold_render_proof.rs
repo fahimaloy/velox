@@ -481,15 +481,38 @@ fn scaffold_modal(theme: &str) -> VNode {
 // Pixel helpers
 // ---------------------------------------------------------------------------
 
-/// Every pixel further than `thr` from `bg`, as `(x, y)`. `thr` has to clear
-/// the anti-aliasing on a rounded edge — the pill's corner pixels blend toward
-/// the page fill, which sits ~10/255 away from the button's own white.
-fn ink(buf: &[u8], w: i32, h: i32, bg: [u8; 3], thr: i32) -> Vec<(i32, i32)> {
+/// A decoded RGBA raster: `w * h * 4` bytes, row-major.
+struct Raster<'a> {
+    buf: &'a [u8],
+    w: i32,
+    h: i32,
+}
+
+/// What counts as ink, against what counts as background.
+///
+/// `thr` has to clear the anti-aliasing on a rounded edge — the pill's corner
+/// pixels blend toward the page fill, which sits ~10/255 away from the button's
+/// own white, so a threshold of zero would measure the whole silhouette.
+struct Ink {
+    bg: [u8; 3],
+    thr: i32,
+}
+
+/// The half-open pixel window to measure in: `x0..x1` by `y0..y1`.
+struct Window {
+    x0: i32,
+    y0: i32,
+    x1: i32,
+    y1: i32,
+}
+
+/// Every pixel further than `thr` from `bg`, as `(x, y)`.
+fn ink(img: Raster<'_>, cfg: Ink) -> Vec<(i32, i32)> {
     let mut out = Vec::new();
-    for y in 0..h {
-        for x in 0..w {
-            let o = (y as usize * w as usize + x as usize) * 4;
-            if buf[o + 3] > 8 && (buf[o] as i32 - bg[0] as i32).abs() > thr {
+    for y in 0..img.h {
+        for x in 0..img.w {
+            let o = (y as usize * img.w as usize + x as usize) * 4;
+            if img.buf[o + 3] > 8 && (img.buf[o] as i32 - cfg.bg[0] as i32).abs() > cfg.thr {
                 out.push((x, y));
             }
         }
@@ -497,26 +520,16 @@ fn ink(buf: &[u8], w: i32, h: i32, bg: [u8; 3], thr: i32) -> Vec<(i32, i32)> {
     out
 }
 
-/// The bounding box of the ink in a window, or `None` when the window is blank.
-fn ink_box(
-    buf: &[u8],
-    w: i32,
-    h: i32,
-    x0: i32,
-    y0: i32,
-    x1: i32,
-    y1: i32,
-    bg: [u8; 3],
-    thr: i32,
-) -> Option<(i32, i32, i32, i32)> {
-    let pts = ink(buf, w, h, bg, thr);
+/// The bounding box of the ink inside `win`, or `None` when the window is blank.
+fn ink_box(img: Raster<'_>, win: Window, cfg: Ink) -> Option<(i32, i32, i32, i32)> {
+    let pts = ink(img, cfg);
     let mut l = i32::MAX;
     let mut r = i32::MIN;
     let mut t = i32::MAX;
     let mut b = i32::MIN;
     let mut any = false;
     for (x, y) in pts {
-        if x < x0 || x >= x1 || y < y0 || y >= y1 {
+        if x < win.x0 || x >= win.x1 || y < win.y0 || y >= win.y1 {
             continue;
         }
         any = true;
@@ -900,15 +913,18 @@ fn the_toggle_glyph_is_centred_in_both_states() {
         // whole edge — and its anti-aliasing — out of the measurement. 60/255
         // is well below a glyph (~150) and well above the blend.
         let b = ink_box(
-            &rgba,
-            w,
-            hh,
-            bx + 7,
-            by + 7,
-            bx + bw - 7,
-            by + bh - 7,
-            bg,
-            60,
+            Raster {
+                buf: &rgba,
+                w,
+                h: hh,
+            },
+            Window {
+                x0: bx + 7,
+                y0: by + 7,
+                x1: bx + bw - 7,
+                y1: by + bh - 7,
+            },
+            Ink { bg, thr: 60 },
         )
         .unwrap_or_else(|| panic!("no ink inside the toggle at {bx},{by} {bw}x{bh}"));
         let button_cx = bx as f32 + bw as f32 / 2.0;
@@ -946,10 +962,10 @@ fn decl_of(styled: &VNode, class: &str, prop: &str) -> String {
         {
             let style = props.attrs.get("style").map(String::as_str).unwrap_or("");
             for d in style.split(';') {
-                if let Some((k, val)) = d.split_once(':') {
-                    if k.trim() == prop {
-                        return Some(val.trim().to_string());
-                    }
+                if let Some((k, val)) = d.split_once(':')
+                    && k.trim() == prop
+                {
+                    return Some(val.trim().to_string());
                 }
             }
         }
