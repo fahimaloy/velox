@@ -260,9 +260,13 @@ impl<'i> cssparser::AtRuleParser<'i> for &mut SheetParser {
         input: &mut cssparser::Parser<'i, 't>,
     ) -> Result<String, cssparser::ParseError<'i, ()>> {
         let mut prelude = String::new();
-        while let Ok(token) = input.next_including_whitespace() {
-            let _ = token.to_css(&mut prelude);
-        }
+        // Same nested-block handling as a declaration value: a media query's
+        // condition list is parenthesised (`@media (min-width: 700px)`), so the
+        // old bare-token loop truncated every at-rule prelude at its first `(`.
+        // The only consumer of this string is the `starts_with` dispatch in
+        // `parse_block`, whose `@keyframes`/`@font-face` prefixes are unaffected
+        // by a more complete prelude.
+        write_component_values(input, &mut prelude)?;
         Ok(format!("@{} {}", name, prelude.trim()))
     }
 
@@ -307,6 +311,62 @@ impl<'i> cssparser::AtRuleParser<'i> for &mut SheetParser {
     }
 }
 
+/// Append every component value remaining in `input` to `dest`.
+///
+/// This is the CSS "consume a component value list" loop, and the one thing a
+/// declaration parser cannot do without: the CONTENTS of a function or block
+/// live in a nested block that the outer token stream does not reach. Per
+/// cssparser's own docs on `Parser::next` (cssparser-0.28.1/src/parser.rs:546)
+/// the call after a `Function`/`ParenthesisBlock`/`SquareBracketBlock`/
+/// `CurlyBracketBlock` token "will skip until after the matching
+/// `CloseParenthesis`…" — so a plain `while let Ok(token) = input.next()`
+/// loses everything between the brackets.
+///
+/// That is exactly the defect this function exists to remove. The old loop
+/// ended on the `Function` token having written only its opening `(` (see
+/// `ToCss for Token`, cssparser-0.28.1/src/serializer.rs:135-141, which writes
+/// `name(` and NOT the closing delimiter), so every function value was
+/// truncated: `background: rgba(20, 24, 27, 0.34)` became `background:
+/// rgba(`, `width: calc(100% - 8px)` became `width: calc(`, and
+/// `color: var(--brand)` became `color: var(`.
+///
+/// So for every block-opening token we emit the arguments ourselves via
+/// `parse_nested_block`, then write the matching closing delimiter — once.
+/// Whitespace tokens are passed through as-is, so author spacing survives
+/// verbatim (`rgba(calc(1 + 2), 0, 0, 1)` round-trips unchanged).
+///
+/// A `parse_nested_block` error cannot discard what was already written: the
+/// value stays best-effort rather than failing the whole declaration, which
+/// is what this parser has always done for a value it cannot model.
+fn write_component_values<'i, 't>(
+    input: &mut cssparser::Parser<'i, 't>,
+    dest: &mut String,
+) -> Result<(), cssparser::ParseError<'i, ()>> {
+    while let Ok(token) = input.next_including_whitespace() {
+        let closing = match *token {
+            cssparser::Token::Function(_) => Some(')'),
+            cssparser::Token::ParenthesisBlock => Some(')'),
+            cssparser::Token::SquareBracketBlock => Some(']'),
+            cssparser::Token::CurlyBracketBlock => Some('}'),
+            _ => None,
+        };
+        // The borrow of `token` must end here: `parse_nested_block` needs
+        // `&mut input`, and the token is borrowed from it.
+        let _ = token.to_css(dest);
+        let Some(closing) = closing else {
+            continue;
+        };
+        // `parse_nested_block` takes `parser.at_start_of` and `.expect()`s that
+        // it is `Some` (cssparser-0.28.1/src/parser.rs:1023). It is, because
+        // `next_including_whitespace` set it when it returned this opening
+        // token (cssparser-0.28.1/src/parser.rs:619-621) and we have touched
+        // nothing in between.
+        let _ = input.parse_nested_block(|input| write_component_values(input, dest));
+        dest.push(closing);
+    }
+    Ok(())
+}
+
 struct DeclarationParser;
 
 impl<'i> cssparser::DeclarationParser<'i> for DeclarationParser {
@@ -319,9 +379,7 @@ impl<'i> cssparser::DeclarationParser<'i> for DeclarationParser {
         input: &mut cssparser::Parser<'i, 't>,
     ) -> Result<(String, String), cssparser::ParseError<'i, ()>> {
         let mut value = String::new();
-        while let Ok(token) = input.next_including_whitespace() {
-            let _ = token.to_css(&mut value);
-        }
+        write_component_values(input, &mut value)?;
         Ok((name.to_string(), value.trim().to_string()))
     }
 }
