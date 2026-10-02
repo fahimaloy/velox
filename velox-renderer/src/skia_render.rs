@@ -3340,29 +3340,41 @@ pub mod skia_impl {
         /// wrong wrap points, wrong caret position, visibly wrong UI, and no
         /// panic to notice it by.
         ///
-        /// The size is deliberately one where the DPI snap MOVES with the
-        /// scale AND the resulting advances land on different f32s — 17.1px is
-        /// 17.1 logical at 1.0 and 17.333 at 1.5 (`(17.1 * 1.5).round() / 1.5`
-        /// = `26 / 1.5`), and `"Buy milk"` measures 68.0 / 67.0 / 69.0 at
-        /// 1.0 / 1.25 / 1.5. The second half of that clause is the load-bearing
-        /// half: the default face quantizes advances to integer f32s at these
-        /// sizes, so a fractional size alone is not enough. 15.4px snaps apart
-        /// too (15.4 vs 15.333) yet `"Buy milk"` measures 61.0 at both 1.25 and
-        /// 1.5, so a memo that was never cleared would pass a test comparing
-        /// those two scales while still being wrong.
+        /// The size is deliberately one where the DPI snap MOVES with the scale
+        /// AND the resulting advances land on different f32s — 16.4px is 16.4
+        /// logical at 1.0 and 16.666 at 1.5 (`(16.4 * 1.5).round() / 1.5` =
+        /// `25 / 1.5`), and `"Buy milk"` measures 68.0 at 1.0 and 75.0 at 1.5.
+        /// The second half of that clause is the load-bearing half: the default
+        /// face quantizes advances, so a fractional size alone is not enough.
+        ///
+        /// It was 17.1px until `0cc6982` swapped the default face from Noto Sans
+        /// to DejaVu Sans. Noto's advances at these sizes were fine-grained enough
+        /// that the snap's movement showed up in the width — 68.0 / 67.0 / 69.0 at
+        /// 1.0 / 1.25 / 1.5. DejaVu's are not: its advances land on a far coarser
+        /// grid, and at 17.1 all three scales measured `"Buy milk"` at exactly
+        /// 75.0. A sweep of every size from 6.00px to 40.00px in 0.01px steps
+        /// found 198 sizes where 1.0 and 1.5 disagree and, for `"Buy milk"`,
+        /// 16.4 is one of them. The widths above are measured, not derived.
+        ///
+        /// Worth being explicit about what the snap is FOR: it makes
+        /// `(logical * scale).round()` land on integer device pixels so glyph
+        /// hinting has a row to land on. That it also perturbs the measured width
+        /// is a side effect of the advance being quantized at all, not the point
+        /// of the snap — which is exactly why the assertion at the end of this
+        /// test is a precondition on the PROBE rather than a claim about the
+        /// snap, and why a size has to be chosen that exhibits the side effect.
         ///
         /// Measure a run long enough to separate. This uses `"Buy milk"`, not
-        /// a short one: at 17.1 the short run `"Hg"` measures 24.0 at BOTH 1.0
-        /// and 1.5 and separates only on `ascent`, which is a weaker and less
-        /// meaningful discriminator than width — width is what drives wrap
-        /// points and caret position, which is what the cache exists to get
-        /// right.
+        /// a short one: at these sizes a short run like `"Hg"` can separate only
+        /// on `ascent`, which is a weaker and less meaningful discriminator than
+        /// width — width is what drives wrap points and caret position, which is
+        /// what the cache exists to get right.
         ///
         /// The reference values come from caches built directly at each scale,
         /// so they do not share the cache under test.
         #[test]
         fn a_scale_change_clears_the_advance_memo_and_remeasures_for_the_new_scale() {
-            const FRACTIONAL: f32 = 17.1;
+            const FRACTIONAL: f32 = 16.4;
             const RUN: &str = "Buy milk";
             let mut cache = FontCache::new_with_scale(1.0);
 
@@ -3423,11 +3435,25 @@ pub mod skia_impl {
         /// So this walks the real alternating pattern — 1.0, 1.5, 1.0, 1.25,
         /// 1.5, 1.0 — and pins the property that a scale-blind memo breaks
         /// first: the value at a scale must be the same on every visit to that
-        /// scale, and different from every other scale. The repeated 1.5 in the
-        /// middle is deliberate; it is a hit, so it also has to agree.
+        /// scale. The repeated 1.5 in the middle is deliberate; it is a hit, so it
+        /// also has to agree. The repeated 1.0 at the end is the load-bearing
+        /// one: it arrives straight after a 1.5 measurement, which is where a memo
+        /// that was never cleared answers with the neighbour's advance.
+        ///
+        /// The precondition is the weaker "at least two scales in this walk
+        /// measure differently", not "every scale measures differently from every
+        /// other". It was the stronger form until `0cc6982` swapped the default
+        /// face to DejaVu Sans, and the stronger form is no longer satisfiable:
+        /// across every size from 6.00px to 40.00px in 0.01px steps, and four
+        /// different scale triples, `"Buy milk"` NEVER produced three
+        /// pairwise-distinct widths — its advances sit on a grid coarse enough
+        /// that two scales always agree. `"todo-item"` and `"Hg"` behave the same
+        /// way. Two scales separating is what this test needs to be able to fail
+        /// at all, and that is what is asserted below.
         #[test]
         fn the_shared_measure_seam_never_serves_another_scales_advance() {
-            const FRACTIONAL: f32 = 17.1;
+            // Measured at 16.4px: 68.0 at 1.0, 75.0 at 1.25, 75.0 at 1.5.
+            const FRACTIONAL: f32 = 16.4;
             let text = "Buy milk";
             let mut seen: Vec<(f32, f32)> = Vec::new();
             for scale in [1.0f32, 1.5, 1.0, 1.25, 1.5, 1.0] {
@@ -3441,20 +3467,20 @@ pub mod skia_impl {
                          scale's advance"
                     ),
                     None => {
-                        // And must differ from every other scale, so the
-                        // agreement above is not two scales happening to
-                        // measure identically at a snapped-equal size.
-                        for (other, other_w) in &seen {
-                            assert_ne!(
-                                width, *other_w,
-                                "{text:?} measures the same at {scale} as at {other}, \
-                                 so this test cannot detect a scale-blind memo"
-                            );
-                        }
                         seen.push((scale, width));
                     }
                 }
             }
+            let mut distinct: Vec<f32> = seen.iter().map(|(_, w)| *w).collect();
+            distinct.sort_by(|a, b| a.partial_cmp(b).expect("a finite advance"));
+            distinct.dedup();
+            assert!(
+                distinct.len() > 1,
+                "precondition: this test cannot detect a scale-blind memo unless the \
+                 scales in {seen:?} measure differently, and they all measured \
+                 {text:?} at {FRACTIONAL}px as {distinct:?} — pick a size at which \
+                 they separate"
+            );
         }
 
         /// The memo is bounded, and it drops the OLDEST entries when full

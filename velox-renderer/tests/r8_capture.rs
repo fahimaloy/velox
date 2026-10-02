@@ -69,18 +69,33 @@ fn tree() -> VNode {
 }
 
 /// Baselines captured on unmodified HEAD, before the funnel existed.
+///
+/// EVERY number in this block was re-recorded in `0cc6982` ("bundle real fonts"),
+/// and the re-recording was not cosmetic.
+///
+/// Before it, `load_default_typeface`'s three `/usr/share/fonts/…/dejavu/`
+/// candidates all missed on this host — the real DejaVu Sans lives at
+/// `/usr/share/fonts/dejavu-sans-fonts/DejaVuSans.ttf`, which was not in the list
+/// — so the fallback was `/usr/share/fonts/google-noto/NotoSans-Regular.ttf` and
+/// every baseline here was measured on Noto Sans. `0cc6982` put the path that
+/// actually resolves first, so the default face is DejaVu Sans, every advance in
+/// the image moved, and the compressed PNGs changed length as well as content
+/// (1972/3256/4614 bytes against the Noto 1981/3293/4684). Pinning the bytes is
+/// the whole point of this file, so the baseline follows the face.
+///
+/// What did NOT move is the property rows 4 and 5 exist for: 0.0 and NaN still
+/// render byte-identically to 1.0, because a degenerate scale is substituted with
+/// 1.0 by the single rounding authority (`viewport::physical_from_logical`). They
+/// are kept as their own rows — aliasing row 1's numbers by construction — so that
+/// substitution can never silently change.
 const RGBA_LEN: usize = 240_000;
-const RGBA_HASH: u32 = 0xefe2_9d78;
+const RGBA_HASH: u32 = 0x29f1_f7d8;
 const PNG_BASELINES: [(f32, usize, u32); 5] = [
-    (1.0, 1981, 0x1cb2_561b),
-    (1.5, 3293, 0x1c93_6207),
-    (2.0, 4684, 0x2290_2f92),
-    // A degenerate scale is substituted with 1.0 by the single rounding
-    // authority (`viewport::physical_from_logical`), so 0.0 and NaN render
-    // exactly what 1.0 renders. Pinned so that substitution can never silently
-    // change.
-    (0.0, 1981, 0x1cb2_561b),
-    (f32::NAN, 1981, 0x1cb2_561b),
+    (1.0, 1972, 0x7af9_dfa6),
+    (1.5, 3256, 0x78d3_1836),
+    (2.0, 4614, 0x9637_a4d3),
+    (0.0, 1972, 0x7af9_dfa6),
+    (f32::NAN, 1972, 0x7af9_dfa6),
 ];
 
 #[test]

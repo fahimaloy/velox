@@ -720,6 +720,13 @@ fn two_paragraphs_whose_source_index_collides_both_paint() {
 /// exact — the band's columns and its lit-pixel count — because the fix changes
 /// which line of a wrap a node draws, and a node that owns line 0 of a
 /// one-line wrap is every other text node in every app.
+///
+/// The pin moved once, in `0cc6982`, when the default face stopped being Noto Sans
+/// and became DejaVu Sans: the same string is 7px narrower with 12 fewer lit
+/// pixels under DejaVu's glyphs. What matters and did NOT move is everything
+/// structural in this file — one band per line box, each band inside its own line
+/// box, and every band's profile distinct from band 0's — which is why the other
+/// seven tests in this file stayed green through the swap untouched.
 #[test]
 fn a_single_line_is_untouched() {
     let v = box_with_text(280, "one line of text");
@@ -734,7 +741,7 @@ fn a_single_line_is_untouched() {
     assert_eq!(bands.len(), 1, "one line, one band: {bands:?}");
     assert_eq!(
         (bands[0].left, bands[0].right, bands[0].ink),
-        (0, 99, 486),
+        (0, 106, 474),
         "the single-line band moved: {:?}",
         bands[0]
     );
