@@ -49,6 +49,24 @@ bytemuck = { version = "1", features = ["derive"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 
+# SVG rasterisation, for `<img src="logo.svg">` and nothing else.
+#
+# `default-features = false` is deliberate and is the whole reason this line is
+# written out longhand. resvg's default set is `svgz + text + system-fonts +
+# memmap-fonts + raster-images`; the two font features pull fontdb, rustybuzz,
+# ttf-parser and fontconfig-parser, which exist to typeset SVG `<text>` -- by far
+# the largest new build cost in the tree, spent on the one thing a logo never
+# has. `raster-images` IS kept: it is what lets an SVG that embeds a PNG (the
+# `image-webp`/`zune-jpeg`/`gif` codecs behind it) resolve, which a brand logo
+# produced by a design tool plausibly does.
+#
+# The version is a bare major because cargo has to resolve it: usvg 0.48 needs
+# tiny-skia `^0.12`, and this host already has tiny-skia 0.8.4 and 0.11.4 in its
+# cargo cache from unrelated work. Pinning tiny-skia by hand here would only
+# constrain one side of that resolution and risk an unsatisfiable tree; the
+# right answer is to let cargo pick, which it does.
+resvg = { version = "0.48", default-features = false, features = ["raster-images"] }
+
 [dev-dependencies]
 velox-core = { path = "../velox-core" }
 velox-style = { path = "../velox-style" }

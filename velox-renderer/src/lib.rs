@@ -906,6 +906,12 @@ pub mod skia_surface;
 mod presenter;
 #[cfg(feature = "skia-native")]
 pub use skia_render::skia_impl::render_vnode_to_rgba;
+// Test/diagnostic only, and public only because `tests/` is a separate crate
+// that cannot see a private module. The decode counter is the honest way to
+// assert the persistent `<img src>` cache works; a timing assertion would
+// measure the machine instead of the cache. See `IMAGE_DECODE_COUNT`.
+#[cfg(feature = "skia-native")]
+pub use skia_render::skia_impl::{image_decode_count, reset_image_decode_count};
 #[cfg(feature = "skia-native")]
 pub use skia_render::{render_vnode_to_raster_png, render_vnode_to_raster_png_with_scale};
 

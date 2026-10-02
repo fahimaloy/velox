@@ -39,7 +39,7 @@ pub(crate) const REM_ROOT_FONT_SIZE: f32 = velox_dom::layout::DEFAULT_ROOT_FONT_
 pub mod skia_impl {
     use super::*;
     use skia_safe as sk;
-    use std::cell::RefCell;
+    use std::cell::{Cell, RefCell};
     use std::collections::HashMap;
 
     /// One resolved `border:` shorthand, in the units painting needs.
@@ -1110,8 +1110,111 @@ pub mod skia_impl {
         }
     }
 
+    /// How far into a file [`looks_like_svg`] looks for an `<svg` element.
+    ///
+    /// Long enough to clear what an SVG author puts in front of the root
+    /// element -- a UTF-8 BOM, an `<?xml ... ?>` prolog, an XML declaration,
+    /// whitespace, and a `<!DOCTYPE>` or comment -- with room to spare, and far
+    /// short enough that a 4 MB photo costs a page-faulted prefix rather than a
+    /// full read. It is a gate on the SLOW path, not a format decision: the
+    /// raster formats are recognised by Skia first, from their own magic.
+    const SVG_SNIFF_WINDOW: usize = 1024;
+
+    /// Whether `bytes` are SVG source, for the sake of not handing a JPEG to a
+    /// vector parser.
+    ///
+    /// SNIFFED, not sniffed from the file name, and deliberately NOT the
+    /// primary format decision: `load` tries `Image::from_encoded` first and
+    /// only reaches this on `None`, which means PNG/JPEG/WebP/GIF/BMP can never
+    /// come through here at all -- Skia has already recognised them by magic
+    /// (`sk::Image::from_encoded` is the authority on raster magic, not us), and
+    /// a `None` from it is a header this Skia build does not know. So the
+    /// asymmetry that matters is handled by ordering, and this only has to
+    /// answer "is this text?", which a `<svg` in the first kilobyte answers.
+    ///
+    /// File extension is not used for the same reason resvg does not: `src` is
+    /// whatever the author wrote, `logo.svg?v=2` and `data:` and a temp file
+    /// with no name all occur, and an extension check that guesses wrong turns a
+    /// working image into a silent blank box.
+    fn looks_like_svg(bytes: &[u8]) -> bool {
+        let window = &bytes[..bytes.len().min(SVG_SNIFF_WINDOW)];
+        window.windows(4).any(|w| w.eq_ignore_ascii_case(b"<svg"))
+    }
+
+    /// Rasterise SVG source into an `sk::Image` at the SVG's OWN intrinsic size.
+    ///
+    /// The size is the SVG's, not the destination's, and that is the whole
+    /// reason it can be cached by `src` alone: the paint walk hands this image
+    /// to `draw_image_rect` with a `None` source rect, so Skia scales it into
+    /// the layout rect at draw time. Nothing downstream -- layout, paint,
+    /// `opacity`, `filter: blur()/brightness()` -- knows or cares what size the
+    /// bitmap happens to be, so one raster serves every box the element is
+    /// later given, at every device scale, which is the opposite of the FONT
+    /// cache (whose glyphs are rasterised at `scale` and must be re-synced).
+    ///
+    /// `ceil` on the extents is what makes a fractional viewBox land on a whole
+    /// pixel rather than being truncated into a half-empty bottom row; a
+    /// non-finite or sub-one intrinsic size is a parse the author would not
+    /// recognise, and is reported as unresolvable rather than rasterised to
+    /// nothing.
+    ///
+    /// Returns `None` — which `load` turns into "draw nothing", the same
+    /// silence a missing file gets — when the bytes are not SVG, when resvg
+    /// cannot make a tree, or when the tree has no usable size.
+    ///
+    /// The pixel handoff is a copy into an `sk::Data`, not a conversion:
+    /// tiny-skia pixmaps are premultiplied RGBA in R,G,B,A byte order
+    /// (documented on `tiny_skia::PixmapRef::from_bytes`), which is precisely
+    /// `RGBA8888 + AlphaType::Premul` with a row stride of `width * 4`. Colour
+    /// space matches too: resvg renders in sRGB and these raster surfaces carry
+    /// no colour space of their own. It is the same two calls the PNG path
+    /// makes -- `Data::new_copy` then a factory that takes an `ImageInfo` -- so
+    /// the two branches converge on one representation and nothing downstream
+    /// can tell which produced the bitmap.
+    fn rasterize_svg(bytes: &[u8]) -> Option<sk::Image> {
+        if !looks_like_svg(bytes) {
+            return None;
+        }
+        let tree = resvg::usvg::Tree::from_data(bytes, &resvg::usvg::Options::default()).ok()?;
+        let (w, h) = (tree.size().width().ceil(), tree.size().height().ceil());
+        if !w.is_finite() || !h.is_finite() || w < 1.0 || h < 1.0 {
+            return None;
+        }
+        let (w, h) = (w as u32, h as u32);
+        let mut pixmap = resvg::tiny_skia::Pixmap::new(w, h)?;
+        resvg::render(
+            &tree,
+            resvg::tiny_skia::Transform::default(),
+            &mut pixmap.as_mut(),
+        );
+        let info = sk::ImageInfo::new(
+            (w as i32, h as i32),
+            sk::ColorType::RGBA8888,
+            sk::AlphaType::Premul,
+            None,
+        );
+        let row_bytes = (w as usize) * 4;
+        // `images::raster_from_data`, not `Image::from_raster_data`: the latter
+        // is the deprecated spelling of this exact call in skia-safe and the
+        // crate denies deprecated code.
+        sk::images::raster_from_data(&info, sk::Data::new_copy(pixmap.data()), row_bytes)
+    }
+
+    /// Decoded sources for the `<img src>` paint walk, keyed by the `src` the
+    /// author wrote.
+    ///
+    /// Persistent per thread, not per frame: see the comment on
+    /// `RENDER_IMAGE_CACHE`. Every field here is about avoiding work that
+    /// happens once per frame otherwise -- a disk read, and a full decode --
+    /// for a picture that does not change between frames.
     struct ImageCache {
         images: HashMap<String, sk::Image>,
+    }
+
+    impl Default for ImageCache {
+        fn default() -> Self {
+            Self::new()
+        }
     }
 
     impl ImageCache {
@@ -1121,13 +1224,36 @@ pub mod skia_impl {
             }
         }
 
+        /// The decoded image for `src`, decoding it on first request.
+        ///
+        /// RASTER FORMATS FIRST, and that ordering is load-bearing rather than
+        /// stylistic: `Image::from_encoded` recognises PNG/JPEG/WebP/GIF/BMP
+        /// from its own magic, so every one of them takes exactly the path it
+        /// took before SVG existed -- same bytes, same `Data`, same call, same
+        /// result, and only `resvg` pays anything for a vector. An SVG comes
+        /// back `None` from `from_encoded` (no Skia magic matches XML) and
+        /// falls to `rasterize_svg`.
+        ///
+        /// A `src` that cannot be decoded at all is NOT remembered: `None` is
+        /// returned without an `insert`, so a file that appears later -- HMR
+        /// writing a replacement, a build step producing an asset -- is picked
+        /// up on the next frame instead of being pinned to a first-frame
+        /// failure. That is a deliberate asymmetry against the success path, and
+        /// it is the same asymmetry the PNG path had: a missing file stays a
+        /// per-frame read attempt until it resolves. Nothing here panics on any
+        /// input; every failure is a `None` that the draw site skips.
         fn load(&mut self, src: &str) -> Option<sk::Image> {
             if let Some(img) = self.images.get(src) {
                 return Some(img.clone());
             }
             let bytes = std::fs::read(src).ok()?;
             let data = sk::Data::new_copy(&bytes);
-            let image = sk::Image::from_encoded(data)?;
+            let image = sk::Image::from_encoded(data).or_else(|| rasterize_svg(&bytes))?;
+            // Counted here, AFTER the decode succeeded and only when it is
+            // about to be cached: the number this test/diagnostic exists to
+            // assert is "how many times did a frame actually decode", and a
+            // failed decode is not one.
+            let _ = IMAGE_DECODE_COUNT.try_with(|c| c.set(c.get() + 1));
             self.images.insert(src.to_string(), image.clone());
             Some(image)
         }
@@ -1173,7 +1299,14 @@ pub mod skia_impl {
         canvas.clear(sk::Color::TRANSPARENT);
 
         let mut fonts = FontCache::new_with_scale(1.0);
-        let mut images = ImageCache::new();
+        // Hoisted out of the per-call path, same rationale and same
+        // take/restore shape as the render path's font cache: this proof path
+        // painted the same `src` on every invocation, and each invocation paid
+        // a disk read and a decode for it. `take_render_image_cache` also means
+        // this path SHARES its bitmaps with `render_frame` rather than keeping
+        // a second copy of every picture the app has shown.
+        let mut image_guard = take_render_image_cache();
+        let images = image_guard.cache_mut();
         let default_family = fonts.default_family();
         let default_text_style = TextStyle {
             color: sk::Color::from_argb(255, 0, 0, 0),
@@ -1396,7 +1529,7 @@ pub mod skia_impl {
             &default_family,
             &mut fonts,
             &mut paints,
-            &mut images,
+            images,
             1.0,
             (root_rect.width(), root_rect.height()),
         );
@@ -1433,6 +1566,15 @@ pub mod skia_impl {
         let styled = apply_with_cascade(vnode, sheet);
         velox_dom::text_wrap::set_current_scale(surface.scale_factor());
         velox_dom::text_wrap::set_skia_measurer(measure_text);
+        // Registered HERE, beside the measurer and under the same reasoning:
+        // both seams are "global function pointer into this crate's backend,
+        // installed at the top of the frame, read back from `velox-dom` during
+        // `compute_layout`". It has to be before the `compute_layout` on the
+        // next line -- that is the only place the probe is ever asked anything,
+        // so registering it after would leave it uninstalled for exactly the one
+        // call that needs it, with no failure to observe: an unsized `<img>`
+        // would simply be a zero-size box, which is what it is today.
+        velox_dom::layout::set_intrinsic_size_probe(intrinsic_image_size);
         let layout = velox_dom::layout::compute_layout(&styled, logical_w, logical_h);
         (styled, layout)
     }
@@ -1947,6 +2089,139 @@ pub mod skia_impl {
         guard
     }
 
+    // ===== PERSISTENT IMAGE CACHE =========================================
+    //
+    // The same argument as `RENDER_FONT_CACHE`, for a much bigger win: the font
+    // cache's job is to stop rebuilding an `sk::FontMgr`, and this one's is to
+    // stop re-reading a file off disk and re-decoding it. Both `ImageCache::new`
+    // sites ran per FRAME, so a visible `<img>` cost a `std::fs::read` plus a
+    // full PNG decode on every single frame of an animation, a scroll, a hover
+    // repaint -- work whose result is by definition identical to the previous
+    // frame's. For a logo on a landing page that is the largest per-frame cost
+    // in the process after the layout itself.
+    //
+    // ONE slot, where the font caches have two. The reason there are two is
+    // written at `RENDER_FONT_CACHE`: measurement and rendering supply scale
+    // independently, and a shared cache would drop its `fonts` map on every
+    // alternating scale change. That hazard is scale-driven and there is no
+    // scale in an image cache -- `draw_image_rect` is called with a `None`
+    // source rect, so Skia does the scaling at draw time and the cached bitmap
+    // is valid at any device scale (verified against
+    // `skia-safe/src/core/canvas.rs`: `src: Option<(&Rect, SrcRectConstraint)>`,
+    // where `None` means "the whole image"). So there is nothing here to
+    // re-sync, one slot cannot thrash, and a second one would only buy a second
+    // copy of every decoded bitmap.
+    //
+    // The slot holds an `Option` and the cache is handed out by value, for the
+    // same reason `RenderFontCache` does it that way: the paint walk needs a
+    // plain `&mut ImageCache` spanning its whole recursion, which a
+    // non-`const` thread-local cannot lend. Take-and-restore also degrades
+    // correctly under re-entrancy -- a nested take finds the slot empty, builds
+    // a throwaway cache, and restores nothing over the outer one.
+    //
+    // The probe at `intrinsic_image_size` shares this slot on purpose: it is
+    // asked during LAYOUT, before any paint walk has started, and answering
+    // from the same cache is what makes an `<img src>` cost one decode for the
+    // whole frame rather than one for layout and one for paint.
+    thread_local! {
+        /// Cache backing every `<img src>` paint walk and the layout probe.
+        static RENDER_IMAGE_CACHE: RefCell<Option<ImageCache>> = const { RefCell::new(None) };
+    }
+
+    thread_local! {
+        /// How many sources THIS THREAD has actually decoded since the counter
+        /// was last reset. Test/diagnostic only.
+        ///
+        /// Deliberately not a field of `ImageCache`: the cache is TAKEN out of
+        /// its slot for the duration of a paint walk, so a field would read back
+        /// as zero to exactly the observer most likely to look -- one that
+        /// spans a frame. A separate counter is never taken and is therefore
+        /// always readable. Counting decodes rather than cache hits is the point:
+        /// it is the number that must stay at 1 no matter how many times the
+        /// frame asks for the same `src`.
+        static IMAGE_DECODE_COUNT: Cell<u64> = const { Cell::new(0) };
+    }
+
+    /// How many sources this thread has decoded since the last reset. See
+    /// [`IMAGE_DECODE_COUNT`]. Test/diagnostic only.
+    pub fn image_decode_count() -> u64 {
+        IMAGE_DECODE_COUNT.try_with(Cell::get).unwrap_or(0)
+    }
+
+    /// Zero [`image_decode_count`]. Test/diagnostic only.
+    pub fn reset_image_decode_count() {
+        let _ = IMAGE_DECODE_COUNT.try_with(|c| c.set(0));
+    }
+
+    /// Owns this thread's `ImageCache` for the duration of one paint walk or one
+    /// probe call, and returns it to its thread-local slot on drop.
+    struct RenderImageCache {
+        cache: Option<ImageCache>,
+    }
+
+    impl RenderImageCache {
+        /// The cache for the caller in hand.
+        fn cache_mut(&mut self) -> &mut ImageCache {
+            self.cache
+                .as_mut()
+                .expect("render image cache taken by this guard; not reentrant")
+        }
+    }
+
+    impl Drop for RenderImageCache {
+        fn drop(&mut self) {
+            // `try_with` for the same reason `RenderFontCache::drop` uses it: a
+            // `Drop` during thread teardown must not touch a destroyed slot.
+            // Dropping the cache there is correct, it just forfeits the reuse.
+            if let Some(cache) = self.cache.take() {
+                let _ = RENDER_IMAGE_CACHE.try_with(|slot| {
+                    *slot.borrow_mut() = Some(cache);
+                });
+            }
+        }
+    }
+
+    /// Take this thread's persistent `ImageCache`.
+    fn take_render_image_cache() -> RenderImageCache {
+        let taken = RENDER_IMAGE_CACHE
+            .try_with(|slot| std::mem::take(&mut *slot.borrow_mut()))
+            .ok()
+            .flatten();
+        RenderImageCache {
+            // First caller on this thread pays for one decode per distinct
+            // `src`; every caller after that gets the previous one's cache back
+            // with every bitmap already decoded.
+            cache: Some(taken.unwrap_or_default()),
+        }
+    }
+
+    /// `velox-dom`'s intrinsic-size probe for replaced elements, answered from
+    /// this thread's image cache.
+    ///
+    /// Registered as [`velox_dom::layout::IntrinsicSizeProbe`], which is what
+    /// lets an unsized `<img src=…>` be laid out at its own size instead of at
+    /// zero (CSS 2.1 §10.3.2 step 2). It answers from the cache and not from a
+    /// fresh `fs::read` per call because layout asks more than once per `src` --
+    /// once for the width pass and once for the height pass -- and a file read
+    /// per question would make a replaced element the most expensive thing in
+    /// the tree to measure.
+    ///
+    /// It takes and returns the cache through `take_render_image_cache` like
+    /// every other caller, so the decode it triggers is the SAME decode the
+    /// paint walk will reuse: one read, one decode, per `src`, per thread, per
+    /// session -- not one per layout question and another per frame.
+    ///
+    /// `None` for a `src` that does not resolve is the right answer and not a
+    /// gap: `velox-dom`'s `intrinsic_size_of` drops non-positive extents and
+    /// an unsized replaced element with an unresolvable source is a zero-size
+    /// box, which paints nothing -- the same thing a broken `<img>` does in a
+    /// browser, and the same thing a PNG whose file is missing does here today.
+    pub fn intrinsic_image_size(src: &str) -> Option<(i32, i32)> {
+        let mut guard = take_render_image_cache();
+        let image = guard.cache_mut().load(src)?;
+        Some((image.width(), image.height()))
+    }
+
     /// Public measure helper for layout unify: snapped size, scale-aware.
     /// Consumes: text, font_size (logical), font_family, scale -> logical px width
     /// (snapped) plus the run's ascent and descent.
@@ -2097,6 +2372,15 @@ pub mod skia_impl {
         // Ensure layout text measure uses same Skia snapped scale (unified).
         velox_dom::text_wrap::set_current_scale(scale);
         velox_dom::text_wrap::set_skia_measurer(measure_text);
+        // Same registration, same reason, same place in the sequence as in
+        // `prepare_frame` -- and here it is what a caller who lays out
+        // elsewhere still needs, because `render_frame` is reachable without
+        // going through `prepare_frame` and is where a caller that paints a
+        // precomputed layout arrives. Idempotent: the second write of an
+        // identical function pointer costs a write lock on a `RwLock` behind an
+        // already-taken layout pass, which is the same cost
+        // `set_skia_measurer` above already pays.
+        velox_dom::layout::set_intrinsic_size_probe(intrinsic_image_size);
 
         let canvas = surface.canvas();
         canvas.clear(sk::Color::TRANSPARENT);
@@ -2115,7 +2399,14 @@ pub mod skia_impl {
         // above still agree.
         let mut font_guard = take_render_font_cache(scale);
         let fonts = font_guard.cache_mut();
-        let mut images = ImageCache::new();
+        // Same shape and same reasoning, one step bigger: `ImageCache::new` was
+        // on this line, so every frame re-read the file and re-decoded it. The
+        // cache is keyed by `src` alone and needs no scale resync -- the bitmap
+        // is scaled by Skia at draw time, not baked at the scale it was decoded
+        // at -- which is why this is one slot shared with the layout probe
+        // rather than a second one. See `RENDER_IMAGE_CACHE`.
+        let mut image_guard = take_render_image_cache();
+        let images = image_guard.cache_mut();
         let default_text_style = TextStyle {
             color: sk::Color::from_argb(255, 0, 0, 0),
             align: TextAlign::Left,
@@ -2942,7 +3233,7 @@ pub mod skia_impl {
             default_text_style,
             &default_family,
             &mut paints,
-            &mut images,
+            images,
             1.0,
             (root_rect.width(), root_rect.height()),
             &mut std::collections::HashMap::new(),
