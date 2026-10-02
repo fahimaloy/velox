@@ -1640,24 +1640,27 @@ pub mod skia_impl {
 
         /// Resolve a family to a typeface.
         ///
-        /// NOT a fontconfig family lookup. `FontCache::new_with_scale` inserts
-        /// exactly one entry, `"default"`, from `load_default_typeface`
-        /// (a bundled/system font file, else a preferred-family probe). Every
-        /// other `family` therefore misses the map and is served THE SAME
-        /// default face. `font-family: Inter` is currently a no-op paint-wide,
-        /// and it is a no-op here because of this function, not because the
-        /// cascade dropped the declaration. Real per-family loading is a
-        /// separate task.
+        /// NOT a fontconfig family lookup, and this is a DECLARED NON-GOAL rather
+        /// than a silent gap — see `docs/plans/2026-10-02-scaffolded-app-defects.md`
+        /// (T5c). `FontCache::new_with_scale` inserts exactly one entry,
+        /// `"default"`, from `load_default_typeface`; every other `family`
+        /// therefore gets that same face, and `parse_font_family` keeps only the
+        /// FIRST name in a comma list, so `font-family: Inter, "Noto Sans", …`
+        /// asks for `Inter` and is served the default. `font-family` is inert
+        /// because of this function, not because the cascade dropped the
+        /// declaration, and per-family loading is a separate task.
+        ///
+        /// What this DOES do is refuse to poison the cache: a miss is served the
+        /// default face WITHOUT writing it under the requested name. Caching it
+        /// made the miss permanent and made it indistinguishable from a hit —
+        /// nothing could later tell "this family resolved" from "this family does
+        /// not exist" — and it was the reason a host that gained the family could
+        /// never be reached.
         fn get_or_load_family(&mut self, family: &str) -> Option<sk::Typeface> {
             if let Some(tf) = self.typefaces.get(family) {
                 return Some(tf.clone());
             }
-            if let Some(default_tf) = self.typefaces.get(&self.default_family) {
-                let tf = default_tf.clone();
-                self.typefaces.insert(family.to_string(), tf.clone());
-                return Some(tf);
-            }
-            None
+            self.typefaces.get(&self.default_family).cloned()
         }
 
         /// Snap a logical font size to the nearest physical pixel row so that
@@ -1980,14 +1983,47 @@ pub mod skia_impl {
     fn load_default_typeface() -> Option<sk::Typeface> {
         use std::fs;
 
+        // Order is a COVERAGE decision, not an arbitrary one. Velox has no glyph
+        // fallback: the only text draw is `draw_str`, a single typeface, no
+        // shaping, so an unmapped codepoint becomes glyph 0 — a tofu box. The
+        // renderer therefore has to pick a face that actually CARRIES the
+        // characters an app prints, and the only one in this list that does is
+        // DejaVu Sans. Measured from the real cmaps:
+        //
+        //   face         U+2600 ☀   U+263E ☾   U+2713 ✓   U+2715 ✕   U+00D7 ×
+        //   DejaVu Sans  present    present    present    present    present
+        //   Noto Sans    MISSING    MISSING    MISSING    MISSING    present
+        //   FreeSans     missing    missing    missing    missing    present
+        //
+        // (FreeSans was dropped from the list below: it covers nothing the other
+        // two do not, so it could only ever win on a host that has neither.)
+        //
+        // Noto Sans is still worth a slot — it is the better text face, and it is
+        // what wins on a host with no DejaVu at all. But it is not first, because
+        // picking it means the shipped template's ☀ ☾ ✓ ✕ are tofu.
+        //
+        // The two `dejavu-sans-fonts` / `google-noto` layouts are what Debian,
+        // Ubuntu and Fedora actually ship; the `truetype/` and `TTF/` ones are
+        // older layouts kept because they are still what some minimal images
+        // have. The previous list had `truetype/dejavu` and `google-noto` but
+        // NOT `dejavu-sans-fonts`, so on this host it fell through to Noto.
         const CANDIDATES: &[&str] = &[
+            "/usr/share/fonts/dejavu-sans-fonts/DejaVuSans.ttf",
             "/usr/share/fonts/dejavu/DejaVuSans.ttf",
             "/usr/share/fonts/TTF/DejaVuSans.ttf",
             "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
             "/usr/share/fonts/google-noto/NotoSans-Regular.ttf",
             "/usr/share/fonts/noto/NotoSans-Regular.ttf",
-            "/usr/share/fonts/gnu-free/FreeSans.ttf",
+            "/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf",
         ];
+
+        // The two bundled faces below are tried only after every system path
+        // misses, and they are the SAME two files in the same order, so a host
+        // with a system DejaVu and a host with neither paint identically. They
+        // used to be 14-byte text stubs reading `<BINARY FILE>`, which made this
+        // whole loop dead: `new_from_data` returns `None` for them. They are now
+        // the real faces (`velox-renderer/assets/LICENSE-*.txt` carries each
+        // one's licence).
 
         let font_mgr = sk::FontMgr::default();
         for p in CANDIDATES {

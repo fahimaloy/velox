@@ -10,17 +10,21 @@
 //! Scoping exposed a latent mistake in the shipped template. The rule
 //! `.btn` / `.btn-add` / `.btn-add:hover` was declared in `TodoInput.vx` (the
 //! CHILD), while the element it was meant for — `<button class="btn btn-add">`
-//! — lives in `Todos.vx` (the PARENT) at
-//! `velox-cli/templates/project/src/components/Todos.vx:8`.
+//! — lived in `Todos.vx` (the PARENT). The template has since been reworked: the
+//! button is `<button class="add" @click="add_todo">Add</button>` at
+//! `velox-cli/templates/project/src/components/Todos.vx:10`, and its rule is
+//! `.add` in the same file. The class names below are therefore the ones the
+//! BUG had, kept because the falsification fixture further down still has to
+//! reproduce that exact shape — `.btn-add` is a fixture value now, not a claim
+//! about the shipped template.
 //!
 //! Velox has no Vue-style scope inheritance and no `:deep()` / `>>>` /
 //! `::v-deep` escape hatch. `append_scope_attr`
-//! (`velox-sfc/src/template_codegen.rs:2622-2628`) appends exactly ONE
-//! `data-v-*` attribute, and `scope_single_selector`
-//! (`velox-sfc/src/codegen.rs:375-400`) appends that attribute to EVERY compound
-//! unconditionally, with no special case. So a child's scoped rule can never
-//! match an element the parent owns, in either direction. Cross-component
-//! styling is simply not expressible.
+//! (`velox-sfc/src/template_codegen.rs:2741`) appends exactly ONE `data-v-*`
+//! attribute, and `scope_single_selector` (`velox-sfc/src/codegen.rs:524-550`)
+//! appends that attribute to EVERY compound unconditionally, with no special
+//! case. So a child's scoped rule can never match an element the parent owns, in
+//! either direction. Cross-component styling is simply not expressible.
 //!
 //! The result was that the Add button silently lost its background, border,
 //! padding, colour and radius; only the UA rule survived
@@ -61,12 +65,16 @@
 //! # Known limits (deliberate, and they fail loudly rather than silently)
 //!
 //! - `:class="{ ... }"` object bindings are a different construct from
-//!   `class="..."` and are NOT collected as USED. `TodoItem.vx:2` binds
+//!   `class="..."` and are NOT collected as USED. `TodoItem.vx:3` binds
 //!   `:class="{ completed: completed }"`, and `completed` is styled by the
-//!   COMPOUND selector `.todo-item.completed .todo-text` (`TodoItem.vx:65`),
-//!   which rule (2) excludes by design. Collecting the binding without
-//!   evaluating the compound would be exactly the fuzzy half-handling this file
-//!   exists to avoid.
+//!   DESCENDANT selector `.completed .todo-text` (`TodoItem.vx:210`), which rule
+//!   (2) excludes by design. (An earlier version of this note named
+//!   `.todo-item.completed .todo-text` — a selector the template's own comments
+//!   record as NOT matching anything, because `parse_selector_part` reads
+//!   everything after a leading `.` as one class name. The real rule has always
+//!   been the two-level form.) Collecting the binding without evaluating the
+//!   descendant would be exactly the fuzzy half-handling this file exists to
+//!   avoid.
 //! - `class="{{ expr }}"` interpolation cannot be enumerated statically; such a
 //!   value contributes no USED tokens. The inverse assertion is the safety net:
 //!   if a declared class only ever appears in interpolated bindings, direction B
@@ -215,27 +223,99 @@ fn is_ident_byte(b: u8) -> bool {
 }
 
 /// Strip `/* ... */` comments so their contents never masquerade as selectors.
+///
+/// # This is a DUPLICATE, deliberately, and it must stay in step with
+/// `velox_sfc::codegen::strip_css_comments` (`velox-sfc/src/codegen.rs:404`).
+///
+/// That one is `fn`, not `pub fn`, so a test in another crate cannot call it:
+/// reusing it would mean exporting a codegen internal, which is a change to
+/// `velox-sfc`'s public surface and is not this test's to make. The task file for
+/// this duplication says to make the production one `pub` and delete this copy —
+/// that is the right end state, and it needs an owner for `velox-sfc`. Until then
+/// the two must agree, and this one carries the two defects the production one
+/// had before T1 fixed them:
+///
+/// 1. **String-blindness.** A `/*` inside `"..."` or inside the body of an
+///    unquoted `url(...)` is a comment opener here, so `content: "/*"` silently
+///    truncates the rest of the sheet. The scan tracks both suppressors the way
+///    the production one does.
+/// 2. **UTF-8 destruction.** Pushing `bytes[i] as char` walks BYTES and casts
+///    each to a codepoint, so every non-ASCII byte becomes a Latin-1 character.
+///    The template components are full of `×`, `☀` and `—`, so this could mangle
+///    a real sheet. Here a comment is collapsed to a single space and the runs
+///    between comments are copied as `&str` slices, which keeps multi-byte
+///    characters intact.
+///
+/// The byte offsets this scan stops on are all ASCII (`/`, `"`, `'`, `)`) or the
+/// end of input, so every slice boundary is a character boundary.
 fn strip_css_comments(css: &str) -> String {
+    fn skip_string(css: &str, i: usize) -> usize {
+        let bytes = css.as_bytes();
+        let quote = bytes[i];
+        let mut j = i + 1;
+        while j < bytes.len() {
+            match bytes[j] {
+                b'\\' => j += 2,
+                b if b == quote => return j + 1,
+                _ => j += 1,
+            }
+        }
+        bytes.len()
+    }
+
+    fn at_url_open(bytes: &[u8], i: usize) -> bool {
+        if !(bytes[i..].len() >= 4 && bytes[i..i + 4].eq_ignore_ascii_case(b"url(")) {
+            return false;
+        }
+        // `url(` must not be part of a longer identifier (`my-url(`).
+        i > 0
+            && (bytes[i - 1].is_ascii_alphanumeric()
+                || bytes[i - 1] == b'-'
+                || bytes[i - 1] == b'_')
+    }
+
+    fn skip_url(css: &str, i: usize) -> usize {
+        let bytes = css.as_bytes();
+        let mut j = i + 4;
+        while j < bytes.len() && (bytes[j] as char).is_whitespace() {
+            j += 1;
+        }
+        match bytes.get(j) {
+            Some(&b'"') | Some(&b'\'') => skip_string(css, j),
+            Some(&b')') => j + 1,
+            _ => {
+                while j < bytes.len() && bytes[j] != b')' {
+                    j += 1;
+                }
+                (j + 1).min(bytes.len())
+            }
+        }
+    }
+
     let mut out = String::with_capacity(css.len());
-    let bytes = css.as_bytes();
+    let mut run_start = 0usize;
     let mut i = 0usize;
+    let bytes = css.as_bytes();
     while i < bytes.len() {
         if bytes[i] == b'/' && bytes.get(i + 1) == Some(&b'*') {
-            match css[i + 2..].find("*/") {
-                Some(end) => {
-                    out.push(' ');
-                    i = i + 2 + end + 2;
-                }
-                None => {
-                    out.push(' ');
-                    break;
-                }
-            }
-            continue;
+            out.push_str(&css[run_start..i]);
+            out.push(' ');
+            // An unterminated comment runs to end of input.
+            let end = css[i + 2..]
+                .find("*/")
+                .map(|e| i + 2 + e + 2)
+                .unwrap_or(bytes.len());
+            i = end;
+            run_start = i;
+        } else if bytes[i] == b'"' || bytes[i] == b'\'' {
+            i = skip_string(css, i);
+        } else if at_url_open(bytes, i) {
+            i = skip_url(css, i);
+        } else {
+            i += 1;
         }
-        out.push(bytes[i] as char);
-        i += 1;
     }
+    out.push_str(&css[run_start..]);
     out
 }
 
@@ -315,8 +395,15 @@ fn collect_rule_preludes(css: &str) -> Vec<String> {
                     i += 1;
                 }
                 _ => {
-                    prelude.push(bytes[i] as char);
-                    i += 1;
+                    // Copy whole CHARACTERS, not bytes. `bytes[i] as char` would
+                    // turn every byte of a multi-byte character into its own
+                    // Latin-1 codepoint; a CSS identifier may legally contain
+                    // non-ASCII, and the template components are full of it. The
+                    // loop only ever stops on ASCII (`{`, `}`) or the end of
+                    // input, so `i` is always a character boundary here.
+                    let ch = css[i..].chars().next().expect("i is a char boundary");
+                    prelude.push(ch);
+                    i += ch.len_utf8();
                 }
             }
         }
@@ -400,6 +487,93 @@ fn single_class_selector(selector: &str) -> Option<String> {
     Some(name)
 }
 
+/// The comment stripper must not be fooled by a `/*` inside a string or a
+/// `url()`, and it must not mangle non-ASCII text.
+///
+/// Both were real defects in this file's copy: the old one treated `content:
+/// "/*"` as a comment opener (silently truncating the rest of the sheet) and
+/// pushed `bytes[i] as char`, so every byte of a multi-byte character became its
+/// own Latin-1 codepoint — and the shipped components are full of `×`, `☀` and
+/// `—`. A stripper that damages the sheet it is meant to clean is worse than no
+/// stripper, so both are pinned here.
+#[test]
+fn the_css_comment_stripper_is_string_aware_and_utf8_safe() {
+    // 1. String-blindness. Nothing after this line may be eaten.
+    let sheet = r#".a { content: "/*"; }
+.b { color: red; }
+.c { background: url(data:image/png;base64,/*AAA*/); }
+"#;
+    let stripped = strip_css_comments(sheet);
+    assert!(
+        stripped.contains(".b { color: red; }"),
+        "a `/*` inside a quoted string was treated as a comment opener and \
+         truncated the sheet: {stripped:?}"
+    );
+    assert!(
+        stripped.contains(".c {"),
+        "a `/*` inside an unquoted url() was treated as a comment opener: \
+         {stripped:?}"
+    );
+    // A real comment is still removed.
+    assert_eq!(
+        strip_css_comments("/* gone */ .keep { color: red; }"),
+        "  .keep { color: red; }"
+    );
+
+    // 2. UTF-8. Every character must survive a round trip, byte for byte.
+    let unicode = ".glyph { content: \"☀ ☾ ✓ × —\"; } /* c */ .after { color: red; }";
+    let stripped = strip_css_comments(unicode);
+    assert!(
+        stripped.contains("☀ ☾ ✓ × —"),
+        "the stripper destroyed non-ASCII characters: {stripped:?}"
+    );
+    assert!(
+        stripped.contains(".after"),
+        "comment not removed: {stripped:?}"
+    );
+    // And a multi-byte character must not be able to hide a comment opener
+    // behind a mangled copy of itself: `é` is two bytes, so a byte-wise cast
+    // would produce two Latin-1 chars and the string would no longer compare
+    // equal to the original.
+    assert_eq!(stripped, unicode.replace("/* c */", " "));
+
+    // 3. The shipped components, on the invariant the byte-cast bug violated: it
+    // turned ONE character into SEVERAL, so a stripper that did it would hand
+    // back MORE characters than it was given. (A character that appears only
+    // inside a comment legitimately disappears — TodoItem.vx's `×` is in a
+    // comment — which is why this is a count, not a containment check.)
+    let dir = shipped_components_dir();
+    let mut checked = 0usize;
+    for entry in fs::read_dir(&dir).expect("read components dir") {
+        let path = entry.expect("entry").path();
+        if path.extension().is_none_or(|e| e != "vx") {
+            continue;
+        }
+        let src = fs::read_to_string(&path).expect("read .vx");
+        let style = block(&src, "style").expect("a <style> block");
+        let stripped = strip_css_comments(style);
+        assert!(
+            stripped.chars().count() <= style.chars().count(),
+            "{}: stripping comments INCREASED the character count ({} -> {}), so \
+             bytes were being cast to chars and multi-byte characters split",
+            path.display(),
+            style.chars().count(),
+            stripped.chars().count()
+        );
+        assert_eq!(
+            strip_css_comments(&stripped),
+            stripped,
+            "{}: stripping is not idempotent on its own output",
+            path.display()
+        );
+        checked += 1;
+    }
+    assert!(
+        checked >= 5,
+        "expected the five shipped components, saw {checked}"
+    );
+}
+///
 /// Every `.ident` token anywhere in a selector, for diagnostics only.
 ///
 /// A `.` opens a class name and its following identifier characters accumulate
@@ -548,8 +722,8 @@ fn direction_a_every_class_used_in_a_template_is_declared_in_that_component() {
                 Some(owners) if !owners.is_empty() => format!(
                     "\n    but `{}` IS declared as a standalone rule in: {}.\n    \
                      A `<style scoped>` rule only matches elements carrying its OWN \
-                     component's data-v-* id (velox-sfc/src/template_codegen.rs:2622 \
-                     `append_scope_attr`, velox-sfc/src/codegen.rs:375 \
+                     component's data-v-* id (velox-sfc/src/template_codegen.rs:2741 \
+                     `append_scope_attr`, velox-sfc/src/codegen.rs:524-550 \
                      `scope_single_selector`), and velox has no scope inheritance or \
                      `:deep()` escape hatch. So the rule is dead CSS and the element \
                      renders unstyled. Move the rule into {}.",

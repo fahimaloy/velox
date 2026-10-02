@@ -28,7 +28,7 @@
 // The author's `padding`, `background` and `border` on an `<input>` are honoured
 // by the renderer, and `::placeholder` is a real pseudo-class: the cascade keeps
 // those declarations on a SEPARATE `style:placeholder` attribute
-// (velox-style/src/lib.rs:812, `PLACEHOLDER_STYLE_ATTR`) so they cannot repaint
+// (velox-style/src/lib.rs:786, `PLACEHOLDER_STYLE_ATTR`) so they cannot repaint
 // the value, and the box painter reads them when the value is empty
 // (velox-renderer/src/skia_render.rs `placeholder_color`). A placeholder's
 // colour is otherwise DERIVED from the field's own text colour, so the one below
@@ -93,7 +93,7 @@ impl State {
     min-width: 0;
     height: 44px;
     padding: 0 14px;
-    border: 1px solid #dedbd3;
+    border: 1px solid #868D92;
     border-radius: 8px;
     /* Exactly the composer's own fill, so the field reads as part of one
        surface instead of a box sitting inside a box. */
@@ -102,16 +102,16 @@ impl State {
     font-size: 15px;
 }
 .input::placeholder {
-    color: #6b7377;
+    color: #667076;
 }
 
 /* Dark overrides — source order decides the winner, so they come last. */
 .dark .input {
-    border: 1px solid #333d45;
-    background: #161b1f;
-    color: #e8ecec;
+    border: 1px solid #64727B;
+    background: #141A1E;
+    color: #EDF2F3;
 }
 .dark .input::placeholder {
-    color: #75818a;
+    color: #849299;
 }
 </style>

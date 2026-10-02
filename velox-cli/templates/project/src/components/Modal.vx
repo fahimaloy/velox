@@ -60,7 +60,7 @@
 // the honest affordance until that plumbing lands.
 //
 // Every visual decision below is a DEFAULT, and the cascade is source-ordered
-// with no specificity and no `!important` (velox-style/src/lib.rs:812) — so a
+// with no specificity and no `!important` (velox-style/src/lib.rs:786) — so a
 // caller who wants a different panel appends their own rules to their own block
 // and the later declaration wins. Appending to `.dark .panel` is how you
 // restyle dark mode. Because a component's scoped CSS cannot reach anything it
@@ -83,11 +83,11 @@
 //    unreachable — the first component would win and the other would be dead.
 //
 // Named slots are the obvious next API for this component and are deliberately
-// NOT used yet: `emit_slot_node` (velox-sfc/src/template_codegen.rs:1543-1564)
+// NOT used yet: `emit_slot_node` (velox-sfc/src/template_codegen.rs:1587-1608)
 // hands `render_slot` a fallback closure built by `emit_children_with_mode`,
 // which returns a `Vec<VNode>` statement block, while the helper wants a single
 // `VNode` — so a `<slot>` outside a `v-for` does not compile. The `v-for` path
-// at :3045 gets this right by wrapping the children in an `h("slot", …)` element.
+// at :1608 gets this right by wrapping the children in an `h("slot", …)` element.
 // Until that is fixed, body and footer copy arrive as props.
 pub struct Props {
     pub title: String,
@@ -193,7 +193,7 @@ impl State {
     width: 100%;
     max-width: 440px;
     padding: 22px;
-    border: 1px solid #dedbd3;
+    border: 1px solid #D8D4CB;
     border-radius: 14px;
     background: #ffffff;
     color: #14181b;
@@ -225,11 +225,11 @@ impl State {
     border: 1px solid transparent;
     border-radius: 999px;
     background: #ffffff;
-    color: #6b7377;
+    color: #667076;
 }
 .dismiss:hover {
-    border: 1px solid #dedbd3;
-    background: #f6f5f2;
+    border: 1px solid #636A70;
+    background: #EFEDE8;
     color: #14181b;
 }
 .dismiss-mark {
@@ -260,7 +260,7 @@ impl State {
     flex: 0 0 auto;
     height: 36px;
     padding: 0 16px;
-    border: 1px solid #dedbd3;
+    border: 1px solid #868D92;
     border-radius: 8px;
     background: #ffffff;
     color: #5a6469;
@@ -269,8 +269,8 @@ impl State {
     text-align: center;
 }
 .cancel:hover {
-    border: 1px solid #c4bfb4;
-    background: #f6f5f2;
+    border: 1px solid #636A70;
+    background: #EFEDE8;
     color: #14181b;
 }
 .confirm {
@@ -293,46 +293,46 @@ impl State {
 /* Dark overrides — source order decides the winner (velox-style/src/lib.rs
    `apply_with_cascade`), so they come last. */
 .dark .overlay {
-    background: rgba(3, 5, 6, 0.66);
+    background: rgba(4, 7, 9, 0.72);
 }
 .dark .panel {
-    border: 1px solid #242c31;
-    background: #181e22;
-    color: #e8ecec;
+    border: 1px solid #364147;
+    background: #1A2126;
+    color: #EDF2F3;
 }
 .dark .title {
-    color: #e8ecec;
+    color: #EDF2F3;
 }
 .dark .dismiss {
     border: 1px solid transparent;
-    background: #181e22;
-    color: #75818a;
+    background: #1A2126;
+    color: #849299;
 }
 .dark .dismiss:hover {
-    border: 1px solid #333d45;
-    background: #222a2f;
-    color: #e8ecec;
+    border: 1px solid #7F8C94;
+    background: #20282D;
+    color: #EDF2F3;
 }
 .dark .body-text {
-    color: #a3aeb2;
+    color: #A8B4B9;
 }
 .dark .cancel {
-    border: 1px solid #333d45;
-    background: #181e22;
-    color: #a3aeb2;
+    border: 1px solid #64727B;
+    background: #1A2126;
+    color: #A8B4B9;
 }
 .dark .cancel:hover {
-    border: 1px solid #414c55;
-    background: #222a2f;
-    color: #e8ecec;
+    border: 1px solid #7F8C94;
+    background: #20282D;
+    color: #EDF2F3;
 }
 .dark .confirm {
-    border: 1px solid #4fd1c5;
-    background: #4fd1c5;
-    color: #08110f;
+    border: 1px solid #2DD4BF;
+    background: #2DD4BF;
+    color: #04211D;
 }
 .dark .confirm:hover {
-    border: 1px solid #6fe0d5;
-    background: #6fe0d5;
+    border: 1px solid #5EEAD4;
+    background: #5EEAD4;
 }
 </style>

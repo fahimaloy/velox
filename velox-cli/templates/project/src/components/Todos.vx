@@ -183,7 +183,7 @@ impl State {
 <style scoped>
 /* `font-family` / `font-size` / `line-height` are declared on the ROOT of every
    component in this template, so each one is self-contained and readable on its
-   own; everything below inherits from here (velox-style/src/lib.rs:733). */
+   own; everything below inherits from here (velox-style/src/lib.rs:761). */
 .todos {
     display: flex;
     flex-direction: column;
@@ -202,7 +202,7 @@ impl State {
     align-items: center;
     gap: 8px;
     padding: 7px;
-    border: 1px solid #dedbd3;
+    border: 1px solid #D8D4CB;
     border-radius: 12px;
     background: #ffffff;
 }
@@ -232,10 +232,10 @@ impl State {
     display: block;
     margin: 0;
     padding: 32px 20px;
-    border: 1px solid #dedbd3;
+    border: 1px solid #D8D4CB;
     border-radius: 10px;
     background: #ffffff;
-    color: #6b7377;
+    color: #667076;
     font-size: 14px;
     line-height: 1.5;
     text-align: center;
@@ -244,21 +244,21 @@ impl State {
 /* Dark overrides — source order decides the winner (velox-style/src/lib.rs
    `apply_styles_with_hover`), so they come last. */
 .dark .composer {
-    border: 1px solid #242c31;
-    background: #161b1f;
+    border: 1px solid #364147;
+    background: #141A1E;
 }
 .dark .add {
-    border: 1px solid #4fd1c5;
-    background: #4fd1c5;
-    color: #08110f;
+    border: 1px solid #2DD4BF;
+    background: #2DD4BF;
+    color: #04211D;
 }
 .dark .add:hover {
-    border: 1px solid #6fe0d5;
-    background: #6fe0d5;
+    border: 1px solid #5EEAD4;
+    background: #5EEAD4;
 }
 .dark .empty {
-    border: 1px solid #242c31;
-    background: #161b1f;
-    color: #75818a;
+    border: 1px solid #364147;
+    background: #141A1E;
+    color: #849299;
 }
 </style>

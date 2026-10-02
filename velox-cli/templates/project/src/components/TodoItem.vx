@@ -40,14 +40,20 @@
 //
 // The check and the remove control are `<button>`s rather than an
 // `<input type="checkbox">` because Velox draws that at a fixed 18px with a
-// hard-coded tick colour (velox-renderer/src/skia_render.rs:2171), which cannot
+// hard-coded tick colour (velox-renderer/src/skia_render.rs:2313), which cannot
 // be themed — and because `:hover` only reaches a `<button>`, an element
 // carrying `on:click`, or an element whose class is literally `btn`
 // (velox-renderer/src/events.rs:150). Both of these need hover.
 //
 // The ✓ and × above are literal characters, not character references: nothing in
-// Velox decodes `&#10003;`, and both code points are present in the two faces
-// the renderer can actually load.
+// Velox decodes `&#10003;`. Which of them actually render is a HOST-FONT
+// question and only ONE of the two is safe everywhere: × U+00D7 is Latin-1
+// Supplement and is in every candidate face, but ✓ U+2713 is NOT in Noto Sans.
+// Velox has one face and no glyph fallback, so a missing codepoint paints as
+// glyph 0 — a tofu box. `load_default_typeface` therefore prefers DejaVu Sans,
+// which has both, and the same face is bundled under
+// `velox-renderer/assets/`; the full coverage table is in `App.vx`'s script
+// block. Check a new symbol against that table before using it here.
 pub struct Props {
     pub todo: String,
     pub completed: bool,
@@ -113,7 +119,7 @@ impl State {
     gap: 12px;
     width: 100%;
     padding: 11px 12px;
-    border: 1px solid #dedbd3;
+    border: 1px solid #D8D4CB;
     border-radius: 10px;
     background: #ffffff;
 }
@@ -128,7 +134,7 @@ impl State {
     width: 22px;
     height: 22px;
     padding: 0;
-    border: 1px solid #c4bfb4;
+    border: 1px solid #868D92;
     border-radius: 999px;
     background: #ffffff;
     color: #ffffff;
@@ -162,9 +168,16 @@ impl State {
     border: 1px solid transparent;
     border-radius: 8px;
     background: #ffffff;
-    color: #6b7377;
+    color: #667076;
     font-size: 16px;
     line-height: 1;
+    /* Its ONLY child is a bare text node — the × — not an element. `justify-
+       content` positions flex ITEMS, and a text node is not one, so the × ignores
+       the `center` above and sits at the padding edge. `text-align` is what the
+       painter actually reads for a text node, and the sibling `.ghost` /
+       `.cancel` rules already carry it for the same reason. Without this the ×
+       is visibly off-centre in its button. */
+    text-align: center;
 }
 .remove:hover {
     border: 1px solid #a3342c;
@@ -174,14 +187,14 @@ impl State {
 
 /* Completed rows.
 
-   `text-decoration` is INHERITABLE (velox-style/src/lib.rs:733), so the
+   `text-decoration` is INHERITABLE (velox-style/src/lib.rs:761), so the
    declaration on this box reaches the text node inside it, and the painter
    reads it there — `line-through` is drawn as its own band above the baseline
    (velox-renderer/src/skia_render.rs `draw_text_decorations`).
 
    The state class is on the card and the text is reached as a DESCENDANT of it
    rather than as `.todo-item.completed`: the selector parser takes everything
-   after a leading `.` as ONE class name (velox-style/src/lib.rs:447), so
+   after a leading `.` as ONE class name (velox-style/src/lib.rs:382), so
    `.todo-item.completed` looks for a class called "todo-item.completed" and
    matches nothing. */
 .completed .check {
@@ -195,50 +208,50 @@ impl State {
     background: #0a5750;
 }
 .completed .todo-text {
-    color: #6b7377;
+    color: #667076;
     text-decoration: line-through;
 }
 
-/* Dark overrides — source order decides the winner (velox-style/src/lib.rs
-   `apply_styles_with_hover`), so they come last. The `.dark .completed …` pair
+/* Dark overrides — source order decides the winner (velox-style/src/lib.rs:786
+   `apply_styles_with_hover`, cascade loop at :840), so they come last. The `.dark .completed …` pair
    has to come after BOTH `.completed …` and `.dark …` to beat them. */
 .dark .todo-item {
-    border: 1px solid #242c31;
-    background: #161b1f;
+    border: 1px solid #364147;
+    background: #141A1E;
 }
 .dark .check {
-    border: 1px solid #333d45;
-    background: #161b1f;
-    color: #08110f;
+    border: 1px solid #64727B;
+    background: #141A1E;
+    color: #04211D;
 }
 .dark .check:hover {
-    border: 1px solid #4fd1c5;
+    border: 1px solid #2DD4BF;
 }
 .dark .check-mark {
-    color: #08110f;
+    color: #04211D;
 }
 .dark .todo-text {
-    color: #e8ecec;
+    color: #EDF2F3;
 }
 .dark .remove {
     border: 1px solid transparent;
-    background: #161b1f;
-    color: #75818a;
+    background: #141A1E;
+    color: #849299;
 }
 .dark .remove:hover {
-    border: 1px solid #f08a80;
-    background: #f08a80;
-    color: #1a0906;
+    border: 1px solid #FF8A80;
+    background: #FF8A80;
+    color: #2B0704;
 }
 .dark .completed .check {
-    border: 1px solid #4fd1c5;
-    background: #4fd1c5;
+    border: 1px solid #2DD4BF;
+    background: #2DD4BF;
 }
 .dark .completed .check:hover {
-    border: 1px solid #6fe0d5;
-    background: #6fe0d5;
+    border: 1px solid #5EEAD4;
+    background: #5EEAD4;
 }
 .dark .completed .todo-text {
-    color: #75818a;
+    color: #849299;
 }
 </style>

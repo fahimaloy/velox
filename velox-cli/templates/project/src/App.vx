@@ -79,10 +79,28 @@
 // glyph names the theme you are IN rather than the one you would move to. They
 // are written as literal characters on purpose: NOTHING in Velox decodes an HTML
 // character reference — `&#9728;` reaches the text painter as the seven
-// characters `&#9728;`, not as U+2600 — and U+2600 ☀ and U+263E ☾ are both
-// present in the only two faces the renderer can load (Noto Sans and DejaVu
-// Sans, per `load_default_typeface`), which is what makes writing them out
-// safe rather than a gamble.
+// characters `&#9728;`, not as U+2600.
+//
+// THE GLYPHS ARE A HOST-FONT RISK, and this is the honest statement of it. An
+// earlier version of this comment claimed U+2600 ☀ and U+263E ☾ were "both
+// present in the only two faces the renderer can load". That was true for
+// DejaVu Sans and FALSE for Noto Sans, which has neither — and which face wins
+// depends on the machine. Measured from the real cmaps:
+//
+//   face         U+2600 ☀   U+263E ☾   U+2713 ✓   U+2715 ✕   U+00D7 ×
+//   DejaVu Sans  present    present    present    present    present
+//   Noto Sans    MISSING    MISSING    MISSING    MISSING    present
+//
+// Velox has exactly ONE face and NO glyph fallback: the only text draw is
+// `draw_str`, a single typeface with no shaping, so an unmapped codepoint
+// becomes glyph 0 — a tofu box, which is what an earlier screenshot of this
+// template showed. `load_default_typeface` now prefers DejaVu Sans precisely
+// because of this table (velox-renderer/src/skia_render.rs `CANDIDATES`), and
+// the same two faces are bundled under `velox-renderer/assets/`, so the glyphs
+// are covered wherever either file can be read. If you add a character to this
+// template, check it against that table first: adding a symbol no candidate
+// face carries puts a tofu box back on the page, and there is no runtime
+// fallback to catch it for you.
 import Todos from './components/Todos.vx'
 import Confirm from './components/Confirm.vx'
 import Modal from './components/Modal.vx'
@@ -252,16 +270,18 @@ impl State {
 </script>
 
 <style scoped>
-/* The one place a font is named. It is INHERITABLE (velox-style/src/lib.rs:733),
+/* The one place a font is named. It is INHERITABLE (velox-style/src/lib.rs:761),
    so every descendant picks it up and no child rule has to repeat it.
 
    Today the stack documents intent rather than being resolved: the renderer's
    font cache holds exactly ONE typeface — whatever `load_default_typeface`
    finds, which is DejaVu Sans or Noto Sans — and `parse_font_family` keeps only
-   the FIRST name in a comma list (velox-renderer/src/skia_render.rs:462), so
+   the FIRST name in a comma list (velox-renderer/src/skia_render.rs:512), so
    there is no per-family fallback and no way to ask for a second face. The list
    is written the way a CSS author would write it so that it starts working the
-   day the cache does, and it costs nothing today. */
+   day the cache does, and it costs nothing today. `get_or_load_family` no
+   longer writes the default face into the cache under a name that missed, so
+   this stays honestly inert rather than becoming permanently wrong. */
 
 .app {
     width: 100%;
@@ -328,14 +348,19 @@ impl State {
     width: 38px;
     height: 38px;
     padding: 0;
-    border: 1px solid #dedbd3;
+    /* The CONTROL border token, not the decorative one. This is a button you
+       can operate and it sits directly on the page, so its edge has to be
+       identifiable (WCAG 1.4.11, 3:1): `#D8D4CB` on the `#f6f5f2` page is
+       1.36:1, which is not a boundary at all. `.ghost` beside it already uses
+       `#868D92` — two buttons on one row must not disagree about their edge. */
+    border: 1px solid #868D92;
     border-radius: 999px;
     background: #ffffff;
     color: #5a6469;
 }
 .toggle:hover {
-    border: 1px solid #c4bfb4;
-    background: #efece5;
+    border: 1px solid #636A70;
+    background: #EFEDE8;
     color: #14181b;
 }
 .glyph {
@@ -375,7 +400,7 @@ impl State {
     flex: 0 0 auto;
     height: 28px;
     padding: 0 10px;
-    border: 1px solid #dedbd3;
+    border: 1px solid #868D92;
     border-radius: 8px;
     background: #ffffff;
     color: #5a6469;
@@ -384,61 +409,75 @@ impl State {
     text-align: center;
 }
 .ghost:hover {
-    border: 1px solid #c4bfb4;
-    background: #efece5;
+    border: 1px solid #636A70;
+    background: #EFEDE8;
     color: #14181b;
 }
 .footnote {
     margin: 22px 0 0;
     font-size: 12px;
     line-height: 1.5;
-    color: #6b7377;
+    color: #667076;
 }
 
 /* Dark overrides. Velox's cascade has no specificity and no `!important`
-   (velox-style/src/lib.rs:812 `apply_styles_with_hover` — last match wins), so
-   every dark rule has to come AFTER the light rule it beats, in this one block.
-   This is also the shape a caller appends to in order to restyle dark mode. */
+   (velox-style/src/lib.rs:786 `apply_styles_with_hover`, whose cascade loop is
+   at :840 — last match wins), so every dark rule has to come AFTER the light
+   rule it beats, in this one block. This is also the shape a caller appends to
+   in order to restyle dark mode.
+
+   The dark values are one value per ROLE, and the roles are the same names
+   light mode uses. The border tokens are deliberately three, not one:
+   decorative (`#364147`) separates a card from its page and stays quiet;
+   control (`#64727B`) is the resting edge of something you can operate and
+   clears 1.4.11's 3:1 for the first time in this template; control hover
+   (`#7F8C94`) is one obvious step above both. Two files used to disagree about
+   what a ghost-button hover looked like — the same interaction, two values —
+   which is exactly the drift the roles are here to prevent. */
 .dark .app {
-    background: #0f1316;
-    color: #e8ecec;
+    background: #0A0E11;
+    color: #EDF2F3;
 }
 .dark .eyebrow {
-    color: #4fd1c5;
+    color: #2DD4BF;
 }
 .dark .title {
-    color: #e8ecec;
+    color: #EDF2F3;
 }
 .dark .tagline {
-    color: #a3aeb2;
+    color: #A8B4B9;
 }
 .dark .toggle {
-    border: 1px solid #242c31;
-    background: #161b1f;
-    color: #a3aeb2;
+    border: 1px solid #64727B;
+    background: #141A1E;
+    color: #A8B4B9;
 }
 .dark .toggle:hover {
-    border: 1px solid #333d45;
-    background: #1d2429;
-    color: #e8ecec;
+    border: 1px solid #7F8C94;
+    background: #20282D;
+    color: #EDF2F3;
 }
 .dark .meta-count {
-    color: #a3aeb2;
+    color: #A8B4B9;
 }
 .dark .rule {
-    background: #242c31;
+    background: #364147;
 }
 .dark .ghost {
-    border: 1px solid #242c31;
-    background: #161b1f;
-    color: #a3aeb2;
+    /* `#64727B`, the control token, not the decorative `#364147` the cards use.
+       A button's edge on the `#0A0E11` page has to clear 3:1 (WCAG 1.4.11) and
+       `#364147` is 1.85:1 — the same mistake the light `.toggle` used to make,
+       and the reason the border roles are three tokens rather than two. */
+    border: 1px solid #64727B;
+    background: #141A1E;
+    color: #A8B4B9;
 }
 .dark .ghost:hover {
-    border: 1px solid #333d45;
-    background: #1d2429;
-    color: #e8ecec;
+    border: 1px solid #7F8C94;
+    background: #20282D;
+    color: #EDF2F3;
 }
 .dark .footnote {
-    color: #75818a;
+    color: #849299;
 }
 </style>

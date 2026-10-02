@@ -150,7 +150,7 @@ impl State {
     width: 100%;
     max-width: 400px;
     padding: 22px;
-    border: 1px solid #dedbd3;
+    border: 1px solid #D8D4CB;
     border-radius: 14px;
     background: #ffffff;
     color: #14181b;
@@ -209,7 +209,7 @@ impl State {
     flex: 0 0 auto;
     height: 36px;
     padding: 0 16px;
-    border: 1px solid #dedbd3;
+    border: 1px solid #868D92;
     border-radius: 8px;
     background: #ffffff;
     color: #5a6469;
@@ -218,8 +218,8 @@ impl State {
     text-align: center;
 }
 .cancel:hover {
-    border: 1px solid #c4bfb4;
-    background: #f6f5f2;
+    border: 1px solid #636A70;
+    background: #EFEDE8;
     color: #14181b;
 }
 .accept {
@@ -242,41 +242,41 @@ impl State {
 /* Dark overrides — source order decides the winner (velox-style/src/lib.rs
    `apply_styles_with_hover`), so they come last. */
 .dark .overlay {
-    background: rgba(3, 5, 6, 0.66);
+    background: rgba(4, 7, 9, 0.72);
 }
 .dark .panel {
-    border: 1px solid #242c31;
-    background: #181e22;
-    color: #e8ecec;
+    border: 1px solid #364147;
+    background: #1A2126;
+    color: #EDF2F3;
 }
 .dark .badge {
-    border: 1px solid #3a2020;
+    border: 1px solid #4A2B28;
     background: #2a1614;
-    color: #f08a80;
+    color: #FF8A80;
 }
 .dark .title {
-    color: #e8ecec;
+    color: #EDF2F3;
 }
 .dark .message {
-    color: #a3aeb2;
+    color: #A8B4B9;
 }
 .dark .cancel {
-    border: 1px solid #333d45;
-    background: #181e22;
-    color: #a3aeb2;
+    border: 1px solid #64727B;
+    background: #1A2126;
+    color: #A8B4B9;
 }
 .dark .cancel:hover {
-    border: 1px solid #414c55;
-    background: #222a2f;
-    color: #e8ecec;
+    border: 1px solid #7F8C94;
+    background: #20282D;
+    color: #EDF2F3;
 }
 .dark .accept {
-    border: 1px solid #f08a80;
-    background: #f08a80;
-    color: #1a0906;
+    border: 1px solid #FF8A80;
+    background: #FF8A80;
+    color: #2B0704;
 }
 .dark .accept:hover {
-    border: 1px solid #f7a49b;
-    background: #f7a49b;
+    border: 1px solid #FFA9A1;
+    background: #FFA9A1;
 }
 </style>
