@@ -1,9 +1,10 @@
 use crate::style::{Sides, TextOverflow, VerticalAlign, WhiteSpace};
-use crate::{Length, VNode};
+use crate::{Length, Props, VNode};
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::collections::hash_map::Entry;
 use std::rc::Rc;
+use std::sync::RwLock;
 
 /// Default font size for root element (used for rem calculations)
 ///
@@ -52,14 +53,18 @@ enum InlineRunItem<'a> {
         font_family: String,
         align: VerticalAlign,
         /// Whether this element's subtree contains any text. An inline element
-        /// with none -- an empty `<span>`, an `<img>`, which has no box in this
-        /// engine -- still gets a box, because a box of zero size is still a box,
-        /// and the `LayoutNode` tree has to mirror the `VNode` tree for the
-        /// renderer to be able to reach it at all.
+        /// with none -- an empty `<span>`, an `<img>` with no `src`, which is not
+        /// replaced and so has no box of its own -- still gets a box, because a box
+        /// of zero size is still a box, and the `LayoutNode` tree has to mirror the
+        /// `VNode` tree for the renderer to be able to reach it at all.
+        ///
+        /// An `<img>` that DOES carry a `src` never arrives here: it is replaced, so
+        /// it is an `Atomic` and is measured by `lay_out_atomic`.
         has_text: bool,
     },
-    /// `display: inline-block`: one unbreakable box that establishes its own
-    /// block formatting context, so it is never flattened and never split.
+    /// `display: inline-block`, and every replaced element: one unbreakable box
+    /// that establishes its own block formatting context, so it is never flattened
+    /// and never split. See `is_atomic_inline_box` for the two ways in.
     Atomic {
         path: Vec<usize>,
         node: &'a VNode,
@@ -384,7 +389,7 @@ fn inline_leaf_node(rect: Rect, source_index: usize, children: Vec<LayoutNode>) 
     }
 }
 
-/// Lay one `inline-block` out and return `(width, height, baseline offset)`.
+/// Lay one atomic inline-level box out: an `inline-block` or a replaced element.
 ///
 /// Shrink-to-fit is CSS 2.1 §10.3.5: `min(max(preferred minimum, available),
 /// preferred)`. The crate has no intrinsic-size helper, so `preferred` is taken
@@ -402,6 +407,23 @@ fn lay_out_atomic(
     y: i32,
 ) -> LayoutNode {
     let available = (ctx.line_limit - line_width_used).max(0);
+
+    // A REPLACED element is not shrink-to-fit, and the two-pass probe below would
+    // quietly make it so. `max_content_width` of a source with no content of its
+    // own is 0, so the second pass would hand `at` a target of 0 and a
+    // `width: 25%` would resolve a quarter of ZERO rather than a quarter of the
+    // containing block. CSS 2.1 §10.3.5 is for a width of `auto`, and a replaced
+    // element's width is not `auto` when a `src` names a source: it is the
+    // declaration, or the presentational hint, or the intrinsic size -- the order
+    // `at` already resolves. So the available width goes in unchanged and `at`
+    // decides, which also keeps the fallback order in one place instead of two.
+    //
+    // A replaced element wider than the space left on the line overflows it,
+    // which is what a browser does and what a shrink-to-fit would have hidden.
+    if is_replaced_element(node) {
+        return lay_out_atomic_at(node, source_index, available, ctx, y).0;
+    }
+
     let inset = atomic_padding_and_border(node, ctx);
 
     // `at` lays a block out at whatever width it is given and a block with no
@@ -1281,10 +1303,11 @@ fn flush_inline_run(
             x += p.width;
         }
         // An inline element whose subtree has no text at all -- an empty
-        // `<span>`, an `<img>` -- contributes no measurable piece, so it never
-        // reached `merged` and would be missing from the tree. It still needs a
-        // box, or the renderer could not resolve its index and the whole subtree
-        // beneath it would be skipped.
+        // `<span>`, an `<img>` with no `src` -- contributes no measurable piece, so
+        // it never reached `merged` and would be missing from the tree. It still
+        // needs a box, or the renderer could not resolve its index and the whole
+        // subtree beneath it would be skipped. An `<img>` WITH a `src` is a replaced
+        // Atomic and never reaches this loop: the box it gets is a real one.
         for (ii, item) in run.iter().enumerate() {
             let InlineRunItem::Fragment { has_text, .. } = item else {
                 continue;
@@ -2686,14 +2709,167 @@ pub fn is_inline_level_box(node: &VNode) -> bool {
 /// Whether a box is an ATOMIC inline-level box: inline-level, but establishing
 /// its own block formatting context, so a line box places it whole and its
 /// contents do not join the surrounding line. `display: inline-block` is the
-/// only value with that shape here.
+/// only value with that shape here, plus every REPLACED element.
 ///
-/// An element with no `display` is never atomic. `button`, `input`, `select` and
-/// `textarea` are `inline-block` in a browser's UA sheet and Velox makes them
-/// blocks instead; see `default_display_for_tag` for why that deviation lives
-/// there and not here.
+/// A replaced element is atomic by definition rather than by declaration — CSS 2.1
+/// §10.8.1 puts it in the same category — and it matters that the test does not
+/// stop at `display: inline-block`. An `<img src=…>` with no `display` at all is
+/// `inline` by tag, so without this it entered the inline run as a text-less
+/// Fragment, the back-fill at the end of `flush_inline_run` gave it width 0, the
+/// renderer drew into a zero-width rect, and no image was ever painted. With this
+/// it enters as an Atomic and is sized by `replaced_used_size`.
+///
+/// `button`, `input`, `select` and `textarea` are `inline-block` in a browser's
+/// UA sheet and Velox makes them blocks instead; see `default_display_for_tag`
+/// for why that deviation lives there and not here.
 pub fn is_atomic_inline_box(node: &VNode) -> bool {
-    explicit_display(node).as_deref() == Some("inline-block")
+    explicit_display(node).as_deref() == Some("inline-block") || is_replaced_element(node)
+}
+
+// ===== REPLACED ELEMENTS ==================================================
+//
+// A replaced element has no content of its own to lay out: its box comes from
+// outside the tree. CSS 2.1 §10.3.2 resolves that box in this order:
+//
+//   1. the used value of `width`/`height` (CSS 2.1 §10.2),
+//   2. otherwise the intrinsic width/height of the source, with the one axis
+//      that IS specified setting the ratio for the other,
+//   3. otherwise 300x150, the default object size.
+//
+// Step 3 is not modelled: with no probe registered and no attribute, an `<img>`
+// is a zero-size box, which is also what an `inline-block` with no content
+// measures today (`max_content_width` returns 0), so the two routes agree
+// rather than one of them inventing a size. A broken or not-yet-decoded source
+// is therefore invisible, which is what a browser does with it too.
+//
+// The HTML `width`/`height` ATTRIBUTES enter at step 1, BELOW the CSS
+// declarations: they are presentational hints, which the HTML spec maps to
+// `width`/`height` declarations that any author rule overrides. Reading them
+// here is that mapping, not a second source of truth — and CSS wins per AXIS,
+// so `width: 120px` beside `height="30"` takes its width from CSS and its
+// height from the attribute.
+
+/// A probe that reports the PIXEL size of a replaced element's source.
+///
+/// Registered by the renderer against its image backend through
+/// [`set_intrinsic_size_probe`]; `None` means no backend, and
+/// `velox-dom` decodes nothing itself — this crate has no image decoder and
+/// must not grow one.
+///
+/// The seam is a function pointer rather than a table of sizes so the answer
+/// comes from the renderer's OWN cache at layout time, which is where a decode
+/// belongs: one registration at init, no second copy of the sizes, and nothing
+/// to invalidate when the cache evicts.
+pub type IntrinsicSizeProbe = fn(src: &str) -> Option<(i32, i32)>;
+
+static INTRINSIC_SIZE_PROBE: RwLock<Option<IntrinsicSizeProbe>> = RwLock::new(None);
+
+/// Register a probe backed by a real image backend (called by velox-renderer at
+/// init).
+///
+/// Shape and locking are [`crate::text_wrap::set_skia_measurer`]'s, deliberately:
+/// this is the second such seam in the crate and there is one way to write it.
+/// A probe answers for one `src` at a time and is asked only for `src`
+/// attributes, so an unregistered or unhelpful probe costs a replaced element its
+/// intrinsic size and nothing else.
+pub fn set_intrinsic_size_probe(f: IntrinsicSizeProbe) {
+    if let Ok(mut g) = INTRINSIC_SIZE_PROBE.write() {
+        *g = Some(f);
+    }
+}
+
+/// What the registered probe makes of this element's `src`, in pixels.
+///
+/// Non-positive extents are dropped: a decoder that reports a zero or negative
+/// size has not measured the source, and a box of that size paints nothing. An
+/// empty `src` is not special-cased either — it is a present attribute, and the
+/// probe is the only thing that can know what it resolves to.
+fn intrinsic_size_of(props: &Props) -> Option<(i32, i32)> {
+    let src = props.attrs.get("src")?;
+    let (w, h) = INTRINSIC_SIZE_PROBE.read().ok().and_then(|g| *g)?(src)?;
+    (w > 0 && h > 0).then_some((w, h))
+}
+
+/// Whether the box's size comes from OUTSIDE the tree, so it has none of its
+/// own content to be sized by.
+///
+/// Presence of a `src` ATTRIBUTE is the test, and it is deliberately not a tag
+/// test. Every element that can name an external source is replaced in CSS —
+/// `img`, `video`, `iframe`, `embed`, `object`, `input type=image` — and a
+/// per-tag list would be a list to extend by hand each time one of those is
+/// used, with a silent zero-size box as the failure mode when it was missed.
+///
+/// What the rule costs is `script`, `link`, `source` and `track`, which carry a
+/// `src` and generate no box in a browser because the UA sheet gives them
+/// `display: none`. Velox has no such sheet, so those elements lay out as a
+/// zero-size box where they used to lay out as a full-container-width block.
+/// Nothing is painted either way and neither is hit-testable, so the whole
+/// divergence is the width of a box that was never going to be drawn in.
+///
+/// An element with NO `src` is never replaced. That is why an `<img>` with no
+/// source keeps the box it had: it names nothing, so it has no intrinsic size
+/// to be sized by, and an unsized one is still a zero-width line-box member
+/// rather than a zero-width atomic.
+pub fn is_replaced_element(node: &VNode) -> bool {
+    match node {
+        VNode::Text(_) => false,
+        VNode::Element { props, .. } => props.attrs.contains_key("src"),
+    }
+}
+
+/// The size a replaced element uses for one axis when its CSS declaration says
+/// nothing, following the order at the top of this section: the presentational
+/// attribute first, then the intrinsic size.
+///
+/// ZERO when neither exists, which is the one value a replaced element must
+/// never inherit from a block: `content_size_for` answers the available width
+/// for a block with no declared width, and a replaced element that filled its
+/// container because nothing told it how wide it is would be the opposite of
+/// what a replaced element is.
+///
+/// `basis` is what a percentage resolves against — the same basis the CSS
+/// declaration at the call site resolves against, so `width="50%"` and
+/// `width: 50%` are one number and not two. The intrinsic half is in PIXELS
+/// already, because that is what a decoder reports.
+fn replaced_used_size(
+    props: &Props,
+    attr: &str,
+    intrinsic: Option<i32>,
+    basis: f32,
+    parent_font_size: f32,
+    root_font_size: f32,
+    viewport: (f32, f32),
+) -> i32 {
+    let hinted = props.attrs.get(attr).and_then(|raw| {
+        is_presentational_dimension(raw)
+            .then(|| parse_length_value(raw, basis, parent_font_size, root_font_size, viewport))?
+    });
+    hinted
+        .filter(|v| *v >= 0.0)
+        .map(|v| v.round() as i32)
+        .or(intrinsic)
+        .unwrap_or(0)
+}
+
+/// Whether an attribute value is in the grammar HTML gives a replaced element's
+/// `width`/`height`: a `<dimension>` (`200`, `200px`) or a `<percentage>`
+/// (`50%`).
+///
+/// `parse_length_value` resolves every unit this engine knows, which is more
+/// than the HTML grammar allows — `width="2em"` would resolve against the font
+/// size here and is dropped by a browser. The hint is applied only when it is a
+/// value HTML actually defines, so the presentational mapping cannot be widened
+/// into a longer unit list by accident. Note what this rejects for free: a
+/// negative or signed value, which HTML's grammar excludes and CSS 2.1 §10.4
+/// drops as an invalid `width` anyway.
+fn is_presentational_dimension(raw: &str) -> bool {
+    let raw = raw.trim();
+    let number = raw
+        .strip_suffix("px")
+        .or_else(|| raw.strip_suffix('%'))
+        .unwrap_or(raw)
+        .trim();
+    !number.is_empty() && number.chars().all(|c| c.is_ascii_digit() || c == '.')
 }
 
 fn is_inline_formatting_participant(node: &VNode) -> bool {
@@ -3503,6 +3679,14 @@ pub fn compute_layout(node: &VNode, viewport_w: i32, viewport_h: i32) -> LayoutN
                 let elem_y = y + mt;
 
                 // Determine width: if set, use as content+padding width; else take available width
+                //
+                // A REPLACED element takes its width from the order in the replaced
+                // section above when the declaration says nothing, and never from
+                // `avail_w` — which is the branch every other undeclared block
+                // takes, and the whole reason an `<img>` used to be sized by its
+                // container instead of by its source.
+                let replaced = is_replaced_element(node);
+                let intrinsic = replaced.then(|| intrinsic_size_of(props)).flatten();
                 let declared_w = style_lookup_len_full(
                     style,
                     "width",
@@ -3511,7 +3695,20 @@ pub fn compute_layout(node: &VNode, viewport_w: i32, viewport_h: i32) -> LayoutN
                     root_font_size,
                     vw_f,
                     vh_f,
-                );
+                )
+                .or_else(|| {
+                    replaced.then(|| {
+                        replaced_used_size(
+                            props,
+                            "width",
+                            intrinsic.map(|(w, _)| w),
+                            avail_w as f32,
+                            parent_font_size,
+                            root_font_size,
+                            (vw_f, vh_f),
+                        )
+                    })
+                });
 
                 let (ml_auto, mr_auto) = style_margin_auto_sides(style);
                 let (ml, mr) = if let Some(dw) = declared_w.filter(|_| ml_auto || mr_auto) {
@@ -3538,6 +3735,12 @@ pub fn compute_layout(node: &VNode, viewport_w: i32, viewport_h: i32) -> LayoutN
                 let elem_x = x + ml;
 
                 // Determine height: handle viewport-relative heights (100vh, min-height: 100vh)
+                //
+                // The replaced fallback is here as well as on the width, and for
+                // the same reason: this is the `avail_h` the children and the
+                // out-of-flow descendants are measured against, so a replaced
+                // element whose height comes from its source must say so here
+                // too, not only at the height the rect is finally given.
                 let declared_h = style_lookup_len_full(
                     style,
                     "height",
@@ -3546,7 +3749,20 @@ pub fn compute_layout(node: &VNode, viewport_w: i32, viewport_h: i32) -> LayoutN
                     root_font_size,
                     vw_f,
                     vh_f,
-                );
+                )
+                .or_else(|| {
+                    replaced.then(|| {
+                        replaced_used_size(
+                            props,
+                            "height",
+                            intrinsic.map(|(_, h)| h),
+                            avail_h as f32,
+                            parent_font_size,
+                            root_font_size,
+                            (vw_f, vh_f),
+                        )
+                    })
+                });
 
                 // Legacy 100% viewport-filling pair still respected, but root already true covers implicit fill
                 let has_100p_width = declared_w
@@ -5601,6 +5817,12 @@ pub fn compute_layout(node: &VNode, viewport_w: i32, viewport_h: i32) -> LayoutN
                 }
 
                 // Height: declared or content height + paddings/borders, clamped by min/max-height
+                //
+                // This re-reads `height` against `my_font_size` where the first read
+                // above used `parent_font_size` — an `em` height means different
+                // numbers on the two, which is pre-existing and left alone. The
+                // replaced fallback is added to BOTH rather than hoisted into one
+                // value, so that difference keeps being the only difference.
                 let declared_h2 = style_lookup_len_full(
                     style,
                     "height",
@@ -5609,7 +5831,20 @@ pub fn compute_layout(node: &VNode, viewport_w: i32, viewport_h: i32) -> LayoutN
                     root_font_size,
                     vw_f,
                     vh_f,
-                );
+                )
+                .or_else(|| {
+                    replaced.then(|| {
+                        replaced_used_size(
+                            props,
+                            "height",
+                            intrinsic.map(|(_, h)| h),
+                            avail_h as f32,
+                            my_font_size,
+                            root_font_size,
+                            (vw_f, vh_f),
+                        )
+                    })
+                });
                 // Use max_y_end which correctly tracks the spatial extent of all children,
                 // including those positioned above content_y_start via negative margins/offsets.
                 let content_h = (max_y_end - content_y_start).max(0);
