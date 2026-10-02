@@ -3210,6 +3210,11 @@ fn apply_absolute_position(
         viewport_h,
     );
 
+    // Where the box already sits, before the offsets below overwrite it. The
+    // move that follows is a TRANSLATION of the whole subtree, so the delta has
+    // to be measured from here.
+    let (pre_x, pre_y) = (node.rect.x, node.rect.y);
+
     // Both offsets on an axis: the box spans the gap between them, which is how
     // an element with `left:0; right:0` fills its containing block.
     if declared_w.is_none()
@@ -3237,6 +3242,34 @@ fn apply_absolute_position(
         node.rect.y = cb.y + (cb.h - b - node.rect.h);
     } else {
         node.rect.y = static_pos.1;
+    }
+
+    // Carry the subtree with the box.
+    //
+    // This pass runs AFTER the children have been laid out, and they were laid
+    // out relative to where this box sat in flow. Overwriting only `node.rect`
+    // therefore moved the box and LEFT everything under it where it was: a
+    // `position: fixed` dialog over a `min-height: 100vh` page was repositioned
+    // to the viewport while its panel stayed at the page's foot, one viewport
+    // below the fold — the dialog "opened" where no user could ever see it, and
+    // every handler behind it looked dead.
+    //
+    // The delta is the honest fix for a MOVE. A RESIZE (`left:0; right:0`
+    // changing the width, or `top`/`bottom` changing the height, above) still
+    // leaves the children at their old sizes, because re-flowing them would mean
+    // running this function's caller again — the same approximation
+    // `apply_sticky_position` makes at its own call site.
+    let dx = node.rect.x - pre_x;
+    let dy = node.rect.y - pre_y;
+    if dx != 0 || dy != 0 {
+        // The box's own clip was measured from its pre-move box, so it travels
+        // with it. `translate_layout_descendants` starts at the children and so
+        // would leave this one behind.
+        if let Some(clip) = node.clip.as_mut() {
+            clip.x += dx;
+            clip.y += dy;
+        }
+        translate_layout_descendants(node, dx, dy);
     }
 }
 
