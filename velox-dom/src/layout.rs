@@ -4066,6 +4066,18 @@ pub fn compute_layout(node: &VNode, viewport_w: i32, viewport_h: i32) -> LayoutN
                         /// `auto`, or negative) — NOT zero.
                         min_main_size: Option<f32>,
                         max_main_size: Option<f32>,
+                        /// The size this item's OWN box came out of the measure
+                        /// pass, on the main axis: `ln.rect.h` in a column,
+                        /// `ln.rect.w` in a row.
+                        ///
+                        /// NOT the available size that was handed to `at()`.
+                        /// Those differ whenever the item declared its own main
+                        /// size, and gating on the available size would re-lay out
+                        /// every fixed-width item in every row for nothing. This
+                        /// is the size the item's DESCENDANTS were measured
+                        /// against, which is what makes it the right thing to
+                        /// compare the resolved size to.
+                        pre_measure_main: f32,
                     }
 
                     // L-H4: order support — stable sort flex children by `order`
@@ -4485,6 +4497,11 @@ pub fn compute_layout(node: &VNode, viewport_w: i32, viewport_h: i32) -> LayoutN
                         // finally gets, which is the target.
                         let hypothetical_main_size =
                             clamp_to_min_max(flex_basis, min_main, max_main);
+                        // The size this item's own box came out of the measure
+                        // pass, on the MAIN axis. Read here, before `ln` moves
+                        // into the item, because it is what the placement pass
+                        // compares the resolved size against.
+                        let pre_measure_main = if is_column { ln.rect.h } else { ln.rect.w } as f32;
                         items.push(FlexItem {
                             child_index: fc.index,
                             layout_node: Some(ln),
@@ -4509,6 +4526,7 @@ pub fn compute_layout(node: &VNode, viewport_w: i32, viewport_h: i32) -> LayoutN
                                 .unwrap_or_else(|| "auto".to_string()),
                             min_main_size: min_main,
                             max_main_size: max_main,
+                            pre_measure_main,
                         });
                     }
 
@@ -4883,8 +4901,6 @@ pub fn compute_layout(node: &VNode, viewport_w: i32, viewport_h: i32) -> LayoutN
                     for line in &lines {
                         for &(item_idx, main_pos) in &line.main_positions {
                             if let Some(mut ln) = items[item_idx].layout_node.take() {
-                                let pre_x = ln.rect.x;
-                                let pre_y = ln.rect.y;
                                 // The resolved target main size IS the item's used
                                 // main size. Gating this write on
                                 // `grow > 0 || shrink > 0` meant `flex: 0 0 20px`
@@ -4896,22 +4912,138 @@ pub fn compute_layout(node: &VNode, viewport_w: i32, viewport_h: i32) -> LayoutN
                                 // `target_main_size` in the pass above, so writing
                                 // it unconditionally is what lands those too.
                                 let fb = items[item_idx].target_main_size.round() as i32;
+                                // Look the item's own child record up ONCE: the
+                                // re-layout below needs its `node`, and
+                                // `max-width` below needs its `style`.
+                                let item_fc = flex_children
+                                    .iter()
+                                    .find(|fc| fc.index == items[item_idx].child_index);
+                                let item_style = item_fc.and_then(|fc| fc.style);
+                                // RE-LAY OUT A RESIZED ITEM'S SUBTREE.
+                                //
+                                // The measure pass laid every item out ONCE, at the
+                                // container's full main size, and the placement pass
+                                // used to resize the item's OWN box and then call
+                                // `translate_layout_subtree`, which only adds `dx`/`dy`
+                                // to every rect and clip. It never re-measures. So
+                                // when the resolved main size differs from the size
+                                // the item was measured at, the item's box became
+                                // correct while its DESCENDANTS kept the old size --
+                                // a subtree that is merely moved, never resized. The
+                                // composer is that bug: `.field` is
+                                // `flex: 1 1 auto` and its only child is
+                                // `width: 100%`, so the input was measured at the
+                                // row's full 556 px, `.field` shrank to 480, and the
+                                // input kept spanning 556 -- overhanging `.field` by
+                                // 76 px, the Add button's 68 px plus the 8 px gap,
+                                // at EVERY window width. The Add button then paints
+                                // over the input's right 68 px, because paint order
+                                // is DOM order.
+                                //
+                                // GATED ON THE DELTA, and this is load-bearing, not
+                                // an optimisation. The re-layout is a whole extra
+                                // `at()` descent, and a second descent per flex item
+                                // is exactly how layout became `2^depth` (and `3^depth`
+                                // before tasks 2.1a/2.1c removed one). The no-change
+                                // case is the common case and pays nothing: the gate
+                                // is one float compare, and it is compared against
+                                // `pre_measure_main`, the size the item's own box
+                                // actually came out of `at()`, which is the size its
+                                // descendants were laid out against.
+                                //
+                                // The gate compares ROUNDED integer sizes because
+                                // that is the resolution the boxes are written at: a
+                                // sub-pixel delta cannot move a rect.
+                                let pre_measure_main =
+                                    items[item_idx].pre_measure_main.round() as i32;
+                                if fb != pre_measure_main
+                                    && let Some(fc) = item_fc
+                                {
+                                    // The CROSS axis is already final -- main size
+                                    // from the flex algorithm, cross size from the
+                                    // stretch pass above -- so it is handed through
+                                    // as measured and never re-derived.
+                                    //
+                                    // The containing block's MAIN extent is the
+                                    // resolved size rather than the container's
+                                    // content box. `at()` resolves the subtree root's
+                                    // own declared main size against `containing`,
+                                    // and for a flex item that declaration is
+                                    // overridden by the flex algorithm, so handing
+                                    // back the container's content box would let the
+                                    // stale size win the second time round -- which
+                                    // is how a column item declaring `height: 100%`
+                                    // kept a 556 px child inside a 480 px item.
+                                    let (rl_w, rl_h, rl_cb) = if is_column {
+                                        (
+                                            ln.rect.w,
+                                            fb,
+                                            ContainingBlock {
+                                                x: content_x,
+                                                y: content_y_start,
+                                                w: content_w,
+                                                h: fb,
+                                            },
+                                        )
+                                    } else {
+                                        (
+                                            fb,
+                                            ln.rect.h,
+                                            ContainingBlock {
+                                                x: content_x,
+                                                y: content_y_start,
+                                                w: fb,
+                                                h: content_h_available,
+                                            },
+                                        )
+                                    };
+                                    ln = at(
+                                        fc.node,
+                                        0,
+                                        0,
+                                        rl_w,
+                                        rl_h,
+                                        viewport_w,
+                                        viewport_h,
+                                        rl_cb,
+                                        Some(fc.index),
+                                        root_font_size,
+                                        my_font_size,
+                                    );
+                                    // The cross-axis size is FINAL before this
+                                    // point -- `align-items: stretch` wrote it onto
+                                    // the item's own box in the pass above, and
+                                    // nothing after here changes it -- but `at()`
+                                    // derives a block's cross size from its
+                                    // content and cannot know a stretch is
+                                    // coming. So the fresh node comes back with
+                                    // the CONTENT cross size and the stretch is
+                                    // silently dropped: a stretched `.field` came
+                                    // back 40 px tall inside a 48 px row.
+                                    // Writing it back restores it, and the
+                                    // subtree is unaffected either way because it
+                                    // never saw the stretch: the pre-layout that
+                                    // produced the node being replaced had not been
+                                    // stretched when it laid its own children out
+                                    // either. Main-axis re-measure only; the cross
+                                    // axis is carried across untouched.
+                                    if is_column {
+                                        ln.rect.w = rl_w;
+                                    } else {
+                                        ln.rect.h = rl_h;
+                                    }
+                                }
+                                // Read the translate source AFTER the re-layout:
+                                // the fresh node was laid out at the origin, so its
+                                // rect is the new `pre_x`/`pre_y` and reusing the
+                                // discarded node's would double-count the offset.
+                                let pre_x = ln.rect.x;
+                                let pre_y = ln.rect.y;
                                 if is_column {
                                     ln.rect.h = fb;
                                 } else {
                                     ln.rect.w = fb;
                                 }
-                                // The item's width is final here — main size from the
-                                // flex algorithm, or cross size from stretch — and all
-                                // three of those overwrite whatever `at()` measured, so
-                                // `max-width` has to be re-applied. Doing it before
-                                // `item_cross_size` is read means a capped column item
-                                // is also centred/flex-ended against its real width.
-                                let item_style = flex_children
-                                    .iter()
-                                    .find(|fc| fc.index == items[item_idx].child_index)
-                                    .map(|fc| fc.style)
-                                    .unwrap_or(None);
                                 ln.rect.w = clamp_width_to_max_width(
                                     ln.rect.w,
                                     item_style,
