@@ -304,15 +304,26 @@ pub fn generate_scope_id(component_name: &str) -> String {
 /// this component's template is tagged with the same `data-v-*` attribute, so
 /// a rule like `.header h1[data-v-*]` could otherwise leak across component
 /// boundaries via an un-tagged ancestor.
+///
+/// CSS comments are replaced by a space before anything else happens (see
+/// [`strip_css_comments`]). Without that, a comment between two rules is glued
+/// onto the front of the next rule's prelude, and the per-compound tokenizer
+/// then appends the scope attribute to the comment's own `*/` as though it were
+/// a compound selector: `.dark .app` was emitted as
+/// `[data-v-x] .dark[data-v-x] .app[data-v-x]`, a three-part descendant
+/// selector requiring a scope-tagged ancestor strictly above the `.dark`
+/// carrier. The carrier is the tree root, whose ancestor list is empty, so
+/// `match_prefix` finds no candidate and the rule can never match.
 pub fn scope_css(css: &str, scope_id: &str) -> String {
+    let stripped = strip_css_comments(css);
     let attr = format!("[{scope_id}]");
-    let mut out = String::with_capacity(css.len() + 32);
+    let mut out = String::with_capacity(stripped.len() + 32);
     let mut prelude = String::new();
     // Stack of block types: true = at-rule container (@media, @keyframes), false = style rule.
     let mut stack: Vec<bool> = Vec::new();
     // Depth of @keyframes container, if any. Selectors inside it (0%, from, to) must not be scoped.
     let mut keyframes_depth: Option<usize> = None;
-    for c in css.chars() {
+    for c in stripped.chars() {
         match c {
             '{' => {
                 let trimmed = prelude.trim().to_string();
@@ -365,6 +376,131 @@ pub fn scope_css(css: &str, scope_id: &str) -> String {
     }
     out.push_str(&prelude);
     out
+}
+
+/// Replace every CSS comment (`/* … */`) with a single space.
+///
+/// [`scope_css`] appends the scope attribute to every whitespace-separated
+/// token of a selector prelude, so comment text must never reach one: a
+/// comment sitting between two rules used to be glued onto the front of the
+/// NEXT rule's prelude and then scoped as if it were a compound selector.
+/// Comments must also not contribute braces — a `}` inside a comment used to
+/// close the declaration block it sat in — so the text is removed here, once,
+/// before any scoping decision is made.
+///
+/// This is a tokenizing scan, not `split("/*")`, because a `/*` inside a
+/// quoted string or inside an unquoted `url(…)` token is NOT a comment opener.
+/// Treating it as one truncates the remainder of the stylesheet: a naive
+/// string-split corrupts `content: "/*"`, `a[href="/*"]` and `url(/*)`. The
+/// scan therefore tracks the two contexts that suppress comment recognition —
+/// a quoted string, and the body of an unquoted `url()` token — and neither
+/// can hide a comment opener from the other.
+///
+/// An unterminated comment runs to end of input (CSS Syntax 3: "consume the
+/// remnants of the bad comment"), so this terminates on any input.
+///
+/// A stylesheet containing no `/*` is returned borrowed and untouched, which is
+/// what keeps [`scope_css`] byte-identical on comment-free CSS.
+fn strip_css_comments(css: &str) -> std::borrow::Cow<'_, str> {
+    use std::borrow::Cow;
+
+    // Only a literal `/*` can open a comment, so a sheet without one cannot
+    // contain one — not even inside a string or a url(), where it would be
+    // inert anyway. Nothing to scan, and the borrow keeps output identical.
+    if !css.contains("/*") {
+        return Cow::Borrowed(css);
+    }
+    let bytes = css.as_bytes();
+    let mut out = String::with_capacity(css.len());
+    // Start of the run of source text not yet copied into `out`. Comments are
+    // collapsed to a single space and everything between runs is preserved
+    // verbatim, so declaration blocks survive byte-for-byte. Every byte offset
+    // this scan stops on is ASCII (`/`, a quote, `)`, `*`) or the end of input,
+    // so it is always a character boundary and the slices never split a
+    // multi-byte character.
+    let mut run_start = 0usize;
+    let mut i = 0usize;
+    while i < bytes.len() {
+        if bytes[i] == b'/' && bytes.get(i + 1) == Some(&b'*') {
+            out.push_str(&css[run_start..i]);
+            out.push(' ');
+            i = skip_css_comment(bytes, i + 2);
+            run_start = i;
+        } else if bytes[i] == b'"' || bytes[i] == b'\'' {
+            i = skip_css_string(bytes, i);
+        } else if at_url_open(bytes, i) {
+            i = skip_css_url(bytes, i);
+        } else {
+            // Advance by one byte, not one char: the loop above only ever stops
+            // on ASCII, and the only slicing offsets are those stops.
+            i += 1;
+        }
+    }
+    out.push_str(&css[run_start..]);
+    Cow::Owned(out)
+}
+
+/// Byte offset just past the `*/` that closes the comment whose body starts at
+/// `start`, or the end of input when the comment is never closed. Every byte is
+/// legal inside a comment except that `*/` ends it, and CSS does not nest
+/// comments, so a linear scan is exact.
+fn skip_css_comment(bytes: &[u8], start: usize) -> usize {
+    let mut i = start;
+    while i < bytes.len() {
+        if bytes[i] == b'*' && bytes.get(i + 1) == Some(&b'/') {
+            return i + 2;
+        }
+        i += 1;
+    }
+    i
+}
+
+/// Byte offset just past the string whose opening quote is at `open`.
+///
+/// A `\` escapes the next byte, and an unescaped newline terminates the string
+/// as a bad-string token without consuming the newline, so neither can run the
+/// scan past the stylesheet.
+fn skip_css_string(bytes: &[u8], open: usize) -> usize {
+    let quote = bytes[open];
+    let mut i = open + 1;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'\\' => i = (i + 2).min(bytes.len()),
+            b'\n' | b'\r' | b'\x0C' => return i,
+            b if b == quote => return i + 1,
+            _ => i += 1,
+        }
+    }
+    i
+}
+
+/// True when `i` starts a `url(` token — an unquoted URL, whose body is literal
+/// text rather than a token stream. `url (` with a space is a function token,
+/// and an identifier that merely ends in `url` (`myurl(`) is that identifier
+/// followed by a parenthesis block, so neither is a URL.
+fn at_url_open(bytes: &[u8], i: usize) -> bool {
+    fn ident_byte(b: u8) -> bool {
+        b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'\\' | b'\0')
+    }
+    if i > 0 && ident_byte(bytes[i - 1]) {
+        return false;
+    }
+    matches!(
+        &bytes[i..i.saturating_add(4).min(bytes.len())],
+        [b'u' | b'U', b'r' | b'R', b'l' | b'L', b'(']
+    )
+}
+
+/// Byte offset just past the `)` that closes the unquoted URL token opening at
+/// `i`. Quoted URLs are handled as ordinary strings by the caller; this only
+/// needs to reach the closing paren, and an unterminated one runs to end of
+/// input.
+fn skip_css_url(bytes: &[u8], open: usize) -> usize {
+    let mut i = open + 4;
+    while i < bytes.len() && bytes[i] != b')' {
+        i += if bytes[i] == b'\\' { 2 } else { 1 };
+    }
+    (i + 1).min(bytes.len())
 }
 
 /// Append the scope attribute to each selector in a comma-separated selector
