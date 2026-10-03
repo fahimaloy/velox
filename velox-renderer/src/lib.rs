@@ -1841,50 +1841,67 @@ where
     // Try to create a winit event loop and window. In headless mode or when
     // no compositor is available, both can fail (winit may panic instead of
     // returning Err) — we catch this and proceed with headless rendering.
-    let (event_loop_opt, window, window_size, scale_factor): (
-        Option<winit::event_loop::EventLoop<()>>,
-        Option<winit::window::Window>,
-        PhysicalSize<u32>,
-        f32,
-    ) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let event_loop = EventLoop::new();
-        let window_result = WindowBuilder::new()
-            .with_title(title)
-            .with_inner_size(PhysicalSize::new(800, 600))
-            .build(&event_loop);
-        match window_result {
-            Ok(w) => {
-                let size = w.inner_size();
-                let sf = w.scale_factor() as f32;
-                (Some(event_loop), Some(w), size, sf)
-            }
-            Err(e) => {
-                let msg = e.to_string();
-                let lower = msg.to_ascii_lowercase();
-                let is_display_err = lower.contains("broken pipe")
-                    || lower.contains("os error 32")
-                    || lower.contains("no compositor")
-                    || lower.contains("no display server")
-                    || lower.contains("failed to connect");
-                if headless_env || is_display_err {
-                    log::warn!("window creation failed — continuing in headless mode: {msg}");
-                    (Some(event_loop), None, PhysicalSize::new(800, 600), 1.0)
-                } else {
-                    panic!("failed to create window: {e}");
+    //
+    // A NON-display failure is not headless-eligible: it is returned as a
+    // typed `VeloxError::Window`, never panicked. The old `panic!` here was
+    // caught by the `catch_unwind` below and silently converted into the same
+    // headless fallback as a broken pipe, which masked real configuration
+    // errors (bad size, closed display fd) as "running headless".
+    // Factored out of the `let` below: clippy::type_complexity fires on the
+    // inline annotation. Behaviour-identical alias.
+    type WindowOutcome = Result<
+        (
+            Option<winit::event_loop::EventLoop<()>>,
+            Option<winit::window::Window>,
+            PhysicalSize<u32>,
+            f32,
+        ),
+        String,
+    >;
+    let window_outcome: WindowOutcome =
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let event_loop = EventLoop::new();
+            let window_result = WindowBuilder::new()
+                .with_title(title)
+                .with_inner_size(PhysicalSize::new(800, 600))
+                .build(&event_loop);
+            match window_result {
+                Ok(w) => {
+                    let size = w.inner_size();
+                    let sf = w.scale_factor() as f32;
+                    Ok((Some(event_loop), Some(w), size, sf))
+                }
+                Err(e) => {
+                    let msg = e.to_string();
+                    let lower = msg.to_ascii_lowercase();
+                    let is_display_err = lower.contains("broken pipe")
+                        || lower.contains("os error 32")
+                        || lower.contains("no compositor")
+                        || lower.contains("no display server")
+                        || lower.contains("failed to connect");
+                    if headless_env || is_display_err {
+                        log::warn!("window creation failed — continuing in headless mode: {msg}");
+                        Ok((Some(event_loop), None, PhysicalSize::new(800, 600), 1.0))
+                    } else {
+                        Err(
+                            velox_dom::VeloxError::Window(format!("failed to create window: {e}"))
+                                .to_string(),
+                        )
+                    }
                 }
             }
-        }
-    }))
-    .unwrap_or_else(|payload| {
-        // Surface the panic payload (usually the compositor error, e.g.
-        // broken pipe) instead of silently masking it — log::warn is
-        // invisible without an initialized logger (CX-13 / F-23).
-        eprintln!(
-            "[velox] window/event loop creation panicked — continuing in headless mode: {}",
-            panic_detail(payload)
-        );
-        (None, None, PhysicalSize::new(800, 600), 1.0)
-    });
+        }))
+        .unwrap_or_else(|payload| {
+            // Surface the panic payload (usually the compositor error, e.g.
+            // broken pipe) instead of silently masking it — log::warn is
+            // invisible without an initialized logger (CX-13 / F-23).
+            eprintln!(
+                "[velox] window/event loop creation panicked — continuing in headless mode: {}",
+                panic_detail(payload)
+            );
+            Ok((None, None, PhysicalSize::new(800, 600), 1.0))
+        });
+    let (event_loop_opt, window, window_size, scale_factor) = window_outcome?;
 
     let window_opt: Option<winit::window::Window> = window;
     let mut renderer = match crate::skia_surface::SkiaSurface::new_raster(
@@ -2431,7 +2448,10 @@ where
     // Use EventLoop<HmrMessage> so the HMR thread can forward messages
     // directly via EventLoopProxy::send_event(HmrMessage) without any
     // shared Mutex<Receiver>.
-    let (event_loop_opt, proxy_opt, window, window_size, scale_factor): WindowBootstrap =
+    // Same contract as the plain loop above: a non-display window failure is
+    // a typed `VeloxError::Window` returned as `Err`, never a `panic!` the
+    // `catch_unwind` would launder into headless mode.
+    let window_outcome_hmr: Result<WindowBootstrap, String> =
         std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let event_loop = EventLoopBuilder::<HmrMessage>::with_user_event().build();
             let proxy = event_loop.create_proxy();
@@ -2443,7 +2463,7 @@ where
                 Ok(w) => {
                     let size = w.inner_size();
                     let sf = w.scale_factor() as f32;
-                    (Some(event_loop), Some(proxy), Some(w), size, sf)
+                    Ok((Some(event_loop), Some(proxy), Some(w), size, sf))
                 }
                 Err(e) => {
                     let msg = e.to_string();
@@ -2455,15 +2475,18 @@ where
                         || lower.contains("failed to connect");
                     if headless_env_hmr || is_display_err {
                         log::warn!("window creation failed — continuing in headless mode: {msg}");
-                        (
+                        Ok((
                             Some(event_loop),
                             Some(proxy),
                             None,
                             PhysicalSize::new(800, 600),
                             1.0,
-                        )
+                        ))
                     } else {
-                        panic!("failed to create window: {e}");
+                        Err(
+                            velox_dom::VeloxError::Window(format!("failed to create window: {e}"))
+                                .to_string(),
+                        )
                     }
                 }
             }
@@ -2476,8 +2499,9 @@ where
                 "[velox] window/event loop creation panicked — continuing in headless mode: {}",
                 panic_detail(payload)
             );
-            (None, None, None, PhysicalSize::new(800, 600), 1.0)
+            Ok((None, None, None, PhysicalSize::new(800, 600), 1.0))
         });
+    let (event_loop_opt, proxy_opt, window, window_size, scale_factor) = window_outcome_hmr?;
 
     // Spawn the HMR forwarding thread. It takes sole ownership of the
     // Receiver (moved out of the Arc<Mutex>) and forwards each HmrMessage
