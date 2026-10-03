@@ -1,0 +1,96 @@
+$ cargo test -p velox-renderer --test wrapped_text_each_line_once
+RC=101
+
+running 8 tests
+test a_forced_line_break_narrower_than_its_container_still_breaks_per_line ... FAILED
+test the_last_line_of_a_wrapped_paragraph_is_painted ... FAILED
+test a_wrapped_inline_element_paints_the_same_as_the_bare_paragraph ... FAILED
+test two_inline_elements_on_one_line_keep_their_places ... ok
+test two_lines_each_painted_once_at_its_own_line ... FAILED
+test a_single_line_is_untouched ... ok
+test every_glyph_of_a_wrapped_paragraph_is_inked_exactly_once ... FAILED
+test two_paragraphs_whose_source_index_collides_both_paint ... ok
+
+failures:
+
+---- a_forced_line_break_narrower_than_its_container_still_breaks_per_line stdout ----
+
+thread 'a_forced_line_break_narrower_than_its_container_still_breaks_per_line' (1972720) panicked at velox-renderer/tests/wrapped_text_each_line_once.rs:615:5:
+assertion `left == right` failed: one text band per text line box, the blue atomic excluded: [Band { top: 3, bottom: 13, left: 1, right: 151, ink: 346 }, Band { top: 48, bottom: 58, left: 201, right: 258, ink: 132 }]
+  left: 2
+ right: 3
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- the_last_line_of_a_wrapped_paragraph_is_painted stdout ----
+
+thread 'the_last_line_of_a_wrapped_paragraph_is_painted' (1972724) panicked at velox-renderer/tests/wrapped_text_each_line_once.rs:228:5:
+assertion `left == right` failed: expected one painted band per line box ([LayoutNode { rect: Rect { x: 0, y: 0, w: 125, h: 22 }, z_index: 0, display_none: false, source_index: Some(0), scroll_x: 0, scroll_y: 0, clip: None, stacking_context: false, scroll_height: 0, max_scroll_y: 0, scrollable: false, children: [] }, LayoutNode { rect: Rect { x: 0, y: 22, w: 134, h: 22 }, z_index: 0, display_none: false, source_index: Some(0), scroll_x: 0, scroll_y: 0, clip: None, stacking_context: false, scroll_height: 0, max_scroll_y: 0, scrollable: false, children: [] }, LayoutNode { rect: Rect { x: 0, y: 44, w: 72, h: 22 }, z_index: 0, display_none: false, source_index: Some(0), scroll_x: 0, scroll_y: 0, clip: None, stacking_context: false, scroll_height: 0, max_scroll_y: 0, scrollable: false, children: [] }]); got [Band { top: 3, bottom: 13, left: 0, right: 105, ink: 545 }] — a line box with no band is a line of text that was never drawn
+  left: 1
+ right: 3
+
+---- a_wrapped_inline_element_paints_the_same_as_the_bare_paragraph stdout ----
+
+thread 'a_wrapped_inline_element_paints_the_same_as_the_bare_paragraph' (1972722) panicked at velox-renderer/tests/wrapped_text_each_line_once.rs:228:5:
+assertion `left == right` failed: expected one painted band per line box ([LayoutNode { rect: Rect { x: 0, y: 0, w: 84, h: 22 }, z_index: 0, display_none: false, source_index: Some(0), scroll_x: 0, scroll_y: 0, clip: None, stacking_context: false, scroll_height: 0, max_scroll_y: 0, scrollable: false, children: [LayoutNode { rect: Rect { x: 0, y: 0, w: 84, h: 22 }, z_index: 0, display_none: false, source_index: Some(0), scroll_x: 0, scroll_y: 0, clip: None, stacking_context: false, scroll_height: 0, max_scroll_y: 0, scrollable: false, children: [] }] }, LayoutNode { rect: Rect { x: 0, y: 22, w: 58, h: 22 }, z_index: 0, display_none: false, source_index: Some(0), scroll_x: 0, scroll_y: 0, clip: None, stacking_context: false, scroll_height: 0, max_scroll_y: 0, scrollable: false, children: [LayoutNode { rect: Rect { x: 0, y: 22, w: 58, h: 22 }, z_index: 0, display_none: false, source_index: Some(0), scroll_x: 0, scroll_y: 0, clip: None, stacking_context: false, scroll_height: 0, max_scroll_y: 0, scrollable: false, children: [] }] }]); got [Band { top: 3, bottom: 17, left: 2, right: 72, ink: 377 }] — a line box with no band is a line of text that was never drawn
+  left: 1
+ right: 2
+
+---- two_lines_each_painted_once_at_its_own_line stdout ----
+
+thread 'two_lines_each_painted_once_at_its_own_line' (1972726) panicked at velox-renderer/tests/wrapped_text_each_line_once.rs:228:5:
+assertion `left == right` failed: expected one painted band per line box ([LayoutNode { rect: Rect { x: 0, y: 0, w: 111, h: 22 }, z_index: 0, display_none: false, source_index: Some(0), scroll_x: 0, scroll_y: 0, clip: None, stacking_context: false, scroll_height: 0, max_scroll_y: 0, scrollable: false, children: [] }, LayoutNode { rect: Rect { x: 0, y: 22, w: 64, h: 22 }, z_index: 0, display_none: false, source_index: Some(0), scroll_x: 0, scroll_y: 0, clip: None, stacking_context: false, scroll_height: 0, max_scroll_y: 0, scrollable: false, children: [] }]); got [Band { top: 3, bottom: 13, left: 0, right: 92, ink: 463 }] — a line box with no band is a line of text that was never drawn
+  left: 1
+ right: 2
+
+---- every_glyph_of_a_wrapped_paragraph_is_inked_exactly_once stdout ----
+
+thread 'every_glyph_of_a_wrapped_paragraph_is_inked_exactly_once' (1972723) panicked at velox-renderer/tests/wrapped_text_each_line_once.rs:520:5:
+assertion `left == right` failed: bands [Band { top: 3, bottom: 13, left: 0, right: 105, ink: 545 }] vs lines [LayoutNode { rect: Rect { x: 0, y: 0, w: 125, h: 22 }, z_index: 0, display_none: false, source_index: Some(0), scroll_x: 0, scroll_y: 0, clip: None, stacking_context: false, scroll_height: 0, max_scroll_y: 0, scrollable: false, children: [] }, LayoutNode { rect: Rect { x: 0, y: 22, w: 134, h: 22 }, z_index: 0, display_none: false, source_index: Some(0), scroll_x: 0, scroll_y: 0, clip: None, stacking_context: false, scroll_height: 0, max_scroll_y: 0, scrollable: false, children: [] }, LayoutNode { rect: Rect { x: 0, y: 44, w: 72, h: 22 }, z_index: 0, display_none: false, source_index: Some(0), scroll_x: 0, scroll_y: 0, clip: None, stacking_context: false, scroll_height: 0, max_scroll_y: 0, scrollable: false, children: [] }]
+  left: 1
+ right: 3
+
+
+failures:
+    a_forced_line_break_narrower_than_its_container_still_breaks_per_line
+    a_wrapped_inline_element_paints_the_same_as_the_bare_paragraph
+    every_glyph_of_a_wrapped_paragraph_is_inked_exactly_once
+    the_last_line_of_a_wrapped_paragraph_is_painted
+    two_lines_each_painted_once_at_its_own_line
+
+test result: FAILED. 3 passed; 5 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.10s
+
+   Compiling velox-renderer v0.1.0 (/home/fahimaloy/Projects/personal/velox/velox-renderer)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.57s
+     Running tests/wrapped_text_each_line_once.rs (target/debug/deps/wrapped_text_each_line_once-b27fb5b3c2c47737)
+error: test failed, to rerun pass `-p velox-renderer --test wrapped_text_each_line_once`
+error: 1 target failed:
+    `-p velox-renderer --test wrapped_text_each_line_once`
+
+$ cargo test -p velox-renderer --test tagline_tail_is_painted
+RC=101
+
+running 1 test
+test the_tagline_paints_its_tail_and_the_png_is_written ... FAILED
+
+failures:
+
+---- the_tagline_paints_its_tail_and_the_png_is_written stdout ----
+
+thread 'the_tagline_paints_its_tail_and_the_png_is_written' (1972839) panicked at velox-renderer/tests/tagline_tail_is_painted.rs:333:5:
+assertion `left == right` failed: one band per tagline line box, [(24, 96, 509, 19), (24, 115, 167, 19)] line boxes but [Band { top: 99, bottom: 113, left: 24, right: 527, ink: 2396 }] bands: a line is either painted twice or not painted at all
+  left: 1
+ right: 2
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    the_tagline_paints_its_tail_and_the_png_is_written
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.06s
+
+   Compiling velox-renderer v0.1.0 (/home/fahimaloy/Projects/personal/velox/velox-renderer)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.61s
+     Running tests/tagline_tail_is_painted.rs (target/debug/deps/tagline_tail_is_painted-b2de028e62832146)
+error: test failed, to rerun pass `-p velox-renderer --test tagline_tail_is_painted`
+error: 1 target failed:
+    `-p velox-renderer --test tagline_tail_is_painted`

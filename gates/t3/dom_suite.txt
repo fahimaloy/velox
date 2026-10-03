@@ -1,0 +1,512 @@
+   Compiling velox-dom v0.1.0 (/home/fahimaloy/Projects/personal/velox/velox-dom)
+   Compiling velox-style v0.1.0 (/home/fahimaloy/Projects/personal/velox/velox-style)
+   Compiling velox-renderer v0.1.0 (/home/fahimaloy/Projects/personal/velox/velox-renderer)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 3.00s
+     Running unittests src/lib.rs (target/debug/deps/velox_dom-33d5b85781eaab46)
+
+running 22 tests
+test style::tests::test_border_shorthand_width_style_color ... ok
+test style::tests::test_background_shorthand_parses_color ... ok
+test style::tests::test_display_hidden_alias ... ok
+test style::tests::border_width_without_a_style_is_not_a_visible_border ... ok
+test style::tests::test_color_parsing ... ok
+test style::tests::test_length_parsing ... ok
+test style::tests::test_margin_shorthand_preserves_auto ... ok
+test style::tests::test_overflow_parsing ... ok
+test style::tests::test_position_parsing ... ok
+test style::tests::test_resolve_auto_margins_border_box_no_double_subtraction ... ok
+test style::tests::test_resolve_auto_margins_both_sides ... ok
+test style::tests::test_resolve_auto_margins_content_box_subtracts_padding_border_once ... ok
+test style::tests::test_resolve_auto_margins_declared_none_resolves_zero ... ok
+test style::tests::test_resolve_auto_margins_negative_free_space_resolves_negative ... ok
+test style::tests::test_resolve_auto_margins_percent_padding_resolves_against_avail ... ok
+test style::tests::test_resolve_auto_margins_single_side_subtracts_fixed_opposite ... ok
+test style::tests::test_resolve_auto_margins_without_auto_returns_declared ... ok
+test style::tests::test_set_property_box_shadow ... ok
+test style::tests::test_set_property_position_overflow_zindex ... ok
+test style::tests::test_set_property_transform ... ok
+test style::tests::test_set_property_transition ... ok
+test tests::build_tree ... ok
+
+test result: ok. 22 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/box_sizing.rs (target/debug/deps/box_sizing-100269764d334c50)
+
+running 9 tests
+test margin_auto_border_box_no_double_subtraction ... ok
+test border_box_avail_subtracts_correctly ... ok
+test margin_auto_centers_block ... ok
+test margin_auto_content_box_subtracts_padding_once ... ok
+test flex_column_min_height_definite_children_shrink ... ok
+test margin_auto_left_only_absorbs_free_space ... ok
+test margin_auto_shorthand_keeps_vertical_margins ... ok
+test margin_auto_over_wide_box_centers_negative ... ok
+test percent_margin_uses_width_basis ... ok
+
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/box_sizing_repro.rs (target/debug/deps/box_sizing_repro-757c86a8e4230a53)
+
+running 6 tests
+test box_sizing_border_box_height_stays_100 ... ok
+test box_sizing_content_box_height_becomes_124 ... ok
+test box_sizing_content_box_default_width_becomes_124 ... ok
+test box_sizing_content_box_width_becomes_124 ... ok
+test border_widths_subtracted_from_avail ... ok
+test box_sizing_border_box_width_stays_100 ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/button_single_child_justify.rs (target/debug/deps/button_single_child_justify-0082651078b64d93)
+
+running 12 tests
+test explicit_text_align_left_still_pins_left ... ok
+test flex_end_without_text_align_puts_glyph_at_the_right_edge ... ok
+test flex_justify_content_center_centres_single_child_glyph ... ok
+test multi_child_button_skips_the_hack ... ok
+test non_flex_single_child_button_without_text_align_is_unchanged ... ok
+test non_flex_button_with_text_align_center_still_centres ... ok
+test text_align_right_wins_over_justify_content_center ... ok
+test todo_remove_glyph_is_centred_in_its_content_box ... ok
+test text_align_center_still_centres_alongside_justify_content_center ... ok
+test vertical_centre_of_a_non_flex_single_child_button_is_kept ... ok
+test non_flex_button_element_child_honours_text_align ... ok
+test inherited_text_align_counts_as_explicit ... ok
+
+test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/composer_pixels.rs (target/debug/deps/composer_pixels-48ea6c85bd62dfe2)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/diff_edge_tests.rs (target/debug/deps/diff_edge_tests-bcb5ad43a996578d)
+
+running 30 tests
+test diff_add_multiple_children ... ok
+test diff_add_prop ... ok
+test diff_empty_to_single_child ... ok
+test diff_deeply_nested_element_change ... ok
+test diff_keyed_children_mixed_keyed_and_unkeyed ... ok
+test diff_keyed_children_full_replace ... ok
+test diff_keyed_children_reorder ... ok
+test diff_completely_different_children ... ok
+test diff_keyed_children_reorder_with_updates ... ok
+test diff_keyed_children_insert_in_middle ... ok
+test diff_keyed_children_with_nested_updates ... ok
+test diff_keyed_children_remove_from_middle ... ok
+test diff_many_props ... ok
+test diff_no_prop_change ... ok
+test diff_prop_value_change ... ok
+test diff_large_tree_deep ... ok
+test diff_remove_all_props ... ok
+test diff_remove_multiple_children ... ok
+test diff_large_tree_text_change ... ok
+test diff_replace_first_child ... ok
+test diff_large_tree_wide ... ok
+test diff_replace_last_child ... ok
+test diff_single_to_empty ... ok
+test props_builder_chaining ... ok
+test props_default_is_empty ... ok
+test props_new_is_empty ... ok
+test vnode_key_returns_none_for_element_without_key ... ok
+test vnode_key_returns_none_for_text ... ok
+test vnode_key_returns_some_for_element_with_key ... ok
+test diff_large_flat_list ... ok
+
+test result: ok. 30 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/diff_tests.rs (target/debug/deps/diff_tests-d6d943fac937a6da)
+
+running 5 tests
+test insert_child ... ok
+test remove_child ... ok
+test props_set_and_remove ... ok
+test text_change_replaces ... ok
+test replace_on_tag_change ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/flex_completeness_repro.rs (target/debug/deps/flex_completeness_repro-90a500c4c6de7336)
+
+running 11 tests
+test repro_baseline_fallback ... ok
+test repro_align_content_center ... ok
+test repro_flex_item_descendants_use_resolved_item_position ... ok
+test repro_space_between_variable_sizes ... ok
+test repro_flex_basis_auto_vs_0percent ... ok
+test repro_flex_shorthand_and_flex_flow ... ok
+test repro_positioned_flex_item_descendants_follow_item_position ... ok
+test repro_order_sort ... ok
+test repro_space_evenly_variable_sizes ... ok
+test repro_row_x_includes_scroll ... ok
+test repro_space_around_variable_sizes ... ok
+
+test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/flex_content_basis.rs (target/debug/deps/flex_content_basis-33c1c5c6d61cc4cf)
+
+running 5 tests
+test a_flex_one_label_owns_the_row_and_its_siblings_do_not ... ok
+test a_row_container_height_is_never_a_childs_width ... ok
+test a_definite_flex_basis_is_honoured_without_an_explicit_width ... ok
+test no_flex_item_leaks_the_unconstrained_size_sentinel ... ok
+test a_content_sized_flex_item_does_not_move_with_the_container ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/flex_content_basis_probe_passes.rs (target/debug/deps/flex_content_basis_probe_passes-931ddad1b58435ca)
+
+running 5 tests
+test app_tree_0 ... ok
+test declared_row_keeps_its_single_pass ... ok
+test app_tree_1 ... ok
+test app_tree_3_is_exactly_repeatable ... ok
+test row_nesting_does_not_perturb_siblings ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/flex_critical_repro.rs (target/debug/deps/flex_critical_repro-af5683b8ec0ee790)
+
+running 5 tests
+test repro_max_height_zero_clamps ... ok
+test repro_multi_line_cross_via_cross_offset ... ok
+test repro_n_zero_no_div_by_zero ... ok
+test repro_nan_inf_sanitized ... ok
+test repro_wrap_reverse_reverses_cross_order ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/flex_min_main_clamp.rs (target/debug/deps/flex_min_main_clamp-17bcc92791e5287c)
+
+running 3 tests
+test a_min_width_larger_than_the_container_floors_the_flex_item ... ok
+test a_min_width_is_honoured_when_positive_free_space_has_no_grow_factor ... ok
+test the_flex_base_size_stays_unclamped_and_only_the_target_is_clamped ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/flex_relayout_resolved_size.rs (target/debug/deps/flex_relayout_resolved_size-0d4c5974801147f0)
+
+running 3 tests
+test free_space_is_zero_needs_no_relayout ... ok
+test column_resolved_size_relayouts_the_field_subtree ... ok
+test row_resolved_size_relayouts_the_field_subtree ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/inline_formatting.rs (target/debug/deps/inline_formatting-caad531b3eab0d0d)
+
+running 36 tests
+test a_line_is_as_tall_as_the_run_in_it_when_the_run_is_taller_than_the_strut ... ok
+test a_block_child_ends_the_inline_run ... ok
+test a_line_may_break_at_the_edge_of_an_inline_element ... ok
+test a_run_that_overshoots_the_strut_makes_the_line_taller_without_taller_boxes ... ok
+test a_pre_block_truncates_each_of_its_own_overflowing_lines ... ok
+test a_word_is_never_split_across_lines ... ok
+test a_text_fragment_box_is_its_own_fonts_content_box_hanging_from_the_baseline ... ok
+test a_flex_container_inside_a_block_still_lays_out_as_flex ... ok
+test a_wrapping_block_does_not_truncate_which_is_a_recorded_divergence ... ok
+test an_atomic_inline_box_whose_only_child_is_display_none_is_zero_wide ... ok
+test an_atomic_inline_box_wider_than_the_line_is_the_line_wide ... ok
+test an_atomic_with_no_declared_width_shrink_fits_to_the_line_and_truncates_its_label ... ok
+test an_inline_block_is_atomic_and_shares_the_line_with_the_text_around_it ... ok
+test all_four_supported_alignments_land_somewhere_different ... ok
+test an_atomic_inline_box_with_a_declared_width_truncates_its_content_to_it ... ok
+test an_empty_atomic_inline_box_is_zero_wide_plus_its_own_padding_and_border ... ok
+test an_inline_block_moves_to_the_next_line_rather_than_overflowing ... ok
+test an_inline_block_is_never_split_across_lines ... ok
+test an_ellipsis_is_reserved_space_in_the_layout_tree_and_never_overflows_its_line ... ok
+test an_inline_element_deep_inside_another_one_joins_the_same_run ... ok
+test an_inline_element_has_no_box_of_its_own ... ok
+test an_inline_block_shrinks_to_the_space_left_on_its_line ... ok
+test an_inline_block_shares_the_baseline_of_the_text_beside_it ... ok
+test an_inline_element_with_no_text_still_gets_a_box ... ok
+test an_out_of_flow_inline_is_still_out_of_flow ... ok
+test baseline_is_the_default ... ok
+test every_emitted_node_carries_the_index_of_the_vnode_it_came_from ... ok
+test text_align_right_still_right_aligns_an_inline_line ... ok
+test sub_and_super_are_not_supported_and_say_so_by_not_being_parsed ... ok
+test inline_flex_is_not_flattened_into_the_enclosing_line ... ok
+test text_align_center_still_centres_an_inline_line ... ok
+test two_lines_are_two_independent_line_boxes ... ok
+test the_ellipsis_lands_in_the_piece_where_the_text_ran_out_not_the_first_one ... ok
+test without_the_property_the_same_text_overflows_its_line_unchanged ... ok
+test vertical_align_is_inherited ... ok
+test without_the_property_the_shrink_fitted_label_overflows_the_clamp_that_did_not_move ... ok
+
+test result: ok. 36 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/key_reorder_layout.rs (target/debug/deps/key_reorder_layout-f4d4f6bb55c66bd2)
+
+running 3 tests
+test reordering_the_vnode_children_reorders_the_geometry ... ok
+test a_reorder_is_visible_in_the_geometry_and_not_only_in_the_tree ... ok
+test the_key_attr_does_not_influence_layout ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/layout_golden.rs (target/debug/deps/layout_golden-cc9bef1736a7a754)
+
+running 5 tests
+test root_fills_without_explicit_styles ... ok
+test root_fills_viewport_with_vw_vh_units ... ok
+test dvh_and_min_height_viewport_filling ... ok
+test percent_chain_fills_when_parent_definite ... ok
+test flex_column_min_height_definite_children_shrink ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/layout_tests.rs (target/debug/deps/layout_tests-014d38a393b5222f)
+
+running 30 tests
+test block_boundary_preserves_whitespace_between_inline_participants ... ok
+test block_boundary_collapses_whitespace_only_text ... ok
+test block_flow_ignores_whitespace_only_text_between_blocks ... ok
+test block_flow_keeps_preserved_whitespace_between_blocks ... ok
+test block_stacks_children_and_uses_style_size ... ok
+test block_margin_collapse_adjacent_siblings ... ok
+test block_margin_no_collapse_with_parent_padding ... ok
+test block_margin_collapse_different_margins ... ok
+test flex_align_items_center ... ok
+test flex_align_self_override ... ok
+test flex_column_basic ... ok
+test flex_column_renders_children ... ok
+test flex_justify_content_center ... ok
+test flex_gap_spacing ... ok
+test flex_grow_distributes_space ... ok
+test flex_grow_proportional ... ok
+test inline_siblings_keep_their_collapsing_whitespace ... ok
+test flex_row_basic ... ok
+test layout_uses_full_width_for_root ... ok
+test text_align_center ... ok
+test flex_row_align_items_flex_start_no_stretch ... ok
+test flex_row_fit_content_height ... ok
+test flex_shrink_on_overflow ... ok
+test text_align_right ... ok
+test flex_row_definite_height_stretches_children ... ok
+test text_uses_font_metrics ... ok
+test text_larger_font ... ok
+test text_wrap_splits_lines ... ok
+test unstyled_inline_level_tags_keep_their_collapsing_whitespace ... ok
+test unstyled_block_level_tags_still_collapse_their_surrounding_whitespace ... ok
+
+test result: ok. 30 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/margin_collapse.rs (target/debug/deps/margin_collapse-9cafcea19addb025)
+
+running 5 tests
+test negative_collapse ... ok
+test both_negative_collapse_is_most_negative ... ok
+test empty_block_collapse_through ... ok
+test parent_through_collapse ... ok
+test sibling_positive_collapse_is_max ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/maxwidth_absolute.rs (target/debug/deps/maxwidth_absolute-649f3c48f69297ff)
+
+running 26 tests
+test absent_or_non_binding_max_width_changes_nothing ... ok
+test absolute_bottom_uses_a_positioned_ancestors_final_auto_height ... ok
+test block_min_width_auto_and_absent_leave_the_box_unclamped ... ok
+test block_min_width_overrides_max_width ... ok
+test a_percentage_relative_offset_from_the_far_edge_uses_the_same_parent_base ... ok
+test absolute_with_no_offsets_takes_its_static_position ... ok
+test a_percentage_relative_offset_moves_the_containing_block_it_establishes_by_the_same_amount ... ok
+test block_min_width_below_the_used_width_is_inert ... ok
+test a_percentage_relative_offset_in_a_flex_container_uses_the_containers_content_width ... ok
+test absolute_sibling_moves_nothing_around_it ... ok
+test absolute_resolves_against_positioned_ancestor_or_initial_containing_block ... ok
+test absolute_containing_block_is_the_padding_box ... ok
+test block_min_width_raises_the_used_width ... ok
+test absolute_inside_positioned_flex_container_uses_its_padding_box ... ok
+test max_width_caps_a_flex_container ... ok
+test max_width_clamps_a_block_box ... ok
+test negative_max_width_is_dropped_as_an_invalid_declaration ... ok
+test max_width_narrows_the_text_wrap_width ... ok
+test fixed_uses_the_viewport_while_absolute_uses_the_positioned_ancestor ... ok
+test max_width_narrows_children_and_lets_them_overflow ... ok
+test nearest_positioned_ancestor_wins ... ok
+test max_width_respects_the_box_sizing_model ... ok
+test max_width_clamps_a_column_flex_item_cross_size ... ok
+test percentage_max_width_resolves_against_the_containing_block ... ok
+test relative_offset_moves_the_containing_block_it_establishes ... ok
+test percentages_resolve_against_the_padding_box_when_out_of_flow_and_the_content_box_when_in_flow ... ok
+
+test result: ok. 26 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/overflow_scroll.rs (target/debug/deps/overflow_scroll-1146fe44d379d627)
+
+running 11 tests
+test is_scrollable_helper ... ok
+test overflow_hidden_not_scrollable_but_clips ... ok
+test overflow_auto_becomes_scrollable_when_content_exceeds ... ok
+test overflow_auto_not_scrollable_when_content_fits ... ok
+test overflow_scroll_scrollable_when_content_exceeds ... ok
+test wheel_scroll_clamps ... ok
+test overflow_visible_not_scrollable_no_clip ... ok
+test wheel_scroll_clamps_via_on_wheel ... ok
+test scroll_height_includes_padding_and_border ... ok
+test synthetic_scroll_top_on_visible_keeps_head_behavior ... ok
+test synthetic_scroll_top_still_shifts_children ... ok
+
+test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/style_parse_cache.rs (target/debug/deps/style_parse_cache-110d034d7029133e)
+
+running 45 tests
+test a_resize_invalidates_viewport_units ... ok
+test a_resize_invalidates_dynamic_viewport_units ... ok
+test a_resize_invalidates_viewport_units_in_the_border_memo ... ok
+test a_resize_invalidates_viewport_units_in_the_padding_memo ... ok
+test a_parent_font_size_change_invalidates_the_font_size_memo ... ok
+test a_parent_font_size_change_invalidates_the_border_memo ... ok
+test all_length_units_resolve_against_their_own_input ... ok
+test a_resize_invalidates_viewport_units_in_the_font_size_memo ... ok
+test first_occurrence_wins_for_lookup_helpers ... ok
+test em_uses_parent_font_size_not_own ... ok
+test longhand_overrides_shorthand_in_either_order ... ok
+test border_width_shorthand_and_longhand ... ok
+test em_inherits_from_parent_font_size ... ok
+test malformed_declarations_are_skipped ... ok
+test border_percentage_memo_is_keyed_on_the_containing_block ... ok
+test margin_longhand_value_takes_the_first_occurrence ... ok
+test margin_auto_centres ... ok
+test identical_sibling_styles_share_a_cache_entry ... ok
+test property_names_are_case_sensitive ... ok
+test margin_shorthand_takes_the_last_occurrence ... ok
+test percentage_follows_its_own_parent_not_an_ancestor ... ok
+test percentage_memo_is_keyed_on_the_containing_block ... ok
+test every_viewport_unit_re_resolves_when_the_viewport_changes ... ok
+test rem_ignores_parent_font_size ... ok
+test the_border_memo_is_keyed_on_the_viewport_through_border_width ... ok
+test rem_in_a_border_is_constant_because_root_font_size_is_constant ... ok
+test shorthand_expansion_keeps_all_four_value_forms ... ok
+test rem_ignores_the_roots_own_font_size_because_root_font_size_is_constant ... ok
+test the_border_memo_is_keyed_on_the_viewport_through_the_shorthand ... ok
+test the_border_memo_is_keyed_on_viewport_width_alone ... ok
+test the_border_memo_is_keyed_on_viewport_height_alone ... ok
+test same_style_under_different_containing_blocks_resolves_per_parent ... ok
+test the_box_sides_memo_is_keyed_on_viewport_height_alone ... ok
+test the_box_sides_memo_is_keyed_on_the_viewport ... ok
+test the_box_sides_memo_is_keyed_on_viewport_width_alone ... ok
+test the_font_size_memo_is_keyed_on_the_viewport ... ok
+test the_length_memo_is_keyed_on_the_viewport_height ... ok
+test the_length_memo_is_keyed_on_the_viewport_width ... ok
+test the_font_size_memo_is_keyed_on_the_parent_font_size ... ok
+test the_length_memo_is_keyed_on_viewport_height_alone ... ok
+test the_font_size_memo_is_keyed_on_viewport_height_alone ... ok
+test the_length_memo_is_keyed_on_viewport_width_alone ... ok
+test the_font_size_memo_is_keyed_on_viewport_width_alone ... ok
+test viewport_units_use_the_viewport ... ok
+test the_same_string_under_two_parent_font_sizes_resolves_twice ... ok
+
+test result: ok. 45 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/template_w_h_layout_repro.rs (target/debug/deps/template_w_h_layout_repro-24990f43c2361df1)
+
+running 1 test
+test layout_reflows_with_viewport_size ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/text_measure.rs (target/debug/deps/text_measure-190d9e1576f4d1d3)
+
+running 10 tests
+test narrow_window_not_positive_wraps ... ok
+test white_space_pre_preserves_newlines ... ok
+test snapped_size_uses_scale_round ... ok
+test ellipsis_truncates_single_line_overflow ... ok
+test white_space_normal_wraps ... ok
+test the_single_string_wrapper_truncates_and_is_not_the_layout_path ... ok
+test wrap_matches_skia_within_half_px ... ok
+test white_space_pre_wrap_preserves_newlines_and_wraps ... ok
+test wrap_matches_skia_direct_measure ... ok
+test white_space_nowrap_single_line ... ok
+
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/text_metrics_fallback.rs (target/debug/deps/text_metrics_fallback-03353d47b779d553)
+
+running 10 tests
+test a_fallback_run_measures_to_the_documented_approximation ... ok
+test a_bare_text_node_on_the_fallback_path_is_unchanged_and_non_zero ... ok
+test a_fallback_run_never_measures_zero_vertical ... ok
+test char_width_and_line_height_are_untouched ... ok
+test a_wrapped_line_on_the_fallback_path_is_the_strut_and_its_width_is_unchanged ... ok
+test font_metrics_carries_the_font_own_strut_and_not_the_labelled_ink_guess ... ok
+test heuristic_vertical_is_the_documented_approximation ... ok
+test the_fallback_width_is_exactly_half_an_em_per_character_at_the_snapped_size ... ok
+test the_labelled_ink_guess_still_totals_one_point_two_em_on_the_fallback_path ... ok
+test the_width_only_entry_point_is_unchanged_by_the_vertical_half ... ok
+
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/text_metrics_seam.rs (target/debug/deps/text_metrics_seam-2a96d674564f1e91)
+
+running 8 tests
+test a_bare_text_node_is_as_tall_as_the_run_in_it ... ok
+test a_registered_measurers_vertical_metrics_reach_the_seam ... ok
+test a_bare_text_nodes_width_half_is_still_the_heuristic_not_the_seam ... ok
+test an_inkless_run_keeps_its_real_width ... ok
+test a_run_with_no_ink_does_not_collapse_its_line_box ... ok
+test a_line_box_is_as_tall_as_the_run_in_it_and_not_the_fonts_nominal_line_height ... ok
+test two_lines_of_different_content_get_different_heights ... ok
+test the_width_only_entry_point_is_a_projection_of_the_registered_measurer ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/text_wrap_one_node_per_line.rs (target/debug/deps/text_wrap_one_node_per_line-3b6348dc313855aa)
+
+running 4 tests
+test a_nested_text_shares_its_parents_sibling_index_and_does_not_collide ... ok
+test a_wrapped_text_yields_one_node_per_line_in_line_order ... ok
+test an_unwrapped_text_is_one_node ... ok
+test each_line_reports_its_own_advance_not_the_whole_strings ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/todo_item_pixels.rs (target/debug/deps/todo_item_pixels-c86e02712530ef5c)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/ua_defaults_live.rs (target/debug/deps/ua_defaults_live-3c26e6d3a366b83b)
+
+running 24 tests
+test font_style_has_a_set_property_arm ... ok
+test font_style_is_listed_as_parsed_but_unrendered ... ok
+test an_author_colour_still_beats_the_ua_input_colour ... ok
+test an_input_takes_the_ua_text_colour ... ok
+test hr_takes_a_half_em_vertical_margin ... ok
+test center_centres_its_inline_content ... ok
+test ordered_list_items_are_indented_too ... ok
+test an_input_keeps_a_24px_floor_even_with_its_padding_removed ... ok
+test an_input_takes_the_ua_padding ... ok
+test dl_takes_a_one_em_vertical_margin ... ok
+test list_items_are_indented_forty_px_by_the_ua_sheet ... ok
+test fieldset_pads_its_content_by_three_quarters_of_an_em ... ok
+test dd_is_indented_forty_px ... ok
+test blockquote_and_figure_take_the_browser_margins ... ok
+test textarea_uses_pre_wrap ... ok
+test strong_and_b_are_bold ... ok
+test pre_keeps_a_one_em_vertical_margin ... ok
+test pre_does_not_wrap_a_line_that_is_wider_than_its_box ... ok
+test white_space_reaches_nested_inline_elements ... ok
+test tier_one_headings_are_bold ... ok
+test tier_one_headings_deliberately_carry_no_font_size ... ok
+test pre_still_breaks_on_newlines ... ok
+test the_input_rule_is_unconditioned_on_input_type_and_that_deviation_is_pinned ... ok
+test tier_one_heading_margins_resolve_and_differ ... ok
+
+test result: ok. 24 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests velox_dom
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+

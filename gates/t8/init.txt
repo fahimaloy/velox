@@ -1,0 +1,14 @@
+   Compiling velox-cli v0.1.0 (/home/fahimaloy/Projects/personal/velox/velox-cli)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.50s
+     Running `target/debug/velox init t8app --local /tmp/opencode/t8app`
+✅ Created Velox project: t8app
+📦 To get started:
+   cd t8app
+   velox dev
+   velox build
+   velox run
+✅ Created Velox project at: t8app
+
+📖 Next steps:
+   cd t8app
+   velox dev

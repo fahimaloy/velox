@@ -1,0 +1,8 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.10s
+     Running tests/r8_capture.rs (target/debug/deps/r8_capture-091221971a684d28)
+
+running 1 test
+test the_funnel_preserves_the_bytes_head_produced ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.13s
+

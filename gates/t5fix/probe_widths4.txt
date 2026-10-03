@@ -1,0 +1,11 @@
+   Compiling velox-renderer v0.1.0 (/home/fahimaloy/Projects/personal/velox/velox-renderer)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.24s
+     Running unittests src/lib.rs (target/debug/deps/velox_renderer-05af19ad498b958d)
+
+running 1 test
+PROBE4 16.00=162.0 16.05=162.0 16.10=162.0 16.15=162.0 16.20=162.0 16.25=162.0 16.30=162.0 16.35=162.0 16.40=162.0 16.45=162.0 16.50=171.0 16.55=171.0 16.60=171.0 16.65=171.0 16.70=171.0 16.75=171.0 16.80=171.0 16.85=171.0 16.90=171.0 16.95=171.0 17.00=171.0 17.05=171.0 17.10=171.0 17.15=171.0 17.20=171.0 17.25=171.0 17.30=171.0 17.35=171.0 17.40=171.0 17.45=171.0 17.50=181.0 17.55=181.0 17.60=181.0 17.65=181.0 17.70=181.0 17.75=181.0 17.80=181.0 17.85=181.0 17.90=181.0 17.95=181.0 18.00=181.0
+PROBE5 len=59 16.00=491.0 16.25=491.0 16.50=521.0 16.65=521.0 16.75=521.0 17.00=521.0 17.25=521.0 17.50=552.0 17.75=552.0 18.00=552.0
+test skia_render::skia_impl::tests::zz_probe_widths ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 128 filtered out; finished in 0.05s
+

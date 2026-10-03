@@ -1,0 +1,23 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.17s
+     Running tests/r8_capture.rs (target/debug/deps/r8_capture-091221971a684d28)
+
+running 1 test
+test the_funnel_preserves_the_bytes_head_produced ... FAILED
+
+failures:
+
+---- the_funnel_preserves_the_bytes_head_produced stdout ----
+
+thread 'the_funnel_preserves_the_bytes_head_produced' (2184638) panicked at velox-renderer/tests/r8_capture.rs:93:5:
+assertion `left == right` failed: render_vnode_to_rgba no longer produces the bytes HEAD produced
+  left: 703723480
+ right: 4024606072
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    the_funnel_preserves_the_bytes_head_produced
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.06s
+
+error: test failed, to rerun pass `-p velox-renderer --test r8_capture`

@@ -1,0 +1,70 @@
+$ cargo test -p velox-renderer --test wrapped_text_each_line_once
+RC=101
+
+running 8 tests
+test a_single_line_is_untouched ... ok
+test two_inline_elements_on_one_line_keep_their_places ... ok
+test two_lines_each_painted_once_at_its_own_line ... ok
+test a_wrapped_inline_element_paints_the_same_as_the_bare_paragraph ... ok
+test a_forced_line_break_narrower_than_its_container_still_breaks_per_line ... ok
+test the_last_line_of_a_wrapped_paragraph_is_painted ... FAILED
+test two_paragraphs_whose_source_index_collides_both_paint ... ok
+test every_glyph_of_a_wrapped_paragraph_is_inked_exactly_once ... FAILED
+
+failures:
+
+---- the_last_line_of_a_wrapped_paragraph_is_painted stdout ----
+
+thread 'the_last_line_of_a_wrapped_paragraph_is_painted' (1973692) panicked at velox-renderer/tests/wrapped_text_each_line_once.rs:256:9:
+assertion `left != right` failed: band 1 has the same glyphs at the same columns as band 0 ((0, 105, 545) vs (0, 105, 545)): line 0 has been painted more than once
+  left: (0, 105, 545)
+ right: (0, 105, 545)
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- every_glyph_of_a_wrapped_paragraph_is_inked_exactly_once stdout ----
+
+thread 'every_glyph_of_a_wrapped_paragraph_is_inked_exactly_once' (1973691) panicked at velox-renderer/tests/wrapped_text_each_line_once.rs:541:5:
+assertion `left == right` failed: wrapped bands [Rect { y0: 3, y1: 13, x0: 0, x1: 105, ink: 545 }, Rect { y0: 25, y1: 35, x0: 0, x1: 105, ink: 545 }, Rect { y0: 47, y1: 57, x0: 0, x1: 35, ink: 201 }] vs hand-split reference [Rect { y0: 3, y1: 13, x0: 0, x1: 105, ink: 545 }, Rect { y0: 25, y1: 39, x0: 1, x1: 116, ink: 605 }, Rect { y0: 47, y1: 57, x0: 0, x1: 62, ink: 318 }]
+  left: [Rect { y0: 3, y1: 13, x0: 0, x1: 105, ink: 545 }, Rect { y0: 25, y1: 35, x0: 0, x1: 105, ink: 545 }, Rect { y0: 47, y1: 57, x0: 0, x1: 35, ink: 201 }]
+ right: [Rect { y0: 3, y1: 13, x0: 0, x1: 105, ink: 545 }, Rect { y0: 25, y1: 39, x0: 1, x1: 116, ink: 605 }, Rect { y0: 47, y1: 57, x0: 0, x1: 62, ink: 318 }]
+
+
+failures:
+    every_glyph_of_a_wrapped_paragraph_is_inked_exactly_once
+    the_last_line_of_a_wrapped_paragraph_is_painted
+
+test result: FAILED. 6 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.11s
+
+   Compiling velox-renderer v0.1.0 (/home/fahimaloy/Projects/personal/velox/velox-renderer)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.47s
+     Running tests/wrapped_text_each_line_once.rs (target/debug/deps/wrapped_text_each_line_once-b27fb5b3c2c47737)
+error: test failed, to rerun pass `-p velox-renderer --test wrapped_text_each_line_once`
+error: 1 target failed:
+    `-p velox-renderer --test wrapped_text_each_line_once`
+
+$ cargo test -p velox-renderer --test tagline_tail_is_painted
+RC=101
+
+running 1 test
+test the_tagline_paints_its_tail_and_the_png_is_written ... FAILED
+
+failures:
+
+---- the_tagline_paints_its_tail_and_the_png_is_written stdout ----
+
+thread 'the_tagline_paints_its_tail_and_the_png_is_written' (1973832) panicked at velox-renderer/tests/tagline_tail_is_painted.rs:385:9:
+the tagline's last line (163px wide, 763 lit pixels) matches NO suffix of the string rendered on its own, so it is not any suffix of it: line 0's paint repeated, or a line the painter invented. Bands [Band { top: 99, bottom: 113, left: 24, right: 527, ink: 2396 }, Band { top: 118, bottom: 132, left: 24, right: 186, ink: 763 }]
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    the_tagline_paints_its_tail_and_the_png_is_written
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.21s
+
+   Compiling velox-renderer v0.1.0 (/home/fahimaloy/Projects/personal/velox/velox-renderer)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.80s
+     Running tests/tagline_tail_is_painted.rs (target/debug/deps/tagline_tail_is_painted-b2de028e62832146)
+error: test failed, to rerun pass `-p velox-renderer --test tagline_tail_is_painted`
+error: 1 target failed:
+    `-p velox-renderer --test tagline_tail_is_painted`
