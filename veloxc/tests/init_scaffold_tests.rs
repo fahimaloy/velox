@@ -35,14 +35,14 @@ impl ScratchProject {
     fn with_cwd(tag: &str, cwd: Option<&Path>) -> Self {
         let root = Path::new(env!("CARGO_MANIFEST_DIR"))
             .parent()
-            .expect("velox-cli has a parent")
+            .expect("veloxc has a parent")
             .join("target")
             .join(format!("velox-init-scratch-{}-{tag}", std::process::id()));
         // A run that panicked mid-way leaves its directory behind; the name is
         // pid-scoped so that is only ever our own leftovers.
         let _ = fs::remove_dir_all(&root);
 
-        let mut cmd = Command::new(env!("CARGO_BIN_EXE_velox"));
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_veloxc"));
         cmd.arg("init").arg(&root);
         if let Some(dir) = cwd {
             cmd.current_dir(dir);

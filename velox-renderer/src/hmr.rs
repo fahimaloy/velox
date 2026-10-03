@@ -1,6 +1,6 @@
 //! HMR (Hot Module Replacement) support for the Velox dev server.
 //!
-//! The dev server (in `velox-cli`) starts a TCP listener on
+//! The dev server (in `veloxc`) starts a TCP listener on
 //! `DEFAULT_HMR_PORT`. When an app runs with `VELOX_HMR=1`,
 //! [`hmr_config`] reads the port from the `VELOX_HMR_PORT` environment
 //! variable and [`run_hmr_client`] spawns a background thread that

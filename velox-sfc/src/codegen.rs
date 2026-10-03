@@ -62,7 +62,7 @@ fn to_stub_rs_inner(
     }
 
     // NOTE: We intentionally do NOT generate `pub mod {name};` declarations here.
-    // The caller (e.g., compile_component_tree in velox-cli) is responsible for
+    // The caller (e.g., compile_component_tree in veloxc) is responsible for
     // generating `#[path = "..."] pub mod ...;` declarations with correct file paths.
     // Generating bare `pub mod` here would conflict with the caller's declarations
     // and cause "file not found for module" errors.
@@ -769,7 +769,7 @@ fn generate_component_emit_helpers() -> String {
 /// emitted by the template half (`template_codegen::generate_render_with_props`).
 /// The two halves are only ever correct together, so a caller that assembles a
 /// module by hand — rather than through `to_stub_rs*` plus
-/// `compile_template_to_rs_full*` as `velox-cli` does — must emit both or
+/// `compile_template_to_rs_full*` as `veloxc` does — must emit both or
 /// neither, or the module does not compile (`E0412: cannot find type 'PropsArg'`).
 /// It is `pub` for exactly that caller.
 pub fn generate_props_arg(ss: &str, indent: &str) -> String {

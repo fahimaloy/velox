@@ -65,7 +65,7 @@ fn count_colour(buf: &[u8], y: i32, want: [u8; 3]) -> usize {
     (0..W).filter(|&x| px(buf, W, x, y) == want).count()
 }
 
-/// `.todo-item` from `velox-cli/templates/project/src/components/TodoItem.vx`,
+/// `.todo-item` from `veloxc/templates/project/src/components/TodoItem.vx`,
 /// with the `flex: 1` text span given a solid green background so the space it
 /// actually receives is directly readable off the pixel buffer.
 ///

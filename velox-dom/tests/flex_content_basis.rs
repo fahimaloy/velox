@@ -27,7 +27,7 @@ use velox_dom::{VNode, h, layout::compute_layout};
 
 const W: i32 = 400;
 
-/// The `.todo-item` row from `velox-cli/templates/project/src/components/TodoItem.vx`,
+/// The `.todo-item` row from `veloxc/templates/project/src/components/TodoItem.vx`,
 /// INCLUSIVE of the `input.checkbox` the pixel proof omits, with styles inline
 /// because `compute_layout` takes no stylesheet.
 fn todo_item() -> VNode {

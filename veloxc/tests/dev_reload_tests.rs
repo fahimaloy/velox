@@ -20,7 +20,7 @@ use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use velox_cli::commands::dev::{
+use veloxc::commands::dev::{
     AppChild, BuildAction, BuildGate, BuildOutcome, BuildReaction, BuildWorker, DevCmd,
     InputSource, classify_build, react_to,
 };

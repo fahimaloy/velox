@@ -178,7 +178,7 @@ fn init_writes_both_brand_assets() {
     // misread as "velox is not installed" — if the directory is not there yet.
     fs::create_dir_all(&dir).expect("create scratch dir");
 
-    let out = Command::new(env!("CARGO_BIN_EXE_velox"))
+    let out = Command::new(env!("CARGO_BIN_EXE_veloxc"))
         .arg("init")
         .arg("logo-scratch")
         .current_dir(&dir)
@@ -326,7 +326,7 @@ fn the_committed_png_is_the_svg_it_was_made_from() {
 /// Ignored by default. Run it when the SVG changes:
 ///
 /// ```text
-/// cargo test -p velox-cli --test logo_assets -- --ignored regenerate --nocapture
+/// cargo test -p veloxc --test logo_assets -- --ignored regenerate --nocapture
 /// ```
 #[test]
 #[ignore = "writes into the source tree on purpose; run it deliberately"]

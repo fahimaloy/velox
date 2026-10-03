@@ -17,4 +17,4 @@ velox-style = { path = "../../velox-style" }
 velox-renderer = { path = "../../velox-renderer", features = ["skia-native"] }
 
 [build-dependencies]
-velox-cli = { path = "../../velox-cli" }
+veloxc = { path = "../../veloxc" }

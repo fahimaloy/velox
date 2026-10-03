@@ -1,14 +1,14 @@
 //! THROWAWAY VISUAL PROOF for the scaffolded template's design pass.
 //!
 //! This is not a gate. It exists so the design work in
-//! `velox-cli/templates/project/src/{App.vx, components/*.vx}` can be LOOKED AT
+//! `veloxc/templates/project/src/{App.vx, components/*.vx}` can be LOOKED AT
 //! rather than argued about, and so the numbers quoted in the report (type scale,
 //! spacing scale, glyph centring, accent ratio) come out of a real render of the
 //! real stylesheets rather than out of anyone's memory.
 //!
 //! ## What is real and what is a replica — and why that is enough
 //!
-//! A test in this crate cannot reach the COMPILED app: `velox-cli` depends on
+//! A test in this crate cannot reach the COMPILED app: `veloxc` depends on
 //! `velox-sfc`, and the template only becomes a runnable crate through
 //! `build_cmd`'s `cargo` invocation. Compiling six `.vx` files to a binary inside
 //! a test would need a nested build of the whole workspace.

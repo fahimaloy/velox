@@ -317,7 +317,7 @@ fn layer_a_child_rules_are_scoped_in_root_stylesheet() {
     let out_dir = scratch("a");
     let _ = fs::remove_dir_all(&out_dir);
 
-    let result = velox_cli::commands::build::build_vx(&input, Some(out_dir.as_path()))
+    let result = veloxc::commands::build::build_vx(&input, Some(out_dir.as_path()))
         .expect("build_vx over the shipped template");
 
     let stub = fs::read_to_string(out_dir.join("app.rs")).expect("read generated app.rs");
@@ -509,7 +509,7 @@ import WidgetB from './WidgetB.vx'
 "#,
     );
 
-    velox_cli::commands::build::build_vx(&root, Some(out_dir.as_path()))
+    veloxc::commands::build::build_vx(&root, Some(out_dir.as_path()))
         .expect("build_vx over the collision fixture");
 
     let sheet_text =

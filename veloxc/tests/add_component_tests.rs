@@ -21,7 +21,7 @@ impl ScratchProject {
     fn new(tag: &str) -> Self {
         let root = Path::new(env!("CARGO_MANIFEST_DIR"))
             .parent()
-            .expect("velox-cli has a parent")
+            .expect("veloxc has a parent")
             .join("target")
             .join(format!("velox-add-scratch-{}-{tag}", std::process::id()));
         // A previous run that panicked mid-way leaves its directory behind;
@@ -39,7 +39,7 @@ impl ScratchProject {
 
     /// Run `velox add component <args>` with the scratch project as cwd.
     fn add(&self, args: &[&str]) -> std::process::Output {
-        Command::new(env!("CARGO_BIN_EXE_velox"))
+        Command::new(env!("CARGO_BIN_EXE_veloxc"))
             .arg("add")
             .arg("component")
             .args(args)
@@ -192,7 +192,7 @@ fn project_root_is_found_from_a_subdirectory() {
     let nested = project.root.join("src").join("components");
     fs::create_dir_all(&nested).expect("create nested dir");
 
-    let out = Command::new(env!("CARGO_BIN_EXE_velox"))
+    let out = Command::new(env!("CARGO_BIN_EXE_veloxc"))
         .arg("add")
         .arg("component")
         .arg("card")

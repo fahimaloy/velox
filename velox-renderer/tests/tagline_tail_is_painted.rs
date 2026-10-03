@@ -7,13 +7,13 @@
 //!
 //! ## Why the markup is a hand-built replica and not the compiled template
 //!
-//! The real `.tagline` lives in `velox-cli/templates/project/src/App.vx`, which
-//! is compiled at build time by `velox-cli`'s `build_cmd`. `velox-cli` depends on
+//! The real `.tagline` lives in `veloxc/templates/project/src/App.vx`, which
+//! is compiled at build time by `veloxc`'s `build_cmd`. `veloxc` depends on
 //! `velox-renderer`, so a test in this crate cannot reach it without a dependency
-//! cycle, and this crate's write scope is not `velox-cli`. So the element is
+//! cycle, and this crate's write scope is not `veloxc`. So the element is
 //! rebuilt here from the template's own declarations, copied verbatim:
 //!
-//! | what | from `velox-cli/templates/project/src/App.vx` |
+//! | what | from `veloxc/templates/project/src/App.vx` |
 //! |---|---|
 //! | the string | `App.vx:139-141` `tagline()`, 110 chars |
 //! | `.shell` | `App.vx:279-285` `width:100%; max-width:620px; padding:44px 24px 32px` |

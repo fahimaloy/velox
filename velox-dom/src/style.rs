@@ -1329,7 +1329,7 @@ impl ComputedStyle {
     /// Adding a `set_property` arm for one of these? Either implement it, or
     /// leave it here — but the honest state is: in the armed set AND in this
     /// table, until a reader exists. A property is never in both states: see
-    /// `velox-cli/tests/lint_css_tests.rs::table_entries_all_have_a_set_property_arm`,
+    /// `veloxc/tests/lint_css_tests.rs::table_entries_all_have_a_set_property_arm`,
     /// which fails the moment the two drift apart.
     ///
     /// This table is the *only* thing `velox lint` reports. It deliberately

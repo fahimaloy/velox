@@ -7,7 +7,7 @@ A Velox application — a Rust GUI framework with Vue-like single-file component
 ### Prerequisites
 
 - Rust toolchain (1.70+)
-- Velox CLI: `cargo install velox-cli`
+- Velox CLI: `cargo install veloxc`
 
 ### Development
 

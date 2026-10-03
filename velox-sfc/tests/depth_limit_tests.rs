@@ -223,7 +223,7 @@ fn both_public_entry_points_enforce_the_cap() {
 /// `depth_error_is_not_a_parse_sfc_warning` below), so this is the test that
 /// shows the error is not actually lost: the compile path re-parses the
 /// template and propagates the `Err` with `?`, which is the path
-/// `velox-cli`'s build command calls. Without this, the guard could be
+/// `veloxc`'s build command calls. Without this, the guard could be
 /// rejecting input with a message only the parser ever saw.
 #[test]
 fn compile_path_propagates_the_depth_error() {

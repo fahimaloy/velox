@@ -7,7 +7,7 @@ Velox is a Rust workspace composed of focused crates that together provide a rea
 - **velox-dom**: lightweight virtual DOM (`VNode`, `Props`) and a minimal diff algorithm to compute patches.
 - **velox-style**: minimal CSS handling (tag/.class selectors) to compute inline styles for VNodes.
 - **velox-renderer**: feature-gated rendering backends and a stable `Renderer` trait (`backend_name()`, `mount()`); includes an event registry for `on:<event>` handlers.
-- **velox-cli**: a CLI to compile `.vx` files into Rust modules for use in apps and examples.
+- **veloxc**: a CLI to compile `.vx` files into Rust modules for use in apps and examples.
 
 ## Data Flow
 
@@ -34,7 +34,7 @@ velox/
 ├── velox-dom/       # Virtual DOM implementation
 ├── velox-style/     # CSS styling system
 ├── velox-renderer/  # Rendering backends (Skia)
-├── velox-cli/       # CLI tools
+├── veloxc/       # CLI tools
 └── examples/        # Example applications
 ```
 

@@ -3,7 +3,7 @@
 //!
 //! The bug this file exists for: `init` pinned every `velox-*` dependency at
 //! `rev = <the commit this CLI binary was built from>`, a value baked in by
-//! `velox-cli/build.rs`. A CLI built from an unpushed local branch therefore
+//! `veloxc/build.rs`. A CLI built from an unpushed local branch therefore
 //! emitted a `Cargo.toml` that no machine could ever resolve, and the user found
 //! out from cargo, several steps later, with no hint where the rev came from:
 //!
@@ -46,7 +46,10 @@ enum Pin {
 impl Pin {
     fn crate_name_of(line: &str) -> Option<&str> {
         let (name, rest) = line.split_once(" = {")?;
-        if name.starts_with("velox-") {
+        // `veloxc` is the build-dependency (the CLI crate under its new name);
+        // it is pinned alongside the four `velox-*` runtime crates and must be
+        // resolved by the same check.
+        if name.starts_with("velox-") || name == "veloxc" {
             Some(name)
         } else {
             let _ = rest;
@@ -116,7 +119,7 @@ impl Scaffold {
              path deps by walking up from the cwd and the git pin is never exercised"
         );
 
-        let mut cmd = Command::new(env!("CARGO_BIN_EXE_velox"));
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_veloxc"));
         cmd.arg("init")
             .arg("myapp")
             .current_dir(&scratch)
@@ -146,7 +149,7 @@ impl Scaffold {
     fn velox_checkout() -> PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR"))
             .parent()
-            .expect("velox-cli has a parent")
+            .expect("veloxc has a parent")
             .to_path_buf()
     }
 }
@@ -195,7 +198,8 @@ fn scaffolded_velox_dependencies_are_resolvable() {
     let pins = velox_pins(&s.cargo_toml);
     assert!(
         pins.len() >= 5,
-        "expected all five velox-* crates to be pinned, found {} in:\n{}",
+        "expected all five velox dependency crates (velox-core, velox-dom, \
+         velox-style, velox-renderer, veloxc) to be pinned, found {} in:\n{}",
         pins.len(),
         s.cargo_toml
     );

@@ -130,7 +130,7 @@ These work. Don't touch without a specific reason.
 
 **Rule:** if a property is parsed, the framework owes the author an effect — or an explicit "not implemented" signal. Silently dropping it is a bug.
 
-**Shipped fix (`de1e12f`, Task 4.7a):** `velox-dom/src/style.rs` `pub const PARSED_BUT_UNRENDERED: &[(&str, &str)]`, immediately above `set_property`, each entry citing its `set_property` arm line and why nothing reads the field. `velox-cli/src/commands/lint.rs` iterates it and warns per name.
+**Shipped fix (`de1e12f`, Task 4.7a):** `velox-dom/src/style.rs` `pub const PARSED_BUT_UNRENDERED: &[(&str, &str)]`, immediately above `set_property`, each entry citing its `set_property` arm line and why nothing reads the field. `veloxc/src/commands/lint.rs` iterates it and warns per name.
 
 **Do not reinstate the original prescription** — adding `unimplemented: Vec<&'static str>` to `ComputedStyle` **cannot work**, because `ComputedStyle` has **zero production callers**: the live path carries declarations in the merged style *string* and the renderer never builds a `ComputedStyle`. Storing state there is dead on arrival. The dev-server one-time notice was also **not** implemented; `velox lint` is the whole mechanism.
 

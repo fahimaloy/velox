@@ -33,7 +33,7 @@ velox-renderer (Skia + softbuffer)
 | velox-dom | Layout computation (compute_layout) |
 | velox-style | CSS processing and style application |
 | velox-renderer | Skia rendering and window management |
-| velox-cli | Build CLI and dev server |
+| veloxc | Build CLI and dev server |
 
 ## Key Commands
 

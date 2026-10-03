@@ -2,7 +2,7 @@
 //!
 //! These tests verify that `HmrMessage` serializes and deserializes
 //! correctly as newline-delimited JSON, which is the wire format used
-//! between the dev server (in `velox-cli`) and the app (via
+//! between the dev server (in `veloxc`) and the app (via
 //! `run_hmr_client` in `velox-renderer::hmr`).
 
 use velox_renderer::{DEFAULT_HMR_PORT, HmrMessage};

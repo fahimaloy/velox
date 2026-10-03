@@ -29,7 +29,7 @@
 //! receives a perfectly well-formed `background: rgba(20, 24, 27, 0.34)`. A
 //! test that asserted on the sheet would pass with the bug in place and prove
 //! nothing — the mistake `velox-style/tests/ua_completeness.rs` and
-//! `velox-cli/tests/template_palette_wcag.rs` both make.
+//! `veloxc/tests/template_palette_wcag.rs` both make.
 //!
 //! So every test here goes `Stylesheet::parse` -> `apply_with_cascade` -> read
 //! the `style` attribute back off the VNode. That attribute string is EXACTLY

@@ -271,7 +271,7 @@ Velox is a **modular workspace** of 6 published crates. Use any combination:
 | `velox-dom` | — | `VNode` types, block/flex layout engine, style resolution |
 | `velox-style` | `cssparser`, `selectors`, `velox-dom` | CSS parsing, cascade, style application to VNode |
 | `velox-renderer` | `velox-core`, `velox-dom`, `velox-style`, `skia-safe`* | Skia rendering backend, event dispatch, hit test |
-| `velox-cli` | `clap`, `anyhow`, `velox-sfc`, `velox-style`, `velox-renderer` | All CLI subcommands |
+| `veloxc` | `clap`, `anyhow`, `velox-sfc`, `velox-style`, `velox-renderer` | All CLI subcommands |
 
 \* optional — gated behind `skia-native` feature
 

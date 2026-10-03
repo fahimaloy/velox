@@ -43,7 +43,7 @@ const SHEETS: &[(&str, &str)] = &[
 fn template_src() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("..")
-        .join("velox-cli/templates/project/src")
+        .join("veloxc/templates/project/src")
 }
 
 /// The six sheets of the scaffolded app, scoped the way `velox-sfc` scopes them.

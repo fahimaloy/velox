@@ -186,7 +186,7 @@ fn vertical_centre_of_a_non_flex_single_child_button_is_kept() {
     );
 }
 
-/// The real `.remove` control from `velox-cli/templates/project/src/components/
+/// The real `.remove` control from `veloxc/templates/project/src/components/
 /// TodoItem.vx:154-168`: `display:flex; justify-content:center; width:26px;
 /// height:26px; padding:0; border:1px solid`. Content box is 26x26 inset by the
 /// 1px border, so the glyph belongs at `1 + (26 - w) / 2`, not at 1.

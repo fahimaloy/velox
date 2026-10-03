@@ -1795,7 +1795,7 @@ mod window_event_shared_tests {
 /// * on every `RedrawRequested` / resize / DPI change with the *current* logical `w,h`.
 ///   Templates must not ignore `(w,h)` (no `|_w, _h|`). The canonical
 ///   responsive pattern is a viewport-filling root:
-///   `width: 100%; min-height: 100vh` on `.app` (see `velox-cli/templates/project/src/App.vx`).
+///   `width: 100%; min-height: 100vh` on `.app` (see `veloxc/templates/project/src/App.vx`).
 ///   With `width:100%` and `min-height:100vh`, `compute_layout(vnode, w as i32, h as i32)`
 ///   reflows visibly on every window resize — no element hidden when it should be visible
 ///   (Flutter invariant). Callers may also thread `(w,h)` into style/layout decisions if needed.

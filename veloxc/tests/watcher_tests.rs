@@ -23,7 +23,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
-use velox_cli::commands::dev::{
+use veloxc::commands::dev::{
     ChangeDebouncer, ChangeKind, DevCmd, DirWatcher, WatchReaction, classify_change,
     react_to_watch_error, watch_roots,
 };

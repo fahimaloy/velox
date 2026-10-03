@@ -2727,23 +2727,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f1bddf1187be692e79c5ffeab891132dfb0f236ed36a43c7ed39f1165ee20191"
 
 [[package]]
-name = "velox-cli"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "clap",
- "env_logger",
- "log",
- "notify",
- "serde",
- "serde_json",
- "velox-dom",
- "velox-renderer",
- "velox-sfc",
- "velox-style",
-]
-
-[[package]]
 name = "velox-core"
 version = "0.1.0"
 dependencies = [
@@ -2759,33 +2742,33 @@ version = "0.1.0"
 name = "velox-example-counter"
 version = "0.1.0"
 dependencies = [
- "velox-cli",
  "velox-core",
  "velox-dom",
  "velox-renderer",
  "velox-style",
+ "veloxc",
 ]
 
 [[package]]
 name = "velox-example-showcase"
 version = "0.1.0"
 dependencies = [
- "velox-cli",
  "velox-core",
  "velox-dom",
  "velox-renderer",
  "velox-style",
+ "veloxc",
 ]
 
 [[package]]
 name = "velox-example-todo"
 version = "0.1.0"
 dependencies = [
- "velox-cli",
  "velox-core",
  "velox-dom",
  "velox-renderer",
  "velox-style",
+ "veloxc",
 ]
 
 [[package]]
@@ -2828,6 +2811,23 @@ dependencies = [
  "cssparser 0.29.6",
  "selectors",
  "velox-dom",
+]
+
+[[package]]
+name = "veloxc"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "env_logger",
+ "log",
+ "notify",
+ "serde",
+ "serde_json",
+ "velox-dom",
+ "velox-renderer",
+ "velox-sfc",
+ "velox-style",
 ]
 
 [[package]]

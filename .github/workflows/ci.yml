@@ -24,7 +24,7 @@ env:
   # Why this was 0 until now: `--fail-under 0` cannot fail, so the job was a
   # green box that enforced nothing while costing a SECOND instrumented native
   # Skia build — resolving the workspace turns on `velox-renderer/skia-native`
-  # (via `velox-cli`'s dev-dependency and the example crates' build-depends),
+  # (via `veloxc`'s dev-dependency and the example crates' build-depends),
   # and an instrumented run compiles Skia again with coverage counters on.
   # Nothing was gained by that build except a number nobody read.
   #
@@ -74,8 +74,8 @@ jobs:
       - name: Install cargo-llvm-cov
         run: cargo install cargo-llvm-cov --locked
       # Expect a slow first run: resolving the workspace turns on
-      # `velox-renderer/skia-native`, because `velox-cli` declares it as a
-      # dev-dependency feature and the example crates build-depend on `velox-cli`.
+      # `velox-renderer/skia-native`, because `veloxc` declares it as a
+      # dev-dependency feature and the example crates build-depend on `veloxc`.
       # Any workspace-wide cargo command therefore compiles Skia natively, and an
       # instrumented run compiles it a second time with coverage counters on.
       - name: Measure line coverage
@@ -187,7 +187,7 @@ jobs:
       #   RUSTSEC-2025-0057  fxhash 0.2.1      — selectors 0.23.0 <- velox-style
       #   RUSTSEC-2026-0192  ttf-parser 0.25.1 — ab_glyph <- sctk-adwaita <-
       #                                         winit 0.28.7 <- velox-renderer
-      #   RUSTSEC-2026-0190  anyhow 1.0.100    — velox-cli, [build-dependencies]
+      #   RUSTSEC-2026-0190  anyhow 1.0.100    — veloxc, [build-dependencies]
       #   RUSTSEC-2026-0186  memmap2 0.5.10    — sctk-adwaita <- winit <-
       #                                         velox-renderer
       #   RUSTSEC-2026-0186  memmap2 0.9.9     — softbuffer 0.3.4 <-
@@ -264,7 +264,7 @@ jobs:
         id: probe
         run: |
           if grep -rqs --include='*.rs' 'proptest!' \
-            velox-cli velox-core velox-dom velox-renderer velox-sfc velox-style \
+            veloxc velox-core velox-dom velox-renderer velox-sfc velox-style \
             examples
           then
             echo "present=true" >> "$GITHUB_OUTPUT"
@@ -297,8 +297,8 @@ jobs:
       - name: Test skia API (no native)
         run: cargo test -p velox-renderer --features skia
       # Allowed to fail, but note it is not the only thing compiling Skia:
-      # `velox-cli` dev-depends on `velox-renderer` with `features =
-      # ["skia-native"]`, and the example crates build-depend on `velox-cli`, so
+      # `veloxc` dev-depends on `velox-renderer` with `features =
+      # ["skia-native"]`, and the example crates build-depend on `veloxc`, so
       # `build-test`'s `cargo test --workspace` already turns `skia-native` on by
       # feature unification. A Skia compile failure still blocks via `build-test`.
       - name: Build skia-native (allowed to fail)

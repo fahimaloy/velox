@@ -12,7 +12,7 @@
 //! CHILD), while the element it was meant for — `<button class="btn btn-add">`
 //! — lived in `Todos.vx` (the PARENT). The template has since been reworked: the
 //! button is `<button class="add" @click="add_todo">Add</button>` at
-//! `velox-cli/templates/project/src/components/Todos.vx:10`, and its rule is
+//! `veloxc/templates/project/src/components/Todos.vx:10`, and its rule is
 //! `.add` in the same file. The class names below are therefore the ones the
 //! BUG had, kept because the falsification fixture further down still has to
 //! reproduce that exact shape — `.btn-add` is a fixture value now, not a claim
@@ -31,7 +31,7 @@
 //! (`velox-style/src/ua.css:8` — `button { border: 1px solid #888 }`).
 //!
 //! The pre-existing suite could not see this.
-//! `velox-cli/tests/scoped_style_merging.rs:55` asserts the root STYLE
+//! `veloxc/tests/scoped_style_merging.rs:55` asserts the root STYLE
 //! CONTAINS `.btn-add[data-v-<id>]` and contains zero bare `.btn-add` — which
 //! passes, because the CSS WAS correctly scoped; it was just scoped to the
 //! wrong component. That test never checks that the button ELEMENT carries a

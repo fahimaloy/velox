@@ -16,7 +16,7 @@ A Rust workspace (edition 2024, rustc 1.91.1) implementing a Vue SFC-syntax GUI 
  velox-dom  — VNode, CSS cascade, flex+block layout engine
  velox-style — CSS parser, selectors, UA stylesheet (ua.css)
  velox-renderer — Skia rendering, events, HMR protocol, winit event loop
- velox-cli  — velox init/build/lint/dev CLI
+ veloxc  — velox init/build/lint/dev CLI
 ```
 
 Three examples: `counter`, `todo`, `showcase`. The `velox` binary is already installed at `~/.cargo/bin/velox`.
@@ -52,7 +52,7 @@ velox/
 ├── velox-style/src/    — lib.rs (Stylesheet, cascade), ua.css, visual_effects.rs
 ├── velox-renderer/src/ — lib.rs (winit loop, HMR), skia_render.rs, presenter.rs,
 │                         events.rs, hmr.rs, skia_surface.rs
-├── velox-cli/src/      — commands/dev.rs (watcher, HMR loop), commands/init.rs
+├── veloxc/src/      — commands/dev.rs (watcher, HMR loop), commands/init.rs
 └── examples/           — counter, todo, showcase
 ```
 
@@ -77,11 +77,11 @@ cargo fmt --all -- --check
 cargo test -p velox-sfc
 cargo test -p velox-dom
 cargo test -p velox-core
-cargo test -p velox-cli
+cargo test -p veloxc
 cargo test -p velox-renderer
 
 # Scoped style merging test (Task 0.1 — currently failing)
-cargo test -p velox-cli --test scoped_style_merging
+cargo test -p veloxc --test scoped_style_merging
 
 # Coverage (Phase 5 gate)
 cargo llvm-cov --workspace --fail-under-lines 70
@@ -168,7 +168,7 @@ GitNexus returns `risk: UNKNOWN` when it cannot resolve callers. This is **not**
 - HMR: the **reload path** is fixed (`8ccdaa1` — no 2 s grace stall, every child reaped on every exit path, rapid saves coalesced into one rebuild, compile errors recovered on the next save). The **watcher is still a 400 ms polling scan** with a blocking `sleep` debounce; replacing it with `notify` is Task 3.1, **never started**. So: do not re-fix 3.4, and do not assume a filesystem watcher exists.
 - There is **no style-only or template-only fast path yet** (3.2/3.3). Every edit still does a full `cargo build` + relaunch. 3.3 is blocked on Task 2.2's node identity.
 
-### CLI dev server (`velox-cli/src/commands/dev.rs`)
+### CLI dev server (`veloxc/src/commands/dev.rs`)
 - `changed_file()`: 400ms `read_dir` poll + `metadata().modified()`.
 - `sleep(150ms)` blocking debounce at line ~467 — stalls command handling.
 - Every change → full `cargo build` (lines ~350, ~381).
@@ -285,6 +285,6 @@ Hermes has gitnexus skills loaded (exploring, impact-analysis, debugging, refact
 
 If you're picking up this workspace fresh:
 
-1. **Task 0.1** — fix the scoped style merging test (`velox-cli/tests/scoped_style_merging.rs:81`). Read the test, find the merge logic in `velox-sfc/src/codegen.rs`, fix so child rules keep the child's hash.
+1. **Task 0.1** — fix the scoped style merging test (`veloxc/tests/scoped_style_merging.rs:81`). Read the test, find the merge logic in `velox-sfc/src/codegen.rs`, fix so child rules keep the child's hash.
 2. **Task 0.2** — `cargo fmt --all` then fix the 88 clippy warnings.
 3. Then pick any Phase 1 task — they're correctness bugs that crash or silently break apps.

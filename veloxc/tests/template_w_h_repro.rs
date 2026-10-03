@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 fn workspace_root() -> PathBuf {
-    // velox-cli is at <workspace>/velox-cli
+    // veloxc is at <workspace>/veloxc
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..")
 }
 

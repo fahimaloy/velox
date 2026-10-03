@@ -124,7 +124,7 @@ fn main() -> Result<()> {
             template,
             local,
         } => {
-            let path = velox_cli::commands::init_project_with_template_local(
+            let path = veloxc::commands::init_project_with_template_local(
                 &name,
                 &template,
                 local.as_deref(),
@@ -141,25 +141,25 @@ fn main() -> Result<()> {
             release,
         } => {
             if let Some(input) = input {
-                velox_cli::build_cmd(&input, out_dir.as_deref(), velox_cli::EmitMode::Render)?;
+                veloxc::build_cmd(&input, out_dir.as_deref(), veloxc::EmitMode::Render)?;
                 println!("ℹ️  The generated .rs file is source code, not an executable.");
             } else {
-                velox_cli::commands::build_current(release)?;
+                veloxc::commands::build_current(release)?;
             }
         }
 
         Commands::Run { release } => {
             if release {
                 println!("🔨 Building in release mode...");
-                velox_cli::commands::build_current(true)?;
+                veloxc::commands::build_current(true)?;
             }
             println!("▶️  Running project...");
-            velox_cli::commands::run_current(release)?;
+            veloxc::commands::run_current(release)?;
         }
 
         Commands::Dev { watch, release } => {
             let dir = watch.unwrap_or_else(|| PathBuf::from("."));
-            velox_cli::commands::dev_current(&dir, release)?;
+            veloxc::commands::dev_current(&dir, release)?;
         }
 
         Commands::Lint { target, fix } => {
@@ -168,26 +168,26 @@ fn main() -> Result<()> {
                 // A single .vx file was given.
                 if fix {
                     println!("🔧 Lint+fix {}...", target.display());
-                    velox_cli::commands::fix_file_single(&target)?;
+                    veloxc::commands::fix_file_single(&target)?;
                 } else {
                     println!("🔍 Linting {}...", target.display());
-                    velox_cli::commands::lint_file(&target)?;
+                    veloxc::commands::lint_file(&target)?;
                 }
             } else {
                 // A directory (or the default "src") — walk recursively.
                 if fix {
                     println!("🔧 Lint+fix .vx files in {}...", target.display());
-                    velox_cli::commands::lint_directory_fix(&target, true)?;
+                    veloxc::commands::lint_directory_fix(&target, true)?;
                 } else {
                     println!("🔍 Linting .vx files in {}...", target.display());
-                    velox_cli::commands::lint_directory_fix(&target, false)?;
+                    veloxc::commands::lint_directory_fix(&target, false)?;
                 }
             }
         }
 
         Commands::Add { what } => match what {
             AddCommand::Component { name, slots } => {
-                velox_cli::commands::add_component(&name, slots.as_deref())?;
+                veloxc::commands::add_component(&name, slots.as_deref())?;
             }
         },
 

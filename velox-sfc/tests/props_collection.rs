@@ -344,7 +344,7 @@ pub mod rows_state_child;
 const FIXTURE_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures");
 
 /// What a build writes into a child's module file, in the order the CLI joins
-/// it: the stub, then the render half. `velox-cli/src/commands/build.rs` does
+/// it: the stub, then the render half. `veloxc/src/commands/build.rs` does
 /// exactly this concatenation for a child component, and the root is the same
 /// two halves wrapped in a `pub mod` — the wrapper adds nothing the tests here
 /// need, so the root is generated the same way.

@@ -3,7 +3,7 @@ use std::path::PathBuf;
 
 #[test]
 fn cli_exposes_git_rev() {
-    let rev = velox_cli::velox_git_rev();
+    let rev = veloxc::velox_git_rev();
     assert!(!rev.is_empty(), "rev must not be empty");
     assert_ne!(
         rev, "MISSING",
@@ -17,7 +17,7 @@ fn init_toml_pins_version_and_rev() {
         std::env::remove_var("VELOX_PATH");
     }
     let dir = std::env::temp_dir().join(format!("velox-pin-{}", std::process::id()));
-    let toml = velox_cli::commands::init::generate_cargo_toml_for_test("demo", &dir);
+    let toml = veloxc::commands::init::generate_cargo_toml_for_test("demo", &dir);
     assert!(
         toml.contains(r#"version = "0.1.0""#),
         "must bind version:\n{toml}"
@@ -33,7 +33,7 @@ fn cli_build_emits_stub_file() {
         .join("../target/velox-cli-tests")
         .join(format!("{}-stub", std::process::id()));
 
-    velox_cli::build_cmd(&input, Some(out_dir.as_path()), velox_cli::EmitMode::Stub)
+    veloxc::build_cmd(&input, Some(out_dir.as_path()), veloxc::EmitMode::Stub)
         .expect("build stub");
 
     let out_file = out_dir.join("app.rs");
@@ -53,7 +53,7 @@ fn cli_build_emits_render_fn() {
         .join("../target/velox-cli-tests")
         .join(format!("{}-render", std::process::id()));
 
-    velox_cli::build_cmd(&input, Some(out_dir.as_path()), velox_cli::EmitMode::Render)
+    veloxc::build_cmd(&input, Some(out_dir.as_path()), veloxc::EmitMode::Render)
         .expect("build render");
 
     // Output file uses sanitized (lowercase) module name per Rust conventions
@@ -69,7 +69,7 @@ fn cli_build_emits_render_fn() {
 fn init_local_override_uses_given_path() {
     let ws = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..");
     let dir = std::env::temp_dir().join(format!("velox-local-{}", std::process::id()));
-    let toml = velox_cli::commands::init::init_toml_with_local("demo", &dir, Some(ws.as_path()));
+    let toml = veloxc::commands::init::init_toml_with_local("demo", &dir, Some(ws.as_path()));
     assert!(
         toml.contains(r#"version = "0.1.0""#),
         "local path must also pin version:\n{toml}"
@@ -87,7 +87,7 @@ fn cli_stub_emits_lowercase_and_alias() {
     let out_dir = std::path::PathBuf::from(manifest_dir)
         .join("../target/velox-cli-tests")
         .join(format!("{}-stub-alias", std::process::id()));
-    velox_cli::build_cmd(&input, Some(out_dir.as_path()), velox_cli::EmitMode::Stub).expect("stub");
+    veloxc::build_cmd(&input, Some(out_dir.as_path()), veloxc::EmitMode::Stub).expect("stub");
     assert!(
         out_dir.join("app.rs").exists(),
         "stub primary app.rs must exist"
@@ -109,7 +109,7 @@ fn init_writes_supported_todo_event_template() {
         std::env::temp_dir().join(format!("velox-init-template-{}", std::process::id()));
     let _ = fs::remove_dir_all(&project_dir);
 
-    velox_cli::commands::init::init_project(project_dir.to_str().unwrap())
+    veloxc::commands::init::init_project(project_dir.to_str().unwrap())
         .expect("init should write the project template");
 
     let todos = fs::read_to_string(project_dir.join("src/components/Todos.vx"))
@@ -130,7 +130,7 @@ fn init_writes_supported_todo_event_template() {
 
 #[test]
 fn workspace_detect_requires_marker_file() {
-    let found = velox_cli::commands::init::find_velox_workspace_for_test();
+    let found = veloxc::commands::init::find_velox_workspace_for_test();
     if let Some(ws) = found {
         assert!(
             ws.join("velox-core").join("Cargo.toml").exists(),

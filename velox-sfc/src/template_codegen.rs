@@ -271,7 +271,7 @@ fn validate_template(nodes: &[Node]) -> Vec<String> {
 pub enum RenderMode {
     /// The component is rendered through `render_with_state`, which reads
     /// `Signal`/`Ref` fields and `v-for` loop items directly from the persistent
-    /// `State`. This is what `velox-cli` and every generated `main.rs` use.
+    /// `State`. This is what `veloxc` and every generated `main.rs` use.
     #[default]
     State,
     /// The component is rendered through `render_with`/`render_with_props`,

@@ -37,7 +37,7 @@ pub(crate) fn find_velox_workspace() -> Option<PathBuf> {
 ///
 /// The `.exists()` check is load-bearing, not defensive. A `cargo install`ed
 /// binary compiles with `CARGO_MANIFEST_DIR` pointing inside the registry cache,
-/// where only `velox-cli` exists and `velox-core` is a separate crate in a
+/// where only `veloxc` exists and `velox-core` is a separate crate in a
 /// different directory. The check makes that case fall through to git
 /// dependencies, which is the correct answer for an installed CLI — so this
 /// returns `Some` only for a binary built inside a real checkout.
@@ -65,7 +65,7 @@ pub fn find_velox_workspace_for_test() -> Option<std::path::PathBuf> {
 /// `tests/logo_assets.rs` fails if either side moves alone.
 ///
 /// The PNG is rasterised from the SVG by the renderer itself — run
-/// `cargo test -p velox-cli --test logo_assets -- --ignored regenerate` — so
+/// `cargo test -p veloxc --test logo_assets -- --ignored regenerate` — so
 /// regenerating it needs no converter installed and no second copy of the mark.
 const ASSETS: &[(&str, &[u8])] = &[
     (
@@ -273,7 +273,7 @@ velox-style = {{ path = "../../velox-style" }}
 velox-renderer = {{ path = "../../velox-renderer" }}
 
 [build-dependencies]
-velox-cli = {{ path = "../../velox-cli" }}
+veloxc = {{ path = "../../veloxc" }}
 "#
     );
     fs::write(root.join("Cargo.toml"), cargo).context("write Cargo.toml")?;
@@ -310,7 +310,7 @@ impl State {
     // directives for every .vx file it reads.
     let input = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/App.vx");
     let out_dir = std::path::PathBuf::from(std::env::var("OUT_DIR").unwrap());
-    velox_cli::build_cmd(&input, Some(&out_dir), velox_cli::EmitMode::Render).expect("compile App.vx");
+    veloxc::build_cmd(&input, Some(&out_dir), veloxc::EmitMode::Render).expect("compile App.vx");
 }
 "#;
     fs::write(root.join("build.rs"), build_rs).context("write build.rs")?;
@@ -340,9 +340,9 @@ pub(crate) fn generate_cargo_toml(name: &str, project_dir: &Path) -> String {
             let dom_path = compute_relative_path(project_dir, &ws.join("velox-dom"));
             let style_path = compute_relative_path(project_dir, &ws.join("velox-style"));
             let renderer_path = compute_relative_path(project_dir, &ws.join("velox-renderer"));
-            let cli_path = compute_relative_path(project_dir, &ws.join("velox-cli"));
+            let cli_path = compute_relative_path(project_dir, &ws.join("veloxc"));
             return format!(
-                "[package]\nname = \"{name}\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[workspace]\n\n[dependencies]\nvelox-core = {{ path = \"{}\", version = \"0.1.0\" }}\nvelox-dom = {{ path = \"{}\", version = \"0.1.0\" }}\nvelox-style = {{ path = \"{}\", version = \"0.1.0\" }}\nvelox-renderer = {{ path = \"{}\", version = \"0.1.0\", features = [\"skia-native\"] }}\nserde_json = \"1.0\"\n\n[build-dependencies]\nvelox-cli = {{ path = \"{}\", version = \"0.1.0\" }}\n",
+                "[package]\nname = \"{name}\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[workspace]\n\n[dependencies]\nvelox-core = {{ path = \"{}\", version = \"0.1.0\" }}\nvelox-dom = {{ path = \"{}\", version = \"0.1.0\" }}\nvelox-style = {{ path = \"{}\", version = \"0.1.0\" }}\nvelox-renderer = {{ path = \"{}\", version = \"0.1.0\", features = [\"skia-native\"] }}\nserde_json = \"1.0\"\n\n[build-dependencies]\nveloxc = {{ path = \"{}\", version = \"0.1.0\" }}\n",
                 core_path.display(),
                 dom_path.display(),
                 style_path.display(),
@@ -360,7 +360,7 @@ pub(crate) fn generate_cargo_toml(name: &str, project_dir: &Path) -> String {
         let dom_path = compute_relative_path(project_dir, &workspace.join("velox-dom"));
         let style_path = compute_relative_path(project_dir, &workspace.join("velox-style"));
         let renderer_path = compute_relative_path(project_dir, &workspace.join("velox-renderer"));
-        let cli_path = compute_relative_path(project_dir, &workspace.join("velox-cli"));
+        let cli_path = compute_relative_path(project_dir, &workspace.join("veloxc"));
 
         format!(
             r#"[package]
@@ -378,7 +378,7 @@ velox-renderer = {{ path = "{}", version = "0.1.0", features = ["skia-native"] }
 serde_json = "1.0"
 
 [build-dependencies]
-velox-cli = {{ path = "{}", version = "0.1.0" }}
+veloxc = {{ path = "{}", version = "0.1.0" }}
 "#,
             core_path.display(),
             dom_path.display(),
@@ -390,7 +390,7 @@ velox-cli = {{ path = "{}", version = "0.1.0" }}
         // No workspace found — fall back to git dependencies
         let rev = crate::velox_git_rev();
         format!(
-            "[package]\nname = \"{name}\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[workspace]\n\n[dependencies]\nvelox-core = {{ git = \"https://github.com/fahimaloy/velox\", rev = \"{rev}\", version = \"0.1.0\" }}\nvelox-dom = {{ git = \"https://github.com/fahimaloy/velox\", rev = \"{rev}\", version = \"0.1.0\" }}\nvelox-style = {{ git = \"https://github.com/fahimaloy/velox\", rev = \"{rev}\", version = \"0.1.0\" }}\nvelox-renderer = {{ git = \"https://github.com/fahimaloy/velox\", rev = \"{rev}\", version = \"0.1.0\", features = [\"skia-native\"] }}\nserde_json = \"1.0\"\n\n[build-dependencies]\nvelox-cli = {{ git = \"https://github.com/fahimaloy/velox\", rev = \"{rev}\", version = \"0.1.0\" }}\n"
+            "[package]\nname = \"{name}\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[workspace]\n\n[dependencies]\nvelox-core = {{ git = \"https://github.com/fahimaloy/velox\", rev = \"{rev}\", version = \"0.1.0\" }}\nvelox-dom = {{ git = \"https://github.com/fahimaloy/velox\", rev = \"{rev}\", version = \"0.1.0\" }}\nvelox-style = {{ git = \"https://github.com/fahimaloy/velox\", rev = \"{rev}\", version = \"0.1.0\" }}\nvelox-renderer = {{ git = \"https://github.com/fahimaloy/velox\", rev = \"{rev}\", version = \"0.1.0\", features = [\"skia-native\"] }}\nserde_json = \"1.0\"\n\n[build-dependencies]\nveloxc = {{ git = \"https://github.com/fahimaloy/velox\", rev = \"{rev}\", version = \"0.1.0\" }}\n"
         )
     }
 }

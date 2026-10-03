@@ -41,7 +41,7 @@
 //!   that matters is the tick on the FILLED box, and that one is asserted —
 //!   `.check-mark` on `.completed .check`, 6.11:1 light and 9.09:1 dark.
 //!
-//! Source of truth: `velox-cli/templates/project/src/{App.vx, components/*.vx}`.
+//! Source of truth: `veloxc/templates/project/src/{App.vx, components/*.vx}`.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;

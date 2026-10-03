@@ -35,7 +35,7 @@ cargo test --workspace --no-fail-fast
 
 **Use `--no-fail-fast`.** Without it cargo stops at the first failing test binary and the remaining crates are never reported, so a total is impossible to reconcile.
 
-Baseline at `de1e12f`: **1120 passed, 0 failed, 33 ignored** (workspace), and `velox-cli` alone sums to 57. **The old "949 passed, 1 failed" baseline is GONE.** Phase 0.1 shipped tests-only (`02a2e77`, `c2a3078`) and the suite is fully green.
+Baseline at `de1e12f`: **1120 passed, 0 failed, 33 ignored** (workspace), and `veloxc` alone sums to 57. **The old "949 passed, 1 failed" baseline is GONE.** Phase 0.1 shipped tests-only (`02a2e77`, `c2a3078`) and the suite is fully green.
 
 **There is no longer a pre-existing failure to ignore.** If a test is red, it is your change or a genuine regression — report it, do not classify it as baseline.
 
@@ -56,7 +56,7 @@ cargo test -p velox-core
 cargo test -p velox-renderer
 
 # CLI
-cargo test -p velox-cli
+cargo test -p veloxc
 ```
 
 ## 5. Frame cost benchmark (the numbers that matter)
@@ -79,7 +79,7 @@ Reports per-frame cost breakdown: stylesheet parse, cascade, layout, paint+readb
 ## 6. Scoped style merging — was red, now green, and the fix is a trap
 
 ```
-cargo test -p velox-cli --test scoped_style_merging
+cargo test -p veloxc --test scoped_style_merging
 ```
 
 **This test used to fail and was "fixed" tests-only in `02a2e77`/`c2a3078`. It is now green. Do NOT reintroduce the "fix".**
@@ -92,7 +92,7 @@ The original Task 0.1 diagnosis — that child component styles were hoisted wit
 cargo llvm-cov --workspace --fail-under-lines 70
 ```
 
-Not yet configured — Phase 5 gate. Uncovered public surface to target: `velox-core/src/ergonomics.rs` (504 lines), `velox-renderer/src/{presenter,event_binding,text,viewport,hmr}.rs`, `velox-style/src/{visual_effects,fonts}.rs`, `velox-cli/src/commands/{add,lint,init}.rs`.
+Not yet configured — Phase 5 gate. Uncovered public surface to target: `velox-core/src/ergonomics.rs` (504 lines), `velox-renderer/src/{presenter,event_binding,text,viewport,hmr}.rs`, `velox-style/src/{visual_effects,fonts}.rs`, `veloxc/src/commands/{add,lint,init}.rs`.
 
 ## 8. Release build (when you need to confirm it compiles optimized)
 

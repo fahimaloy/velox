@@ -30,7 +30,7 @@
 //! `Default::default()` so a real authoring mistake stopped being an error,
 //! which is the failure this file now pins shut.
 //!
-//! The fixtures are the SHAPE `velox-cli/templates/project` ships, trimmed to
+//! The fixtures are the SHAPE `veloxc/templates/project` ships, trimmed to
 //! the boundary and nothing else: a child with no `Props` struct, a child with
 //! two required props, and three parents against that child — fully bound,
 //! partly bound, and bound to nothing at all.

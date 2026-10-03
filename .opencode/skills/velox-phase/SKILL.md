@@ -16,10 +16,10 @@ All current work is driven by `docs/plans/2026-09-28-velox-remediation-plan.md`.
 ### Task 0.1 — Fix the failing scoped-style test
 
 ```bash
-cargo test -p velox-cli --test scoped_style_merging
+cargo test -p veloxc --test scoped_style_merging
 ```
 
-Fails at `velox-cli/tests/scoped_style_merging.rs:81`: "TodoInput's .btn-add must be scoped in the merged sheet."
+Fails at `veloxc/tests/scoped_style_merging.rs:81`: "TodoInput's .btn-add must be scoped in the merged sheet."
 
 **Fix:** Read `velox-sfc/src/codegen.rs` around `scope_css` and the child-style merge. The child component's own scope hash is not being applied when its rules are hoisted into the root stylesheet. Fix so each child's rules keep the CHILD's hash, not the root's.
 
@@ -213,7 +213,7 @@ uses the existing structural `path` (`preserve_input_state`).
 
 Also: classify change kind (`StyleOnly`, `TemplateOnly`, `Script`) — prerequisite for 3.2. A `<style>` edit must not trigger `cargo build`.
 
-Test to write: `velox-cli/tests/watcher_tests.rs`.
+Test to write: `veloxc/tests/watcher_tests.rs`.
 
 Commit: `perf(cli): watch with notify instead of a 400ms polling scan`
 
@@ -285,7 +285,7 @@ on arrival: the plan and this skill both certified the field without noticing th
 type is unreadable in the product.
 
 **What shipped:** `velox-dom/src/style.rs` `pub const PARSED_BUT_UNRENDERED: &[(&str, &str)]`
-sits immediately above `set_property`; `velox-cli/src/commands/lint.rs` reads it and
+sits immediately above `set_property`; `veloxc/src/commands/lint.rs` reads it and
 warns per name. Build-time table, no `ComputedStyle` change.
 
 **The list is 10, not 3.** N1 named `transition`/`transform`/`box-shadow`; the audit

@@ -35,7 +35,7 @@ impl Drop for ScratchFile {
 
 /// Run `velox lint <path>` and return `(success, combined output)`.
 fn run_lint(path: &Path) -> (bool, String) {
-    let out = Command::new(env!("CARGO_BIN_EXE_velox"))
+    let out = Command::new(env!("CARGO_BIN_EXE_veloxc"))
         .arg("lint")
         .arg(path)
         .output()
