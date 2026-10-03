@@ -6,7 +6,7 @@ license = "MIT"
 description = "Core reactive primitives for the Velox UI framework"
 authors = ["fahimaloy"]
 repository = "https://github.com/fahimaloy/velox"
-publish = false
+categories = ["gui", "no-std"]
 
 [dependencies]
 log = "0.4"
