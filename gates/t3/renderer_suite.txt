@@ -1,0 +1,701 @@
+   Compiling velox-style v0.1.0 (/home/fahimaloy/Projects/personal/velox/velox-style)
+   Compiling velox-renderer v0.1.0 (/home/fahimaloy/Projects/personal/velox/velox-renderer)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 33.78s
+     Running unittests src/lib.rs (target/debug/deps/velox_renderer-05af19ad498b958d)
+
+running 128 tests
+test edit_focus_tests::editing_keys_map_to_their_actions ... ok
+test edit_focus_tests::escape_is_routed_to_the_blur_action ... ok
+test edit_focus_tests::both_loops_publish_their_pre_loop_frame_before_they_start ... ok
+test edit_focus_tests::backspace_at_caret_zero_changes_nothing ... ok
+test edit_focus_tests::caret_move_repaints_without_announcing_a_text_change ... ok
+test edit_focus_tests::dispatch_uses_the_value_in_the_tree_not_the_target ... ok
+test edit_focus_tests::backspace_removes_the_char_before_the_caret ... ok
+test edit_focus_tests::clicking_empty_space_blurs_clears_the_selection_and_keeps_the_caret ... ok
+test edit_focus_tests::escape_with_nothing_focused_is_a_no_op ... ok
+test edit_focus_tests::clicking_empty_space_with_nothing_focused_changes_nothing ... ok
+test edit_focus_tests::non_editing_keys_produce_no_action ... ok
+test edit_focus_tests::escape_on_a_focused_field_blurs_it_and_drops_its_caret_and_selection ... ok
+test edit_focus_tests::insert_lands_at_the_caret_not_at_the_end ... ok
+test edit_focus_tests::insert_at_caret_dispatches_new_value_and_advances_caret ... ok
+test edit_focus_tests::insert_with_no_published_frame_is_silently_dropped ... ok
+test edit_focus_tests::no_focused_input_is_a_no_op ... ok
+test edit_focus_tests::shift_caret_move_anchors_a_selection ... ok
+test edit_focus_tests::focus_gain_with_no_published_frame_puts_the_caret_at_zero ... ok
+test event_binding::tests::test_event_binder ... ok
+test event_binding::tests::test_event_binder_no_handler ... ok
+test event_binding::tests::test_event_data ... ok
+test event_binding::tests::test_event_type_parsing ... ok
+test edit_focus_tests::text_origin_agrees_with_the_paint_authority_for_every_padding_spelling ... ok
+test edit_focus_tests::submit_dispatches_the_unchanged_value ... ok
+test input_metrics::tests::border_width_deflates_the_padding_box ... ok
+test input_metrics::tests::content_right_never_falls_left_of_text_left ... ok
+test input_metrics::tests::degenerate_box_does_not_produce_nan ... ok
+test input_metrics::tests::degenerate_font_size_falls_back_to_the_inherited_one ... ok
+test input_metrics::tests::em_padding_resolves_against_the_elements_own_font_size ... ok
+test input_metrics::tests::explicit_zero_padding_is_honoured ... ok
+test input_metrics::tests::font_size_declared_in_em_resolves_against_the_parent ... ok
+test input_metrics::tests::four_value_shorthand ... ok
+test input_metrics::tests::no_style_falls_back_to_the_documented_padding ... ok
+test input_metrics::tests::none_border_style_occupies_no_space ... ok
+test input_metrics::tests::shorthand_and_longhand_padding_agree ... ok
+test input_metrics::tests::the_shorthand_is_what_the_old_lookup_missed ... ok
+test presenter::tests::debug_flag_does_not_change_degraded_path ... ok
+test presenter::tests::epipe_warning_claimed_once_per_session ... ok
+test resize_state_tests::cleanup_component_removes_only_its_resize_hook ... ok
+test resize_state_tests::renderer_resize_state_coalesces_raw_events_and_dispatches_once ... ok
+test resize_state_tests::renderer_resize_state_initial_logical_size_suppresses_notification ... ok
+test resize_state_tests::renderer_resize_state_runs_all_hooks_and_allows_signal_mutation ... ok
+test resize_state_tests::renderer_resize_state_uses_viewport_logical_pixels_for_dpi ... ok
+test resize_state_tests::two_windows_with_equal_committed_sizes_both_dispatch ... ok
+test skia_gl::unix_impl::tests::direct_context_can_only_be_obtained_by_consuming_the_gl_context ... ok
+test skia_render::skia_impl::tests::a_nan_vertical_bound_cannot_escape_the_seam ... ok
+test edit_focus_tests::shorthand_padding_places_the_caret_on_the_painted_glyph ... ok
+test skia_render::skia_impl::tests::a_bare_text_node_under_real_metrics_is_the_strut_and_not_the_ink ... ok
+test skia_render::skia_impl::tests::an_authored_placeholder_block_without_colour_still_derives ... ok
+test skia_render::skia_impl::tests::an_authored_placeholder_colour_wins_over_the_derived_one ... ok
+test skia_render::skia_impl::tests::apply_border_style_clears_a_stale_dash ... ok
+test skia_render::skia_impl::tests::apply_border_style_dashes_only_dashed_and_dotted ... ok
+test skia_render::skia_impl::tests::apply_border_style_survives_a_degenerate_width ... ok
+test skia_render::skia_impl::tests::border_value_accepts_every_named_colour_the_dom_accepts ... ok
+test skia_render::skia_impl::tests::a_non_positive_scale_falls_back_to_one_instead_of_collapsing_the_surface ... ok
+test edit_focus_tests::focus_gain_puts_the_caret_at_the_end_of_the_value ... ok
+test edit_focus_tests::click_into_a_focused_field_repositions_the_caret ... ok
+test skia_render::skia_impl::tests::border_value_every_style_keyword_reaches_the_canvas ... ok
+test skia_render::skia_impl::tests::border_value_resolves_relative_lengths ... ok
+test skia_render::skia_impl::tests::border_width_without_a_style_paints_nothing ... ok
+test skia_render::skia_impl::tests::line_through_tracks_the_font_size_rather_than_a_constant ... ok
+test skia_render::skia_impl::tests::a_repeated_measurement_is_served_from_the_memo_without_reshaping ... ok
+test skia_render::skia_impl::tests::parse_border_resolves_rem_against_the_root_not_the_element ... ok
+test skia_render::skia_impl::tests::parse_padding_clamps_negative_lengths_and_rejects_infinite_ones ... ok
+test skia_render::skia_impl::tests::border_value_defaults_to_medium_width ... ok
+test skia_render::skia_impl::tests::parse_padding_reads_every_css_shorthand_form ... ok
+test skia_render::skia_impl::tests::parse_padding_rejects_garbage_and_the_four_value_overflow ... ok
+test skia_render::skia_impl::tests::parse_padding_resolves_percent_against_the_font_size ... ok
+test skia_render::skia_impl::tests::parse_padding_resolves_rem_against_the_root_not_the_element ... ok
+test skia_render::skia_impl::tests::parse_text_style_bolder_overrides_non_bold_base ... ok
+test skia_render::skia_impl::tests::parse_text_style_detects_ellipsis_and_nowrap ... ok
+test skia_render::skia_impl::tests::parse_text_style_drops_font_sizes_that_cannot_paint ... ok
+test skia_render::skia_impl::tests::parse_text_style_font_weight_keyword_matrix ... ok
+test skia_render::skia_impl::tests::parse_text_style_keeps_absolute_font_sizes ... ok
+test skia_render::skia_impl::tests::parse_text_style_relative_font_size_does_not_compound_within_one_block ... ok
+test skia_render::skia_impl::tests::parse_text_style_relative_font_size_follows_the_inherited_size ... ok
+test skia_render::skia_impl::tests::parse_text_style_rem_agrees_with_the_dom_layout_root_basis ... ok
+test skia_render::skia_impl::tests::parse_text_style_resolves_every_relative_font_size_unit ... ok
+test skia_render::skia_impl::tests::parse_text_style_treats_bolder_as_bold ... ok
+test skia_render::skia_impl::tests::a_logical_size_that_rounds_to_zero_at_a_fractional_scale_still_renders ... ok
+test skia_render::skia_impl::tests::placeholder_colour_is_derived_from_the_fields_own_colour ... ok
+test skia_render::skia_impl::tests::parse_text_style_viewport_units_follow_the_viewport_argument ... ok
+test skia_render::skia_impl::tests::placeholder_keeps_the_texts_alpha_and_dims_only_the_channels ... ok
+test skia_render::skia_impl::tests::placeholder_colour_is_derived_not_a_fixed_grey ... ok
+test skia_render::skia_impl::tests::render_debug_hit_rects_collects_clickable ... ok
+test skia_render::skia_impl::tests::render_overflow_hidden_clips_children ... ignored, requires skia-native feature and GPU hardware
+test skia_render::skia_impl::tests::render_z_index_overlap_checksum ... ignored, requires skia-native feature and GPU hardware
+test skia_render::skia_impl::tests::text_decoration_line_through_is_not_dropped ... ok
+test skia_render::skia_impl::tests::text_decoration_matches_whole_keywords_not_substrings ... ok
+test skia_render::skia_impl::tests::text_decoration_none_clears_both_flags ... ok
+test skia_render::skia_impl::tests::parse_padding_resolves_em_against_the_elements_font_size ... ok
+test skia_render::skia_impl::tests::text_decoration_underline_line_through_draws_both ... ok
+test skia_render::skia_impl::tests::text_decoration_underline_still_works ... ok
+test skia_render::skia_impl::tests::text_decoration_none_beats_a_sibling_keyword ... ok
+test skia_render::skia_impl::tests::a_blank_run_does_not_collapse_its_line_box_under_real_metrics ... ok
+test skia_render::skia_impl::tests::the_renderer_borrows_the_dom_root_font_size ... ok
+test skia_render::skia_impl::tests::line_box_height_under_real_metrics_is_the_strut_for_every_real_run ... ok
+test skia_render::skia_impl::tests::measured_run_vertical_metrics_come_from_the_glyphs_not_a_constant ... ok
+test skia_render::skia_impl::tests::measure_run_passes_skias_bounds_through_unmodified ... ok
+test skia_render::skia_impl::tests::underline_and_line_through_are_far_enough_apart_to_be_two_rules ... ok
+test skia_render::skia_impl::tests::a_runs_vertical_extent_is_logical_and_does_not_move_with_scale ... ok
+test text::tests::test_text_config ... ok
+test skia_render::skia_impl::tests::the_shared_measure_seam_never_serves_another_scales_advance ... ok
+test skia_render::skia_impl::tests::truncate_ellipsis_appends_ellipsis_on_overflow ... ok
+test viewport::tests::clamp_zero ... ok
+test viewport::tests::fractional_scale_rounding ... ok
+test viewport::tests::set_scale_recomputes ... ok
+test viewport::tests::update_physical_recomputes_logical ... ok
+test window_event_shared_tests::a_wheel_event_before_the_first_frame_is_a_no_op ... ok
+test window_event_shared_tests::close_requested_tells_the_caller_to_exit ... ok
+test window_event_shared_tests::cursor_moved_converts_physical_pixels_to_logical_units ... ok
+test window_event_shared_tests::cursor_moved_latches_and_clears_the_hover_target_under_the_logical_cursor ... ok
+test window_event_shared_tests::modifiers_changed_latches_the_shift_state_the_caret_reads ... ok
+test window_event_shared_tests::resized_keeps_only_the_last_size_of_a_drag ... ok
+test window_event_shared_tests::scale_factor_change_never_divides_by_a_degenerate_old_scale ... ok
+test window_event_shared_tests::scale_factor_change_rescales_the_cursor_so_the_physical_point_is_stable ... ok
+test window_event_shared_tests::wheel_deltas_become_logical_pixels_in_the_natural_direction ... ok
+test skia_render::skia_impl::tests::truncate_ellipsis_handles_zero_width ... ok
+test skia_render::skia_impl::tests::truncate_ellipsis_fits_short_text_unchanged ... ok
+test text::tests::test_text_measurement ... ok
+test edit_focus_tests::the_caret_lane_measures_at_the_size_an_undeclared_font_size_paints_at ... ok
+test skia_render::skia_impl::tests::the_advance_memo_is_bounded_and_evicts_the_oldest_rather_than_refusing ... ok
+test text::tests::the_renderer_and_the_layout_seam_measure_a_run_identically ... ok
+test text::tests::test_line_height ... ok
+test edit_focus_tests::a_relative_font_size_reaches_the_caret_lane_at_its_resolved_size ... ok
+test edit_focus_tests::em_padding_resolves_against_the_same_inherited_size_in_both_lanes ... ok
+test skia_render::skia_impl::tests::a_scale_change_clears_the_advance_memo_and_remeasures_for_the_new_scale ... ok
+test skia_render::skia_impl::tests::the_caret_lane_and_the_paint_lane_measure_the_same_advance ... ok
+
+test result: ok. 126 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 0.24s
+
+     Running tests/a11y_tree_tests.rs (target/debug/deps/a11y_tree_tests-ab51094e36e49155)
+
+running 1 test
+test a11y_tree_includes_roles_and_names ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/app_background_render.rs (target/debug/deps/app_background_render-3eecafa0282e6ee5)
+
+running 2 tests
+test app_root_background_paints_navy_not_brown ... ok
+test live_render_frame_paints_navy ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s
+
+     Running tests/app_render_test.rs (target/debug/deps/app_render_test-6bc6f5ec67cc83c9)
+
+running 1 test
+test render_app_template ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.23s
+
+     Running tests/backends.rs (target/debug/deps/backends-891284d5944d86ac)
+
+running 1 test
+test skia_backend_reports_name ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/caret_pixels.rs (target/debug/deps/caret_pixels-d3255c4e6f53051c)
+
+running 9 tests
+test focus_ring_is_visible_and_distinct_from_the_border ... ok
+test a_long_value_clips_the_caret_inside_the_field ... ok
+test a_dashed_border_does_not_make_the_focus_ring_dashed ... ok
+test selection_paints_a_highlight_behind_the_text ... ok
+test checkbox_tick_follows_the_checked_attribute ... ok
+test caret_does_not_touch_a_sibling_element ... ok
+test unfocused_input_has_no_caret ... ok
+test blink_gates_the_caret_and_the_core_is_black ... ok
+test caret_x_is_the_measured_prefix_width ... ok
+
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.05s
+
+     Running tests/dpi_correctness_repro.rs (target/debug/deps/dpi_correctness_repro-2773f690b10dee82)
+
+running 6 tests
+test single_rounding_physical_from_logical_exists ... ok
+test hit_test_and_render_share_viewport ... ok
+test mouse_pos_rescaled_atomically_on_scale_change ... ok
+test inverse_rounding_no_hairline_fractional_1_25_1_5 ... ok
+test fractional_scales_no_blur_hairline_click_correct ... ok
+test font_re_raster_at_device_pixels ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/e2e_tests.rs (target/debug/deps/e2e_tests-a07e75cedd228a2d)
+
+running 1 test
+test end_to_end_reactive_updates_and_mount ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/edit_typing_contract.rs (target/debug/deps/edit_typing_contract-f3bbb6693726bb15)
+
+running 10 tests
+test a_caret_move_repaints_without_reporting_a_text_change ... ok
+test a_caret_past_the_end_of_the_value_is_clamped ... ok
+test backspace_at_the_start_of_the_value_changes_nothing ... ok
+test backspace_removes_the_char_before_the_caret ... ok
+test move_right_at_the_end_of_the_value_changes_nothing ... ok
+test focused_input_index_reports_the_focused_field_and_nothing_otherwise ... ok
+test typing_into_a_focused_input_updates_the_value_and_the_caret ... ok
+test a_character_lands_at_the_caret_not_at_the_end ... ok
+test submit_reports_the_submit_flag_and_the_unchanged_value ... ok
+test typing_over_a_selection_replaces_it ... ok
+
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/event_lifecycle_tests.rs (target/debug/deps/event_lifecycle_tests-d286ba94c4fc8907)
+
+running 22 tests
+test dispatch_deeply_nested_handlers ... ok
+test dispatch_mixed_handler_names ... ok
+test dispatch_multiple_event_types ... ok
+test dispatch_no_matching_handlers ... ok
+test dispatch_same_handler_on_multiple_elements ... ok
+test event_registry_has_method ... ok
+test event_registry_remove_handler ... ok
+test dispatch_unregistered_handler_name ... ok
+test keyed_diff_inserts_everything_when_old_is_empty ... ok
+test keyed_diff_inserts_a_new_key_without_disturbing_the_existing_one ... ok
+test keyed_diff_removes_everything_when_new_is_empty ... ok
+test keyed_diff_removes_unmatched_keys_and_moves_the_survivor ... ok
+test keyed_diff_reorders_by_key_and_applies_new_content ... ok
+test mount_creates_render_tree ... ok
+test mount_deep_tree ... ok
+test mount_empty_element ... ok
+test mount_nested_tree_counts_nodes ... ok
+test mount_text_only ... ok
+test mount_wide_tree ... ok
+test runtime_double_click_detection ... ok
+test runtime_hover_sent_once ... ok
+test runtime_mouse_click_invokes_handler ... ok
+
+test result: ok. 22 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/event_loop_arms.rs (target/debug/deps/event_loop_arms-abccc9ad40074ce2)
+
+running 13 tests
+test caret_blink_ticker_drop_signals_the_thread_before_it_joins_it ... ok
+test each_loop_repaints_when_the_caret_blink_phase_flips ... ok
+test each_loop_republishes_and_presents_on_redraw ... ok
+test each_loop_declares_the_focus_state_its_arms_mutate ... ok
+test each_loop_holds_its_blink_ticker_in_a_local_that_outlives_the_run ... ok
+test each_loop_routes_editing_keys_through_the_shared_editor ... ok
+test each_loop_dispatches_keydown_additively_before_routing_the_key ... ok
+test each_loop_withholds_reload_and_quit_while_a_text_field_has_focus ... ok
+test each_loop_focuses_the_clicked_field_before_dispatching_the_click ... ok
+test each_loop_applies_received_characters_to_the_focused_field ... ok
+test the_duplicated_arms_of_both_loops_make_the_same_calls ... ok
+test the_renderer_has_exactly_two_event_loops ... ok
+test each_loop_parks_on_control_flow_wait_before_it_dispatches ... ok
+
+test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+
+     Running tests/events_hit_test.rs (target/debug/deps/events_hit_test-7f39076cb437a916)
+
+running 1 test
+test hit_test_click_targets ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/events_runtime_tests.rs (target/debug/deps/events_runtime_tests-90670166de17a4e7)
+
+running 1 test
+test runtime_click_and_dblclick_and_hover ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/events_tests.rs (target/debug/deps/events_tests-3b61e5322a03cb83)
+
+running 2 tests
+test dispatch_handles_multiple_targets ... ok
+test dispatch_invokes_registered_callback ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/focus_blur_api.rs (target/debug/deps/focus_blur_api-4d62316240bb051b)
+
+running 12 tests
+test blur_drops_focus_and_the_selection_but_keeps_the_caret ... ok
+test blur_releases_every_focused_field ... ok
+test blurring_nothing_is_not_a_change ... ok
+test escape_over_a_selection_does_not_change_the_value ... ok
+test escape_blurs_the_field_and_leaves_its_value_alone ... ok
+test escape_with_nothing_focused_reports_no_change ... ok
+test focused_input_path_reports_the_focused_field_and_nothing_otherwise ... ok
+test focusing_a_field_takes_focus_from_the_previous_one ... ok
+test focusing_an_out_of_range_index_changes_nothing ... ok
+test focusing_the_already_focused_field_reports_no_change ... ok
+test the_gate_agrees_with_the_flag_whichever_field_is_focused ... ok
+test the_shortcut_gate_is_closed_only_while_a_field_is_focused ... ok
+
+test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/frame_cost_bench.rs (target/debug/deps/frame_cost_bench-93f41c93375d2c94)
+
+running 1 test
+test per_frame_cost_breakdown ... ignored, measurement tool; run explicitly with --ignored --nocapture
+
+test result: ok. 0 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/hit_test.rs (target/debug/deps/hit_test-65ecfed94379f3aa)
+
+running 7 tests
+test clip_rejects_hover_outside_parent ... ok
+test clip_rejects_input_focus_outside_parent ... ok
+test positioned_overlay_hits_above_static_sibling ... ok
+test clip_rejects_click_outside_parent ... ok
+test scrolled_protrusion_not_hittable_outside_container ... ok
+test same_depth_prefers_higher_z_index ... ok
+test stacking_group_traps_descendant_z_index ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/hmr_deadlock_repro.rs (target/debug/deps/hmr_deadlock_repro-433b69af515be0cf)
+
+running 6 tests
+test hmr_thread_has_catch_unwind ... ok
+test hmr_hot_reload_recomputes_input_targets_and_redraw ... ok
+test hmr_main_thread_mutex_try_recv ... ok
+test hmr_deadlock_mutex_held_across_recv ... ok
+test live_no_deadlock_new_pattern ... ok
+test live_deadlock_simulation_old_pattern_blocks ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.10s
+
+     Running tests/hmr_protocol.rs (target/debug/deps/hmr_protocol-b3d185aed556a56e)
+
+running 6 tests
+test default_hmr_port_is_well_known ... ok
+test full_reload_serializes_roundtrip ... ok
+test hot_reload_serializes_roundtrip ... ok
+test hmr_config_disabled_by_default ... ok
+test keep_window_serializes_roundtrip ... ok
+test newline_delimited_protocol_parses ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/inherited_text_align_render.rs (target/debug/deps/inherited_text_align_render-1c792b34d3a5188e)
+
+running 1 test
+test inherited_text_align_centers_rendered_text ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.06s
+
+     Running tests/init_bg_check.rs (target/debug/deps/init_bg_check-51fd8cffbcf84857)
+
+running 1 test
+test init_app_bg_paint_check ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s
+
+     Running tests/init_preview.rs (target/debug/deps/init_preview-a3e1022c3ace146c)
+
+running 1 test
+test dump_init_preview_png ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.06s
+
+     Running tests/input_author_styling.rs (target/debug/deps/input_author_styling-aa6565e229a04a02)
+
+running 13 tests
+test an_explicit_zero_padding_is_not_replaced_by_a_fallback ... ok
+test the_shorthand_the_longhand_and_an_inline_length_agree ... ok
+test the_value_text_uses_the_authors_colour ... ok
+test the_authors_background_reaches_the_field_instead_of_the_white_fallback ... ok
+test the_authors_border_colour_reaches_the_outline ... ok
+test the_default_border_colour_survives_as_the_fallback ... ok
+test a_wider_padding_moves_the_glyphs_right_on_screen ... ok
+test a_dark_author_colour_paints_dark_ink_and_not_the_hardcoded_black_forever ... ok
+test the_authors_border_width_is_fully_visible ... ok
+test a_translucent_author_background_is_not_painted_twice ... ok
+test an_undeclared_background_still_falls_back_to_white ... ok
+test a_border_radius_reaches_the_outline_not_just_the_fill ... ok
+test the_fallback_outline_honours_the_radius_too ... ok
+
+test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.05s
+
+     Running tests/input_placeholder.rs (target/debug/deps/input_placeholder-90ecb450c815d620)
+
+running 13 tests
+test an_input_gets_ua_padding_even_with_no_author_style ... ok
+test an_input_with_no_author_height_still_gets_a_usable_height ... ok
+test an_author_padding_beats_the_ua_default ... ok
+test a_placeholder_disappears_once_the_field_has_a_value ... ok
+test an_empty_field_with_a_placeholder_paints_something ... ok
+test an_empty_placeholder_attribute_paints_nothing ... ok
+test a_placeholder_longer_than_the_field_is_truncated_to_its_content_width ... ok
+test the_placeholder_is_dimmer_than_the_value_it_replaces ... ok
+test the_placeholder_rule_ignores_a_field_with_no_placeholder ... ok
+test the_placeholder_rule_does_not_touch_the_value_text ... ok
+test the_boilerplates_dark_input_renders_as_a_dark_field ... ok
+test the_placeholder_keeps_the_fields_hue_but_not_its_strength ... ok
+test an_author_placeholder_colour_reaches_the_paint ... ok
+
+test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.05s
+
+     Running tests/integration_tests.rs (target/debug/deps/integration_tests-db8e26c26752420c)
+
+running 12 tests
+test tests::test_computed_style_from_css ... ok
+test tests::test_event_binding_workflow ... ok
+test tests::test_event_data_with_key ... ok
+test tests::test_flexbox_properties ... ok
+test tests::test_event_data_with_position ... ok
+test tests::test_hover_event ... ok
+test tests::test_css_property_application ... ok
+test tests::test_complete_sfc_parsing ... ok
+test tests::test_multiple_handlers_same_target ... ok
+test tests::test_positioning_properties ... ok
+test tests::test_input_event_handling ... ok
+test tests::test_typography_properties ... ok
+
+test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/keydown_focus.rs (target/debug/deps/keydown_focus-251d736ddd41ecc8)
+
+running 27 tests
+test a_focus_grant_for_something_that_is_not_a_text_input_does_nothing ... ok
+test a_keydown_binding_with_no_handler_name_is_ignored ... ok
+test a_duplicate_focus_id_resolves_to_the_first_in_document_order ... ok
+test a_key_with_no_binding_changes_nothing ... ok
+test a_keydown_binding_is_found_and_called_with_the_key_name ... ok
+test a_binding_fires_while_a_field_is_focused_and_an_unbound_key_does_not ... ok
+test an_unresolvable_grant_does_not_stop_the_handler_on_the_same_press ... ok
+test an_unknown_focus_id_resolves_to_nothing ... ok
+test focus_on_matching_ignores_attribute_case ... ok
+test every_keydown_binding_in_the_tree_is_invoked_in_document_order ... ok
+test escape_blurs_the_focused_field_while_a_keydown_handler_is_present ... ok
+test dispatch_never_edits_blurs_or_changes_focus ... ok
+test focusing_moves_the_caret_to_the_end_of_the_value ... ok
+test ordinary_typing_still_edits_while_a_keydown_handler_is_present ... ok
+test pressing_the_same_key_again_does_not_move_the_caret ... ok
+test two_grants_of_the_same_key_still_leave_exactly_one_field_focused ... ok
+test winit_keys::a_key_with_no_edit_action_and_no_binding_is_a_complete_no_op ... ok
+test winit_keys::an_unmapped_key_is_named_rather_than_panicking ... ok
+test the_focus_id_still_resolves_after_a_field_is_inserted_above_it ... ok
+test winit_keys::a_press_runs_the_binding_and_the_editor_together ... ok
+test winit_keys::dispatch_without_a_tree_is_quiet ... ok
+test winit_keys::dispatching_a_letter_does_not_consume_it ... ok
+test winit_keys::an_editing_key_reaches_the_editor_with_a_binding_attached ... ok
+test winit_keys::letters_are_named_upper_case_regardless_of_shift ... ok
+test winit_keys::f2_focuses_the_field_the_author_named ... ok
+test winit_keys::the_key_name_table_is_author_facing ... ok
+test winit_keys::focus_by_id_is_the_same_thing_the_key_path_does ... ok
+
+test result: ok. 27 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/lifecycle_renderer_sim.rs (target/debug/deps/lifecycle_renderer_sim-38ea195bc851415c)
+
+running 3 tests
+test renderer_cleanup_guard_drop_calls_destroy ... ok
+test renderer_sim_ensure_mounted_helper_idempotent ... ok
+test renderer_sim_mounted_once_updated_per_recompute_destroy_once ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/mount_tests.rs (target/debug/deps/mount_tests-4c30d9e371ab5cf5)
+
+running 1 test
+test mount_counts_nodes_and_texts ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/overflow_scroll_events.rs (target/debug/deps/overflow_scroll_events-07d703f644967478)
+
+running 8 tests
+test wheel_ignores_overflow_hidden ... ok
+test apply_scroll_offsets_clamps_stored_offset_to_max ... ok
+test wheel_outside_scrollable_is_noop ... ok
+test wheel_on_root_uses_empty_path_key ... ok
+test hit_test_finds_deepest_scrollable ... ok
+test wheel_scroll_clamps_and_shifts_children ... ok
+test wheel_seeds_from_deprecated_scroll_top ... ok
+test wheel_targets_deepest_and_shifts_only_that_subtree ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/overflow_scroll_render.rs (target/debug/deps/overflow_scroll_render-67723ccca2dd247b)
+
+running 3 tests
+test scrollbar_thumb_painted_on_scrollable_container ... ok
+test non_scrollable_container_paints_no_thumb ... ok
+test scrolled_content_renders_shifted_with_thumb_at_bottom ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s
+
+     Running tests/presenter_pixel_bytes.rs (target/debug/deps/presenter_pixel_bytes-75707d88a861e458)
+
+running 3 tests
+test n32_is_bgra_8888_on_this_target ... ok
+test known_colours_map_to_argb_words ... ok
+test old_pipeline_bytes_is_identical_to_new_pipeline ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/r8_capture.rs (target/debug/deps/r8_capture-091221971a684d28)
+
+running 1 test
+test the_funnel_preserves_the_bytes_head_produced ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.14s
+
+     Running tests/renderer_api.rs (target/debug/deps/renderer_api-a3e4f1ce94564f4e)
+
+running 1 test
+test selected_renderer_matches_backend_const ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/single_layout_repro.rs (target/debug/deps/single_layout_repro-4f40b781e8cf6ef4)
+
+running 5 tests
+test recompute_targets_takes_layout_node ... ok
+test no_recompute_in_resized_handler ... ok
+test single_layout_per_redraw_shares_layout ... ok
+test logical_size_unified ... ok
+test render_frame_takes_layout_node ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/skia_batching_render.rs (target/debug/deps/skia_batching_render-4af49db304ecaca5)
+
+running 1 test
+test render_many_boxes_checksum ... ignored, requires skia-native feature and GPU hardware
+
+test result: ok. 0 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/skia_border_radius_render.rs (target/debug/deps/skia_border_radius_render-31edae3830bff6e8)
+
+running 1 test
+test render_border_radius_vnode_checksum ... ignored, requires skia-native feature and GPU hardware
+
+test result: ok. 0 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/skia_border_render.rs (target/debug/deps/skia_border_render-e38bf19947f9eeb4)
+
+running 1 test
+test render_border_vnode_checksum ... ignored, requires skia-native feature and GPU hardware
+
+test result: ok. 0 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/skia_dpr_render.rs (target/debug/deps/skia_dpr_render-4bfc86ce8ff4c0c5)
+
+running 1 test
+test render_dpr2_checksum ... ignored, requires skia-native feature and GPU hardware
+
+test result: ok. 0 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/skia_draw.rs (target/debug/deps/skia_draw-9855baa32c101205)
+
+running 1 test
+test smoke_skia_draw ... ignored, requires skia-native feature and GPU hardware
+
+test result: ok. 0 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/skia_gl_lifetime.rs (target/debug/deps/skia_gl_lifetime-a65c146401179801)
+
+running 2 tests
+test gpu::direct_context_outlives_the_egl_context_that_backs_it ... ignored, requires skia-native feature and GPU hardware
+test gpu::repeated_create_and_drop_is_clean ... ignored, requires skia-native feature and GPU hardware
+
+test result: ok. 0 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/skia_gpu_surface.rs (target/debug/deps/skia_gpu_surface-0c34cddd48183836)
+
+running 1 test
+test gpu_surface_present ... ignored, requires skia-native feature and GPU hardware
+
+test result: ok. 0 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/skia_hover_render.rs (target/debug/deps/skia_hover_render-d69190f2bab6bcae)
+
+running 1 test
+test render_hover_styles_checksum ... ignored, requires skia-native feature and GPU hardware
+
+test result: ok. 0 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/skia_image_filter_render.rs (target/debug/deps/skia_image_filter_render-91519789101e2681)
+
+running 1 test
+test render_image_filters_checksum ... ignored, requires skia-native feature and GPU hardware
+
+test result: ok. 0 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/skia_init.rs (target/debug/deps/skia_init-0cddbbd9c9695762)
+
+running 1 test
+test smoke_skia_init ... ignored, requires skia-native feature and GPU hardware
+
+test result: ok. 0 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/skia_non_unix_surface.rs (target/debug/deps/skia_non_unix_surface-cab8cb8322d3e1d1)
+
+running 3 tests
+test the_platform_crates_stay_reachable_on_every_target ... ok
+test no_non_unix_entry_point_panics_or_claims_a_context_it_cannot_make ... ok
+test the_non_unix_stub_provides_every_entry_point_the_shared_call_site_uses ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/skia_text_render.rs (target/debug/deps/skia_text_render-ce0eeecf4c8cd34b)
+
+running 1 test
+test render_text_styles_checksum ... ignored, requires skia-native feature and GPU hardware
+
+test result: ok. 0 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/skia_text_wrap_render.rs (target/debug/deps/skia_text_wrap_render-9f636508e1b458ba)
+
+running 1 test
+test every_wrapped_line_of_a_paragraph_is_painted_once ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.05s
+
+     Running tests/skia_vnode_render.rs (target/debug/deps/skia_vnode_render-c8d9b8eda0736056)
+
+running 1 test
+test render_simple_vnode_to_png ... ignored, requires skia-native feature and GPU hardware
+
+test result: ok. 0 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/tagline_tail_is_painted.rs (target/debug/deps/tagline_tail_is_painted-b2de028e62832146)
+
+running 1 test
+test the_tagline_paints_its_tail_and_the_png_is_written ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.24s
+
+     Running tests/text_decoration_render.rs (target/debug/deps/text_decoration_render-ab39a23f620d7bf7)
+
+running 7 tests
+test the_rule_is_drawn_once_per_wrapped_line ... ok
+test a_later_none_clears_an_earlier_decoration_in_the_same_block ... ok
+test the_wrapped_strike_and_underline_stay_one_band_per_line_each ... ok
+test none_paints_no_rule_at_all ... ok
+test line_through_paints_a_rule_that_the_baseline_does_not ... ok
+test the_strike_is_a_different_band_from_the_underline ... ok
+test underline_line_through_draws_both_bands ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.08s
+
+     Running tests/throttle_repro.rs (target/debug/deps/throttle_repro-414ab95451360d2d)
+
+running 3 tests
+test resized_does_not_create_surface_per_event ... ok
+test drag_resize_coalesces_to_last_size_only ... ok
+test redraw_deferred_surface_creation_via_pending_resize ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/ua_cascade_render.rs (target/debug/deps/ua_cascade_render-e6a65aabda7004db)
+
+running 2 tests
+test production_cascade_applies_ua_default_margins ... ok
+test author_and_inline_styles_override_ua_in_order ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/viewport_robust_repro.rs (target/debug/deps/viewport_robust_repro-e456324a6e70d442)
+
+running 7 tests
+test minimize_0x0_then_restore_no_crash_no_desync_functional ... ok
+test skia_surface_resize_clamps_max1_before_raster ... ok
+test skia_surface_resize_warns_and_keeps_previous_on_error ... ok
+test skia_surface_resize_zero_keeps_previous_surface ... ok
+test viewport_dedup_used_by_surface_and_presenter_and_lib ... ok
+test lib_resize_does_not_swallow_error ... ok
+test viewport_struct_exists_and_has_fields ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/wrapped_text_each_line_once.rs (target/debug/deps/wrapped_text_each_line_once-b27fb5b3c2c47737)
+
+running 8 tests
+test a_single_line_is_untouched ... ok
+test a_forced_line_break_narrower_than_its_container_still_breaks_per_line ... ok
+test a_wrapped_inline_element_paints_the_same_as_the_bare_paragraph ... ok
+test the_last_line_of_a_wrapped_paragraph_is_painted ... ok
+test two_lines_each_painted_once_at_its_own_line ... ok
+test two_paragraphs_whose_source_index_collides_both_paint ... ok
+test every_glyph_of_a_wrapped_paragraph_is_inked_exactly_once ... ok
+test two_inline_elements_on_one_line_keep_their_places ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.11s
+
+   Doc-tests velox_renderer
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+

@@ -18,8 +18,6 @@ COPY velox-sfc/Cargo.toml velox-sfc/Cargo.toml
 COPY velox-style/Cargo.toml velox-style/Cargo.toml
 COPY velox-renderer/Cargo.toml velox-renderer/Cargo.toml
 COPY velox-cli/Cargo.toml velox-cli/Cargo.toml
-COPY examples/gallery/Cargo.toml examples/gallery/Cargo.toml
-COPY examples/todo/Cargo.toml examples/todo/Cargo.toml
 
 RUN cargo fetch
 

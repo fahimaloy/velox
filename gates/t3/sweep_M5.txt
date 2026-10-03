@@ -1,0 +1,47 @@
+$ cargo test -p velox-renderer --test wrapped_text_each_line_once
+RC=101
+
+running 8 tests
+test the_last_line_of_a_wrapped_paragraph_is_painted ... ok
+test two_paragraphs_whose_source_index_collides_both_paint ... ok
+test a_wrapped_inline_element_paints_the_same_as_the_bare_paragraph ... ok
+test a_single_line_is_untouched ... ok
+test two_lines_each_painted_once_at_its_own_line ... ok
+test two_inline_elements_on_one_line_keep_their_places ... ok
+test a_forced_line_break_narrower_than_its_container_still_breaks_per_line ... FAILED
+test every_glyph_of_a_wrapped_paragraph_is_inked_exactly_once ... ok
+
+failures:
+
+---- a_forced_line_break_narrower_than_its_container_still_breaks_per_line stdout ----
+
+thread 'a_forced_line_break_narrower_than_its_container_still_breaks_per_line' (1975121) panicked at velox-renderer/tests/wrapped_text_each_line_once.rs:615:5:
+assertion `left == right` failed: one text band per text line box, the blue atomic excluded: [Band { top: 3, bottom: 13, left: 1, right: 151, ink: 346 }, Band { top: 48, bottom: 62, left: 201, right: 299, ink: 232 }]
+  left: 2
+ right: 3
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    a_forced_line_break_narrower_than_its_container_still_breaks_per_line
+
+test result: FAILED. 7 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.12s
+
+   Compiling velox-renderer v0.1.0 (/home/fahimaloy/Projects/personal/velox/velox-renderer)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.96s
+     Running tests/wrapped_text_each_line_once.rs (target/debug/deps/wrapped_text_each_line_once-b27fb5b3c2c47737)
+error: test failed, to rerun pass `-p velox-renderer --test wrapped_text_each_line_once`
+error: 1 target failed:
+    `-p velox-renderer --test wrapped_text_each_line_once`
+
+$ cargo test -p velox-renderer --test tagline_tail_is_painted
+RC=0
+
+running 1 test
+test the_tagline_paints_its_tail_and_the_png_is_written ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.25s
+
+   Compiling velox-renderer v0.1.0 (/home/fahimaloy/Projects/personal/velox/velox-renderer)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.57s
+     Running tests/tagline_tail_is_painted.rs (target/debug/deps/tagline_tail_is_painted-b2de028e62832146)

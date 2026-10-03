@@ -1,0 +1,14 @@
+pub fn render_with_state<F>(state: std::sync::Arc<script_rs::State>, mut resolve: F) -> velox_dom::VNode where F: FnMut(&str) -> String {
+    use velox_dom::*;
+    h("ul", Props::new(), { let mut __children: Vec<velox_dom::VNode> = Vec::new();
+let __col = state.items.get();
+if !__col.is_empty() {
+    for (__idx, item) in __col.iter().enumerate() {
+    __children.push({ let mut __node = h("li", Props::new(), vec![text({ let __obj = &item; __obj.name.to_string() })]); if let velox_dom::VNode::Element { ref mut props, .. } = __node { props.attrs.insert("key".to_string(), item.id.to_string()); } __node });
+    }
+}
+__children
+})
+}
+
+#[allow(clippy::arc_with_non_send_sync)]

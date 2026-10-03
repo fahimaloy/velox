@@ -1,0 +1,176 @@
+<template>
+  <div class="app">
+    <h1 class="title">{{ title }}</h1>
+    <div class="card">
+      <p class="count">{{ count }}</p>
+      <p class="status">{{ status }}</p>
+      <div class="label-row">
+        <span class="label-text">Label</span>
+        <input class="label-input" v-model="label"/>
+      </div>
+      <div class="actions">
+        <button class="btn inc" @click="increment">+1</button>
+        <button class="btn dec" @click="decrement">-1</button>
+        <button class="btn reset" @click="reset">Reset</button>
+      </div>
+    </div>
+  </div>
+</template>
+
+<script setup>
+use velox_core::ergonomics::Ref;
+
+pub struct State {
+    // A single reactive integer. `r#ref!` expands to
+    // `Ref::new(value)`, which is the ergonomic wrapper around
+    // `Rc<Signal<T>>` for scalar state.
+    counter: Ref<i32>,
+    // The text field's value, bound with `v-model="label"`. It is the same
+    // wrapper as `counter` because `VModel` is implemented for `Ref<T>`: the
+    // generated setter is a fully-qualified `VModel::vmodel_set(&self.label,
+    // payload)` call, and fully-qualified calls do not auto-deref, so the
+    // wrapper needs the impl rather than inheriting `Signal`'s through
+    // `Deref`.
+    label: Ref<String>,
+}
+
+impl State {
+    pub fn new() -> Self {
+        Self {
+            counter: velox_core::r#ref!(0),
+            label: velox_core::r#ref!(String::from("counter")),
+        }
+    }
+
+    pub fn title(&self) -> String {
+        String::from("Velox Counter")
+    }
+
+    pub fn count(&self) -> i32 {
+        self.counter.get()
+    }
+
+    // The `v-model` read side: the generated `make_resolve` calls this on
+    // every build, so the input shows whatever the ref holds.
+    pub fn label(&self) -> String {
+        self.label.get()
+    }
+
+    // Derived label rendered under the number. It reads the same signal, so
+    // the renderer picks it up on the next frame after an increment.
+    pub fn status(&self) -> String {
+        if self.counter.get() > 0 {
+            String::from("positive")
+        } else {
+            String::from("not positive")
+        }
+    }
+
+    pub fn increment(&self) {
+        self.counter.set(self.counter.get() + 1);
+    }
+
+    pub fn decrement(&self) {
+        self.counter.set(self.counter.get() - 1);
+    }
+
+    pub fn reset(&self) {
+        self.counter.set(0);
+    }
+}
+</script>
+
+<style scoped>
+.app {
+    width: 100%;
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    padding: 6px 14px 20px;
+    background: #0f172a;
+    color: #f1f5f9;
+    font-family: system-ui, -apple-system, sans-serif;
+}
+.title {
+    display: block;
+    margin: 0 0 8px 0;
+    text-align: center;
+    font-size: 18px;
+    font-weight: 700;
+}
+/* A fixed width plus `margin: 0 auto` centers the card in the viewport. */
+.card {
+    display: block;
+    width: 420px;
+    margin: 0 auto;
+    padding: 12px 14px;
+    background: #1e293b;
+    border-radius: 12px;
+    text-align: center;
+}
+.count {
+    display: block;
+    margin: 0 0 4px 0;
+    font-size: 34px;
+    font-weight: 700;
+    color: #38bdf8;
+}
+.status {
+    display: block;
+    margin: 0 0 6px 0;
+    font-size: 13px;
+    color: #94a3b8;
+}
+.label-row {
+    display: flex;
+    flex-direction: row;
+    align-items: center;
+    gap: 8px;
+    margin: 0 0 8px 0;
+}
+.label-text {
+    display: block;
+    /* `flex: 0 0 auto`, or the layout engine hands this label the whole row
+       and the input beside it collapses to zero width. */
+    flex: 0 0 auto;
+    font-size: 13px;
+    color: #94a3b8;
+}
+.label-input {
+    display: block;
+    /* The same shape the todo example's input uses: grow into the space the
+       label leaves, never narrower than the row can afford. */
+    flex: 1 1 auto;
+    min-width: 0;
+    width: 220px;
+    height: 26px;
+    font-size: 14px;
+}
+.actions {
+    display: flex;
+    flex-direction: row;
+    justify-content: center;
+    gap: 8px;
+}
+.btn {
+    flex: 0 1 120px;
+    padding: 7px 12px;
+    border: none;
+    border-radius: 8px;
+    font-size: 15px;
+    font-weight: 600;
+    color: #0f172a;
+    text-align: center;
+    cursor: pointer;
+}
+.inc {
+    background: #4ade80;
+}
+.dec {
+    background: #fbbf24;
+}
+.reset {
+    background: #94a3b8;
+}
+</style>

@@ -1,0 +1,14 @@
+   Compiling velox-renderer v0.1.0 (/home/fahimaloy/Projects/personal/velox/velox-renderer)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.26s
+     Running unittests src/lib.rs (target/debug/deps/velox_renderer-05af19ad498b958d)
+
+running 1 test
+PROBE7               Buy milk hits=0 first=[]
+PROBE7    The quick brown fox hits=0 first=[]
+PROBE7              todo-item hits=0 first=[]
+PROBE7          Hello, world! hits=0 first=[]
+PROBE7               new_todo hits=0 first=[]
+test skia_render::skia_impl::tests::zz_probe_widths ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 128 filtered out; finished in 0.09s
+

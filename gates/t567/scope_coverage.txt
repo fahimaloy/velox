@@ -1,0 +1,15 @@
+   Compiling velox-cli v0.1.0 (/home/fahimaloy/Projects/personal/velox/velox-cli)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.24s
+     Running tests/template_scope_coverage.rs (target/debug/deps/template_scope_coverage-ade1cd79d6a91210)
+
+running 7 tests
+test allowlist_entries_all_have_reasons ... ok
+test single_class_selector_accepts_only_standalone_class_rules ... ok
+test detector_catches_a_child_styling_a_class_the_parent_owns ... ok
+test allowlist_entries_are_actually_needed ... ok
+test direction_a_every_class_used_in_a_template_is_declared_in_that_component ... ok
+test the_css_comment_stripper_is_string_aware_and_utf8_safe ... ok
+test direction_b_every_class_declared_in_a_component_is_used_in_that_component ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+

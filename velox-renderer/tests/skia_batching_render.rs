@@ -4,7 +4,7 @@
 
 #[cfg(all(feature = "skia-native", unix))]
 #[test]
-#[ignore]
+#[ignore = "requires skia-native feature and GPU hardware"]
 fn render_many_boxes_checksum() {
     use velox_dom::h;
     use velox_style::Stylesheet;
@@ -17,7 +17,12 @@ fn render_many_boxes_checksum() {
     }
     let vnode = h("div", vec![("style", "width:128px;height:128px")], children);
 
-    let png = match velox_renderer::render_vnode_to_raster_png(&vnode, &Stylesheet::default(), 128, 128) {
+    let png = match velox_renderer::render_vnode_to_raster_png(
+        &vnode,
+        &Stylesheet::default(),
+        128,
+        128,
+    ) {
         Ok(b) => b,
         Err(e) => panic!("render failed: {}", e),
     };
@@ -29,6 +34,7 @@ fn render_many_boxes_checksum() {
     assert_eq!(checksum, EXPECTED_BATCHING_CHECKSUM);
 }
 
+#[cfg(all(feature = "skia-native", unix))]
 fn fnv1a(bytes: &[u8]) -> u32 {
     let mut hash: u32 = 0x811c9dc5;
     for b in bytes {

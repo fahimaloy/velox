@@ -4,9 +4,9 @@
 
 #[cfg(all(feature = "skia-native", unix))]
 #[test]
-#[ignore]
+#[ignore = "requires skia-native feature and GPU hardware"]
 fn render_simple_vnode_to_png() {
-    use velox_dom::{h, text, VNode};
+    use velox_dom::{h, text};
     use velox_style::Stylesheet;
 
     // Build a small vnode: a green background div with a text child.
@@ -16,7 +16,12 @@ fn render_simple_vnode_to_png() {
         vec![text("Hello Skia")],
     );
 
-    let png = match velox_renderer::render_vnode_to_raster_png(&vnode, &Stylesheet::default(), 320, 120) {
+    let png = match velox_renderer::render_vnode_to_raster_png(
+        &vnode,
+        &Stylesheet::default(),
+        320,
+        120,
+    ) {
         Ok(b) => b,
         Err(e) => panic!("render failed: {}", e),
     };

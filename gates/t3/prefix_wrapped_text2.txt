@@ -1,0 +1,41 @@
+   Compiling velox-renderer v0.1.0 (/home/fahimaloy/Projects/personal/velox/velox-renderer)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.54s
+     Running tests/wrapped_text_each_line_once.rs (target/debug/deps/wrapped_text_each_line_once-b27fb5b3c2c47737)
+
+running 6 tests
+test two_inline_elements_on_one_line_keep_their_places ... ok
+test a_single_line_is_untouched ... ok
+test two_paragraphs_whose_source_index_collides_both_paint ... ok
+test two_lines_each_painted_once_at_its_own_line ... FAILED
+test a_wrapped_inline_element_paints_the_same_as_the_bare_paragraph ... FAILED
+test the_last_line_of_a_wrapped_paragraph_is_painted ... FAILED
+
+failures:
+
+---- two_lines_each_painted_once_at_its_own_line stdout ----
+
+thread 'two_lines_each_painted_once_at_its_own_line' (1657138) panicked at velox-renderer/tests/wrapped_text_each_line_once.rs:212:9:
+band 1 spans columns 0..92 but line box 1 is columns 0..63: the ink on this line belongs to a DIFFERENT line of the text
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- a_wrapped_inline_element_paints_the_same_as_the_bare_paragraph stdout ----
+
+thread 'a_wrapped_inline_element_paints_the_same_as_the_bare_paragraph' (1657135) panicked at velox-renderer/tests/wrapped_text_each_line_once.rs:338:5:
+assertion `left == right` failed: the span and the bare paragraph have to paint the same words on the same rows: the painter broke the text at the wrong width for one of them. bare = [Band { top: 3, bottom: 17, left: 0, right: 70, ink: 377 }, Band { top: 25, bottom: 39, left: 0, right: 70, ink: 377 }], span = [Band { top: 3, bottom: 17, left: 2, right: 72, ink: 377 }, Band { top: 25, bottom: 39, left: 2, right: 38, ink: 205 }]
+  left: [(3, 17, 71, 377), (25, 39, 71, 377)]
+ right: [(3, 17, 71, 377), (25, 39, 37, 205)]
+
+---- the_last_line_of_a_wrapped_paragraph_is_painted stdout ----
+
+thread 'the_last_line_of_a_wrapped_paragraph_is_painted' (1657136) panicked at velox-renderer/tests/wrapped_text_each_line_once.rs:212:9:
+band 2 spans columns 0..105 but line box 2 is columns 0..71: the ink on this line belongs to a DIFFERENT line of the text
+
+
+failures:
+    a_wrapped_inline_element_paints_the_same_as_the_bare_paragraph
+    the_last_line_of_a_wrapped_paragraph_is_painted
+    two_lines_each_painted_once_at_its_own_line
+
+test result: FAILED. 3 passed; 3 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.11s
+
+error: test failed, to rerun pass `-p velox-renderer --test wrapped_text_each_line_once`

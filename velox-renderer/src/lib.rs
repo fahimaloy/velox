@@ -2,19 +2,916 @@
 //! No features enabled => stub, compiles fast.
 
 use velox_dom::VNode;
-use velox_style::{Stylesheet, apply_styles_with_hover};
-use std::collections::{HashMap, HashSet};
+use velox_style::Stylesheet;
 
+/// Apply the renderer-wide UA < author < inline cascade before layout or paint.
+///
+/// The renderer always calls this once on a freshly-built VNode. Keeping the
+/// composition here prevents a backend from accidentally dropping the UA layer.
+pub fn style_vnode_with_hover<F>(vnode: &VNode, author: &Stylesheet, is_hovered: &F) -> VNode
+where
+    F: Fn(&str, &velox_dom::Props) -> bool,
+{
+    velox_style::apply_with_cascade_with_hover(vnode, author, is_hovered)
+}
+
+/// Lifecycle wiring helper — ensures `on_unmounted` / `before_destroy` hooks
+/// fire even if the event loop exits via `Drop` rather than `CloseRequested`.
+#[allow(dead_code)]
+pub struct LifecycleCleanupGuard;
+
+impl Drop for LifecycleCleanupGuard {
+    fn drop(&mut self) {
+        let _ = std::panic::catch_unwind(velox_core::lifecycle::run_all_destroy_hooks);
+    }
+}
+
+#[allow(dead_code)]
+pub fn ensure_mounted(flag: &mut bool) {
+    if !*flag {
+        *flag = true;
+        velox_core::lifecycle::run_all_mounted_hooks();
+    }
+}
+
+/// Return the VNode at a child source-index path, if it exists.
+pub fn find_node_at_path<'a>(node: &'a VNode, path: &[usize]) -> Option<&'a VNode> {
+    let mut cur = node;
+    for &idx in path {
+        match cur {
+            VNode::Element { children, .. } => cur = children.get(idx)?,
+            _ => return None,
+        }
+    }
+    Some(cur)
+}
+
+/// Unified logical size helper — single rounding point for all frame paths.
+/// Delegates to Viewport::from_i32 for consistent clamping; kept as free function for compat.
+#[cfg(any(feature = "skia-native", test))]
+fn viewport_logical_dimensions(width: i32, height: i32, scale_factor: f32) -> (u32, u32) {
+    Viewport::from_i32(width, height, scale_factor).logical_size()
+}
+
+#[cfg(feature = "skia-native")]
+pub fn logical_size(width: i32, height: i32, scale_factor: f32) -> (u32, u32) {
+    viewport_logical_dimensions(width, height, scale_factor)
+}
+
+/// Notify resize hooks only after a coalesced physical resize has committed and
+/// its logical viewport differs from the last committed size.
+#[cfg(any(feature = "skia-native", test))]
+fn dispatch_resize_if_changed(
+    committed: bool,
+    logical: (u32, u32),
+    last_resize_size: &mut Option<(u32, u32)>,
+) {
+    if committed && *last_resize_size != Some(logical) {
+        velox_core::lifecycle::run_resize_hooks(logical.0, logical.1);
+        *last_resize_size = Some(logical);
+    }
+}
+
+#[cfg(any(feature = "skia-native", test))]
+fn frame_logical_size(
+    width: i32,
+    height: i32,
+    scale_factor: f32,
+    committed: bool,
+    last_resize_size: &mut Option<(u32, u32)>,
+) -> (u32, u32) {
+    let logical = viewport_logical_dimensions(width, height, scale_factor);
+    dispatch_resize_if_changed(committed, logical, last_resize_size);
+    logical
+}
+
+/// Per-renderer resize state. Physical events are coalesced here and the
+/// committed logical baseline is kept locally to this window/event loop.
+#[cfg(any(feature = "skia-native", test))]
+struct ResizeState {
+    pending_resize: Option<(u32, u32)>,
+    last_resize_size: Option<(u32, u32)>,
+}
+
+#[cfg(any(feature = "skia-native", test))]
+impl ResizeState {
+    fn new() -> Self {
+        Self {
+            pending_resize: None,
+            last_resize_size: None,
+        }
+    }
+
+    fn queue(&mut self, physical: (u32, u32)) {
+        self.pending_resize = Some(physical);
+    }
+
+    fn take_pending(&mut self) -> Option<(u32, u32)> {
+        self.pending_resize.take()
+    }
+
+    fn record_initial(&mut self, width: i32, height: i32, scale_factor: f32) -> (u32, u32) {
+        let logical = viewport_logical_dimensions(width, height, scale_factor);
+        self.last_resize_size = Some(logical);
+        logical
+    }
+
+    fn frame_logical_size(
+        &mut self,
+        width: i32,
+        height: i32,
+        scale_factor: f32,
+        committed: bool,
+    ) -> (u32, u32) {
+        frame_logical_size(
+            width,
+            height,
+            scale_factor,
+            committed,
+            &mut self.last_resize_size,
+        )
+    }
+}
+
+/// Build hit-test targets from a precomputed layout. No layout recompute here.
+#[cfg(feature = "skia-native")]
+fn recompute_targets(
+    vnode: &velox_dom::VNode,
+    layout: &velox_dom::layout::LayoutNode,
+    click_targets: &mut Vec<crate::events::ClickTarget>,
+    hover_targets: &mut Vec<crate::events::HoverTarget>,
+    input_targets: &mut Vec<crate::events::InputTarget>,
+) {
+    click_targets.clear();
+    let mut order = 0;
+    crate::events::collect_click_targets(
+        vnode,
+        layout,
+        None,
+        crate::events::StackCtx::ROOT,
+        &mut order,
+        click_targets,
+    );
+    hover_targets.clear();
+    let mut order = 0;
+    crate::events::collect_hover_targets(
+        vnode,
+        layout,
+        None,
+        crate::events::StackCtx::ROOT,
+        &mut order,
+        hover_targets,
+    );
+    // Edit state (focus / caret / selection / blink phase) lives on the targets,
+    // and a target rebuild throws it all away. Move the old vector aside and
+    // re-apply it onto the freshly collected targets by tree path, so a
+    // re-render does not silently drop the caret. `std::mem::take` is only a
+    // move — the fresh collection below reuses the same allocation.
+    let previous = std::mem::take(input_targets);
+    let mut order = 0;
+    let mut path = Vec::new();
+    crate::events::collect_input_targets(
+        vnode,
+        layout,
+        None,
+        crate::events::StackCtx::ROOT,
+        &mut path,
+        &mut order,
+        input_targets,
+    );
+    crate::events::preserve_input_state(input_targets, &previous, &|p| {
+        input_value_char_len(vnode, p)
+    });
+}
+
+#[cfg(feature = "skia-native")]
+fn with_hover_ids(vnode: &velox_dom::VNode, next_id: &mut u32) -> velox_dom::VNode {
+    match vnode {
+        velox_dom::VNode::Text(_) => vnode.clone(),
+        velox_dom::VNode::Element {
+            tag,
+            props,
+            children,
+        } => {
+            let mut new_props = props.clone();
+            if crate::events::is_hoverable(tag, props) {
+                let id = *next_id;
+                *next_id += 1;
+                new_props = new_props.set("data-hover-id", id.to_string());
+            }
+            let new_children = children
+                .iter()
+                .map(|c| with_hover_ids(c, next_id))
+                .collect();
+            velox_dom::VNode::Element {
+                tag: tag.clone(),
+                props: new_props,
+                children: new_children,
+            }
+        }
+    }
+}
+
+/// Caret blink half-period, in milliseconds.
+///
+/// 530 ms is the conventional caret cadence. It is a named const rather than a
+/// literal at the call site because the tick interval, the "solid while
+/// typing" grace window, and the post-key re-arm deadline must all agree.
+#[cfg(feature = "skia-native")]
+const CARET_BLINK_MS: u64 = 530;
+
+/// Posts a recurring `UserEvent` to the winit event loop so the caret blink has
+/// a clock.
+///
+/// Why there is a thread at all: the loops run with `ControlFlow::Wait`, so they
+/// only wake for real OS events. A bare `Instant::now()` deadline check inside
+/// the event closure would therefore never fire while the user is idle, and the
+/// caret would freeze solid. winit 0.28 has no timer API, so the tick has to
+/// come in as a user event.
+///
+/// Why this is not a shared-state race: the thread owns nothing but an
+/// `EventLoopProxy`, a cloned copy of the tick payload, and an `AtomicBool`
+/// stop flag. It has no reference to `input_targets`, the VNode, the renderer,
+/// or the presenter — it cannot read or write renderer state at all. Every
+/// `blink_on` mutation happens on the event-loop thread, inside the event
+/// closure, where the renderer is already single-threaded. This is exactly the
+/// property a `Mutex<InputState>` design would have had to give up.
+///
+/// The thread is joined in `Drop`, so closing the window does not leave a
+/// detached ticker posting events at a dead loop.
+#[cfg(feature = "skia-native")]
+struct CaretBlinkTicker<T: Clone + Send + 'static> {
+    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    handle: Option<std::thread::JoinHandle<()>>,
+    /// The tick payload is moved into the thread, so the struct itself does
+    /// not otherwise mention `T`. This marker is what ties the type parameter
+    /// to the type; it is zero-sized and owns nothing.
+    _tick: std::marker::PhantomData<fn() -> T>,
+}
+
+#[cfg(feature = "skia-native")]
+impl<T: Clone + Send + 'static> CaretBlinkTicker<T> {
+    /// Start ticking. `tick` is the payload posted on every interval — `()` for
+    /// the plain loop, [`HmrMessage::KeepWindow`] for the HMR loop, whose
+    /// channel is typed.
+    fn start(proxy: winit::event_loop::EventLoopProxy<T>, tick: T) -> Self {
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let stop_thread = std::sync::Arc::clone(&stop);
+        let period = std::time::Duration::from_millis(CARET_BLINK_MS);
+        let handle = std::thread::Builder::new()
+            .name("velox-caret-blink".into())
+            .spawn(move || {
+                while !stop_thread.load(std::sync::atomic::Ordering::Relaxed) {
+                    std::thread::sleep(period);
+                    if stop_thread.load(std::sync::atomic::Ordering::Relaxed) {
+                        break;
+                    }
+                    // winit 0.28's `EventLoopProxy<T>::send_event` takes the
+                    // user-event payload `T` directly — the platform layer wraps
+                    // it into `Event::UserEvent(..)` on delivery. Sending fails
+                    // once the loop is gone, which is the exit condition.
+                    if proxy.send_event(tick.clone()).is_err() {
+                        break;
+                    }
+                }
+            })
+            .ok();
+        Self {
+            stop,
+            handle,
+            _tick: std::marker::PhantomData,
+        }
+    }
+}
+
+#[cfg(feature = "skia-native")]
+impl<T: Clone + Send + 'static> Drop for CaretBlinkTicker<T> {
+    fn drop(&mut self) {
+        self.stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        if let Some(h) = self.handle.take() {
+            let _ = h.join();
+        }
+    }
+}
+
+/// Advance the caret blink phase on a ticker event.
+///
+/// Returns `true` when the phase actually flipped and the frame must be
+/// repainted. A tick that arrives inside the "solid while typing" window set by
+/// a keypress or a focus change does *not* flip: it only re-arms the deadline,
+/// which is what stops the caret from blinking off milliseconds after a
+/// keystroke.
+#[cfg(feature = "skia-native")]
+fn on_caret_blink_tick(
+    input_targets: &mut [crate::events::InputTarget],
+    blink_deadline: &mut Option<std::time::Instant>,
+) -> bool {
+    let Some(idx) = crate::events::focused_input_index(input_targets) else {
+        return false;
+    };
+    let now = std::time::Instant::now();
+    if let Some(d) = *blink_deadline
+        && now < d
+    {
+        return false;
+    }
+    input_targets[idx].blink_on = !input_targets[idx].blink_on;
+    *blink_deadline = Some(now + std::time::Duration::from_millis(CARET_BLINK_MS));
+    true
+}
+
+/// Re-arm the blink grace window after a keypress or focus change.
+///
+/// This is the "caret goes solid while you type" rule: any editing action
+/// defers the next phase flip by one cadence period. Without it a keystroke
+/// landing just before a tick would be blinked off a few milliseconds later,
+/// which reads as flicker rather than as a caret.
+#[cfg(feature = "skia-native")]
+fn arm_blink_deadline(blink_deadline: &mut Option<std::time::Instant>) {
+    *blink_deadline =
+        Some(std::time::Instant::now() + std::time::Duration::from_millis(CARET_BLINK_MS));
+}
+
+/// Read a declaration out of a cascaded `style` attribute (`"a: b; c: d"`).
+#[cfg(feature = "skia-native")]
+fn style_decl<'s>(style: &'s str, key: &str) -> Option<&'s str> {
+    style
+        .split(';')
+        .filter_map(|d| d.split_once(':'))
+        .find(|(k, _)| k.trim() == key)
+        .map(|(_, v)| v.trim())
+}
+
+/// The painter's own geometry for a text input's value text: content edges
+/// **and** the font size its advances are measured at.
+///
+/// The click-to-caret mapping is relative to `text_left`, so padding shifts
+/// the caret to match the painted glyphs.
+///
+/// This delegates to [`crate::input_metrics::input_text_metrics`] rather than
+/// reading the authored string. It used to look up the literal key
+/// `padding-left`, which is never present: the cascade does not expand
+/// shorthands, so `padding: 6px 10px` survives under the key `padding` and the
+/// lookup missed it, returning `rect.x + 0` while the paint lane drew glyphs at
+/// `text_left`. Click-to-caret therefore disagreed with the painted glyphs by
+/// the whole left padding, and only an inline `padding-left` happened to work.
+/// Reading the *computed* side is the fix; the paint lane already calls the
+/// same function, so the two lanes can no longer drift.
+///
+/// Returning the whole struct — rather than just `.text_left` — is what makes
+/// the second half of the bug unrepresentable. The origin used to be shared
+/// while the font size was re-derived by a lane-local `parse_px` that accepted
+/// only a literal `px` suffix, so `em`/`%`/`rem` and bare inheritance all
+/// collapsed to a fallback and every advance came out `16/14` too wide: a
+/// click at the far end of the value landed the caret about one character
+/// short for every seven clicked. One call, both fields.
+///
+/// `viewport` is the **logical** `(w, h)` the paint lane resolves `vw`/`vh`
+/// against, so `padding-left: 2vw` lands the caret on the glyph in both lanes.
+#[cfg(feature = "skia-native")]
+fn resolve_text_metrics(
+    props: &velox_dom::Props,
+    rect: velox_dom::layout::Rect,
+    viewport: (f32, f32),
+) -> crate::input_metrics::InputTextMetrics {
+    crate::input_metrics::input_text_metrics(
+        props.attrs.get("style").map(|s| s.as_str()),
+        rect,
+        viewport,
+        // This lane has no inheritance context, so it cannot read the parent's
+        // size. The painter's root `TextStyle` IS that context — the size an
+        // element that declares no `font-size` of its own paints at — so its
+        // constant is the stand-in, and it must be the same number in both
+        // lanes. Passing `DEFAULT_ROOT_FONT_SIZE` (16) here instead meant a field
+        // with no `font-size` was measured 16/14 too wide and its `em` padding
+        // resolved against 16 while paint used 14.
+        crate::skia_render::PAINT_ROOT_FONT_SIZE,
+    )
+}
+
+/// The `value` attribute of the element at `path`, if it is an element.
+#[cfg(feature = "skia-native")]
+fn input_value_at(vnode: &VNode, path: &[usize]) -> Option<String> {
+    match find_node_at_path(vnode, path) {
+        Some(VNode::Element { props, .. }) => {
+            Some(props.attrs.get("value").cloned().unwrap_or_default())
+        }
+        _ => None,
+    }
+}
+
+/// Char length of the value at `path`, 0 when there is no such input.
+#[cfg(feature = "skia-native")]
+fn input_value_char_len(vnode: &VNode, path: &[usize]) -> usize {
+    input_value_at(vnode, path)
+        .map(|s| s.chars().count())
+        .unwrap_or(0)
+}
+
+/// Dispatch an explicit new value to the input at `path` via its `on:input`
+/// handler, so the app's state and the next `make_view` see the edit.
+#[cfg(feature = "skia-native")]
+fn dispatch_input_value(
+    last_vnode: &Option<VNode>,
+    path: &[usize],
+    new_value: &str,
+    on_event: &mut impl FnMut(&str, Option<&str>),
+) {
+    let Some(vnode) = last_vnode else { return };
+    let Some(node) = find_node_at_path(vnode, path) else {
+        return;
+    };
+    let VNode::Element { props, .. } = node else {
+        return;
+    };
+    let Some(handler) = props.attrs.get("on:input").cloned() else {
+        return;
+    };
+    on_event(&handler, Some(new_value));
+}
+
+/// Apply one editing action to the focused input and dispatch any text change.
+///
+/// Shared by both event loops — that shared call is what keeps the HMR loop
+/// from drifting away from the plain one again. Returns `true` when the caller
+/// must repaint.
+///
+/// Public because a host that drives its own key handling needs the same
+/// sequence the loops run, and because "is a keypress additive?" is only
+/// testable if both halves of a keypress can be driven in one test.
+#[cfg(feature = "skia-native")]
+pub fn apply_edit_to_focused(
+    input_targets: &mut [crate::events::InputTarget],
+    action: crate::events::EditAction,
+    last_vnode: &Option<VNode>,
+    focused_input: &mut Option<Vec<usize>>,
+    on_event: &mut impl FnMut(&str, Option<&str>),
+) -> bool {
+    let Some(idx) = crate::events::focused_input_index(input_targets) else {
+        return false;
+    };
+    let path = input_targets[idx].path.clone();
+    let value = last_vnode
+        .as_ref()
+        .and_then(|v| input_value_at(v, &path))
+        .unwrap_or_default();
+    let res = crate::events::apply_edit(&mut input_targets[idx], &value, action);
+    if res.submit {
+        // Submit always dispatches: with no selection the text is unchanged, and
+        // the handler still has to see the submission.
+        let v = res.value.clone().unwrap_or_else(|| value.clone());
+        dispatch_input_value(last_vnode, &path, &v, on_event);
+    } else if let Some(new_value) = &res.value {
+        dispatch_input_value(last_vnode, &path, new_value, on_event);
+    }
+    // `InputTarget::focused` is the single source of truth for focus; the
+    // loop's `focused_input` is its index-free mirror, so it has to follow
+    // whatever the action did to the flag rather than drift one keypress
+    // behind it. Every action except `Blur` leaves focus alone.
+    if matches!(action, crate::events::EditAction::Blur) {
+        *focused_input = None;
+    }
+    res.needs_repaint()
+}
+
+/// Resolve the VirtualKeyCode of a key event into an editing action, honouring
+/// the Shift modifier. Returns `None` for keys that are not editing commands.
+///
+/// The match is closed on purpose: it is the *editor's* vocabulary, and a key
+/// that is not an editing command has no business acquiring one just because an
+/// app also listens for it. The author-facing listening vocabulary is
+/// [`key_name`], and the two are peers rather than a chain — see
+/// [`dispatch_keydown`], which runs both on the same press.
+#[cfg(feature = "skia-native")]
+pub fn edit_action_for_key(
+    keycode: winit::event::VirtualKeyCode,
+    shift: bool,
+) -> Option<crate::events::EditAction> {
+    use crate::events::EditAction;
+    use winit::event::VirtualKeyCode as K;
+    Some(match keycode {
+        K::Left => EditAction::MoveLeft { shift },
+        K::Right => EditAction::MoveRight { shift },
+        K::Home => EditAction::Home { shift },
+        K::End => EditAction::End { shift },
+        K::Back => EditAction::Backspace,
+        K::Delete => EditAction::Delete,
+        K::Return => EditAction::Submit,
+        // Esc ends the editing session: focus, selection and caret go, the
+        // value stays. This match is closed — there is no fallthrough to user
+        // code — so Esc belongs here or the user has no way out of a field.
+        K::Escape => EditAction::Blur,
+        _ => return None,
+    })
+}
+
+/// Stable, author-facing name for a key press.
+///
+/// This is the whole payload contract of `@keydown`, and it is a *string*, not
+/// the winit enum, for three reasons:
+///
+/// - the enum is a dependency's type, so putting it in a `.vx` handler's
+///   signature would leak `winit` (and an optional feature) into every app;
+/// - winit spells its variants `Key1`, `Numpad0`, `LWin`; an author writes
+///   `"1"`, `"0"`, `"MetaLeft"`-or-`"Super"`, never the crate's spelling;
+/// - a name is a *value*, so it can be compared, matched, printed and stored,
+///   which is what an `if key == "F2"` branch needs.
+///
+/// The vocabulary is the DOM `KeyboardEvent.key` convention where the two
+/// disagree (`"Enter"` not `"Return"`, `" "`-as-`"Space"`, `"Escape"`), and
+/// upper-case bare letters so a shifted key is the *same* name as an unshifted
+/// one — `shift` is not reported, and folding it into the name would mean an
+/// author cannot tell `a` from `A` when they cannot tell them apart either.
+/// Anything outside the table becomes `"Unidentified"`.
+#[cfg(feature = "skia-native")]
+pub fn key_name(keycode: winit::event::VirtualKeyCode) -> &'static str {
+    use winit::event::VirtualKeyCode as K;
+    match keycode {
+        K::A => "A",
+        K::B => "B",
+        K::C => "C",
+        K::D => "D",
+        K::E => "E",
+        K::F => "F",
+        K::G => "G",
+        K::H => "H",
+        K::I => "I",
+        K::J => "J",
+        K::K => "K",
+        K::L => "L",
+        K::M => "M",
+        K::N => "N",
+        K::O => "O",
+        K::P => "P",
+        K::Q => "Q",
+        K::R => "R",
+        K::S => "S",
+        K::T => "T",
+        K::U => "U",
+        K::V => "V",
+        K::W => "W",
+        K::X => "X",
+        K::Y => "Y",
+        K::Z => "Z",
+        K::Key0 => "0",
+        K::Key1 => "1",
+        K::Key2 => "2",
+        K::Key3 => "3",
+        K::Key4 => "4",
+        K::Key5 => "5",
+        K::Key6 => "6",
+        K::Key7 => "7",
+        K::Key8 => "8",
+        K::Key9 => "9",
+        K::F1 => "F1",
+        K::F2 => "F2",
+        K::F3 => "F3",
+        K::F4 => "F4",
+        K::F5 => "F5",
+        K::F6 => "F6",
+        K::F7 => "F7",
+        K::F8 => "F8",
+        K::F9 => "F9",
+        K::F10 => "F10",
+        K::F11 => "F11",
+        K::F12 => "F12",
+        K::Up => "ArrowUp",
+        K::Down => "ArrowDown",
+        K::Left => "ArrowLeft",
+        K::Right => "ArrowRight",
+        K::Back => "Backspace",
+        K::Delete => "Delete",
+        K::Insert => "Insert",
+        K::Home => "Home",
+        K::End => "End",
+        K::PageUp => "PageUp",
+        K::PageDown => "PageDown",
+        K::Return | K::NumpadEnter => "Enter",
+        K::Escape => "Escape",
+        K::Tab => "Tab",
+        K::Space => "Space",
+        K::LShift | K::RShift => "Shift",
+        K::LControl | K::RControl => "Control",
+        K::LAlt | K::RAlt => "Alt",
+        K::LWin | K::RWin => "Meta",
+        _ => "Unidentified",
+    }
+}
+
+/// Focus the input the author named `data-focus-id="id"`.
+///
+/// The stable-name entry point, for a caller that already knows *which* field it
+/// means — a host embedding the renderer that drives focus itself, or a test.
+/// Resolution runs through the same [`crate::events::find_focus_id_path`] the
+/// `@keydown` grant uses, so "focus the composer" means one thing in this
+/// codebase no matter which door it came through.
+///
+/// Returns `true` when focus actually moved, so an already-focused field is not
+/// mistaken for a change and does not have its caret reset.
+#[cfg(feature = "skia-native")]
+pub fn focus_input_by_id(
+    input_targets: &mut [crate::events::InputTarget],
+    last_vnode: &Option<VNode>,
+    focused_input: &mut Option<Vec<usize>>,
+    id: &str,
+) -> bool {
+    let Some(vnode) = last_vnode.as_ref() else {
+        return false;
+    };
+    let Some(path) = crate::events::find_focus_id_path(vnode, &[], id) else {
+        return false;
+    };
+    // Expressed as a one-focus `KeydownPlan` so this and the key path run the
+    // same grant code — the flag, the caret, the anchor, the blink and the
+    // index-free mirror are all written in exactly one place.
+    let plan = crate::events::KeydownPlan {
+        focus_paths: vec![path],
+        ..Default::default()
+    };
+    crate::events::apply_keydown(
+        &plan,
+        "",
+        input_targets,
+        focused_input,
+        &|p: &[usize]| input_value_char_len(vnode, p),
+        &mut (|_: &str, _: Option<&str>| {}),
+    )
+}
+
+/// Route one key press to the app: declarative focus grants plus every
+/// `on:keydown` handler, with the key's [`key_name`] as the payload.
+///
+/// Shared by both event loops, for the same reason `apply_edit_to_focused` is:
+/// the HMR loop drifting from the plain one is not a theoretical risk, it is the
+/// specific bug that indirection exists to prevent. Returns `true` when the
+/// caller must repaint.
+///
+/// Both loops call this from the key arm *before* the reload/quit guard and
+/// outside the `match` that routes editing keys, and it returns no instruction
+/// to consume the key. That placement is the additive contract made structural
+/// instead of documented: `dispatch_keydown` and the editing branch are
+/// siblings, so swallowing a keystroke would take deleting the adjacency to do.
+#[cfg(feature = "skia-native")]
+pub fn dispatch_keydown(
+    keycode: winit::event::VirtualKeyCode,
+    input_targets: &mut [crate::events::InputTarget],
+    last_vnode: &Option<VNode>,
+    focused_input: &mut Option<Vec<usize>>,
+    on_event: &mut impl FnMut(&str, Option<&str>),
+) -> bool {
+    let name = crate::key_name(keycode);
+    let Some(vnode) = last_vnode.as_ref() else {
+        return false;
+    };
+    let plan = crate::events::plan_keydown(vnode, name);
+    crate::events::apply_keydown(
+        &plan,
+        name,
+        input_targets,
+        focused_input,
+        &|p: &[usize]| input_value_char_len(vnode, p),
+        on_event,
+    )
+}
+
+/// Inject the caret/selection/focus contract onto every text input in the tree.
+///
+/// Paint never reads live event state. It reads these five attrs off the styled
+/// VNode, which is what makes the caret headless-testable — a golden can be
+/// produced from a VNode alone, with no event loop running:
+///
+/// - `caret`       — caret position as a char index into the value
+/// - `caret_blink` — `"true"` when the caret bar is visible this frame
+/// - `sel_start`   — selection start char index (== `caret` when collapsed)
+/// - `sel_end`     — selection end char index
+/// - `focused`     — `"true"` when the input holds keyboard focus
+///
+/// Runs *after* `style_vnode_with_hover` (the single style-cascade application
+/// site) and before layout, so it adds no second cascade and no second
+/// rounding. Every text input always carries all five attrs, so paint never has
+/// to invent a default for a missing one.
+#[cfg(feature = "skia-native")]
+fn inject_input_caret_attrs(vnode: &VNode, focused: Option<&crate::events::InputTarget>) -> VNode {
+    /// Descend one level. `on_path` means "this node is an ancestor of (or is)
+    /// the focused input"; `focused_path` is the remainder to match.
+    fn walk(
+        node: &VNode,
+        focused_path: Option<&[usize]>,
+        on_path: bool,
+        focused: Option<&crate::events::InputTarget>,
+    ) -> VNode {
+        match node {
+            VNode::Text(_) => node.clone(),
+            VNode::Element {
+                tag,
+                props,
+                children,
+            } => {
+                let mut new_props = props.clone();
+                if crate::events::is_text_input(tag, props) {
+                    let (is_focused, cursor, blink, sel_start, sel_end) = match focused {
+                        Some(t) if on_path => {
+                            let (a, b) = t.selection().unwrap_or((t.cursor, t.cursor));
+                            (true, t.cursor, t.blink_on, a, b)
+                        }
+                        // Unfocused inputs still get the attrs, so paint reads
+                        // a total contract rather than guessing at absence.
+                        _ => (false, 0, true, 0, 0),
+                    };
+                    new_props = new_props
+                        .set("focused", if is_focused { "true" } else { "false" })
+                        .set("caret", cursor.to_string())
+                        .set("caret_blink", if blink { "true" } else { "false" })
+                        .set("sel_start", sel_start.to_string())
+                        .set("sel_end", sel_end.to_string());
+                }
+                let new_children = children
+                    .iter()
+                    .enumerate()
+                    .map(|(i, child)| {
+                        let child_on_path = on_path
+                            && focused_path
+                                .and_then(|p| p.first())
+                                .map(|first| *first == i)
+                                .unwrap_or(false);
+                        let rest = if child_on_path {
+                            focused_path.map(|p| &p[1..])
+                        } else {
+                            None
+                        };
+                        walk(child, rest, child_on_path, focused)
+                    })
+                    .collect();
+                VNode::Element {
+                    tag: tag.clone(),
+                    props: new_props,
+                    children: new_children,
+                }
+            }
+        }
+    }
+
+    let focused_path = focused.map(|t| t.path.as_slice());
+    walk(vnode, focused_path, true, focused)
+}
+
+/// Effective font family of a styled element, for caret hit testing.
+#[cfg(feature = "skia-native")]
+fn resolve_font_family(props: &velox_dom::Props) -> String {
+    props
+        .attrs
+        .get("style")
+        .and_then(|s| style_decl(s, "font-family"))
+        .filter(|f| !f.is_empty())
+        .unwrap_or("system-ui, sans-serif")
+        .to_string()
+}
+
+/// The **logical** `(w, h)` the paint lane will resolve `vw`/`vh` against this
+/// frame, read from the live surface.
+///
+/// Read from the surface, not a constant, precisely so it cannot disagree with
+/// paint: `render_frame` resolves viewport units against the same surface
+/// dimensions through the same [`logical_size`] rounding. A surface-less
+/// (headless) renderer yields `(0.0, 0.0)`, which only matters for
+/// viewport-unit padding — and there is nothing painted to disagree with.
+#[cfg(feature = "skia-native")]
+fn surface_logical_viewport(
+    renderer: &skia_backend::SkiaRenderer,
+    scale_factor: f32,
+) -> (f32, f32) {
+    match &renderer.surface {
+        Some(s) => {
+            let (w, h) = logical_size(s.width, s.height, scale_factor);
+            (w as f32, h as f32)
+        }
+        None => (0.0, 0.0),
+    }
+}
+
+/// Move keyboard focus to the text input under the cursor (or drop focus),
+/// and place the caret.
+///
+/// Shared by both event loops for the same reason `apply_edit_to_focused` is:
+/// the HMR loop used to have no focus handling at all, and a second copy of
+/// this is how the drift happened.
+///
+/// Caret placement differs by case, and the difference is deliberate:
+/// - clicking an input that did **not** have focus is a focus *gain*, so the
+///   caret goes to the end of the value (the conventional behaviour, and what
+///   makes "click a field and start typing" replace rather than prepend);
+/// - clicking an input that already had focus is a reposition, so the caret
+///   goes to the clicked glyph via [`crate::events::click_to_char_index`].
+///
+/// Returns `true` when the caller must repaint — i.e. focus actually changed or
+/// the caret moved.
+///
+/// `viewport` is the **logical** `(w, h)` the paint lane uses this frame (see
+/// [`surface_logical_viewport`]). It is threaded in rather than reconstructed
+/// here because the caret's origin is computed from the same lengths paint
+/// resolves: pass a different viewport and a `vw`/`vh` field puts its caret in
+/// one place and its glyphs in another.
+#[cfg(feature = "skia-native")]
+fn apply_click_focus(
+    input_targets: &mut [crate::events::InputTarget],
+    last_vnode: &Option<VNode>,
+    focused_input: &mut Option<Vec<usize>>,
+    x: f32,
+    y: f32,
+    scale_factor: f32,
+    viewport: (f32, f32),
+) -> bool {
+    let Some(idx) = crate::events::hit_test_input_index(input_targets, x, y) else {
+        // Clicked empty space: blur. Clearing the selection is what stops a
+        // stale highlight from surviving on a field the user has left. The
+        // caret position is deliberately kept, so re-entering the field
+        // restores where the user was.
+        let changed = crate::events::blur_focused_input(input_targets);
+        return changed || focused_input.take().is_some();
+    };
+
+    let was_focused = input_targets[idx].focused;
+    let rect = input_targets[idx].rect;
+    let path = input_targets[idx].path.clone();
+    let mut caret: Option<usize> = None;
+    let mut value_len: Option<usize> = None;
+    if let Some(vnode) = last_vnode.as_ref()
+        && let Some(VNode::Element { props, .. }) = find_node_at_path(vnode, &path)
+    {
+        let value = props.attrs.get("value").cloned().unwrap_or_default();
+        value_len = Some(value.chars().count());
+        // ONE call for both the origin and the font size. Taking the origin
+        // from here and the size from anywhere else is the defect this shape
+        // removes: two lanes that must agree, each holding its own constant.
+        let metrics = resolve_text_metrics(props, rect, viewport);
+        let font_size = metrics.font_size;
+        let config = crate::text::TextRenderConfig::new(&resolve_font_family(props), font_size);
+        // Measure through the renderer's own text stack (single measure path,
+        // skia-aware under `skia-native`) rather than a local heuristic, so the
+        // caret lands on the glyph the paint lane will actually draw.
+        let measure =
+            |s: &str| crate::text::TextMeasurer::measure_with_scale(s, &config, scale_factor).0;
+        caret = Some(crate::events::click_to_char_index(
+            &value,
+            rect,
+            x,
+            metrics.text_left,
+            font_size,
+            &measure,
+        ));
+    }
+
+    // The one place focus is granted. `focus_input` also blurs any other field
+    // that held focus, so a click straight from one field to another cannot
+    // leave two of them flagged.
+    crate::events::focus_input(input_targets, idx);
+    input_targets[idx].blink_on = true;
+    // A plain click is never a selection-extension; it collapses one.
+    input_targets[idx].anchor = None;
+    // `cursor` is a char index, so "the end" is the char count, not `len()`.
+    input_targets[idx].cursor = if was_focused {
+        caret.unwrap_or(input_targets[idx].cursor)
+    } else {
+        // Focus gain: caret to the end of the value.
+        value_len.unwrap_or(input_targets[idx].cursor)
+    };
+    *focused_input = Some(path);
+    true
+}
+
+pub mod event_binding;
 pub mod events;
+pub mod hmr;
+// The single authority on an `<input>`'s content-box geometry. Public so both
+// `skia_render`'s paint lane and `lib.rs`'s hit-test lane reach the SAME
+// function instead of each growing an inset of its own, and so a test can
+// assert against it without re-deriving the painter's arithmetic.
+pub mod input_metrics;
+pub mod text;
+pub mod viewport;
+
+pub use hmr::{DEFAULT_HMR_PORT, HmrMessage, hmr_config, run_hmr_client};
+pub use viewport::{LogicalSize, PhysicalSize, Viewport};
 
 // Native Skia GL helper module (feature-gated)
 #[cfg(feature = "skia-native")]
 mod skia_gl;
 // Skia surface and renderer helpers (feature-gated)
 #[cfg(feature = "skia-native")]
-mod skia_surface;
-#[cfg(feature = "skia-native")]
 mod skia_render;
+#[cfg(feature = "skia-native")]
+pub mod skia_surface;
+// Softbuffer presenter for window rendering (feature-gated)
+#[cfg(feature = "skia-native")]
+mod presenter;
+#[cfg(feature = "skia-native")]
+pub use skia_render::skia_impl::render_vnode_to_rgba;
+// Test/diagnostic only, and public only because `tests/` is a separate crate
+// that cannot see a private module. The decode counter is the honest way to
+// assert the persistent `<img src>` cache works; a timing assertion would
+// measure the machine instead of the cache. See `IMAGE_DECODE_COUNT`.
+#[cfg(feature = "skia-native")]
+pub use skia_render::skia_impl::{image_decode_count, reset_image_decode_count};
 #[cfg(feature = "skia-native")]
 pub use skia_render::{render_vnode_to_raster_png, render_vnode_to_raster_png_with_scale};
 
@@ -39,6 +936,38 @@ pub struct A11yTree {
     pub root: A11yNode,
 }
 
+pub trait HmrRenderer {
+    /// Initialize the rendering backend (e.g. create DirectContext, verify GPU).
+    fn init() -> Result<(), String>
+    where
+        Self: Sized;
+
+    /// Mount a VNode into the renderer for display.
+    fn mount(&mut self, vnode: VNode) -> Result<(), String>;
+
+    /// Hot-update the rendered VNode.
+    fn hot_update(&mut self, new_vnode: VNode) -> Result<(), String>;
+
+    /// Get the raw window handle for platform integration.
+    fn get_window_handle(&self) -> *mut std::ffi::c_void;
+}
+
+/// High-level renderer lifecycle trait. Backends implement this to expose
+/// a consistent `new -> mount -> hot_update` workflow that returns `Result`
+/// instead of panicking on failure.
+pub trait VeloxRenderer {
+    /// Construct a new renderer instance.
+    fn new() -> Result<Self, String>
+    where
+        Self: Sized;
+
+    /// Mount a VNode tree for rendering, returning an error on failure.
+    fn mount(&mut self, vnode: VNode) -> Result<(), String>;
+
+    /// Hot-replace the rendered VNode tree, returning an error on failure.
+    fn hot_update(&mut self, new_vnode: VNode) -> Result<(), String>;
+}
+
 fn summarize(v: &VNode, counts: &mut (usize, usize)) {
     match v {
         VNode::Text(_) => {
@@ -57,7 +986,11 @@ fn summarize(v: &VNode, counts: &mut (usize, usize)) {
 fn build_render_tree(v: &VNode) -> RenderTree {
     let mut counts = (0, 0);
     summarize(v, &mut counts);
-    RenderTree { root: v.clone(), node_count: counts.0, text_count: counts.1 }
+    RenderTree {
+        root: v.clone(),
+        node_count: counts.0,
+        text_count: counts.1,
+    }
 }
 
 fn vnode_text_content(node: &VNode) -> String {
@@ -98,10 +1031,10 @@ fn a11y_name_for(tag: &str, props: &velox_dom::Props, node: &VNode) -> String {
     if let Some(label) = props.attrs.get("aria-label") {
         return label.clone();
     }
-    if tag == "img" {
-        if let Some(alt) = props.attrs.get("alt") {
-            return alt.clone();
-        }
+    if tag == "img"
+        && let Some(alt) = props.attrs.get("alt")
+    {
+        return alt.clone();
     }
     vnode_text_content(node)
 }
@@ -121,10 +1054,22 @@ fn build_a11y_tree_with_layout(
             rect: layout.rect,
             children: Vec::new(),
         },
-        VNode::Element { tag, props, children, .. } => {
+        VNode::Element {
+            tag,
+            props,
+            children,
+            ..
+        } => {
             let mut child_nodes = Vec::new();
-            for (ch, ch_layout) in children.iter().zip(&layout.children) {
-                child_nodes.push(build_a11y_tree_with_layout(ch, ch_layout, next_id));
+            for ch_layout in &layout.children {
+                if ch_layout.display_none {
+                    continue;
+                }
+                if let Some(src_idx) = ch_layout.source_index
+                    && let Some(ch) = children.get(src_idx)
+                {
+                    child_nodes.push(build_a11y_tree_with_layout(ch, ch_layout, next_id));
+                }
             }
             A11yNode {
                 id,
@@ -137,148 +1082,73 @@ fn build_a11y_tree_with_layout(
     }
 }
 
-pub fn build_a11y_tree(
-    vnode: &VNode,
-    width: i32,
-    height: i32,
-) -> A11yTree {
+/// Build the accessibility tree for `vnode` laid out at `width` x `height`.
+///
+/// DELIBERATE EXCEPTION to R-8's single-funnel invariant: this function runs its
+/// own `compute_layout` and does not go through the renderer's `prepare_frame`.
+///
+/// The reason is that this is not a render path. It takes no `Stylesheet`, paints
+/// nothing, and is given no `SkiaSurface`; its only output is a tree of roles,
+/// names and rects. Funnelling it would mean inventing a stylesheet and a surface
+/// for a caller that has neither, and then applying a style cascade to a tree
+/// whose geometry — not its appearance — is what is being reported. It is named
+/// here so the exception is on the record rather than discovered later as a
+/// "missing" funnel site.
+pub fn build_a11y_tree(vnode: &VNode, width: i32, height: i32) -> A11yTree {
     let layout = velox_dom::layout::compute_layout(vnode, width, height);
     let mut next_id = 1;
     let root = build_a11y_tree_with_layout(vnode, &layout, &mut next_id);
     A11yTree { root }
 }
 
-/// Reconcile two VNode children vectors using an optional `key` prop.
-/// This is a simple helper that prefers reusing old nodes when the child's
-/// `Props` contains a `key` attribute matching a new child's `key`.
-pub fn reconcile_keyed_children(old: &mut Vec<VNode>, new: &Vec<VNode>) {
-    let mut key_to_index: HashMap<String, usize> = HashMap::new();
-    for (i, n) in old.iter().enumerate() {
-        if let VNode::Element { props, .. } = n {
-            if let Some(k) = props.attrs.get("key") {
-                key_to_index.insert(k.clone(), i);
-            }
-        }
-    }
-    let mut used: HashSet<usize> = HashSet::new();
-    let mut out: Vec<VNode> = Vec::with_capacity(new.len());
-    for nn in new.iter() {
-        if let VNode::Element { props: nprops, .. } = nn {
-            if let Some(k) = nprops.attrs.get("key") {
-                if let Some(&idx) = key_to_index.get(k) {
-                    out.push(old[idx].clone());
-                    used.insert(idx);
-                    continue;
-                }
-            }
-        }
-        out.push(nn.clone());
-    }
-    *old = out;
-}
-
 /// Minimal renderer trait. Backends implement this to expose a consistent API.
 pub trait Renderer {
     fn backend_name(&self) -> &'static str;
-    fn mount(&self, vnode: &VNode) -> RenderTree;
-}
-
-#[cfg(feature = "wgpu")]
-pub mod wgpu_backend {
-    use wgpu as _wgpu;
-    use winit as _winit;
-
-    pub fn init() {
-        // Attempt headless WGPU initialization to verify adapter/device availability.
-        // This is intentionally best-effort and will not panic on failure; it logs to stderr.
-        let instance = _wgpu::Instance::new(_wgpu::InstanceDescriptor { backends: _wgpu::Backends::all(), dx12_shader_compiler: Default::default() });
-        // Try to get a real adapter first; if none is found (common in CI),
-        // retry requesting a fallback adapter (software renderer) before giving up.
-        let adapter = match pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
-            power_preference: _wgpu::PowerPreference::HighPerformance,
-            compatible_surface: None,
-            force_fallback_adapter: false,
-        })) {
-            Some(a) => a,
-            None => {
-                eprintln!("wgpu backend: no adapter found; retrying with fallback adapter...");
-                match pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
-                    power_preference: _wgpu::PowerPreference::HighPerformance,
-                    compatible_surface: None,
-                    force_fallback_adapter: true,
-                })) {
-                    Some(a2) => a2,
-                    None => {
-                        eprintln!("wgpu backend: no adapter found even with fallback (init skipped)");
-                        return;
-                    }
-                }
-            }
-        };
-
-        match pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
-            label: Some("velox-wgpu-device"),
-            features: wgpu::Features::empty(),
-            limits: wgpu::Limits::default(),
-        }, None)) {
-            Ok((_device, _queue)) => {
-                let info = adapter.get_info();
-                eprintln!("wgpu backend: init OK — adapter='{}'", info.name);
-            }
-            Err(e) => {
-                eprintln!("wgpu backend: failed to request device: {:?}", e);
-            }
-        }
-    }
-
-    pub struct WgpuRenderer;
-    impl crate::Renderer for WgpuRenderer {
-        fn backend_name(&self) -> &'static str {
-            "wgpu"
-        }
-        fn mount(&self, vnode: &velox_dom::VNode) -> crate::RenderTree {
-            // Try a GPU-backed present; log errors but do not fail the mount.
-            #[cfg(all(feature = "skia-native", unix))]
-            {
-                if let Err(e) = crate::skia_gl::draw_gpu_test_frame(256, 256) {
-                    eprintln!("skia backend: GPU present failed: {}", e);
-                }
-            }
-            crate::build_render_tree(vnode)
-        }
-    }
+    fn mount(&self, vnode: &VNode) -> Result<RenderTree, String>;
 }
 
 // Real Skia backend only when `skia-native` is enabled.
 #[cfg(feature = "skia-native")]
 pub mod skia_backend {
+    use crate::HmrRenderer;
+    use crate::VeloxRenderer;
     #[cfg(feature = "skia-native")]
     use crate::skia_gl;
     #[cfg(feature = "skia-native")]
     use crate::skia_surface;
     #[cfg(feature = "skia-native")]
     use raw_window_handle::HasRawWindowHandle;
+    use velox_dom::VNode;
 
-    pub fn init() {
+    pub fn init() -> Result<(), String> {
         match skia_gl::create_context() {
-            Ok(gl_ctx) => {
-                match gl_ctx.into_direct_context() {
-                    Some(_dctx) => eprintln!("skia backend: init OK (DirectContext created)"),
-                    None => eprintln!("skia backend: init failed: couldn't create DirectContext"),
+            Ok(gl_ctx) => match gl_ctx.into_direct_context() {
+                Some(_dctx) => {
+                    log::info!("skia backend: init OK (DirectContext created)");
+                    Ok(())
                 }
-            }
-            Err(e) => eprintln!("skia backend: init failed: {}", e),
+                None => Err("skia backend: init failed: couldn't create DirectContext".to_string()),
+            },
+            Err(e) => Err(format!("skia backend: init failed: {}", e)),
         }
     }
 
     pub struct SkiaRenderer {
         pub surface: Option<skia_surface::SkiaSurface>,
+        pub vnode: Option<VNode>,
     }
 
     impl SkiaRenderer {
-        pub fn with_window(window: &impl HasRawWindowHandle, width: i32, height: i32) -> Result<Self, String> {
+        pub fn with_window(
+            window: &impl HasRawWindowHandle,
+            width: i32,
+            height: i32,
+        ) -> Result<Self, String> {
             match skia_surface::create_window_surface_from_handle(window, width, height) {
-                Ok(s) => Ok(SkiaRenderer { surface: Some(s) }),
+                Ok(s) => Ok(SkiaRenderer {
+                    surface: Some(s),
+                    vnode: None,
+                }),
                 Err(e) => Err(e),
             }
         }
@@ -304,8 +1174,47 @@ pub mod skia_backend {
         fn backend_name(&self) -> &'static str {
             "skia"
         }
-        fn mount(&self, vnode: &velox_dom::VNode) -> crate::RenderTree {
-            crate::build_render_tree(vnode)
+        fn mount(&self, vnode: &velox_dom::VNode) -> Result<crate::RenderTree, String> {
+            Ok(crate::build_render_tree(vnode))
+        }
+    }
+
+    impl HmrRenderer for SkiaRenderer {
+        fn init() -> Result<(), String> {
+            init()
+        }
+
+        fn mount(&mut self, vnode: VNode) -> Result<(), String> {
+            self.vnode = Some(vnode);
+            Ok(())
+        }
+
+        fn hot_update(&mut self, new_vnode: VNode) -> Result<(), String> {
+            self.vnode = Some(new_vnode);
+            Ok(())
+        }
+
+        fn get_window_handle(&self) -> *mut std::ffi::c_void {
+            std::ptr::null_mut()
+        }
+    }
+
+    impl VeloxRenderer for SkiaRenderer {
+        fn new() -> Result<Self, String> {
+            Ok(SkiaRenderer {
+                surface: None,
+                vnode: None,
+            })
+        }
+
+        fn mount(&mut self, vnode: VNode) -> Result<(), String> {
+            self.vnode = Some(vnode);
+            Ok(())
+        }
+
+        fn hot_update(&mut self, new_vnode: VNode) -> Result<(), String> {
+            self.vnode = Some(new_vnode);
+            Ok(())
         }
     }
 }
@@ -313,31 +1222,57 @@ pub mod skia_backend {
 // Skia stub backend to allow compiling with `--features skia` without native deps.
 #[cfg(all(feature = "skia", not(feature = "skia-native")))]
 pub mod skia_backend {
-    pub fn init() {}
+    pub fn init() -> Result<(), String> {
+        Ok(())
+    }
 
     pub struct SkiaRenderer;
     impl crate::Renderer for SkiaRenderer {
-        fn backend_name(&self) -> &'static str { "skia" }
-        fn mount(&self, vnode: &velox_dom::VNode) -> crate::RenderTree {
-            crate::build_render_tree(vnode)
+        fn backend_name(&self) -> &'static str {
+            "skia"
+        }
+        fn mount(&self, vnode: &velox_dom::VNode) -> Result<crate::RenderTree, String> {
+            Ok(crate::build_render_tree(vnode))
+        }
+    }
+    impl crate::HmrRenderer for SkiaRenderer {
+        fn init() -> Result<(), String> {
+            Ok(())
+        }
+        fn mount(&mut self, _vnode: velox_dom::VNode) -> Result<(), String> {
+            Ok(())
+        }
+        fn hot_update(&mut self, _new_vnode: velox_dom::VNode) -> Result<(), String> {
+            Ok(())
+        }
+        fn get_window_handle(&self) -> *mut std::ffi::c_void {
+            std::ptr::null_mut()
+        }
+    }
+    impl crate::VeloxRenderer for SkiaRenderer {
+        fn new() -> Result<Self, String> {
+            Ok(SkiaRenderer)
+        }
+        fn mount(&mut self, _vnode: velox_dom::VNode) -> Result<(), String> {
+            Ok(())
+        }
+        fn hot_update(&mut self, _new_vnode: velox_dom::VNode) -> Result<(), String> {
+            Ok(())
         }
     }
 }
 
 /// Stub init used when no backend features are enabled.
-#[cfg(not(any(feature = "wgpu", feature = "skia")))]
-pub fn init() {
-    // Intentionally empty
+#[cfg(not(feature = "skia"))]
+pub fn init() -> Result<(), String> {
+    // Intentionally empty — no backend enabled
+    Ok(())
 }
 
 // Simple identifier of the selected backend, useful for tests.
-#[cfg(all(feature = "wgpu", feature = "skia"))]
-pub const BACKEND: &str = "wgpu+skia";
-#[cfg(all(feature = "wgpu", not(feature = "skia")))]
-pub const BACKEND: &str = "wgpu";
-#[cfg(all(not(feature = "wgpu"), feature = "skia"))]
+#[cfg(feature = "skia")]
 pub const BACKEND: &str = "skia";
-#[cfg(all(not(feature = "wgpu"), not(feature = "skia")))]
+#[cfg(not(feature = "skia"))]
 pub const BACKEND: &str = "stub";
 
 pub fn backend_name() -> &'static str {
@@ -345,36 +1280,64 @@ pub fn backend_name() -> &'static str {
 }
 
 /// Feature-selected renderer type and constructor for tests and examples.
-#[cfg(feature = "wgpu")]
-pub type SelectedRenderer = wgpu_backend::WgpuRenderer;
-#[cfg(all(not(feature = "wgpu"), any(feature = "skia", feature = "skia-native")))]
+#[cfg(any(feature = "skia", feature = "skia-native"))]
 pub type SelectedRenderer = skia_backend::SkiaRenderer;
-#[cfg(all(not(feature = "wgpu"), not(feature = "skia")))]
+#[cfg(not(feature = "skia"))]
 pub struct StubRenderer;
-#[cfg(all(not(feature = "wgpu"), not(feature = "skia")))]
+#[cfg(not(feature = "skia"))]
 pub type SelectedRenderer = StubRenderer;
-#[cfg(all(not(feature = "wgpu"), not(feature = "skia")))]
+#[cfg(not(feature = "skia"))]
 impl Renderer for StubRenderer {
     fn backend_name(&self) -> &'static str {
         "stub"
     }
-    fn mount(&self, vnode: &VNode) -> RenderTree {
-        build_render_tree(vnode)
+    fn mount(&self, vnode: &VNode) -> Result<RenderTree, String> {
+        Ok(build_render_tree(vnode))
+    }
+}
+#[cfg(not(feature = "skia"))]
+impl HmrRenderer for StubRenderer {
+    fn init() -> Result<(), String> {
+        Ok(())
+    }
+    fn mount(&mut self, _vnode: VNode) -> Result<(), String> {
+        Ok(())
+    }
+    fn hot_update(&mut self, _new_vnode: VNode) -> Result<(), String> {
+        Ok(())
+    }
+    fn get_window_handle(&self) -> *mut std::ffi::c_void {
+        std::ptr::null_mut()
+    }
+}
+#[cfg(not(feature = "skia"))]
+impl VeloxRenderer for StubRenderer {
+    fn new() -> Result<Self, String> {
+        Ok(StubRenderer)
+    }
+    fn mount(&mut self, _vnode: VNode) -> Result<(), String> {
+        Ok(())
+    }
+    fn hot_update(&mut self, _new_vnode: VNode) -> Result<(), String> {
+        Ok(())
     }
 }
 
 /// Construct the feature-selected renderer.
 pub fn new_selected_renderer() -> SelectedRenderer {
-    #[cfg(feature = "wgpu")]
-    {
-        wgpu_backend::WgpuRenderer
-    }
-    #[cfg(all(not(feature = "wgpu"), feature = "skia"))]
+    #[cfg(feature = "skia-native")]
     {
         // Construct SkiaRenderer with no surface for the default selected renderer.
-        skia_backend::SkiaRenderer { surface: None }
+        skia_backend::SkiaRenderer {
+            surface: None,
+            vnode: None,
+        }
     }
-    #[cfg(all(not(feature = "wgpu"), not(feature = "skia")))]
+    #[cfg(all(feature = "skia", not(feature = "skia-native")))]
+    {
+        skia_backend::SkiaRenderer
+    }
+    #[cfg(not(feature = "skia"))]
     {
         StubRenderer
     }
@@ -389,13 +1352,468 @@ pub fn skia_draw_test_frame() -> Result<(), String> {
 }
 
 /// Convenience wrapper to create a Skia `DirectContext` from the crate root.
+///
+/// Returns the owning `GlDirectContext` pair, which holds the headless EGL
+/// context alongside the `DirectContext`: handing back a bare `DirectContext`
+/// would return a handle whose GL context had already been destroyed.
 #[cfg(all(feature = "skia-native", unix))]
-pub fn create_direct_context() -> Result<skia_safe::gpu::DirectContext, String> {
+pub fn create_direct_context() -> Result<crate::skia_gl::GlDirectContext, String> {
     crate::skia_gl::create_direct_context()
 }
 
+/// Extracts the human-readable message from a caught panic payload
+/// (`panic!("literal")` stores `&'static str`, `format!`-based panics store
+/// `String`). Used so compositor failures caught by `catch_unwind` are
+/// surfaced instead of silently discarded (CX-13 / F-23).
 #[cfg(feature = "skia-native")]
-pub fn run_window_vnode_skia<F, G, H>(title: &str, mut make_view: F, mut on_event: G, mut get_title: H)
+fn panic_detail(payload: Box<dyn std::any::Any + Send>) -> String {
+    if let Some(s) = payload.downcast_ref::<&'static str>() {
+        (*s).to_string()
+    } else if let Some(s) = payload.downcast_ref::<String>() {
+        s.clone()
+    } else {
+        "unknown panic payload".to_string()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Shared window-event arms (Task 5.6b)
+// ---------------------------------------------------------------------------
+//
+// `run_window_vnode_skia` and `run_window_vnode_skia_with_hmr` are the same loop
+// written twice, and six `WindowEvent` arms were copy-pasted between them. Two
+// copies means every fix has to be made twice, and this repo has already paid
+// for that: the HMR keyboard arm shipped as a bare `_ => {}` stub, and the HMR
+// loop had no `ReceivedCharacter` arm at all, so typing silently did nothing
+// under HMR. Each function below is the single implementation of one arm, and
+// both loops call it.
+//
+// Two rules, both load-bearing:
+//
+//   * These functions never touch `ControlFlow`. The loops keep every
+//     `*control_flow = ...` assignment, because parking on `Wait` (not `Poll`,
+//     not `WaitUntil`) is right for a non-game application: `Poll` would burn a
+//     core while idle and `WaitUntil` would swallow the events these arms
+//     handle. `tests/event_loop_arms.rs` pins that, and it is easier to keep
+//     pinned when the control flow never leaves the loop.
+//   * Shared state is passed as arguments instead of moving into a struct, so
+//     the three arms that are *not* here keep reading the loop's own locals
+//     under their own names — see the note on why those three stayed behind.
+//
+// Why six of the nine, and not nine:
+//
+//   * Extracted: `CloseRequested`, `Resized`, `ScaleFactorChanged`,
+//     `CursorMoved`, `ModifiersChanged`, `MouseWheel`.
+//   * Left in place: the left-click, `KeyboardInput` and `ReceivedCharacter`
+//     arms. `tests/event_loop_arms.rs` pins their bodies as *literal source
+//     text* inside each loop — `apply_click_focus(`, `&mut focused_input`,
+//     `hit_test_click`, `edit_action_for_key(keycode, shift_held)`,
+//     `arm_blink_deadline(&mut blink_deadline)`, `EditAction::Insert(c)` — and
+//     `the_duplicated_arms_of_both_loops_make_the_same_calls` compares their
+//     callee sequences so a second divergence cannot appear beside the one
+//     known HMR-only `last_vnode` republish. Moving the bodies out of the
+//     loops deletes that guard along with the duplicate: the drift test would
+//     compare two identical one-line call sites and never see the arms again.
+//     Those three are the arms the caret and typing regressions both lived in,
+//     so they keep a live drift test instead of a second copy. Task 5.6 step 3
+//     is what actually finishes the job — see the report for why it needs
+//     production-code change before it can exist.
+
+/// `WindowEvent::CloseRequested` — shared by both loops.
+///
+/// Returns `true` so the *caller* performs the exit. `ControlFlow` belongs to
+/// the loop, and keeping the assignment at the call site keeps it visible to
+/// the structural test.
+#[cfg(feature = "skia-native")]
+fn window_close_requested() -> bool {
+    velox_core::lifecycle::run_all_destroy_hooks();
+    true
+}
+
+/// `WindowEvent::Resized` — shared by both loops.
+///
+/// R-L3: coalesce. A drag produces many `Resized` events and only the last one
+/// per frame may materialise, so this records the pending size and asks for a
+/// redraw. It must not touch the raster surface; surface recreation belongs to
+/// `RedrawRequested`.
+#[cfg(feature = "skia-native")]
+fn window_resized(
+    resize_state: &mut ResizeState,
+    window_opt: &Option<winit::window::Window>,
+    size: (u32, u32),
+) {
+    // `ResizeState::queue` is the production `pending_resize = Some(..)` path.
+    resize_state.queue(size);
+    if let Some(w) = window_opt.as_ref() {
+        w.request_redraw();
+    }
+}
+
+/// `WindowEvent::ScaleFactorChanged` — shared by both loops.
+///
+/// R-M1: the physical cursor must not move when the scale factor changes, so
+/// the logical `mouse_pos` is rescaled by `old / new` in the same step that
+/// adopts the new factor. R-L3: the pending resize and the surface scale are
+/// updated here, but nothing is recreated — layout and hit-test refresh wait
+/// for `RedrawRequested` (single layout/frame, R-H5).
+#[cfg(feature = "skia-native")]
+fn window_scale_factor_changed(
+    scale_factor: &mut f32,
+    mouse_pos: &mut (f32, f32),
+    resize_state: &mut ResizeState,
+    surface: &mut Option<crate::skia_surface::SkiaSurface>,
+    window_opt: &Option<winit::window::Window>,
+    new_scale: f64,
+    new_inner_size: (u32, u32),
+) {
+    let old_scale = *scale_factor;
+    *scale_factor = new_scale as f32;
+    if old_scale.is_finite() && old_scale > 0.0 && scale_factor.is_finite() && *scale_factor > 0.0 {
+        mouse_pos.0 = mouse_pos.0 * old_scale / *scale_factor;
+        mouse_pos.1 = mouse_pos.1 * old_scale / *scale_factor;
+    }
+    resize_state.queue(new_inner_size);
+    if let Some(s) = surface.as_mut() {
+        s.set_scale_factor(*scale_factor);
+    }
+    if let Some(w) = window_opt.as_ref() {
+        w.request_redraw();
+    }
+}
+
+/// `WindowEvent::CursorMoved` — shared by both loops.
+///
+/// winit reports physical pixels while hit-testing and layout are logical, so
+/// the position is divided by the scale factor. Only a *change* of hover asks
+/// for a redraw: a cursor move within the same target paints identically.
+#[cfg(feature = "skia-native")]
+fn window_cursor_moved(
+    scale_factor: f32,
+    mouse_pos: &mut (f32, f32),
+    hover_targets: &[crate::events::HoverTarget],
+    hovered_id: &mut Option<u32>,
+    window_opt: &Option<winit::window::Window>,
+    position: (f32, f32),
+) {
+    *mouse_pos = (position.0 / scale_factor, position.1 / scale_factor);
+    let now_hovered = crate::events::hit_test_hover(hover_targets, mouse_pos.0, mouse_pos.1);
+    if now_hovered != *hovered_id {
+        *hovered_id = now_hovered;
+        if let Some(w) = window_opt.as_ref() {
+            w.request_redraw();
+        }
+    }
+}
+
+/// `WindowEvent::ModifiersChanged` — shared by both loops.
+///
+/// Latches Shift for Shift-extends-selection. winit 0.28 deprecates
+/// `KeyboardInput::modifiers` in favour of this event, so the caret reads the
+/// latched value instead of the deprecated per-key field.
+#[cfg(feature = "skia-native")]
+fn window_modifiers_changed(shift_held: &mut bool, shift: bool) {
+    *shift_held = shift;
+}
+
+/// Convert a winit scroll delta into logical pixels, negated so that wheel-down
+/// increases the scroll offset and reveals content below.
+///
+/// winit reports positive `y` for wheel-up; one line is 40 logical px, and
+/// `PixelDelta` is physical so it needs the scale factor.
+#[cfg(feature = "skia-native")]
+fn window_wheel_delta_y(delta: winit::event::MouseScrollDelta, scale_factor: f32) -> f32 {
+    match delta {
+        winit::event::MouseScrollDelta::LineDelta(_, y) => -y * 40.0,
+        winit::event::MouseScrollDelta::PixelDelta(pos) => -(pos.y as f32) / scale_factor,
+    }
+}
+
+/// `WindowEvent::MouseWheel` — shared by both loops.
+///
+/// Scrollable overflow: the deepest scrollable under the cursor, clamped by
+/// `apply_wheel_scroll`, which returns whether the offset actually moved. A
+/// wheel event that arrives before the first frame has no layout to scroll and
+/// must be a no-op rather than a panic.
+#[cfg(feature = "skia-native")]
+fn window_mouse_wheel(
+    scale_factor: f32,
+    mouse_pos: (f32, f32),
+    last_layout: &Option<velox_dom::layout::LayoutNode>,
+    scroll_offsets: &mut std::collections::HashMap<Vec<usize>, f32>,
+    window_opt: &Option<winit::window::Window>,
+    delta: winit::event::MouseScrollDelta,
+) {
+    let delta_y = window_wheel_delta_y(delta, scale_factor);
+    if let Some(layout) = last_layout.as_ref()
+        && crate::events::apply_wheel_scroll(
+            layout,
+            mouse_pos.0,
+            mouse_pos.1,
+            scroll_offsets,
+            delta_y,
+        )
+        && let Some(w) = window_opt.as_ref()
+    {
+        w.request_redraw();
+    }
+}
+
+// Behavioural tests for the shared arms.
+//
+// The loops themselves can only run inside a live winit window, and winit is an
+// optional dependency rather than a dev-dependency, so nothing under `tests/`
+// can name a `WindowEvent` and reach these functions. `tests/event_loop_arms.rs`
+// pins the *source text* of what is left in the loops, which catches the two
+// copies drifting apart from each other but says nothing about whether either
+// one is correct. These tests are that missing check: each one states an
+// observable property of a shared arm, so deleting or breaking the shared
+// implementation turns them red.
+//
+// They run under `cargo test --features velox-renderer/skia-native`; a plain
+// `cargo test -p velox-renderer` does not enable `skia-native` and does not
+// compile the loops or these tests at all.
+#[cfg(all(test, feature = "skia-native"))]
+mod window_event_shared_tests {
+    use super::*;
+    use std::collections::HashMap;
+    use winit::dpi::PhysicalPosition;
+    use winit::event::MouseScrollDelta;
+
+    /// Stand-in for the loop's `window_opt`. A `None` window is the case that
+    /// matters for these assertions: every shared arm must still do its state
+    /// work, and must simply skip the redraw request.
+    fn no_window() -> Option<winit::window::Window> {
+        None
+    }
+
+    fn hover_target(x: i32, y: i32, w: i32, h: i32, id: u32) -> crate::events::HoverTarget {
+        crate::events::HoverTarget {
+            rect: velox_dom::layout::Rect { x, y, w, h },
+            id,
+            z_index: 0,
+            order: 0,
+            clip: None,
+            sc: crate::events::StackCtx::ROOT,
+        }
+    }
+
+    #[test]
+    fn close_requested_tells_the_caller_to_exit() {
+        // `ControlFlow` is the loop's to own, so the shared arm signals instead
+        // of setting it. A false here would leave the window running.
+        assert!(window_close_requested());
+    }
+
+    #[test]
+    fn resized_keeps_only_the_last_size_of_a_drag() {
+        // R-L3 coalescing: a drag emits many `Resized` events and only the
+        // final one may be committed, so a resize storm cannot queue a backlog.
+        let mut state = ResizeState::new();
+        let window = no_window();
+        window_resized(&mut state, &window, (800, 600));
+        window_resized(&mut state, &window, (1024, 768));
+        assert_eq!(state.take_pending(), Some((1024, 768)));
+        assert_eq!(state.take_pending(), None);
+    }
+
+    #[test]
+    fn scale_factor_change_rescales_the_cursor_so_the_physical_point_is_stable() {
+        // R-M1: the physical cursor does not move when the scale factor does,
+        // so the logical position has to be divided by the same ratio.
+        let mut state = ResizeState::new();
+        let window = no_window();
+        let mut surface: Option<crate::skia_surface::SkiaSurface> = None;
+        let mut scale_factor = 1.0f32;
+        let mut mouse_pos = (100.0f32, 200.0f32);
+
+        window_scale_factor_changed(
+            &mut scale_factor,
+            &mut mouse_pos,
+            &mut state,
+            &mut surface,
+            &window,
+            2.0,
+            (1920, 1080),
+        );
+
+        assert_eq!(scale_factor, 2.0);
+        assert_eq!(mouse_pos, (50.0, 100.0));
+        // The pending resize is queued by the same arm (R-L3).
+        assert_eq!(state.take_pending(), Some((1920, 1080)));
+    }
+
+    #[test]
+    fn scale_factor_change_never_divides_by_a_degenerate_old_scale() {
+        // A 0, negative or NaN old scale cannot produce a meaningful ratio.
+        // Rescaling by it anyway would poison `mouse_pos` with NaN or infinity,
+        // after which every hover hit-test silently misses forever.
+        for degenerate in [0.0f32, -1.0, f32::NAN, f32::INFINITY] {
+            let mut state = ResizeState::new();
+            let window = no_window();
+            let mut surface: Option<crate::skia_surface::SkiaSurface> = None;
+            let mut scale_factor = degenerate;
+            let mut mouse_pos = (10.0f32, 20.0f32);
+
+            window_scale_factor_changed(
+                &mut scale_factor,
+                &mut mouse_pos,
+                &mut state,
+                &mut surface,
+                &window,
+                2.0,
+                (800, 600),
+            );
+
+            assert_eq!(
+                scale_factor, 2.0,
+                "old_scale={degenerate}: new scale adopted"
+            );
+            assert_eq!(
+                mouse_pos,
+                (10.0, 20.0),
+                "old_scale={degenerate}: cursor left alone"
+            );
+            // The pending resize is not conditional on the cursor arithmetic.
+            assert_eq!(state.take_pending(), Some((800, 600)));
+        }
+    }
+
+    #[test]
+    fn cursor_moved_converts_physical_pixels_to_logical_units() {
+        // winit reports physical pixels; layout and hit-testing are logical.
+        // Skipping this division puts the cursor half a screen away at 2x.
+        let window = no_window();
+        let mut mouse_pos = (0.0f32, 0.0f32);
+        let mut hovered_id: Option<u32> = None;
+
+        window_cursor_moved(
+            2.0,
+            &mut mouse_pos,
+            &[],
+            &mut hovered_id,
+            &window,
+            (300.0, 200.0),
+        );
+
+        assert_eq!(mouse_pos, (150.0, 100.0));
+    }
+
+    #[test]
+    fn cursor_moved_latches_and_clears_the_hover_target_under_the_logical_cursor() {
+        let window = no_window();
+        let targets = [hover_target(0, 0, 200, 200, 7)];
+        let mut mouse_pos = (0.0f32, 0.0f32);
+        let mut hovered_id: Option<u32> = None;
+
+        // 300 physical px at 2.0 is 150 logical, inside the 0..200 target.
+        window_cursor_moved(
+            2.0,
+            &mut mouse_pos,
+            &targets,
+            &mut hovered_id,
+            &window,
+            (300.0, 200.0),
+        );
+        assert_eq!(hovered_id, Some(7));
+
+        // Leaving the target has to clear the latch, or the hover style sticks.
+        window_cursor_moved(
+            2.0,
+            &mut mouse_pos,
+            &targets,
+            &mut hovered_id,
+            &window,
+            (900.0, 800.0),
+        );
+        assert_eq!(hovered_id, None);
+    }
+
+    #[test]
+    fn modifiers_changed_latches_the_shift_state_the_caret_reads() {
+        // winit 0.28 deprecated the per-key `KeyboardInput::modifiers` field, so
+        // Shift-extends-selection depends on this latch being the only writer.
+        let mut shift_held = false;
+        window_modifiers_changed(&mut shift_held, true);
+        assert!(shift_held);
+        window_modifiers_changed(&mut shift_held, false);
+        assert!(!shift_held);
+    }
+
+    #[test]
+    fn wheel_deltas_become_logical_pixels_in_the_natural_direction() {
+        // winit reports positive y for wheel-up; the offset must grow when the
+        // wheel is pushed down, and one line is 40 logical px.
+        assert_eq!(
+            window_wheel_delta_y(MouseScrollDelta::LineDelta(0.0, 1.0), 1.0),
+            -40.0
+        );
+        assert_eq!(
+            window_wheel_delta_y(MouseScrollDelta::LineDelta(0.0, -1.0), 1.0),
+            40.0
+        );
+        // The horizontal component is not a vertical scroll.
+        assert_eq!(
+            window_wheel_delta_y(MouseScrollDelta::LineDelta(7.0, 1.0), 1.0),
+            -40.0
+        );
+        // `PixelDelta` is physical, so it needs the scale factor.
+        assert_eq!(
+            window_wheel_delta_y(
+                MouseScrollDelta::PixelDelta(PhysicalPosition::new(0.0, -100.0)),
+                2.0,
+            ),
+            50.0
+        );
+    }
+
+    #[test]
+    fn a_wheel_event_before_the_first_frame_is_a_no_op() {
+        // A wheel can arrive before any `RedrawRequested`, when there is no
+        // layout to scroll. That must be inert, not a panic.
+        let window = no_window();
+        let mut scroll_offsets: HashMap<Vec<usize>, f32> = HashMap::new();
+        window_mouse_wheel(
+            1.0,
+            (10.0, 10.0),
+            &None,
+            &mut scroll_offsets,
+            &window,
+            MouseScrollDelta::LineDelta(0.0, 3.0),
+        );
+        assert!(scroll_offsets.is_empty());
+    }
+}
+
+/// Run a Skia window whose contents are produced by `make_view`.
+///
+/// # Viewport contract (1A / X-H1) — Viewport Root Normalization (CX-04)
+///
+/// `make_view` is `FnMut(w: u32, h: u32) -> (VNode, Stylesheet)` where
+/// `(w, h)` are **logical viewport dimensions** — `Viewport::from_i32(physical, scale).logical_size()`.
+/// The renderer calls it:
+/// * once on startup,
+/// * on every `RedrawRequested` / resize / DPI change with the *current* logical `w,h`.
+///   Templates must not ignore `(w,h)` (no `|_w, _h|`). The canonical
+///   responsive pattern is a viewport-filling root:
+///   `width: 100%; min-height: 100vh` on `.app` (see `velox-cli/templates/project/src/App.vx`).
+///   With `width:100%` and `min-height:100vh`, `compute_layout(vnode, w as i32, h as i32)`
+///   reflows visibly on every window resize — no element hidden when it should be visible
+///   (Flutter invariant). Callers may also thread `(w,h)` into style/layout decisions if needed.
+///
+/// ## Root normalization
+///
+/// `velox_dom::layout::root_is_viewport_filling` ensures the *first* VNode (index 0 / `None`)
+/// always fills the logical viewport — even without explicit `width:100%`. The expanded
+/// predicate `is_viewport_filling(style, is_root_index)` additionally treats `100% | 100vw | 100dvw | 100vh | 100dvh | min-height:100%|vh|dvh`
+/// as viewport-filling, validated via `compute_layout` percent chains (`height:100%` fills
+/// when parent is definite) and `vw/vh/dvh` units that resolve against `Viewport::logical_size`.
+#[cfg(feature = "skia-native")]
+pub fn run_window_vnode_skia<F, G, H>(
+    title: &str,
+    mut make_view: F,
+    mut on_event: G,
+    mut get_title: H,
+) -> Result<(), String>
 where
     F: FnMut(u32, u32) -> (velox_dom::VNode, Stylesheet) + 'static,
     G: FnMut(&str, Option<&str>) + 'static,
@@ -406,1343 +1824,2147 @@ where
     use winit::event_loop::{ControlFlow, EventLoop};
     use winit::window::WindowBuilder;
 
-    struct SoftbufferPresenter {
-        _context: softbuffer::Context,
-        surface: softbuffer::Surface,
-        width: u32,
-        height: u32,
-        rgba: Vec<u8>,
-    }
+    // Headless mode: when no compositor is available (CI, containers, SSH)
+    // we still create the window + run the event loop but skip softbuffer
+    // presentation, rendering offscreen only. Enable with VELOX_HEADLESS=1
+    // or it is auto-detected via presenter::is_compositor_available().
+    let headless_env = std::env::var("VELOX_HEADLESS").as_deref() == Ok("1")
+        || !crate::presenter::is_compositor_available();
 
-    impl SoftbufferPresenter {
-        fn new(window: &winit::window::Window, width: u32, height: u32) -> Result<Self, String> {
-            let context = unsafe {
-                softbuffer::Context::new(window)
-                    .map_err(|e| format!("softbuffer context failed: {}", e))?
-            };
-            let mut surface = unsafe {
-                softbuffer::Surface::new(&context, window)
-                    .map_err(|e| format!("softbuffer surface failed: {}", e))?
-            };
-            let w = width.max(1);
-            let h = height.max(1);
-            surface
-                .resize(std::num::NonZeroU32::new(w).unwrap(), std::num::NonZeroU32::new(h).unwrap())
-                .map_err(|e| format!("softbuffer resize failed: {}", e))?;
-            Ok(Self {
-                _context: context,
-                surface,
-                width: w,
-                height: h,
-                rgba: vec![0u8; (w as usize) * (h as usize) * 4],
-            })
-        }
+    let mut last_vnode: Option<velox_dom::VNode> = None;
+    let mut _hmr_pending = false;
 
-        fn resize(&mut self, width: u32, height: u32) -> Result<(), String> {
-            let w = width.max(1);
-            let h = height.max(1);
-            if w == self.width && h == self.height {
-                return Ok(());
+    // Prepare the winit backend: force X11 if Wayland socket is stale to
+    // avoid winit's Wayland backend calling process::exit() on EPIPE.
+    let _headless_check = crate::presenter::prepare_backend();
+
+    // Try to create a winit event loop and window. In headless mode or when
+    // no compositor is available, both can fail (winit may panic instead of
+    // returning Err) — we catch this and proceed with headless rendering.
+    //
+    // A NON-display failure is not headless-eligible: it is returned as a
+    // typed `VeloxError::Window`, never panicked. The old `panic!` here was
+    // caught by the `catch_unwind` below and silently converted into the same
+    // headless fallback as a broken pipe, which masked real configuration
+    // errors (bad size, closed display fd) as "running headless".
+    // Factored out of the `let` below: clippy::type_complexity fires on the
+    // inline annotation. Behaviour-identical alias.
+    type WindowOutcome = Result<
+        (
+            Option<winit::event_loop::EventLoop<()>>,
+            Option<winit::window::Window>,
+            PhysicalSize<u32>,
+            f32,
+        ),
+        String,
+    >;
+    let window_outcome: WindowOutcome =
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let event_loop = EventLoop::new();
+            let window_result = WindowBuilder::new()
+                .with_title(title)
+                .with_inner_size(PhysicalSize::new(800, 600))
+                .build(&event_loop);
+            match window_result {
+                Ok(w) => {
+                    let size = w.inner_size();
+                    let sf = w.scale_factor() as f32;
+                    Ok((Some(event_loop), Some(w), size, sf))
+                }
+                Err(e) => {
+                    let msg = e.to_string();
+                    let lower = msg.to_ascii_lowercase();
+                    let is_display_err = lower.contains("broken pipe")
+                        || lower.contains("os error 32")
+                        || lower.contains("no compositor")
+                        || lower.contains("no display server")
+                        || lower.contains("failed to connect");
+                    if headless_env || is_display_err {
+                        log::warn!("window creation failed — continuing in headless mode: {msg}");
+                        Ok((Some(event_loop), None, PhysicalSize::new(800, 600), 1.0))
+                    } else {
+                        Err(
+                            velox_dom::VeloxError::Window(format!("failed to create window: {e}"))
+                                .to_string(),
+                        )
+                    }
+                }
             }
-            self.surface
-                .resize(std::num::NonZeroU32::new(w).unwrap(), std::num::NonZeroU32::new(h).unwrap())
-                .map_err(|e| format!("softbuffer resize failed: {}", e))?;
-            self.width = w;
-            self.height = h;
-            self.rgba.resize((w as usize) * (h as usize) * 4, 0);
-            Ok(())
-        }
-
-        fn present(&mut self, skia_surface: &mut crate::skia_surface::SkiaSurface) -> Result<(), String> {
-            let width = skia_surface.width.max(1) as u32;
-            let height = skia_surface.height.max(1) as u32;
-            self.resize(width, height)?;
-
-            let info = skia_safe::ImageInfo::new(
-                (self.width as i32, self.height as i32),
-                skia_safe::ColorType::RGBA8888,
-                skia_safe::AlphaType::Premul,
-                None,
+        }))
+        .unwrap_or_else(|payload| {
+            // Surface the panic payload (usually the compositor error, e.g.
+            // broken pipe) instead of silently masking it — log::warn is
+            // invisible without an initialized logger (CX-13 / F-23).
+            eprintln!(
+                "[velox] window/event loop creation panicked — continuing in headless mode: {}",
+                panic_detail(payload)
             );
-            let row_bytes = (self.width * 4) as usize;
-            if !skia_surface.read_pixels(&info, &mut self.rgba, row_bytes, (0, 0)) {
-                return Err("skia: read_pixels failed".to_string());
-            }
+            Ok((None, None, PhysicalSize::new(800, 600), 1.0))
+        });
+    let (event_loop_opt, window, window_size, scale_factor) = window_outcome?;
 
-            let mut buffer = self
-                .surface
-                .buffer_mut()
-                .map_err(|e| format!("softbuffer buffer_mut failed: {}", e))?;
-            let pixels: &mut [u32] = &mut buffer;
-            let pixel_count = (self.width as usize) * (self.height as usize);
-            if pixels.len() < pixel_count {
-                return Err("softbuffer: buffer smaller than expected".to_string());
+    let window_opt: Option<winit::window::Window> = window;
+    let mut renderer = match crate::skia_surface::SkiaSurface::new_raster(
+        window_size.width as i32,
+        window_size.height as i32,
+    ) {
+        Ok(surface) => skia_backend::SkiaRenderer {
+            surface: Some(surface),
+            vnode: None,
+        },
+        Err(e) => {
+            return Err(format!("failed to create SkiaSurface: {e}"));
+        }
+    };
+    let mut presenter: Option<crate::presenter::SoftbufferPresenter> = None;
+    if let Some(w) = window_opt.as_ref() {
+        // softbuffer::Context::new() can panic when the display server is
+        // unreachable even though DISPLAY/WAYLAND_DISPLAY are set (broken pipe).
+        // Catch such panics and degrade to headless rendering.
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            crate::presenter::SoftbufferPresenter::new(w, window_size.width, window_size.height)
+        })) {
+            Ok(Ok(p)) => presenter = Some(p),
+            Ok(Err(e)) => {
+                if headless_env {
+                    log::warn!(
+                        "softbuffer presenter unavailable — continuing in headless mode: {e}"
+                    );
+                } else {
+                    return Err(format!("failed to create softbuffer presenter: {e}"));
+                }
             }
-            for (i, pixel) in pixels.iter_mut().take(pixel_count).enumerate() {
-                let base = i * 4;
-                let r = self.rgba[base] as u32;
-                let g = self.rgba[base + 1] as u32;
-                let b = self.rgba[base + 2] as u32;
-                *pixel = (r << 16) | (g << 8) | b;
+            Err(payload) => {
+                // Surface the panic payload (softbuffer panics with a
+                // broken pipe when the display is unreachable) instead of
+                // silently masking it (CX-13 / F-23).
+                eprintln!(
+                    "[velox] softbuffer presenter creation panicked — continuing in headless mode: {}",
+                    panic_detail(payload)
+                );
             }
-            buffer
-                .present()
-                .map_err(|e| format!("softbuffer present failed: {}", e))?;
-            Ok(())
         }
     }
-
-    let event_loop = EventLoop::new();
-    let window = WindowBuilder::new()
-        .with_title(title)
-        .with_inner_size(PhysicalSize::new(800, 600))
-        .build(&event_loop)
-        .expect("failed to create window");
-
-    let size = window.inner_size();
-    let mut renderer = match crate::skia_surface::SkiaSurface::new_raster(size.width as i32, size.height as i32) {
-        Ok(surface) => skia_backend::SkiaRenderer { surface: Some(surface) },
-        Err(e) => panic!("failed to create SkiaSurface: {}", e),
-    };
-    let mut presenter = match SoftbufferPresenter::new(&window, size.width, size.height) {
-        Ok(p) => p,
-        Err(e) => panic!("failed to create softbuffer presenter: {}", e),
-    };
-    let mut scale_factor = window.scale_factor() as f32;
+    let mut scale_factor = scale_factor;
     let mut mouse_pos = (0.0f32, 0.0f32);
     let mut hovered_id: Option<u32> = None;
     let mut click_targets: Vec<crate::events::ClickTarget> = Vec::new();
     let mut hover_targets: Vec<crate::events::HoverTarget> = Vec::new();
+    let mut input_targets: Vec<crate::events::InputTarget> = Vec::new();
+    // Path (child source indices) to the focused text input, if any.
+    let mut focused_input: Option<Vec<usize>> = None;
+    // Instant before which the caret must stay solid regardless of tick
+    // timing. Armed by every editing key and by focus changes.
+    let mut blink_deadline: Option<std::time::Instant> = None;
+    // Shift state, latched by the shared `window_modifiers_changed` below.
+    // winit 0.28 deprecates `KeyboardInput::modifiers` in favour of the
+    // `ModifiersChanged` event, so the caret reads this latched value instead
+    // of the deprecated per-key field.
+    let mut shift_held = false;
+    // Scrollable overflow model: wheel clamping + deepest hit_test
+    let mut scroll_offsets: std::collections::HashMap<Vec<usize>, f32> =
+        std::collections::HashMap::new();
+    let mut last_layout: Option<velox_dom::layout::LayoutNode> = None;
+    // Lifecycle: ensure on_mounted fires once on first RedrawRequested and
+    // on_unmounted/before_destroy fire on CloseRequested or drop.
+    let _lifecycle_guard = LifecycleCleanupGuard;
+    let mut did_mount = false;
+    // R-L3: coalesce rapid resize drags — only last size per frame materializes.
+    // Surface recreation (raster_n32_premul) is deferred to RedrawRequested.
+    let mut resize_state = ResizeState::new();
 
-    fn logical_size(width: i32, height: i32, scale_factor: f32) -> (u32, u32) {
-        let w = ((width as f32) / scale_factor).round().max(1.0) as u32;
-        let h = ((height as f32) / scale_factor).round().max(1.0) as u32;
-        (w, h)
-    }
-
-    fn recompute_targets(
-        vnode: &velox_dom::VNode,
-        width: u32,
-        height: u32,
-        click_targets: &mut Vec<crate::events::ClickTarget>,
-        hover_targets: &mut Vec<crate::events::HoverTarget>,
-    ) {
-        let layout = velox_dom::layout::compute_layout(vnode, width as i32, height as i32);
-        click_targets.clear();
-        crate::events::collect_click_targets(vnode, &layout, click_targets);
-        hover_targets.clear();
-        crate::events::collect_hover_targets(vnode, &layout, hover_targets);
-    }
-
-    fn with_hover_ids(vnode: &velox_dom::VNode, next_id: &mut u32) -> velox_dom::VNode {
-        match vnode {
-            velox_dom::VNode::Text(_) => vnode.clone(),
-            velox_dom::VNode::Element { tag, props, children } => {
-                let mut new_props = props.clone();
-                if crate::events::is_hoverable(tag, props) {
-                    let id = *next_id;
-                    *next_id += 1;
-                    new_props = new_props.set("data-hover-id", id.to_string());
-                }
-                let new_children = children.iter().map(|c| with_hover_ids(c, next_id)).collect();
-                velox_dom::VNode::Element { tag: tag.clone(), props: new_props, children: new_children }
-            }
-        }
-    }
+    // Render first frame immediately before entering the event loop.
+    // This ensures the window has content even on platforms where
+    // request_redraw() from NewEvents(StartCause::Init) may not trigger
+    // a RedrawRequested event (e.g. certain Wayland/X11 compositors).
 
     if let Some(s) = &mut renderer.surface {
         s.set_scale_factor(scale_factor);
-        let (vw, vh) = logical_size(s.width, s.height, scale_factor);
+        let (vw, vh) = resize_state.record_initial(s.width, s.height, scale_factor);
         let (vnode_raw, sheet) = make_view(vw, vh);
         let mut next_id = 1u32;
         let vnode_tagged = with_hover_ids(&vnode_raw, &mut next_id);
-        let vnode = apply_styles_with_hover(
-            &vnode_tagged,
-            &sheet,
-            &|_tag, props| {
-                props
-                    .attrs
-                    .get("data-hover-id")
-                    .and_then(|v| v.parse::<u32>().ok())
-                    .map(|id| Some(id) == hovered_id)
-                    .unwrap_or(false)
-            },
+        let vnode = crate::style_vnode_with_hover(&vnode_tagged, &sheet, &|_tag, props| {
+            props
+                .attrs
+                .get("data-hover-id")
+                .and_then(|v| v.parse::<u32>().ok())
+                .map(|id| Some(id) == hovered_id)
+                .unwrap_or(false)
+        });
+        // First frame: no input can be focused yet, so every text input gets
+        // the unfocused defaults. Injected anyway so the attr contract holds on
+        // frame one and paint never has to special-case absence.
+        let vnode = crate::inject_input_caret_attrs(&vnode, None);
+        // Publish the pre-loop frame so a click or keystroke that arrives before
+        // the first RedrawRequested is handled against real layout/value data
+        // rather than an empty `last_vnode`. Without this, `apply_click_focus`
+        // and `apply_edit_to_focused` see `None` and either drop the edit or put
+        // the caret at 0 — the regression the HMR loop already guards against
+        // by assigning `last_vnode` here.
+        last_vnode = Some(vnode.clone());
+        let mut layout = velox_dom::layout::compute_layout(&vnode, vw as i32, vh as i32);
+        {
+            let mut path = Vec::new();
+            crate::events::apply_scroll_offsets(&mut layout, &scroll_offsets, &mut path);
+        }
+        last_layout = Some(layout.clone());
+        recompute_targets(
+            &vnode,
+            &layout,
+            &mut click_targets,
+            &mut hover_targets,
+            &mut input_targets,
         );
-        recompute_targets(&vnode, vw, vh, &mut click_targets, &mut hover_targets);
+        // Render and present the initial frame so the window has immediate content.
+        if let Err(e) = crate::skia_render::skia_impl::render_frame(s, &vnode, &layout, &sheet) {
+            log::error!("skia initial render error: {}", e);
+        }
+        if let Some(presenter) = presenter.as_mut()
+            && let Err(e) = presenter.present(s)
+        {
+            log::error!("skia initial present error: {}", e);
+        }
     }
 
-    event_loop.run(move |event, _, control_flow| {
-        *control_flow = ControlFlow::Wait;
-        match event {
-            Event::NewEvents(StartCause::Init) => {
-                window.request_redraw();
-            }
-            Event::WindowEvent { event: WindowEvent::CloseRequested, .. } => {
-                *control_flow = ControlFlow::Exit;
-            }
-            Event::WindowEvent { event: WindowEvent::Resized(new_size), .. } => {
-                let _ = renderer.resize(new_size.width as i32, new_size.height as i32);
-                let _ = presenter.resize(new_size.width, new_size.height);
-                if let Some(s) = &mut renderer.surface {
-                    s.set_scale_factor(scale_factor);
-                    let (vw, vh) = logical_size(s.width, s.height, scale_factor);
-                    let (vnode_raw, sheet) = make_view(vw, vh);
-                    let mut next_id = 1u32;
-                    let vnode_tagged = with_hover_ids(&vnode_raw, &mut next_id);
-                    let vnode = apply_styles_with_hover(
-                        &vnode_tagged,
-                        &sheet,
-                        &|_tag, props| {
-                            props
-                                .attrs
-                                .get("data-hover-id")
-                                .and_then(|v| v.parse::<u32>().ok())
-                                .map(|id| Some(id) == hovered_id)
-                                .unwrap_or(false)
-                        },
-                    );
-                    recompute_targets(&vnode, vw, vh, &mut click_targets, &mut hover_targets);
-                }
-                window.request_redraw();
-            }
-            Event::WindowEvent { event: WindowEvent::ScaleFactorChanged { scale_factor: new_scale, new_inner_size, .. }, .. } => {
-                scale_factor = new_scale as f32;
-                let _ = renderer.resize(new_inner_size.width as i32, new_inner_size.height as i32);
-                let _ = presenter.resize(new_inner_size.width, new_inner_size.height);
-                if let Some(s) = &mut renderer.surface {
-                    s.set_scale_factor(scale_factor);
-                    let (vw, vh) = logical_size(s.width, s.height, scale_factor);
-                    let (vnode_raw, sheet) = make_view(vw, vh);
-                    let mut next_id = 1u32;
-                    let vnode_tagged = with_hover_ids(&vnode_raw, &mut next_id);
-                    let vnode = apply_styles_with_hover(
-                        &vnode_tagged,
-                        &sheet,
-                        &|_tag, props| {
-                            props
-                                .attrs
-                                .get("data-hover-id")
-                                .and_then(|v| v.parse::<u32>().ok())
-                                .map(|id| Some(id) == hovered_id)
-                                .unwrap_or(false)
-                        },
-                    );
-                    recompute_targets(&vnode, vw, vh, &mut click_targets, &mut hover_targets);
-                }
-                window.request_redraw();
-            }
-            Event::WindowEvent { event: WindowEvent::CursorMoved { position, .. }, .. } => {
-                mouse_pos = (
-                    position.x as f32 / scale_factor,
-                    position.y as f32 / scale_factor,
-                );
-                let now_hovered = crate::events::hit_test_hover(&hover_targets, mouse_pos.0, mouse_pos.1);
-                if now_hovered != hovered_id {
-                    hovered_id = now_hovered;
-                    window.request_redraw();
-                }
-            }
-            Event::WindowEvent { event: WindowEvent::MouseInput { state: ElementState::Pressed, button: MouseButton::Left, .. }, .. } => {
-                if let Some((handler, payload_opt)) = crate::events::hit_test_click(&click_targets, mouse_pos.0, mouse_pos.1) {
-                    let payload_owned = payload_opt
-                        .map(|p| p.to_string())
-                        .unwrap_or_else(|| format!("{{\"x\":{},\"y\":{}}}", mouse_pos.0, mouse_pos.1));
-                    on_event(handler, Some(&payload_owned));
-                    if let Some(s) = &mut renderer.surface {
-                        let (vw, vh) = logical_size(s.width, s.height, scale_factor);
-                        let (vnode_raw, sheet) = make_view(vw, vh);
-                        let mut next_id = 1u32;
-                        let vnode_tagged = with_hover_ids(&vnode_raw, &mut next_id);
-                        let vnode = apply_styles_with_hover(
-                            &vnode_tagged,
-                            &sheet,
-                            &|_tag, props| {
-                                props
-                                    .attrs
-                                    .get("data-hover-id")
-                                    .and_then(|v| v.parse::<u32>().ok())
-                                    .map(|id| Some(id) == hovered_id)
-                                    .unwrap_or(false)
-                            },
+    if let Some(event_loop) = event_loop_opt {
+        // The event loop can panic if the display server becomes unreachable
+        // (e.g. "Io error: Broken pipe") — catch that and degrade gracefully.
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            // Caret blink clock. `EventLoop::new()` is an alias for
+            // `EventLoopBuilder::new().build()`, and that constructor calls
+            // `with_user_event()`, so the user-event channel is already enabled
+            // here and `create_proxy()` needs no builder change. Held in a local
+            // inside the unwind closure so its `Drop` joins the thread when the
+            // loop ends.
+            let _blink_ticker = crate::CaretBlinkTicker::start(event_loop.create_proxy(), ());
+            event_loop.run(move |event, _, control_flow| {
+                *control_flow = ControlFlow::Wait;
+                match event {
+                    Event::NewEvents(StartCause::Init) => {
+                        if let Some(w) = window_opt.as_ref() {
+                            w.request_redraw();
+                        }
+                    }
+                    Event::WindowEvent {
+                        event: WindowEvent::CloseRequested,
+                        ..
+                    } => {
+                        // Destroy hooks run inside the shared arm; the exit stays
+                        // here so `ControlFlow` never leaves the loop.
+                        if window_close_requested() {
+                            *control_flow = ControlFlow::Exit;
+                        }
+                    }
+                    Event::WindowEvent {
+                        event: WindowEvent::Resized(new_size),
+                        ..
+                    } => {
+                        window_resized(
+                            &mut resize_state,
+                            &window_opt,
+                            (new_size.width, new_size.height),
                         );
-                        recompute_targets(&vnode, vw, vh, &mut click_targets, &mut hover_targets);
                     }
-                    window.set_title(&get_title());
-                    window.request_redraw();
+                    Event::WindowEvent {
+                        event:
+                            WindowEvent::ScaleFactorChanged {
+                                scale_factor: new_scale,
+                                new_inner_size,
+                                ..
+                            },
+                        ..
+                    } => {
+                        window_scale_factor_changed(
+                            &mut scale_factor,
+                            &mut mouse_pos,
+                            &mut resize_state,
+                            &mut renderer.surface,
+                            &window_opt,
+                            new_scale,
+                            (new_inner_size.width, new_inner_size.height),
+                        );
+                    }
+                    Event::WindowEvent {
+                        event: WindowEvent::CursorMoved { position, .. },
+                        ..
+                    } => {
+                        window_cursor_moved(
+                            scale_factor,
+                            &mut mouse_pos,
+                            &hover_targets,
+                            &mut hovered_id,
+                            &window_opt,
+                            (position.x as f32, position.y as f32),
+                        );
+                    }
+                    Event::WindowEvent {
+                        event:
+                            WindowEvent::MouseInput {
+                                state: ElementState::Pressed,
+                                button: MouseButton::Left,
+                                ..
+                            },
+                        ..
+                    } => {
+                        // Text-input focus: clicking a text field focuses it and
+                        // places the caret; clicking anywhere else drops focus and
+                        // clears the selection. This runs BEFORE the click-handler
+                        // test and is deliberately independent of it — see the
+                        // redraw hoist at the bottom of this arm.
+                        crate::apply_click_focus(
+                            &mut input_targets,
+                            &last_vnode,
+                            &mut focused_input,
+                            mouse_pos.0,
+                            mouse_pos.1,
+                            scale_factor,
+                            surface_logical_viewport(&renderer, scale_factor),
+                        );
+                        let mut handled_click = false;
+                        if let Some((handler, payload_opt)) =
+                            crate::events::hit_test_click(&click_targets, mouse_pos.0, mouse_pos.1)
+                        {
+                            let payload_owned =
+                                payload_opt.map(|p| p.to_string()).unwrap_or_else(|| {
+                                    format!("{{\"x\":{},\"y\":{}}}", mouse_pos.0, mouse_pos.1)
+                                });
+                            on_event(handler, Some(&payload_owned));
+                            velox_core::lifecycle::run_all_updated_hooks();
+                            if let Some(s) = &mut renderer.surface {
+                                let (vw, vh) = logical_size(s.width, s.height, scale_factor);
+                                let (vnode_raw, sheet) = make_view(vw, vh);
+                                let mut next_id = 1u32;
+                                let vnode_tagged = with_hover_ids(&vnode_raw, &mut next_id);
+                                let vnode = crate::style_vnode_with_hover(
+                                    &vnode_tagged,
+                                    &sheet,
+                                    &|_tag, props| {
+                                        props
+                                            .attrs
+                                            .get("data-hover-id")
+                                            .and_then(|v| v.parse::<u32>().ok())
+                                            .map(|id| Some(id) == hovered_id)
+                                            .unwrap_or(false)
+                                    },
+                                );
+                                let vnode = crate::inject_input_caret_attrs(
+                                    &vnode,
+                                    crate::events::focused_input_index(&input_targets)
+                                        .and_then(|i| input_targets.get(i)),
+                                );
+                                let mut layout =
+                                    velox_dom::layout::compute_layout(&vnode, vw as i32, vh as i32);
+                                {
+                                    let mut path = Vec::new();
+                                    crate::events::apply_scroll_offsets(
+                                        &mut layout,
+                                        &scroll_offsets,
+                                        &mut path,
+                                    );
+                                }
+                                last_layout = Some(layout.clone());
+                                recompute_targets(
+                                    &vnode,
+                                    &layout,
+                                    &mut click_targets,
+                                    &mut hover_targets,
+                                    &mut input_targets,
+                                );
+                            }
+                            handled_click = true;
+                        }
+                        if let Some(w) = window_opt.as_ref() {
+                            if handled_click {
+                                w.set_title(&get_title());
+                            }
+                            // HOISTED OUT of the `hit_test_click` arm on purpose.
+                            // This used to live inside it, so a click that hit
+                            // empty space changed focus and then never repainted:
+                            // the focus ring and caret were stuck at their old
+                            // values. Focus is now state the frame depends on, so
+                            // any change to it must schedule a redraw.
+                            w.request_redraw();
+                        }
+                    }
+                    Event::WindowEvent {
+                        event: WindowEvent::ModifiersChanged(mods),
+                        ..
+                    } => {
+                        window_modifiers_changed(&mut shift_held, mods.shift());
+                    }
+                    Event::WindowEvent {
+                        event: WindowEvent::KeyboardInput { input, .. },
+                        ..
+                    } => {
+                        // Handle keyboard shortcuts and text-input editing keys.
+                        use winit::event::VirtualKeyCode;
+                        if let Some(keycode) = input.virtual_keycode
+                            && input.state == ElementState::Pressed
+                        {
+                            // `@keydown` bindings first, and additively: this
+                            // grants focus and calls handlers, it never
+                            // consumes the key, so every branch below still
+                            // runs exactly as it did before any keydown
+                            // binding existed.
+                            if crate::dispatch_keydown(
+                                keycode,
+                                &mut input_targets,
+                                &last_vnode,
+                                &mut focused_input,
+                                &mut on_event,
+                            ) {
+                                arm_blink_deadline(&mut blink_deadline);
+                                velox_core::lifecycle::run_all_updated_hooks();
+                                if let Some(w) = window_opt.as_ref() {
+                                    w.request_redraw();
+                                }
+                            }
+                            match keycode {
+                                // Reload (app exits, dev server restarts it) and quit.
+                                // Both are withheld while a text field has focus: with a
+                                // field focused these keys are *text*, so an unguarded
+                                // shortcut means typing "r" into a search box kills the
+                                // application. With nothing focused they are the only way
+                                // out of the window. When the guard fails the key falls
+                                // through to the editor below, which is what lets the
+                                // character still reach the field.
+                                VirtualKeyCode::R | VirtualKeyCode::Q
+                                    if !crate::events::any_input_focused(&input_targets) =>
+                                {
+                                    velox_core::lifecycle::run_all_destroy_hooks();
+                                    *control_flow = ControlFlow::Exit;
+                                }
+                                _ => {
+                                    // Every remaining editing key routes through the
+                                    // one shared call, so the HMR loop cannot drift
+                                    // from this one again.
+                                    if let Some(action) =
+                                        crate::edit_action_for_key(keycode, shift_held)
+                                    {
+                                        let changed = crate::apply_edit_to_focused(
+                                            &mut input_targets,
+                                            action,
+                                            &last_vnode,
+                                            &mut focused_input,
+                                            &mut on_event,
+                                        );
+                                        if changed {
+                                            // Caret goes solid while you type.
+                                            arm_blink_deadline(&mut blink_deadline);
+                                            velox_core::lifecycle::run_all_updated_hooks();
+                                            if let Some(w) = window_opt.as_ref() {
+                                                w.request_redraw();
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    Event::UserEvent(()) => {
+                        // Caret blink tick from `CaretBlinkTicker`. See that
+                        // type for why a thread is involved and why it is not a
+                        // shared-state race.
+                        if crate::on_caret_blink_tick(&mut input_targets, &mut blink_deadline)
+                            && let Some(w) = window_opt.as_ref()
+                        {
+                            w.request_redraw();
+                        }
+                    }
+                    Event::WindowEvent {
+                        event: WindowEvent::ReceivedCharacter(c),
+                        ..
+                    } => {
+                        // Printable characters go to the focused text input.
+                        if !c.is_control()
+                            && c != '\u{7f}'
+                            && crate::apply_edit_to_focused(
+                                &mut input_targets,
+                                crate::events::EditAction::Insert(c),
+                                &last_vnode,
+                                &mut focused_input,
+                                &mut on_event,
+                            )
+                        {
+                            // Caret goes solid while you type.
+                            arm_blink_deadline(&mut blink_deadline);
+                            velox_core::lifecycle::run_all_updated_hooks();
+                            if let Some(w) = window_opt.as_ref() {
+                                w.request_redraw();
+                            }
+                        }
+                    }
+                    Event::WindowEvent {
+                        event: WindowEvent::MouseWheel { delta, .. },
+                        ..
+                    } => {
+                        window_mouse_wheel(
+                            scale_factor,
+                            mouse_pos,
+                            &last_layout,
+                            &mut scroll_offsets,
+                            &window_opt,
+                            delta,
+                        );
+                    }
+                    Event::RedrawRequested(_) => {
+                        // R-L3: materialize any coalesced resize exactly once per frame.
+                        let mut committed_resize = false;
+                        if let Some((pw, ph)) = resize_state.take_pending() {
+                            // `ResizeState::take_pending` is the production `pending_resize.take()` path.
+                            match renderer.resize(pw as i32, ph as i32) {
+                                Ok(()) => committed_resize = true,
+                                Err(e) => {
+                                    log::warn!("renderer resize failed ({}x{}): {}", pw, ph, e);
+                                }
+                            }
+                            if let Some(presenter) = presenter.as_mut()
+                                && let Err(e) = presenter.resize(pw, ph)
+                            {
+                                log::warn!("presenter resize failed: {}", e);
+                            }
+                        }
+                        // First mount: fire on_mounted once.
+                        ensure_mounted(&mut did_mount);
+                        // Render VNode -> Skia frame and present.
+                        if let Some(s) = &mut renderer.surface {
+                            s.set_scale_factor(scale_factor);
+                            let (vw, vh) = resize_state.frame_logical_size(
+                                s.width,
+                                s.height,
+                                scale_factor,
+                                committed_resize,
+                            );
+                            let (vnode_raw, sheet) = make_view(vw, vh);
+                            let mut next_id = 1u32;
+                            let vnode_tagged = with_hover_ids(&vnode_raw, &mut next_id);
+                            let vnode = crate::style_vnode_with_hover(
+                                &vnode_tagged,
+                                &sheet,
+                                &|_tag, props| {
+                                    props
+                                        .attrs
+                                        .get("data-hover-id")
+                                        .and_then(|v| v.parse::<u32>().ok())
+                                        .map(|id| Some(id) == hovered_id)
+                                        .unwrap_or(false)
+                                },
+                            );
+                            // Caret/selection/focus contract for the paint lane.
+                            // After the style cascade, before layout: it adds no
+                            // second cascade and no second rounding site.
+                            let vnode = crate::inject_input_caret_attrs(
+                                &vnode,
+                                crate::events::focused_input_index(&input_targets)
+                                    .and_then(|i| input_targets.get(i)),
+                            );
+                            last_vnode = Some(vnode.clone());
+                            let mut layout =
+                                velox_dom::layout::compute_layout(&vnode, vw as i32, vh as i32);
+                            {
+                                let mut path = Vec::new();
+                                crate::events::apply_scroll_offsets(
+                                    &mut layout,
+                                    &scroll_offsets,
+                                    &mut path,
+                                );
+                            }
+                            last_layout = Some(layout.clone());
+                            recompute_targets(
+                                &vnode,
+                                &layout,
+                                &mut click_targets,
+                                &mut hover_targets,
+                                &mut input_targets,
+                            );
+                            if let Err(e) = crate::skia_render::skia_impl::render_frame(
+                                s, &vnode, &layout, &sheet,
+                            ) {
+                                log::error!("skia render error: {}", e);
+                            }
+                            if let Some(presenter) = presenter.as_mut()
+                                && let Err(e) = presenter.present(s)
+                            {
+                                log::error!("skia present error: {}", e);
+                            }
+                        }
+                    }
+                    _ => {}
                 }
-            }
-            Event::RedrawRequested(_) => {
-                // Render VNode -> Skia frame and present.
-                if let Some(s) = &mut renderer.surface {
-                    s.set_scale_factor(scale_factor);
-                    let (vw, vh) = logical_size(s.width, s.height, scale_factor);
-                    let (vnode_raw, sheet) = make_view(vw, vh);
-                    let mut next_id = 1u32;
-                    let vnode_tagged = with_hover_ids(&vnode_raw, &mut next_id);
-                    let vnode = apply_styles_with_hover(
-                        &vnode_tagged,
-                        &sheet,
-                        &|_tag, props| {
-                            props
-                                .attrs
-                                .get("data-hover-id")
-                                .and_then(|v| v.parse::<u32>().ok())
-                                .map(|id| Some(id) == hovered_id)
-                                .unwrap_or(false)
-                        },
-                    );
-                    recompute_targets(&vnode, vw, vh, &mut click_targets, &mut hover_targets);
-                    if let Err(e) = crate::skia_render::skia_impl::render_frame(s, &vnode, &sheet) {
-                        eprintln!("skia render error: {}", e);
-                    }
-                    if let Err(e) = presenter.present(s) {
-                        eprintln!("skia present error: {}", e);
-                    }
-                }
-            }
-            _ => {}
-        }
-    });
-}
-
-#[cfg(feature = "wgpu")]
-fn load_system_font() -> Option<ab_glyph::FontArc> {
-    use std::fs;
-    const CANDIDATES: &[&str] = &[
-        "/usr/share/fonts/dejavu/DejaVuSans.ttf",
-        "/usr/share/fonts/TTF/DejaVuSans.ttf",
-        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-        "/usr/share/fonts/google-noto/NotoSans-Regular.ttf",
-        "/usr/share/fonts/noto/NotoSans-Regular.ttf",
-        "/usr/share/fonts/gnu-free/FreeSans.ttf",
-    ];
-    for p in CANDIDATES {
-        if let Ok(bytes) = fs::read(p) {
-            if let Ok(font) = ab_glyph::FontArc::try_from_vec(bytes) {
-                return Some(font);
-            }
-        }
+            });
+        }));
+    } else {
+        // Headless mode — no event loop, just run the initial render and return.
+        log::info!("running in headless mode (no event loop)");
+        velox_core::lifecycle::run_all_destroy_hooks();
     }
-    None
+    Ok(())
 }
 
-#[cfg(feature = "wgpu")]
-pub fn run_window_vnode<F, G, H>(title: &str, mut make_view: F, mut on_event: G, mut get_title: H)
+/// What the caught window/loop construction yields: the event loop and its HMR
+/// proxy (both survive even when the window does not), the window itself, its
+/// physical size, and the DPI scale factor.
+#[cfg(feature = "skia-native")]
+type WindowBootstrap = (
+    Option<winit::event_loop::EventLoop<HmrMessage>>,
+    Option<winit::event_loop::EventLoopProxy<HmrMessage>>,
+    Option<winit::window::Window>,
+    winit::dpi::PhysicalSize<u32>,
+    f32,
+);
+
+/// HMR variant — same viewport contract as [`run_window_vnode_skia`] (see its docs).
+/// `make_view` is called with logical `(w, h)` on every frame/resize; templates use
+/// `width:100%` / `min-height:100vh` so the viewport change is visibly reflected.
+#[cfg(feature = "skia-native")]
+pub fn run_window_vnode_skia_with_hmr<F, G, H>(
+    title: &str,
+    mut make_view: F,
+    mut on_event: G,
+    mut get_title: H,
+    hmr_rx: std::sync::Arc<std::sync::Mutex<std::sync::mpsc::Receiver<HmrMessage>>>,
+) -> Result<(), String>
 where
     F: FnMut(u32, u32) -> (velox_dom::VNode, Stylesheet) + 'static,
     G: FnMut(&str, Option<&str>) + 'static,
     H: FnMut() -> String + 'static,
 {
     use winit::dpi::PhysicalSize;
-    use winit::event::{ElementState, Event, MouseButton, WindowEvent};
-    use winit::event_loop::{ControlFlow, EventLoop};
+    use winit::event::{ElementState, Event, MouseButton, StartCause, WindowEvent};
+    use winit::event_loop::{ControlFlow, EventLoopBuilder};
     use winit::window::WindowBuilder;
 
-    // Setup window
-    let event_loop = EventLoop::new();
-    let window = WindowBuilder::new()
-        .with_title(title)
-        .with_inner_size(PhysicalSize::new(800, 600))
-        .build(&event_loop)
-        .expect("window");
-    let mut size = window.inner_size();
-    let _title_owned = title.to_string();
+    let headless_env_hmr = std::env::var("VELOX_HEADLESS").as_deref() == Ok("1")
+        || !crate::presenter::is_compositor_available();
 
-    // WGPU setup (reuse pipeline from run_window)
-    let instance = wgpu::Instance::default();
-    let surface = unsafe { instance.create_surface(&window) }.expect("surface");
-    let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
-        power_preference: wgpu::PowerPreference::HighPerformance,
-        compatible_surface: Some(&surface),
-        force_fallback_adapter: false,
-    }))
-    .expect("adapter");
-    let (device, queue) = pollster::block_on(adapter.request_device(
-        &wgpu::DeviceDescriptor {
-            label: Some("velox-device"),
-            features: wgpu::Features::empty(),
-            limits: wgpu::Limits::default(),
-        },
-        None,
-    ))
-    .expect("device");
+    // Prepare the winit backend: force X11 if Wayland socket is stale to
+    // avoid winit's Wayland backend calling process::exit() on EPIPE.
+    let _headless_check_hmr = crate::presenter::prepare_backend();
 
-    if size.width == 0 || size.height == 0 {
-        size = PhysicalSize::new(800, 600);
-        window.set_inner_size(size);
-    }
-    let caps = surface.get_capabilities(&adapter);
-    let format = caps.formats[0];
-    let mut config = wgpu::SurfaceConfiguration {
-        usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
-        format,
-        width: size.width,
-        height: size.height,
-        present_mode: caps.present_modes[0],
-        alpha_mode: caps.alpha_modes[0],
-        view_formats: vec![],
-    };
-    surface.configure(&device, &config);
-
-    #[repr(C)]
-    #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
-    struct Vertex {
-        pos: [f32; 2],
-        color: [f32; 3],
-    }
-    let shader_src = r#"
-        struct VsOut { @builtin(position) position: vec4<f32>, @location(0) color: vec3<f32>, };
-        @vertex fn vs(@location(0) pos: vec2<f32>, @location(1) color: vec3<f32>) -> VsOut {
-            var out: VsOut; out.position = vec4<f32>(pos, 0.0, 1.0); out.color = color; return out;
-        }
-        @fragment fn fs(@location(0) color: vec3<f32>) -> @location(0) vec4<f32> { return vec4<f32>(color, 1.0); }
-    "#;
-    let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-        label: Some("velox-shader"),
-        source: wgpu::ShaderSource::Wgsl(shader_src.into()),
-    });
-    let vlayout = wgpu::VertexBufferLayout {
-        array_stride: std::mem::size_of::<Vertex>() as wgpu::BufferAddress,
-        step_mode: wgpu::VertexStepMode::Vertex,
-        attributes: &[
-            wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x2, offset: 0, shader_location: 0 },
-            wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x3, offset: 8, shader_location: 1 },
-        ],
-    };
-    let pl_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-        label: Some("velox-pl"),
-        bind_group_layouts: &[],
-        push_constant_ranges: &[],
-    });
-    let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-        label: Some("velox-pipeline"),
-        layout: Some(&pl_layout),
-        vertex: wgpu::VertexState { module: &shader, entry_point: "vs", buffers: &[vlayout] },
-        fragment: Some(wgpu::FragmentState {
-            module: &shader,
-            entry_point: "fs",
-            targets: &[Some(wgpu::ColorTargetState { format, blend: Some(wgpu::BlendState::ALPHA_BLENDING), write_mask: wgpu::ColorWrites::ALL })],
-        }),
-        primitive: wgpu::PrimitiveState::default(),
-        depth_stencil: None,
-        multisample: wgpu::MultisampleState::default(),
-        multiview: None,
-    });
-    let mut vbuf = device.create_buffer(&wgpu::BufferDescriptor {
-        label: Some("velox-vbuf"),
-        size: 6 * std::mem::size_of::<Vertex>() as u64,
-        usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
-        mapped_at_creation: false,
-    });
-
-    // Extract first child rect (button) from VNode layout
-    fn to_ndc(w: u32, h: u32, x: f32, y: f32) -> [f32; 2] {
-        [x / w as f32 * 2.0 - 1.0, 1.0 - y / h as f32 * 2.0]
-    }
-    // (helpers defined once above)
-    fn has_class(props: &velox_dom::Props, class: &str) -> bool {
-        props
-            .attrs
-            .get("class")
-            .map(|s| s.split_whitespace().any(|c| c == class))
-            .unwrap_or(false)
-    }
-    fn find_rect_pred(
-        vnode: &velox_dom::VNode,
-        layout: &velox_dom::layout::LayoutNode,
-        pred: &dyn Fn(&velox_dom::VNode) -> bool,
-    ) -> Option<velox_dom::layout::Rect> {
-        if pred(vnode) {
-            return Some(layout.rect);
-        }
-        match vnode {
-            velox_dom::VNode::Element { children, .. } => {
-                for (i, ch) in children.iter().enumerate() {
-                    if let Some(lc) = layout.children.get(i) {
-                        if let Some(r) = find_rect_pred(ch, lc, pred) {
-                            return Some(r);
-                        }
-                    }
+    // Try to create a winit event loop and window. In headless mode or when
+    // no compositor is available, both can fail (winit may panic instead of
+    // returning Err) — we catch this and proceed with headless rendering.
+    // Use EventLoop<HmrMessage> so the HMR thread can forward messages
+    // directly via EventLoopProxy::send_event(HmrMessage) without any
+    // shared Mutex<Receiver>.
+    // Same contract as the plain loop above: a non-display window failure is
+    // a typed `VeloxError::Window` returned as `Err`, never a `panic!` the
+    // `catch_unwind` would launder into headless mode.
+    let window_outcome_hmr: Result<WindowBootstrap, String> =
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let event_loop = EventLoopBuilder::<HmrMessage>::with_user_event().build();
+            let proxy = event_loop.create_proxy();
+            let window_result = WindowBuilder::new()
+                .with_title(title)
+                .with_inner_size(PhysicalSize::new(800, 600))
+                .build(&event_loop);
+            match window_result {
+                Ok(w) => {
+                    let size = w.inner_size();
+                    let sf = w.scale_factor() as f32;
+                    Ok((Some(event_loop), Some(proxy), Some(w), size, sf))
                 }
-                None
-            }
-            velox_dom::VNode::Text(_) => None,
-        }
-    }
-    fn find_text_in_class(vnode: &velox_dom::VNode, class: &str) -> Option<String> {
-        fn first_text(node: &velox_dom::VNode) -> Option<String> {
-            match node {
-                velox_dom::VNode::Text(t) => {
-                    let s = t.trim();
-                    if s.is_empty() { None } else { Some(s.to_string()) }
-                }
-                velox_dom::VNode::Element { children, .. } => {
-                    for ch in children { if let Some(s) = first_text(ch) { return Some(s); } }
-                    None
-                }
-            }
-        }
-        match vnode {
-            velox_dom::VNode::Element { props, children, .. } => {
-                if has_class(props, class) {
-                    return first_text(vnode);
-                }
-                for ch in children { if let Some(s) = find_text_in_class(ch, class) { return Some(s); } }
-                None
-            }
-            _ => None,
-        }
-    }
-    let mut btn_rect: (f32, f32, f32, f32) = (0.0, 0.0, 0.0, 0.0);
-    let mut hovered = false;
-    let mut mouse = (0.0f32, 0.0f32);
-    let mut bg_color: [f32; 4] = [0.12, 0.12, 0.14, 1.0];
-    let mut text_color: [f32; 4] = [0.90, 0.93, 0.95, 1.0];
-    let mut font_size: f32 = 18.0;
-    let mut btn_color: [f32; 4] = [0.2, 0.5, 0.8, 1.0];
-    let mut btn_text_color: [f32; 4] = text_color;
-    let mut btn_text: String = String::new();
-    let mut btn_handler: Option<String> = None;
-    let mut btn_pad_left: f32 = 0.0;
-    let mut btn_pad_top: f32 = 0.0;
-    let mut click_targets: Vec<(f32,f32,f32,f32,String, Option<String>)> = Vec::new();
-
-    // Keep previous vnode around so we can attempt keyed reconciliation between frames.
-    let mut prev_vnode: Option<velox_dom::VNode> = None;
-
-    let make_vertices = |w: u32, h: u32, r: (f32, f32, f32, f32), color: [f32; 4]| -> [Vertex; 6] {
-        let (x0, y0, x1, y1) = r;
-        let (r, g, b) = (color[0], color[1], color[2]);
-        [
-            Vertex { pos: to_ndc(w, h, x0, y0), color: [r, g, b] },
-            Vertex { pos: to_ndc(w, h, x1, y0), color: [r, g, b] },
-            Vertex { pos: to_ndc(w, h, x1, y1), color: [r, g, b] },
-            Vertex { pos: to_ndc(w, h, x0, y0), color: [r, g, b] },
-            Vertex { pos: to_ndc(w, h, x1, y1), color: [r, g, b] },
-            Vertex { pos: to_ndc(w, h, x0, y1), color: [r, g, b] },
-        ]
-    };
-
-    // Font and text renderer (optional): try system font + bundled fonts; otherwise skip text drawing
-    let mut glyph: Option<(wgpu_glyph::GlyphBrush<()>, wgpu::util::StagingBelt)> = {
-        let mut fonts: Vec<ab_glyph::FontArc> = Vec::new();
-        if let Some(sys) = load_system_font() { fonts.push(sys); }
-        if let Ok(f) = ab_glyph::FontArc::try_from_slice(include_bytes!("../assets/DejaVuSans.ttf")) { fonts.push(f); }
-        if let Ok(f) = ab_glyph::FontArc::try_from_slice(include_bytes!("../assets/NotoSans-Regular.ttf")) { fonts.push(f); }
-        if fonts.is_empty() { None } else { Some((wgpu_glyph::GlyphBrushBuilder::using_fonts(fonts).build(&device, format), wgpu::util::StagingBelt::new(1024))) }
-    };
-
-    // style helpers
-    fn parse_color(style: Option<&str>, key: &str, default: [f32; 4]) -> [f32; 4] {
-        let s = if let Some(s) = style { s } else { return default };
-        for decl in s.split(';') {
-            let d = decl.trim();
-            if d.is_empty() { continue; }
-            if let Some((k, v)) = d.split_once(':') {
-                if k.trim() == key {
-                    let v = v.trim();
-                    if let Some(hex) = v.strip_prefix('#') {
-                        if hex.len() == 6 {
-                            let r = u8::from_str_radix(&hex[0..2], 16).unwrap_or(0) as f32 / 255.0;
-                            let g = u8::from_str_radix(&hex[2..4], 16).unwrap_or(0) as f32 / 255.0;
-                            let b = u8::from_str_radix(&hex[4..6], 16).unwrap_or(0) as f32 / 255.0;
-                            return [r, g, b, 1.0];
-                        }
+                Err(e) => {
+                    let msg = e.to_string();
+                    let lower = msg.to_ascii_lowercase();
+                    let is_display_err = lower.contains("broken pipe")
+                        || lower.contains("os error 32")
+                        || lower.contains("no compositor")
+                        || lower.contains("no display server")
+                        || lower.contains("failed to connect");
+                    if headless_env_hmr || is_display_err {
+                        log::warn!("window creation failed — continuing in headless mode: {msg}");
+                        Ok((
+                            Some(event_loop),
+                            Some(proxy),
+                            None,
+                            PhysicalSize::new(800, 600),
+                            1.0,
+                        ))
+                    } else {
+                        Err(
+                            velox_dom::VeloxError::Window(format!("failed to create window: {e}"))
+                                .to_string(),
+                        )
                     }
                 }
             }
-        }
-        default
-    }
-    fn parse_px_f32(style: Option<&str>, key: &str, default: f32) -> f32 {
-        let s = if let Some(s) = style { s } else { return default };
-        for decl in s.split(';') {
-            let d = decl.trim();
-            if d.is_empty() { continue; }
-            if let Some((k, v)) = d.split_once(':') {
-                if k.trim() == key {
-                    let v = v.trim();
-                    let v = v.strip_suffix("px").unwrap_or(v);
-                    if let Ok(f) = v.trim().parse::<f32>() { return f; }
-                }
-            }
-        }
-        default
-    }
-    fn parse_text_align(style: Option<&str>) -> wgpu_glyph::HorizontalAlign {
-        if let Some(v) = style_lookup(style, "text-align") {
-            let v = v.to_ascii_lowercase();
-            if v.contains("center") { return wgpu_glyph::HorizontalAlign::Center; }
-            if v.contains("right") { return wgpu_glyph::HorizontalAlign::Right; }
-        }
-        wgpu_glyph::HorizontalAlign::Left
-    }
-    fn parse_font_family_id(style: Option<&str>) -> usize {
-        if let Some(v) = style_lookup(style, "font-family") {
-            let v = v.to_ascii_lowercase();
-            if v.contains("dejavu") { return 1; }
-            if v.contains("noto") { return 2; }
-        }
-        0
-    }
-    fn style_lookup<'a>(style: Option<&'a str>, key: &str) -> Option<&'a str> {
-        let s = style?;
-        for decl in s.split(';') {
-            let d = decl.trim(); if d.is_empty() { continue; }
-            if let Some((k, v)) = d.split_once(':') { if k.trim() == key { return Some(v.trim()); } }
-        }
-        None
-    }
-    fn parse_font_weight(style: Option<&str>) -> bool {
-        if let Some(v) = style_lookup(style, "font-weight") {
-            if v.eq_ignore_ascii_case("bold") { return true; }
-            if let Ok(n) = v.parse::<i32>() { return n >= 600; }
-        }
-        false
-    }
-    #[derive(Clone, Copy, Default)]
-    struct TextDecor { underline: bool, line_through: bool }
-    fn parse_text_decoration(style: Option<&str>) -> TextDecor {
-        if let Some(v) = style_lookup(style, "text-decoration") {
-            let mut td = TextDecor::default();
-            for part in v.split_whitespace() { let p = part.trim().to_ascii_lowercase(); if p == "underline" { td.underline = true; } else if p == "line-through" { td.line_through = true; } }
-            return td;
-        }
-        TextDecor::default()
-    }
-    fn approx_text_width_px(s: &str, font_size: f32) -> f32 { (s.chars().count() as f32) * font_size * 0.6 }
+        }))
+        .unwrap_or_else(|payload| {
+            // Surface the panic payload (usually the compositor error, e.g.
+            // broken pipe) instead of silently masking it — log::warn is
+            // invisible without an initialized logger (CX-13 / F-23).
+            eprintln!(
+                "[velox] window/event loop creation panicked — continuing in headless mode: {}",
+                panic_detail(payload)
+            );
+            Ok((None, None, None, PhysicalSize::new(800, 600), 1.0))
+        });
+    let (event_loop_opt, proxy_opt, window, window_size, scale_factor) = window_outcome_hmr?;
 
-    // Helper to find the first element matching a predicate and return its rect and props
-    fn find_node_and_rect<'a>(
-        vnode: &'a velox_dom::VNode,
-        layout: &velox_dom::layout::LayoutNode,
-        pred: &dyn Fn(&velox_dom::VNode) -> bool,
-    ) -> Option<(velox_dom::layout::Rect, &'a velox_dom::Props, &'a [velox_dom::VNode])> {
-        if pred(vnode) {
-            if let velox_dom::VNode::Element { props, children, .. } = vnode {
-                return Some((layout.rect, props, children.as_slice()));
-            }
-        }
-        match vnode {
-            velox_dom::VNode::Element { children, .. } => {
-                for (i, ch) in children.iter().enumerate() {
-                    if let Some(lc) = layout.children.get(i) {
-                        if let Some(found) = find_node_and_rect(ch, lc, pred) {
-                            return Some(found);
+    // Spawn the HMR forwarding thread. It takes sole ownership of the
+    // Receiver (moved out of the Arc<Mutex>) and forwards each HmrMessage
+    // directly via EventLoopProxy::send_event(HmrMessage). No Mutex is
+    // held across blocking recv(). Wrap in catch_unwind so HMR panics
+    // never bring down the app (acceptance: catch_unwind around HMR loop).
+    if let Some(proxy) = proxy_opt {
+        match std::sync::Arc::try_unwrap(hmr_rx) {
+            Ok(mutex) => {
+                // `into_inner`, never `expect`: a poisoned mutex still owns a
+                // valid `Receiver`, and panicking here would kill the app over
+                // a previous panic's side effect. The receiver is taken as-is.
+                let rx = mutex
+                    .into_inner()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                std::thread::spawn(move || {
+                    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        while let Ok(msg) = rx.recv() {
+                            if proxy.send_event(msg).is_err() {
+                                break;
+                            }
                         }
-                    }
-                }
-                None
+                    }));
+                });
             }
-            velox_dom::VNode::Text(_) => None,
+            Err(shared) => {
+                // Fallback: another Arc clone exists (unusual). Poll without
+                // holding the lock across blocking recv.
+                std::thread::spawn(move || {
+                    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        loop {
+                            let res = {
+                                // `into_inner`, never `expect`: poisoning must
+                                // not panic the HMR thread (which would kill
+                                // forwarding silently). The guard is dropped
+                                // before `recv` either way — no lock is held
+                                // across the blocking call.
+                                let guard = shared
+                                    .lock()
+                                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                                guard.try_recv()
+                            };
+                            match res {
+                                Ok(msg) => {
+                                    if proxy.send_event(msg).is_err() {
+                                        break;
+                                    }
+                                }
+                                Err(std::sync::mpsc::TryRecvError::Empty) => {
+                                    std::thread::sleep(std::time::Duration::from_millis(16));
+                                }
+                                Err(std::sync::mpsc::TryRecvError::Disconnected) => break,
+                            }
+                        }
+                    }));
+                });
+            }
         }
     }
+    // NOTE: hmr_rx has been moved into the forwarding thread. The event loop
+    // now receives HmrMessage via Event::UserEvent(msg) without any Mutex.
 
-    // Recompute layout-derived values and GPU vertices from a vnode + stylesheet, respecting hover
-    fn recompute_from_vnode(
-        vnode_raw: &velox_dom::VNode,
-        sheet: &Stylesheet,
-        hovered_btn: bool,
-        viewport_w: u32,
-        viewport_h: u32,
-        bg_color: &mut [f32; 4],
-        text_color: &mut [f32; 4],
-        font_size: &mut f32,
-        btn_rect: &mut (f32, f32, f32, f32),
-        btn_color: &mut [f32; 4],
-        btn_text_color: &mut [f32; 4],
-        btn_text: &mut String,
-        btn_handler: &mut Option<String>,
-        btn_pad_left: &mut f32,
-        btn_pad_top: &mut f32,
-        click_targets: &mut Vec<(f32,f32,f32,f32,String, Option<String>)>,
-        queue: &wgpu::Queue,
-        vbuf: &wgpu::Buffer,
+    let window_opt: Option<winit::window::Window> = window;
+    let mut scale_factor = scale_factor;
+    let mut renderer = match crate::skia_surface::SkiaSurface::new_raster(
+        window_size.width as i32,
+        window_size.height as i32,
     ) {
-        let is_hovered = |tag: &str, props: &velox_dom::Props| -> bool {
-            hovered_btn && (props.attrs.contains_key("on:click") || tag == "button" || has_class(props, "btn"))
-        };
-        let vnode = apply_styles_with_hover(vnode_raw, sheet, &is_hovered);
-        // root styles
-        if let velox_dom::VNode::Element { ref props, .. } = vnode {
-            *bg_color = parse_color(props.attrs.get("style").map(|s| s.as_str()), "background", *bg_color);
-            *text_color = parse_color(props.attrs.get("style").map(|s| s.as_str()), "color", *text_color);
-            *font_size = parse_px_f32(props.attrs.get("style").map(|s| s.as_str()), "font-size", *font_size);
-        }
-        // layout and clickable target
-        let layout = velox_dom::layout::compute_layout(&vnode, viewport_w as i32, viewport_h as i32);
-        let pred = |n: &velox_dom::VNode| match n {
-            velox_dom::VNode::Element { props, tag, .. } => {
-                props.attrs.contains_key("on:click") || *tag == "button" || has_class(props, "btn")
-            }
-            _ => false,
-        };
-        // collect all clickable targets for event hit testing
-        fn collect_clicks(vnode: &velox_dom::VNode, layout: &velox_dom::layout::LayoutNode, out: &mut Vec<(f32,f32,f32,f32,String, Option<String>)>) {
-            match vnode {
-                velox_dom::VNode::Text(_) => {}
-                velox_dom::VNode::Element { props, children, .. } => {
-                    if let Some(handler) = props.attrs.get("on:click").cloned() {
-                        let payload = props.attrs.get("on:click-payload").cloned();
-                        let r = layout.rect;
-                        out.push((r.x as f32, r.y as f32, (r.x + r.w) as f32, (r.y + r.h) as f32, handler, payload));
-                    }
-                    for (i,ch) in children.iter().enumerate() {
-                        if let Some(lc) = layout.children.get(i) { collect_clicks(ch, lc, out); }
-                    }
-                }
-            }
-        }
-        click_targets.clear();
-        collect_clicks(&vnode, &layout, click_targets);
-        if let Some((r, props, children)) = find_node_and_rect(&vnode, &layout, &pred) {
-            *btn_rect = (r.x as f32, r.y as f32, (r.x + r.w) as f32, (r.y + r.h) as f32);
-            // element styles
-            let style_str = props.attrs.get("style").map(|s| s.as_str());
-            *btn_color = parse_color(style_str, "background", *btn_color);
-            *btn_text_color = parse_color(style_str, "color", *text_color);
-            *btn_handler = props.attrs.get("on:click").cloned();
-            // padding for label position
-            let pad_left = parse_px_f32(style_str, "padding-left", parse_px_f32(style_str, "padding", 0.0));
-            let pad_top = parse_px_f32(style_str, "padding-top", parse_px_f32(style_str, "padding", 0.0));
-            *btn_pad_left = pad_left;
-            *btn_pad_top = pad_top;
-            // label text: first text child
-            btn_text.clear();
-            for ch in children {
-                if let velox_dom::VNode::Text(t) = ch { let s = t.trim(); if !s.is_empty() { btn_text.push_str(s); break; } }
-            }
-        }
-        // update GPU vertices
-        let to_ndc = |w: u32, h: u32, x: f32, y: f32| -> [f32; 2] {
-            [x / w as f32 * 2.0 - 1.0, 1.0 - y / h as f32 * 2.0]
-        };
-        let (x0, y0, x1, y1) = *btn_rect;
-        let (r, g, b) = (btn_color[0], btn_color[1], btn_color[2]);
-        let verts = [
-            Vertex { pos: to_ndc(viewport_w, viewport_h, x0, y0), color: [r, g, b] },
-            Vertex { pos: to_ndc(viewport_w, viewport_h, x1, y0), color: [r, g, b] },
-            Vertex { pos: to_ndc(viewport_w, viewport_h, x1, y1), color: [r, g, b] },
-            Vertex { pos: to_ndc(viewport_w, viewport_h, x0, y0), color: [r, g, b] },
-            Vertex { pos: to_ndc(viewport_w, viewport_h, x1, y1), color: [r, g, b] },
-            Vertex { pos: to_ndc(viewport_w, viewport_h, x0, y1), color: [r, g, b] },
-        ];
-        queue.write_buffer(vbuf, 0, bytemuck::cast_slice(&verts));
-    }
-
-    {
-        let (vnode_raw, sheet) = make_view(config.width, config.height);
-        recompute_from_vnode(&vnode_raw, &sheet, false, config.width, config.height, &mut bg_color, &mut text_color, &mut font_size, &mut btn_rect, &mut btn_color, &mut btn_text_color, &mut btn_text, &mut btn_handler, &mut btn_pad_left, &mut btn_pad_top, &mut click_targets, &queue, &vbuf);
-        // set initial title from SFC state
-        window.set_title(&get_title());
-    }
-
-    let _ = event_loop.run(move |event, _, control_flow| match event {
-        Event::WindowEvent { event: WindowEvent::CloseRequested, .. } => { *control_flow = ControlFlow::Exit; }
-        Event::WindowEvent { event: WindowEvent::Resized(sz), .. } => {
-            config.width = sz.width.max(1);
-            config.height = sz.height.max(1);
-            surface.configure(&device, &config);
-            let (vnode_raw, sheet) = make_view(config.width, config.height);
-            recompute_from_vnode(&vnode_raw, &sheet, hovered, config.width, config.height, &mut bg_color, &mut text_color, &mut font_size, &mut btn_rect, &mut btn_color, &mut btn_text_color, &mut btn_text, &mut btn_handler, &mut btn_pad_left, &mut btn_pad_top, &mut click_targets, &queue, &vbuf);
-            window.request_redraw();
-        }
-        Event::WindowEvent { event: WindowEvent::CursorMoved { position, .. }, .. } => {
-            mouse = (position.x as f32, position.y as f32);
-            let (x0,y0,x1,y1) = btn_rect;
-            let h = mouse.0>=x0&&mouse.0<=x1&&mouse.1>=y0&&mouse.1<=y1;
-            if h!=hovered {
-                hovered=h;
-                // recompute styles with hover
-                let (vnode_raw, sheet) = make_view(config.width, config.height);
-                recompute_from_vnode(&vnode_raw, &sheet, hovered, config.width, config.height, &mut bg_color, &mut text_color, &mut font_size, &mut btn_rect, &mut btn_color, &mut btn_text_color, &mut btn_text, &mut btn_handler, &mut btn_pad_left, &mut btn_pad_top, &mut click_targets, &queue, &vbuf);
-            }
-        }
-        Event::WindowEvent { event: WindowEvent::MouseInput { state: ElementState::Pressed, button: MouseButton::Left, .. }, .. } => {
-            // dispatch to first matching clickable rect
-            if let Some((_,_,_,_, name, payload_opt)) = click_targets.iter().find(|(x0,y0,x1,y1,_,_)| mouse.0>=*x0&&mouse.0<=*x1&&mouse.1>=*y0&&mouse.1<=*y1) {
-                // Prepare payload: prefer explicit payload from attribute, otherwise forward mouse coords as JSON
-                let payload_owned = payload_opt.clone().unwrap_or_else(|| format!("{{\"x\":{},\"y\":{}}}", mouse.0, mouse.1));
-                on_event(name, Some(&payload_owned));
-                let (vnode_raw, sheet) = make_view(config.width, config.height);
-                recompute_from_vnode(&vnode_raw, &sheet, hovered, config.width, config.height, &mut bg_color, &mut text_color, &mut font_size, &mut btn_rect, &mut btn_color, &mut btn_text_color, &mut btn_text, &mut btn_handler, &mut btn_pad_left, &mut btn_pad_top, &mut click_targets, &queue, &vbuf);
-                window.set_title(&get_title());
-                window.request_redraw();
-            }
-        }
-        Event::RedrawRequested(_) => {
-            let frame = match surface.get_current_texture() { Ok(f)=>f, Err(wgpu::SurfaceError::Lost)=>{ surface.configure(&device, &config); return; }, Err(_) => return };
-            let view = frame.texture.create_view(&wgpu::TextureViewDescriptor::default());
-            let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("velox-enc") });
-            // Build and draw quads for all clickable buttons
-            // Compute vnode + layout once for this frame
-            let (frame_vnode_raw, frame_sheet) = make_view(config.width, config.height);
-            // Attempt keyed reconciliation with prior frame to prefer node reuse when `key` props are present
-            let frame_vnode_reconciled = if let Some(mut old) = prev_vnode.take() {
-                match (&mut old, &frame_vnode_raw) {
-                    (velox_dom::VNode::Element { children: old_ch, .. }, velox_dom::VNode::Element { children: new_ch, .. }) => {
-                        // run keyed reconciliation on children
-                        crate::reconcile_keyed_children(old_ch, new_ch);
-                        old
-                    }
-                    _ => frame_vnode_raw.clone(),
-                }
-            } else {
-                frame_vnode_raw.clone()
-            };
-            let frame_vnode = apply_styles_with_hover(&frame_vnode_reconciled, &frame_sheet, &|tag, props| hovered && (props.attrs.contains_key("on:click") || tag == "button" || has_class(props, "btn")));
-            fn collect_click_nodes<'a>(vnode: &'a velox_dom::VNode, layout: &velox_dom::layout::LayoutNode, out: &mut Vec<(velox_dom::layout::Rect, &'a velox_dom::Props, &'a [velox_dom::VNode])>) {
-                match vnode {
-                    velox_dom::VNode::Text(_) => {}
-                    velox_dom::VNode::Element { props, children, .. } => {
-                        if props.attrs.contains_key("on:click") { out.push((layout.rect, props, children.as_slice())); }
-                        for (i, ch) in children.iter().enumerate() { if let Some(lc) = layout.children.get(i) { collect_click_nodes(ch, lc, out); } }
-                    }
-                }
-            }
-            let layout2 = velox_dom::layout::compute_layout(&frame_vnode, config.width as i32, config.height as i32);
-            let mut buttons: Vec<(velox_dom::layout::Rect, &velox_dom::Props, &[velox_dom::VNode])> = Vec::new();
-            collect_click_nodes(&frame_vnode, &layout2, &mut buttons);
-            let mut verts_all: Vec<Vertex> = Vec::with_capacity(buttons.len() * 6);
-            for (rect, props, _) in &buttons {
-                let style_str = props.attrs.get("style").map(|s| s.as_str());
-                let color = parse_color(style_str, "background", [0.2,0.5,0.8,1.0]);
-                let (x0,y0,x1,y1) = (rect.x as f32, rect.y as f32, (rect.x+rect.w) as f32, (rect.y+rect.h) as f32);
-                let to = |x: f32, y: f32| -> [f32;2] { [ (x / config.width as f32) * 2.0 - 1.0, 1.0 - (y / config.height as f32) * 2.0 ] };
-                let (r,g,b) = (color[0], color[1], color[2]);
-                verts_all.push(Vertex{pos:to(x0,y0),color:[r,g,b]});
-                verts_all.push(Vertex{pos:to(x1,y0),color:[r,g,b]});
-                verts_all.push(Vertex{pos:to(x1,y1),color:[r,g,b]});
-                verts_all.push(Vertex{pos:to(x0,y0),color:[r,g,b]});
-                verts_all.push(Vertex{pos:to(x1,y1),color:[r,g,b]});
-                verts_all.push(Vertex{pos:to(x0,y1),color:[r,g,b]});
-            }
-            {
-                if !verts_all.is_empty() {
-                    let quad_buf = device.create_buffer(&wgpu::BufferDescriptor { label: Some("velox-quads"), size: (verts_all.len()*std::mem::size_of::<Vertex>()) as u64, usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
-                    queue.write_buffer(&quad_buf, 0, bytemuck::cast_slice(&verts_all));
-                    let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor { label: Some("velox-pass"), color_attachments: &[Some(wgpu::RenderPassColorAttachment { view: &view, resolve_target: None, ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color { r: bg_color[0] as f64, g: bg_color[1] as f64, b: bg_color[2] as f64, a: bg_color[3] as f64 }), store: true } })], depth_stencil_attachment: None });
-                    rpass.set_pipeline(&pipeline);
-                    rpass.set_vertex_buffer(0, quad_buf.slice(..));
-                    rpass.draw(0..(verts_all.len() as u32), 0..1);
-                } else {
-                    let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor { label: Some("velox-pass"), color_attachments: &[Some(wgpu::RenderPassColorAttachment { view: &view, resolve_target: None, ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color { r: bg_color[0] as f64, g: bg_color[1] as f64, b: bg_color[2] as f64, a: bg_color[3] as f64 }), store: true } })], depth_stencil_attachment: None });
-                    rpass.set_pipeline(&pipeline);
-                }
-            }
-            // draw texts from vnode: button label and count using their own styles
-            if let Some((ref mut glyph_brush, ref mut staging_belt)) = glyph {
-                use wgpu_glyph::{Section, Text, Layout, HorizontalAlign, VerticalAlign, FontId};
-                let (x0,y0,x1,y1) = btn_rect;
-                let (vnode_raw, sheet) = make_view(config.width, config.height);
-                let vnode = apply_styles_with_hover(&vnode_raw, &sheet, &|tag, props| hovered && (props.attrs.contains_key("on:click") || tag == "button" || has_class(props, "btn")));
-
-                // helpers to locate nodes
-                fn find_rect_for_class<'a>(vnode: &'a velox_dom::VNode, layout: &velox_dom::layout::LayoutNode, class: &str) -> Option<(velox_dom::layout::Rect, &'a velox_dom::Props)> {
-                    match vnode {
-                        velox_dom::VNode::Text(_) => None,
-                        velox_dom::VNode::Element { props, children, .. } => {
-                            let has = props.attrs.get("class").map(|s| s.split_whitespace().any(|c| c == class)).unwrap_or(false);
-                            if has { return Some((layout.rect, props)); }
-                            for (i, ch) in children.iter().enumerate() { if let Some(lc) = layout.children.get(i) { if let Some(v) = find_rect_for_class(ch, lc, class) { return Some(v); } } }
-                            None
-                        }
-                    }
-                }
-                fn find_click_node<'a>(vnode: &'a velox_dom::VNode, layout: &velox_dom::layout::LayoutNode) -> Option<(&'a velox_dom::Props)> {
-                    match vnode {
-                        velox_dom::VNode::Text(_) => None,
-                        velox_dom::VNode::Element { tag, props, children, .. } => {
-                            let is_btn = props.attrs.contains_key("on:click") || *tag == "button" || props.attrs.get("class").map(|s| s.split_whitespace().any(|c| c == "btn")).unwrap_or(false);
-                            if is_btn { return Some(props); }
-                            for (i, ch) in children.iter().enumerate() { let _ = layout.children.get(i)?; if let Some(p) = find_click_node(ch, &layout.children[i]) { return Some(p); } }
-                            None
-                        }
-                    }
-                }
-                let layout2 = velox_dom::layout::compute_layout(&vnode, config.width as i32, config.height as i32);
-
-                // button text placement with line-height and bold/decoration
-                let btn_style = find_click_node(&vnode, &layout2).and_then(|p| p.attrs.get("style")).map(|s| s.as_str());
-                let btn_line_h = parse_px_f32(btn_style, "line-height", font_size);
-                let btn_font_size = parse_px_f32(btn_style, "font-size", font_size);
-                // padding right/bottom
-                let btn_pad_right = parse_px_f32(btn_style, "padding-right", parse_px_f32(btn_style, "padding", 0.0));
-                let btn_pad_bottom = parse_px_f32(btn_style, "padding-bottom", parse_px_f32(btn_style, "padding", 0.0));
-                // text top-left for glyph_brush (Section position is top-left), vertically centered in line box
-                let mut label_pos = (x0 + btn_pad_left, y0 + btn_pad_top + (btn_line_h - btn_font_size).max(0.0) * 0.5);
-                if label_pos.1 + btn_font_size > y1 - 1.0 { label_pos.1 = (y1 - 1.0 - btn_font_size).max(y0 + btn_pad_top); }
-                let label = if btn_text.is_empty() { String::new() } else { btn_text.clone() };
-                let btn_td = parse_text_decoration(btn_style);
-                let btn_bold = parse_font_weight(btn_style);
-                let btn_italic = style_lookup(btn_style, "font-style").map(|v| v.eq_ignore_ascii_case("italic")).unwrap_or(false);
-                let btn_align = parse_text_align(btn_style);
-                let btn_font_id = parse_font_family_id(btn_style);
-                if !label.is_empty() {
-                    let mut offsets: Vec<(f32,f32)> = if btn_bold { vec![(0.0,0.0),(0.6,0.0),(0.0,0.6)] } else { vec![(0.0,0.0)] };
-                    if btn_italic { offsets.push((0.4, 0.0)); }
-                    let bounds = ( (x1 - x0 - btn_pad_left - btn_pad_right).max(0.0), (y1 - y0 - btn_pad_top - btn_pad_bottom).max(0.0) );
-                    let layout = Layout::default().h_align(btn_align).v_align(VerticalAlign::Top);
-                    for (ox, oy) in offsets {
-                        glyph_brush.queue(Section {
-                            screen_position: (label_pos.0 + ox, label_pos.1 + oy),
-                            bounds,
-                            layout,
-                            text: vec![Text::new(&label).with_color(btn_text_color).with_scale(btn_font_size).with_font_id(FontId(btn_font_id))],
-                            ..Default::default()
-                        });
-                    }
-                }
-
-                // Save reconciled vnode for next frame
-                prev_vnode = Some(frame_vnode_reconciled);
-
-                // count text placement with its own padding/line-height and bold/decoration
-                let (count_text, count_pos, count_style, count_bounds) = if let Some((rect, props)) = find_rect_for_class(&vnode, &layout2, "count") {
-                    let style_str = props.attrs.get("style").map(|s| s.as_str());
-                    let cp_l = parse_px_f32(style_str, "padding-left", parse_px_f32(style_str, "padding", 0.0));
-                    let cp_t = parse_px_f32(style_str, "padding-top", parse_px_f32(style_str, "padding", 0.0));
-                    let cp_r = parse_px_f32(style_str, "padding-right", parse_px_f32(style_str, "padding", 0.0));
-                    let cp_b = parse_px_f32(style_str, "padding-bottom", parse_px_f32(style_str, "padding", 0.0));
-                    let line_h = parse_px_f32(style_str, "line-height", font_size);
-                    let count_font_size = parse_px_f32(style_str, "font-size", font_size);
-                    let mut pos_y = rect.y as f32 + cp_t + (line_h - count_font_size).max(0.0) * 0.5;
-                    if pos_y + count_font_size > (rect.y + rect.h - 1) as f32 { pos_y = (rect.y + rect.h - 1) as f32 - count_font_size; }
-                    let pos = (rect.x as f32 + cp_l, pos_y);
-                    // Allow vertical overflow to be visible by giving a tall bound down to bottom of viewport
-                    let bounds_h = (config.height as f32 - rect.y as f32).max((rect.h as f32 - cp_t - cp_b).max(0.0));
-                    let bounds = ( (rect.w as f32 - cp_l - cp_r).max(0.0), bounds_h );
-                    (find_text_in_class(&vnode, "count").unwrap_or_default(), pos, style_str, bounds)
-                } else { (String::new(), (x0, y0), None, (0.0, 0.0)) };
-                let count_td = parse_text_decoration(count_style);
-                let count_bold = parse_font_weight(count_style);
-                let count_italic = style_lookup(count_style, "font-style").map(|v| v.eq_ignore_ascii_case("italic")).unwrap_or(false);
-                let count_align = parse_text_align(count_style);
-                let count_font_id = parse_font_family_id(count_style);
-                if !count_text.is_empty() {
-                    let mut offsets: Vec<(f32,f32)> = if count_bold { vec![(0.0,0.0),(0.6,0.0),(0.0,0.6)] } else { vec![(0.0,0.0)] };
-                    if count_italic { offsets.push((0.4, 0.0)); }
-                    let count_font_size = parse_px_f32(count_style, "font-size", font_size);
-                    let layout = Layout::default().h_align(count_align).v_align(VerticalAlign::Top);
-                    for (ox, oy) in offsets {
-                        glyph_brush.queue(Section {
-                            screen_position: (count_pos.0 + ox, count_pos.1 + oy),
-                            bounds: count_bounds,
-                            layout,
-                            text: vec![Text::new(&count_text).with_color(text_color).with_scale(count_font_size).with_font_id(FontId(count_font_id))],
-                            ..Default::default()
-                        });
-                    }
-                }
-                let _ = glyph_brush.draw_queued(&device, staging_belt, &mut encoder, &view, config.width, config.height);
-                staging_belt.finish();
-                // Text decorations as thin quads in a second pass
-                let mut deco_verts: Vec<Vertex> = Vec::new();
-                let mut push_rect = |x0: f32, y0: f32, x1: f32, y1: f32, color: [f32;3]| {
-                    let to = |x: f32, y: f32| [ (x / config.width as f32) * 2.0 - 1.0, 1.0 - (y / config.height as f32) * 2.0 ];
-                    deco_verts.push(Vertex { pos: to(x0,y0), color });
-                    deco_verts.push(Vertex { pos: to(x1,y0), color });
-                    deco_verts.push(Vertex { pos: to(x1,y1), color });
-                    deco_verts.push(Vertex { pos: to(x0,y0), color });
-                    deco_verts.push(Vertex { pos: to(x1,y1), color });
-                    deco_verts.push(Vertex { pos: to(x0,y1), color });
-                };
-                let thickness = 1.0f32.max(font_size.max(parse_px_f32(btn_style, "font-size", font_size)).max(parse_px_f32(count_style, "font-size", font_size)) * 0.06);
-                if !label.is_empty() && (btn_td.underline || btn_td.line_through) {
-                    let fs = parse_px_f32(btn_style, "font-size", font_size);
-                    let w = approx_text_width_px(&label, fs);
-                    let y_u = (label_pos.1 + fs + thickness).min(y1 - 1.0);
-                    let y_s = label_pos.1 + fs * 0.65;
-                    if btn_td.underline { push_rect(label_pos.0, y_u, label_pos.0 + w, (y_u + thickness).min(y1 - 1.0), [btn_text_color[0], btn_text_color[1], btn_text_color[2]]); }
-                    if btn_td.line_through { push_rect(label_pos.0, y_s, label_pos.0 + w, y_s + thickness, [btn_text_color[0], btn_text_color[1], btn_text_color[2]]); }
-                    // overline
-                    if style_lookup(btn_style, "text-decoration").map(|v| v.to_ascii_lowercase().contains("overline")).unwrap_or(false) {
-                        let y_o = (label_pos.1).max(y0 + btn_pad_top);
-                        push_rect(label_pos.0, y_o, label_pos.0 + w, (y_o + thickness).min(y1 - 1.0), [btn_text_color[0], btn_text_color[1], btn_text_color[2]]);
-                    }
-                }
-                if !count_text.is_empty() && (count_td.underline || count_td.line_through) {
-                    let cf = parse_px_f32(count_style, "font-size", font_size);
-                    let w = approx_text_width_px(&count_text, cf);
-                    let y_u = count_pos.1 + cf + thickness;
-                    let y_s = count_pos.1 + cf * 0.65;
-                    if count_td.underline { push_rect(count_pos.0, y_u, count_pos.0 + w, y_u + thickness, [text_color[0], text_color[1], text_color[2]]); }
-                    if count_td.line_through { push_rect(count_pos.0, y_s, count_pos.0 + w, y_s + thickness, [text_color[0], text_color[1], text_color[2]]); }
-                    if style_lookup(count_style, "text-decoration").map(|v| v.to_ascii_lowercase().contains("overline")).unwrap_or(false) {
-                        let y_o = count_pos.1;
-                        push_rect(count_pos.0, y_o, count_pos.0 + w, y_o + thickness, [text_color[0], text_color[1], text_color[2]]);
-                    }
-                }
-                if !deco_verts.is_empty() {
-                    let deco_buf = device.create_buffer(&wgpu::BufferDescriptor { label: Some("velox-deco"), size: (deco_verts.len() * std::mem::size_of::<Vertex>()) as u64, usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
-                    queue.write_buffer(&deco_buf, 0, bytemuck::cast_slice(&deco_verts));
-                    {
-                        let mut rpass2 = encoder.begin_render_pass(&wgpu::RenderPassDescriptor { label: Some("velox-deco-pass"), color_attachments: &[Some(wgpu::RenderPassColorAttachment { view: &view, resolve_target: None, ops: wgpu::Operations { load: wgpu::LoadOp::Load, store: true } })], depth_stencil_attachment: None });
-                        rpass2.set_pipeline(&pipeline);
-                        rpass2.set_vertex_buffer(0, deco_buf.slice(..));
-                        rpass2.draw(0..(deco_verts.len() as u32), 0..1);
-                    }
-                }
-                queue.submit(Some(encoder.finish()));
-                device.poll(wgpu::Maintain::Wait);
-                staging_belt.recall();
-                frame.present();
-            } else {
-                queue.submit(Some(encoder.finish()));
-                frame.present();
-            }
-        }
-        Event::MainEventsCleared => { window.request_redraw(); }
-        _ => {}
-    });
-}
-
-// Minimal window runner using winit when `wgpu` feature is enabled.
-#[cfg(feature = "wgpu")]
-pub fn run_window(title: &str) {
-    use wgpu::SurfaceError;
-    use winit::dpi::PhysicalSize;
-    use winit::event::{Event, WindowEvent};
-    use winit::event_loop::{ControlFlow, EventLoop};
-    use winit::window::WindowBuilder;
-
-    println!("[window] launching '{}'", title);
-    let event_loop = EventLoop::new();
-    let window = match WindowBuilder::new()
-        .with_title(title)
-        .with_inner_size(PhysicalSize::new(800, 600))
-        .build(&event_loop)
-    {
-        Ok(w) => {
-            println!("[window] opened: {}", title);
-            w
-        }
-        Err(e) => {
-            eprintln!("[window] failed to create window: {}", e);
-            return;
-        }
-    };
-
-    // WGPU setup
-    let instance = wgpu::Instance::default();
-    let surface = unsafe { instance.create_surface(&window) }.expect("create surface");
-    let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
-        power_preference: wgpu::PowerPreference::HighPerformance,
-        compatible_surface: Some(&surface),
-        force_fallback_adapter: false,
-    }))
-    .expect("no suitable GPU adapters");
-    let (device, queue) = pollster::block_on(adapter.request_device(
-        &wgpu::DeviceDescriptor {
-            label: Some("velox-device"),
-            features: wgpu::Features::empty(),
-            limits: wgpu::Limits::default(),
+        Ok(surface) => skia_backend::SkiaRenderer {
+            surface: Some(surface),
+            vnode: None,
         },
-        None,
-    ))
-    .expect("request device");
-
-    let mut size = window.inner_size();
-    if size.width == 0 || size.height == 0 {
-        size = PhysicalSize::new(800, 600);
-        window.set_inner_size(size);
+        Err(e) => {
+            return Err(format!("failed to create SkiaSurface: {e}"));
+        }
+    };
+    let mut presenter: Option<crate::presenter::SoftbufferPresenter> = None;
+    if let Some(w) = window_opt.as_ref() {
+        // softbuffer::Context::new() can panic when the display server is
+        // unreachable even though DISPLAY/WAYLAND_DISPLAY are set (broken pipe).
+        // Catch such panics and degrade to headless rendering.
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            crate::presenter::SoftbufferPresenter::new(w, window_size.width, window_size.height)
+        })) {
+            Ok(Ok(p)) => presenter = Some(p),
+            Ok(Err(e)) => {
+                if headless_env_hmr || !crate::presenter::is_compositor_available() {
+                    log::warn!(
+                        "softbuffer presenter unavailable — continuing in headless mode: {e}"
+                    );
+                } else {
+                    return Err(format!("failed to create softbuffer presenter: {e}"));
+                }
+            }
+            Err(payload) => {
+                // Surface the panic payload (softbuffer panics with a
+                // broken pipe when the display is unreachable) instead of
+                // silently masking it (CX-13 / F-23).
+                eprintln!(
+                    "[velox] softbuffer presenter creation panicked — continuing in headless mode: {}",
+                    panic_detail(payload)
+                );
+            }
+        }
     }
-    let surface_caps = surface.get_capabilities(&adapter);
-    let format = surface_caps.formats[0];
-    let mut config = wgpu::SurfaceConfiguration {
-        usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
-        format,
-        width: size.width,
-        height: size.height,
-        present_mode: surface_caps.present_modes[0],
-        alpha_mode: surface_caps.alpha_modes[0],
-        view_formats: vec![],
-    };
-    surface.configure(&device, &config);
+    let mut mouse_pos = (0.0f32, 0.0f32);
+    let mut hovered_id: Option<u32> = None;
+    let mut click_targets: Vec<crate::events::ClickTarget> = Vec::new();
+    let mut hover_targets: Vec<crate::events::HoverTarget> = Vec::new();
+    let mut input_targets: Vec<crate::events::InputTarget> = Vec::new();
+    // Was `_last_vnode` until 5cc4a4f, which renamed it and made it live. The
+    // earlier HMR-deadlock fix (7585674) introduced this binding *unused*, so
+    // typing, Backspace and Return stayed dead under HMR; 5cc4a4f is what
+    // actually fixed them, by giving the value a real name and wiring it into
+    // the ported input handling.
+    let mut last_vnode: Option<velox_dom::VNode> = None;
+    // Path (child source indices) to the focused text input, if any.
+    // Mirrors the plain loop's state so the two loops stay behaviourally equal.
+    let mut focused_input: Option<Vec<usize>> = None;
+    // Instant before which the caret must stay solid regardless of tick timing.
+    let mut blink_deadline: Option<std::time::Instant> = None;
+    // Shift state, latched by the shared `window_modifiers_changed` below —
+    // see the plain loop for why the per-key `modifiers` field is not used.
+    let mut shift_held = false;
+    let mut scroll_offsets_hmr: std::collections::HashMap<Vec<usize>, f32> =
+        std::collections::HashMap::new();
+    let mut last_layout_hmr: Option<velox_dom::layout::LayoutNode> = None;
+    let _lifecycle_guard_hmr = LifecycleCleanupGuard;
+    let mut did_mount_hmr = false;
+    // R-L3: coalesce rapid resize drags in HMR loop too (only last size per frame).
+    let mut resize_state = ResizeState::new();
 
-    // Simple colored quad pipeline (two triangles) for a button placeholder
-    #[repr(C)]
-    #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
-    struct Vertex { pos: [f32; 2], color: [f32; 3] }
-
-    let shader_src = r#"
-        struct VsOut {
-            @builtin(position) position: vec4<f32>,
-            @location(0) color: vec3<f32>,
-        };
-
-        @vertex
-        fn vs(@location(0) pos: vec2<f32>, @location(1) color: vec3<f32>) -> VsOut {
-            var out: VsOut;
-            out.position = vec4<f32>(pos, 0.0, 1.0);
-            out.color = color;
-            return out;
-        }
-
-        @fragment
-        fn fs(@location(0) color: vec3<f32>) -> @location(0) vec4<f32> {
-            return vec4<f32>(color, 1.0);
-        }
-    "#;
-    let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-        label: Some("velox-shader"),
-        source: wgpu::ShaderSource::Wgsl(shader_src.into()),
-    });
-
-    let vertex_layout = wgpu::VertexBufferLayout {
-        array_stride: std::mem::size_of::<Vertex>() as wgpu::BufferAddress,
-        step_mode: wgpu::VertexStepMode::Vertex,
-        attributes: &[
-            wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x2, offset: 0, shader_location: 0 },
-            wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x3, offset: 8, shader_location: 1 },
-        ],
-    };
-
-    let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-        label: Some("velox-pipeline-layout"),
-        bind_group_layouts: &[],
-        push_constant_ranges: &[],
-    });
-
-    let render_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-        label: Some("velox-pipeline"),
-        layout: Some(&pipeline_layout),
-        vertex: wgpu::VertexState { module: &shader, entry_point: "vs", buffers: &[vertex_layout] },
-        fragment: Some(wgpu::FragmentState {
-            module: &shader,
-            entry_point: "fs",
-            targets: &[Some(wgpu::ColorTargetState { format, blend: Some(wgpu::BlendState::ALPHA_BLENDING), write_mask: wgpu::ColorWrites::ALL })],
-        }),
-        primitive: wgpu::PrimitiveState::default(),
-        depth_stencil: None,
-        multisample: wgpu::MultisampleState::default(),
-        multiview: None,
-    });
-
-    // Button rect in pixel space; we convert to NDC in create_vertices
-    let mut mouse_pos: (f32, f32) = (0.0, 0.0);
-    let mut count: i32 = 0;
-    let mut hovered = false;
-
-    let mut vertex_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-        label: Some("velox-vertices"), size: 6 * std::mem::size_of::<Vertex>() as u64, usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false
-    });
-
-    let create_vertices = |w: u32, h: u32, hovered: bool| -> [Vertex; 6] {
-        let bw = 200.0; let bh = 80.0;
-        let cx = w as f32 / 2.0; let cy = h as f32 / 2.0;
-        let x0 = cx - bw / 2.0; let y0 = cy - bh / 2.0; let x1 = cx + bw / 2.0; let y1 = cy + bh / 2.0;
-        let to_ndc = |x: f32, y: f32| -> [f32; 2] { [ (x / w as f32) * 2.0 - 1.0, 1.0 - (y / h as f32) * 2.0 ] };
-        let (r,g,b) = if hovered { (0.25, 0.6, 0.9) } else { (0.2, 0.5, 0.8) };
-        [
-            Vertex { pos: to_ndc(x0, y0), color: [r,g,b] },
-            Vertex { pos: to_ndc(x1, y0), color: [r,g,b] },
-            Vertex { pos: to_ndc(x1, y1), color: [r,g,b] },
-            Vertex { pos: to_ndc(x0, y0), color: [r,g,b] },
-            Vertex { pos: to_ndc(x1, y1), color: [r,g,b] },
-            Vertex { pos: to_ndc(x0, y1), color: [r,g,b] },
-        ]
-    };
-
-    // initial vertices
-    let verts = create_vertices(config.width, config.height, hovered);
-    queue.write_buffer(&vertex_buffer, 0, bytemuck::cast_slice(&verts));
-
-    fn render(
-        surface: &wgpu::Surface,
-        device: &wgpu::Device,
-        queue: &wgpu::Queue,
-        config: &wgpu::SurfaceConfiguration,
-        render_pipeline: &wgpu::RenderPipeline,
-        vertex_buffer: &wgpu::Buffer,
-    ) -> Result<(), SurfaceError> {
-        let frame = surface.get_current_texture()?;
-        let view = frame.texture.create_view(&wgpu::TextureViewDescriptor::default());
-        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("velox-encoder") });
+    // Render first frame immediately before entering the event loop.
+    // This ensures the window has content even on platforms where
+    // request_redraw() from NewEvents(StartCause::Init) may not trigger
+    // a RedrawRequested event (e.g. certain Wayland/X11 compositors).
+    if let Some(s) = &mut renderer.surface {
+        s.set_scale_factor(scale_factor);
+        let (vw, vh) = resize_state.record_initial(s.width, s.height, scale_factor);
+        let (vnode_raw, sheet) = make_view(vw, vh);
+        let mut next_id = 1u32;
+        let vnode_tagged = with_hover_ids(&vnode_raw, &mut next_id);
+        let vnode = crate::style_vnode_with_hover(&vnode_tagged, &sheet, &|_tag, props| {
+            props
+                .attrs
+                .get("data-hover-id")
+                .and_then(|v| v.parse::<u32>().ok())
+                .map(|id| Some(id) == hovered_id)
+                .unwrap_or(false)
+        });
+        // First frame: no input can be focused yet, so every text input gets the
+        // unfocused defaults.
+        let vnode = crate::inject_input_caret_attrs(&vnode, None);
+        last_vnode = Some(vnode.clone());
+        let mut layout = velox_dom::layout::compute_layout(&vnode, vw as i32, vh as i32);
         {
-            let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("velox-pass"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &view, resolve_target: None,
-                    ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color { r: 0.12, g: 0.12, b: 0.14, a: 1.0 }), store: true }
-                })],
-                depth_stencil_attachment: None,
-            });
-            rpass.set_pipeline(render_pipeline);
-            rpass.set_vertex_buffer(0, vertex_buffer.slice(..));
-            rpass.draw(0..6, 0..1);
+            let mut path = Vec::new();
+            crate::events::apply_scroll_offsets(&mut layout, &scroll_offsets_hmr, &mut path);
         }
-        queue.submit(Some(encoder.finish()));
-        frame.present();
-        Ok(())
+        last_layout_hmr = Some(layout.clone());
+        recompute_targets(
+            &vnode,
+            &layout,
+            &mut click_targets,
+            &mut hover_targets,
+            &mut input_targets,
+        );
+        // Render and present the initial frame so the window has immediate content.
+        if let Err(e) = crate::skia_render::skia_impl::render_frame(s, &vnode, &layout, &sheet) {
+            log::error!("skia initial render error: {}", e);
+        }
+        if let Some(presenter) = presenter.as_mut()
+            && let Err(e) = presenter.present(s)
+        {
+            log::error!("skia initial present error: {}", e);
+        }
     }
 
-    let mut redraw_pending = true;
-    // Move owned state into the event loop
-    let mut config = config;
-    let mut surface = surface;
-    let mut device = device;
-    let mut queue = queue;
-    let mut vertex_buffer = vertex_buffer;
-    let render_pipeline = render_pipeline;
-    let title_owned = title.to_string();
-
-    let _ = event_loop.run(move |event, _, control_flow| match event {
-        Event::WindowEvent { event: WindowEvent::CloseRequested, .. } => {
-            *control_flow = ControlFlow::Exit;
-        }
-        Event::WindowEvent { event: WindowEvent::Resized(new_size), .. } => {
-            config.width = new_size.width.max(1);
-            config.height = new_size.height.max(1);
-            surface.configure(&device, &config);
-            let verts2 = create_vertices(config.width, config.height, hovered);
-            queue.write_buffer(&vertex_buffer, 0, bytemuck::cast_slice(&verts2));
-            redraw_pending = true;
-        }
-        Event::WindowEvent { event: WindowEvent::CursorMoved { position, .. }, .. } => {
-            mouse_pos = (position.x as f32, position.y as f32);
-            let bw = 200.0; let bh = 80.0;
-            let cx = config.width as f32 / 2.0; let cy = config.height as f32 / 2.0;
-            let x0 = cx - bw/2.0; let y0 = cy - bh/2.0; let x1 = cx + bw/2.0; let y1 = cy + bh/2.0;
-            let now_hovered = mouse_pos.0 >= x0 && mouse_pos.0 <= x1 && mouse_pos.1 >= y0 && mouse_pos.1 <= y1;
-            if now_hovered != hovered { hovered = now_hovered; let verts3 = create_vertices(config.width, config.height, hovered); queue.write_buffer(&vertex_buffer, 0, bytemuck::cast_slice(&verts3)); }
-            window.request_redraw();
-        }
-        Event::WindowEvent { event: WindowEvent::MouseInput { state: winit::event::ElementState::Pressed, button: winit::event::MouseButton::Left, .. }, .. } => {
-            let bw = 200.0; let bh = 80.0;
-            let cx = config.width as f32 / 2.0; let cy = config.height as f32 / 2.0;
-            let x0 = cx - bw/2.0; let y0 = cy - bh/2.0; let x1 = cx + bw/2.0; let y1 = cy + bh/2.0;
-            if mouse_pos.0 >= x0 && mouse_pos.0 <= x1 && mouse_pos.1 >= y0 && mouse_pos.1 <= y1 {
-                count += 1;
-                window.set_title(&format!("{} — count {}", title_owned, count));
-            }
-        }
-        Event::MainEventsCleared => {
-            if redraw_pending {
-                window.request_redraw();
-            }
-        }
-        Event::RedrawRequested(_) => {
-            match render(&surface, &device, &queue, &config, &render_pipeline, &vertex_buffer) {
-                Ok(()) => {}
-                Err(SurfaceError::Lost) => { surface.configure(&device, &config); }
-                Err(SurfaceError::OutOfMemory) => { *control_flow = ControlFlow::Exit; }
-                Err(_) => {}
-            }
-            redraw_pending = false;
-        }
-        _ => {}
-    });
+    if let Some(event_loop) = event_loop_opt {
+        // The event loop can panic if the display server becomes unreachable
+        // (e.g. "Io error: Broken pipe") — catch that and degrade gracefully.
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            // Caret blink clock for the HMR loop. `EventLoop::run` consumes
+            // `self`, so the proxy has to be made before the call. This loop's
+            // channel is typed `HmrMessage`, so the tick rides
+            // `HmrMessage::KeepWindow` — see that arm for why.
+            let _blink_ticker =
+                crate::CaretBlinkTicker::start(event_loop.create_proxy(), HmrMessage::KeepWindow);
+            event_loop.run(move |event, _, control_flow| {
+                *control_flow = ControlFlow::Wait;
+                match event {
+                    Event::UserEvent(msg) => match msg {
+                        HmrMessage::FullReload => {
+                            velox_core::lifecycle::run_all_destroy_hooks();
+                            *control_flow = ControlFlow::Exit;
+                        }
+                        HmrMessage::HotReload { module_path: _ } => {
+                            // Rebuild view and refresh all hit-test targets including
+                            // input_targets, then request a redraw so the new VNode
+                            // is painted on the next frame.
+                            if let Some(s) = renderer.surface.as_ref() {
+                                let (vw, vh) = logical_size(s.width, s.height, scale_factor);
+                                let (vnode_raw, _) = make_view(vw, vh);
+                                if let Err(e) = HmrRenderer::hot_update(&mut renderer, vnode_raw) {
+                                    log::error!("hot_update failed: {}", e);
+                                }
+                                // Recompute all targets from the updated view so
+                                // input focus / hit-test stays in sync after HMR.
+                                if let Some(s2) = renderer.surface.as_ref() {
+                                    let (vw2, vh2) =
+                                        logical_size(s2.width, s2.height, scale_factor);
+                                    let (vnode2_raw, sheet2) = make_view(vw2, vh2);
+                                    let mut nid = 1u32;
+                                    let tagged = with_hover_ids(&vnode2_raw, &mut nid);
+                                    let vnode2 = crate::style_vnode_with_hover(
+                                        &tagged,
+                                        &sheet2,
+                                        &|_tag, props| {
+                                            props
+                                                .attrs
+                                                .get("data-hover-id")
+                                                .and_then(|v| v.parse::<u32>().ok())
+                                                .map(|id| Some(id) == hovered_id)
+                                                .unwrap_or(false)
+                                        },
+                                    );
+                                    // Caret attrs survive a hot reload: the
+                                    // focused path is matched by tree path, and
+                                    // `recompute_targets` below re-applies the
+                                    // edit state onto the new targets.
+                                    let vnode2 = crate::inject_input_caret_attrs(
+                                        &vnode2,
+                                        crate::events::focused_input_index(&input_targets)
+                                            .and_then(|i| input_targets.get(i)),
+                                    );
+                                    last_vnode = Some(vnode2.clone());
+                                    let mut layout = velox_dom::layout::compute_layout(
+                                        &vnode2, vw2 as i32, vh2 as i32,
+                                    );
+                                    {
+                                        let mut path = Vec::new();
+                                        crate::events::apply_scroll_offsets(
+                                            &mut layout,
+                                            &scroll_offsets_hmr,
+                                            &mut path,
+                                        );
+                                    }
+                                    last_layout_hmr = Some(layout.clone());
+                                    recompute_targets(
+                                        &vnode2,
+                                        &layout,
+                                        &mut click_targets,
+                                        &mut hover_targets,
+                                        &mut input_targets,
+                                    );
+                                }
+                            }
+                            if let Some(w) = window_opt.as_ref() {
+                                w.request_redraw();
+                            }
+                        }
+                        // `KeepWindow` is overloaded as the HMR loop's caret
+                        // blink tick. The HMR channel is typed `HmrMessage`, and
+                        // winit 0.28 has no timer API, so the ticker posts a
+                        // no-op HMR message on the same channel rather than
+                        // forcing the loop to be untyped. The dev server's real
+                        // keep-alives land here too, and both are no-ops, so
+                        // overloading costs nothing.
+                        HmrMessage::KeepWindow => {
+                            if crate::on_caret_blink_tick(&mut input_targets, &mut blink_deadline)
+                                && let Some(w) = window_opt.as_ref()
+                            {
+                                w.request_redraw();
+                            }
+                        }
+                    },
+                    Event::NewEvents(StartCause::Init) => {
+                        if let Some(w) = window_opt.as_ref() {
+                            w.request_redraw();
+                        }
+                    }
+                    Event::WindowEvent {
+                        event: WindowEvent::CloseRequested,
+                        ..
+                    } => {
+                        // Destroy hooks run inside the shared arm; the exit stays
+                        // here so `ControlFlow` never leaves the loop.
+                        if window_close_requested() {
+                            *control_flow = ControlFlow::Exit;
+                        }
+                    }
+                    Event::WindowEvent {
+                        event: WindowEvent::Resized(new_size),
+                        ..
+                    } => {
+                        window_resized(
+                            &mut resize_state,
+                            &window_opt,
+                            (new_size.width, new_size.height),
+                        );
+                    }
+                    Event::WindowEvent {
+                        event:
+                            WindowEvent::ScaleFactorChanged {
+                                scale_factor: new_scale,
+                                new_inner_size,
+                                ..
+                            },
+                        ..
+                    } => {
+                        window_scale_factor_changed(
+                            &mut scale_factor,
+                            &mut mouse_pos,
+                            &mut resize_state,
+                            &mut renderer.surface,
+                            &window_opt,
+                            new_scale,
+                            (new_inner_size.width, new_inner_size.height),
+                        );
+                    }
+                    Event::WindowEvent {
+                        event: WindowEvent::CursorMoved { position, .. },
+                        ..
+                    } => {
+                        window_cursor_moved(
+                            scale_factor,
+                            &mut mouse_pos,
+                            &hover_targets,
+                            &mut hovered_id,
+                            &window_opt,
+                            (position.x as f32, position.y as f32),
+                        );
+                    }
+                    Event::WindowEvent {
+                        event:
+                            WindowEvent::MouseInput {
+                                state: ElementState::Pressed,
+                                button: MouseButton::Left,
+                                ..
+                            },
+                        ..
+                    } => {
+                        // Text-input focus: identical to the plain loop, and now
+                        // actually present. This arm previously had NO focus
+                        // handling at all, which is why the whole caret was
+                        // unreachable under HMR.
+                        crate::apply_click_focus(
+                            &mut input_targets,
+                            &last_vnode,
+                            &mut focused_input,
+                            mouse_pos.0,
+                            mouse_pos.1,
+                            scale_factor,
+                            surface_logical_viewport(&renderer, scale_factor),
+                        );
+                        let mut handled_click = false;
+                        if let Some((handler, payload_opt)) =
+                            crate::events::hit_test_click(&click_targets, mouse_pos.0, mouse_pos.1)
+                        {
+                            let payload_owned =
+                                payload_opt.map(|p| p.to_string()).unwrap_or_else(|| {
+                                    format!("{{\"x\":{},\"y\":{}}}", mouse_pos.0, mouse_pos.1)
+                                });
+                            on_event(handler, Some(&payload_owned));
+                            velox_core::lifecycle::run_all_updated_hooks();
+                            if let Some(s) = &mut renderer.surface {
+                                let (vw, vh) = logical_size(s.width, s.height, scale_factor);
+                                let (vnode_raw, sheet) = make_view(vw, vh);
+                                let mut next_id = 1u32;
+                                let vnode_tagged = with_hover_ids(&vnode_raw, &mut next_id);
+                                let vnode = crate::style_vnode_with_hover(
+                                    &vnode_tagged,
+                                    &sheet,
+                                    &|_tag, props| {
+                                        props
+                                            .attrs
+                                            .get("data-hover-id")
+                                            .and_then(|v| v.parse::<u32>().ok())
+                                            .map(|id| Some(id) == hovered_id)
+                                            .unwrap_or(false)
+                                    },
+                                );
+                                let vnode = crate::inject_input_caret_attrs(
+                                    &vnode,
+                                    crate::events::focused_input_index(&input_targets)
+                                        .and_then(|i| input_targets.get(i)),
+                                );
+                                last_vnode = Some(vnode.clone());
+                                let mut layout =
+                                    velox_dom::layout::compute_layout(&vnode, vw as i32, vh as i32);
+                                {
+                                    let mut path = Vec::new();
+                                    crate::events::apply_scroll_offsets(
+                                        &mut layout,
+                                        &scroll_offsets_hmr,
+                                        &mut path,
+                                    );
+                                }
+                                last_layout_hmr = Some(layout.clone());
+                                recompute_targets(
+                                    &vnode,
+                                    &layout,
+                                    &mut click_targets,
+                                    &mut hover_targets,
+                                    &mut input_targets,
+                                );
+                            }
+                            handled_click = true;
+                        }
+                        if let Some(w) = window_opt.as_ref() {
+                            if handled_click {
+                                w.set_title(&get_title());
+                            }
+                            // HOISTED OUT of the `hit_test_click` arm, for the
+                            // same reason as the plain loop: this arm had the
+                            // identical nesting bug, so a click on empty space
+                            // changed focus and never repainted.
+                            w.request_redraw();
+                        }
+                    }
+                    Event::WindowEvent {
+                        event: WindowEvent::ModifiersChanged(mods),
+                        ..
+                    } => {
+                        window_modifiers_changed(&mut shift_held, mods.shift());
+                    }
+                    Event::WindowEvent {
+                        event: WindowEvent::KeyboardInput { input, .. },
+                        ..
+                    } => {
+                        // Keyboard shortcuts and text-input editing keys.
+                        use winit::event::VirtualKeyCode;
+                        if let Some(keycode) = input.virtual_keycode
+                            && input.state == ElementState::Pressed
+                        {
+                            // `@keydown` bindings, identical to the plain
+                            // loop's — including the additive contract, which
+                            // is what stops an HMR session from losing F2-focus
+                            // the moment a rebuild is watched.
+                            if crate::dispatch_keydown(
+                                keycode,
+                                &mut input_targets,
+                                &last_vnode,
+                                &mut focused_input,
+                                &mut on_event,
+                            ) {
+                                crate::arm_blink_deadline(&mut blink_deadline);
+                                velox_core::lifecycle::run_all_updated_hooks();
+                                if let Some(w) = window_opt.as_ref() {
+                                    w.request_redraw();
+                                }
+                            }
+                            match keycode {
+                                // Reload / quit. Identical to the plain loop's arm
+                                // including the focus guard — an unguarded shortcut
+                                // here would mean typing "r" into a field exits the
+                                // process under HMR only, which is the kind of drift
+                                // that survives review because it is "the other loop".
+                                VirtualKeyCode::R | VirtualKeyCode::Q
+                                    if !crate::events::any_input_focused(&input_targets) =>
+                                {
+                                    velox_core::lifecycle::run_all_destroy_hooks();
+                                    *control_flow = ControlFlow::Exit;
+                                }
+                                // Ported from the plain loop. This arm used to be
+                                // a bare `_ => {}` stub with no `focused_input` in
+                                // scope at all, so typing did nothing under HMR.
+                                _ => {
+                                    if let Some(action) =
+                                        crate::edit_action_for_key(keycode, shift_held)
+                                    {
+                                        let changed = crate::apply_edit_to_focused(
+                                            &mut input_targets,
+                                            action,
+                                            &last_vnode,
+                                            &mut focused_input,
+                                            &mut on_event,
+                                        );
+                                        if changed {
+                                            // Caret goes solid while you type.
+                                            crate::arm_blink_deadline(&mut blink_deadline);
+                                            velox_core::lifecycle::run_all_updated_hooks();
+                                            if let Some(w) = window_opt.as_ref() {
+                                                w.request_redraw();
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    Event::WindowEvent {
+                        event: WindowEvent::ReceivedCharacter(c),
+                        ..
+                    } => {
+                        // Printable characters go to the focused text input.
+                        // Ported from the plain loop; there was no
+                        // `ReceivedCharacter` arm anywhere in this loop, so
+                        // typing inserted nothing under HMR.
+                        if !c.is_control()
+                            && c != '\u{7f}'
+                            && crate::apply_edit_to_focused(
+                                &mut input_targets,
+                                crate::events::EditAction::Insert(c),
+                                &last_vnode,
+                                &mut focused_input,
+                                &mut on_event,
+                            )
+                        {
+                            // Caret goes solid while you type.
+                            crate::arm_blink_deadline(&mut blink_deadline);
+                            velox_core::lifecycle::run_all_updated_hooks();
+                            if let Some(w) = window_opt.as_ref() {
+                                w.request_redraw();
+                            }
+                        }
+                    }
+                    Event::WindowEvent {
+                        event: WindowEvent::MouseWheel { delta, .. },
+                        ..
+                    } => {
+                        window_mouse_wheel(
+                            scale_factor,
+                            mouse_pos,
+                            &last_layout_hmr,
+                            &mut scroll_offsets_hmr,
+                            &window_opt,
+                            delta,
+                        );
+                    }
+                    Event::RedrawRequested(_) => {
+                        // R-L3: materialize any coalesced resize exactly once per frame.
+                        let mut committed_resize = false;
+                        if let Some((pw, ph)) = resize_state.take_pending() {
+                            // `ResizeState::take_pending` is the production `pending_resize.take()` path.
+                            match renderer.resize(pw as i32, ph as i32) {
+                                Ok(()) => committed_resize = true,
+                                Err(e) => {
+                                    log::warn!("renderer resize failed ({}x{}): {}", pw, ph, e);
+                                }
+                            }
+                            if let Some(presenter) = presenter.as_mut()
+                                && let Err(e) = presenter.resize(pw, ph)
+                            {
+                                log::warn!("presenter resize failed: {}", e);
+                            }
+                        }
+                        ensure_mounted(&mut did_mount_hmr);
+                        // Render VNode -> Skia frame and present.
+                        if let Some(s) = &mut renderer.surface {
+                            s.set_scale_factor(scale_factor);
+                            let (vw, vh) = resize_state.frame_logical_size(
+                                s.width,
+                                s.height,
+                                scale_factor,
+                                committed_resize,
+                            );
+                            let (vnode_raw, sheet) = make_view(vw, vh);
+                            let mut next_id = 1u32;
+                            let vnode_tagged = with_hover_ids(&vnode_raw, &mut next_id);
+                            let vnode = crate::style_vnode_with_hover(
+                                &vnode_tagged,
+                                &sheet,
+                                &|_tag, props| {
+                                    props
+                                        .attrs
+                                        .get("data-hover-id")
+                                        .and_then(|v| v.parse::<u32>().ok())
+                                        .map(|id| Some(id) == hovered_id)
+                                        .unwrap_or(false)
+                                },
+                            );
+                            // Caret/selection/focus contract for the paint lane.
+                            let vnode = crate::inject_input_caret_attrs(
+                                &vnode,
+                                crate::events::focused_input_index(&input_targets)
+                                    .and_then(|i| input_targets.get(i)),
+                            );
+                            last_vnode = Some(vnode.clone());
+                            let mut layout =
+                                velox_dom::layout::compute_layout(&vnode, vw as i32, vh as i32);
+                            {
+                                let mut path = Vec::new();
+                                crate::events::apply_scroll_offsets(
+                                    &mut layout,
+                                    &scroll_offsets_hmr,
+                                    &mut path,
+                                );
+                            }
+                            last_layout_hmr = Some(layout.clone());
+                            recompute_targets(
+                                &vnode,
+                                &layout,
+                                &mut click_targets,
+                                &mut hover_targets,
+                                &mut input_targets,
+                            );
+                            if let Err(e) = crate::skia_render::skia_impl::render_frame(
+                                s, &vnode, &layout, &sheet,
+                            ) {
+                                log::error!("skia render error: {}", e);
+                            }
+                            if let Some(presenter) = presenter.as_mut()
+                                && let Err(e) = presenter.present(s)
+                            {
+                                log::error!("softbuffer present error: {}", e);
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            });
+        }));
+    } else {
+        // Headless mode — no event loop, just run the initial render and return.
+        log::info!("running in headless mode (no event loop)");
+        velox_core::lifecycle::run_all_destroy_hooks();
+    }
+    Ok(())
 }
 
-#[cfg(feature = "wgpu")]
-pub fn run_window_counter<F>(title: &str, mut on_change: F)
-where
-    F: FnMut(i32) + 'static,
-{
-    use winit::dpi::PhysicalSize;
-    use winit::event::{Event, WindowEvent, ElementState, MouseButton};
-    use winit::event_loop::{ControlFlow, EventLoop};
-    use winit::window::WindowBuilder;
-
-    let event_loop = EventLoop::new();
-    let window = WindowBuilder::new().with_title(title).with_inner_size(PhysicalSize::new(800,600)).build(&event_loop).expect("window");
-    let title_owned = title.to_string();
-
-    // Reuse the rendering path
-    // Minimal re-init by calling into `run_window`-like setup inline to avoid refactor
-    let instance = wgpu::Instance::default();
-    let surface = unsafe { instance.create_surface(&window) }.expect("surface");
-    let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions { power_preference: wgpu::PowerPreference::HighPerformance, compatible_surface: Some(&surface), force_fallback_adapter: false })).expect("adapter");
-    let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor { label: Some("velox-device"), features: wgpu::Features::empty(), limits: wgpu::Limits::default() }, None)).expect("device");
-    let mut size = window.inner_size();
-    if size.width == 0 || size.height == 0 { size = PhysicalSize::new(800, 600); window.set_inner_size(size); }
-    let caps = surface.get_capabilities(&adapter);
-    let format = caps.formats[0];
-    let mut config = wgpu::SurfaceConfiguration { usage: wgpu::TextureUsages::RENDER_ATTACHMENT, format, width: size.width, height: size.height, present_mode: caps.present_modes[0], alpha_mode: caps.alpha_modes[0], view_formats: vec![] };
-    surface.configure(&device, &config);
-
-    #[repr(C)]
-    #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
-    struct Vertex { pos: [f32; 2], color: [f32; 3] }
-    let shader_src = r#"
-        struct VsOut { @builtin(position) position: vec4<f32>, @location(0) color: vec3<f32>, };
-        @vertex fn vs(@location(0) pos: vec2<f32>, @location(1) color: vec3<f32>) -> VsOut {
-            var out: VsOut; out.position = vec4<f32>(pos, 0.0, 1.0); out.color = color; return out;
-        }
-        @fragment fn fs(@location(0) color: vec3<f32>) -> @location(0) vec4<f32> { return vec4<f32>(color, 1.0); }
-    "#;
-    let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("velox-shader"), source: wgpu::ShaderSource::Wgsl(shader_src.into()) });
-    let vlayout = wgpu::VertexBufferLayout { array_stride: std::mem::size_of::<Vertex>() as wgpu::BufferAddress, step_mode: wgpu::VertexStepMode::Vertex, attributes: &[
-        wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x2, offset: 0, shader_location: 0 },
-        wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x3, offset: 8, shader_location: 1 },
-    ]};
-    let pl_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: Some("velox-pl"), bind_group_layouts: &[], push_constant_ranges: &[] });
-    let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor { label: Some("velox-pipeline"), layout: Some(&pl_layout), vertex: wgpu::VertexState { module: &shader, entry_point: "vs", buffers: &[vlayout] }, fragment: Some(wgpu::FragmentState { module: &shader, entry_point: "fs", targets: &[Some(wgpu::ColorTargetState { format, blend: Some(wgpu::BlendState::ALPHA_BLENDING), write_mask: wgpu::ColorWrites::ALL })] }), primitive: wgpu::PrimitiveState::default(), depth_stencil: None, multisample: wgpu::MultisampleState::default(), multiview: None });
-    let mut vbuf = device.create_buffer(&wgpu::BufferDescriptor { label: Some("velox-vbuf"), size: 6 * std::mem::size_of::<Vertex>() as u64, usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST, mapped_at_creation: false });
-
-    let make_quad = |w: u32, h: u32, hovered: bool| -> [Vertex; 6] {
-        let bw = 200.0; let bh = 80.0; let cx = w as f32 / 2.0; let cy = h as f32 / 2.0;
-        let x0 = cx - bw/2.0; let y0 = cy - bh/2.0; let x1 = cx + bw/2.0; let y1 = cy + bh/2.0;
-        let to_ndc = |x: f32, y: f32| [ (x / w as f32) * 2.0 - 1.0, 1.0 - (y / h as f32) * 2.0 ];
-        let (r,g,b) = if hovered { (0.25,0.6,0.9) } else { (0.2,0.5,0.8) };
-        [ Vertex{pos:to_ndc(x0,y0),color:[r,g,b]}, Vertex{pos:to_ndc(x1,y0),color:[r,g,b]}, Vertex{pos:to_ndc(x1,y1),color:[r,g,b]}, Vertex{pos:to_ndc(x0,y0),color:[r,g,b]}, Vertex{pos:to_ndc(x1,y1),color:[r,g,b]}, Vertex{pos:to_ndc(x0,y1),color:[r,g,b]} ]
+#[cfg(test)]
+mod resize_state_tests {
+    use super::ResizeState;
+    use std::cell::RefCell;
+    use std::rc::Rc;
+    use std::sync::{Mutex, MutexGuard, OnceLock};
+    use velox_core::lifecycle::{
+        cleanup_component, clear_current_component, generate_component_id, on_resize,
+        set_current_component,
     };
-    let mut hovered = false;
-    queue.write_buffer(&vbuf, 0, bytemuck::cast_slice(&make_quad(config.width, config.height, hovered)));
-    let mut mouse = (0.0f32, 0.0f32);
-    let mut count = 0;
-    on_change(count);
+    use velox_core::signal::Signal;
 
-    let _ = event_loop.run(move |event, _, control_flow| match event {
-        Event::WindowEvent { event: WindowEvent::CloseRequested, .. } => { *control_flow = ControlFlow::Exit; }
-        Event::WindowEvent { event: WindowEvent::Resized(sz), .. } => { config.width = sz.width.max(1); config.height = sz.height.max(1); surface.configure(&device, &config); queue.write_buffer(&vbuf, 0, bytemuck::cast_slice(&make_quad(config.width, config.height, hovered))); window.request_redraw(); }
-        Event::WindowEvent { event: WindowEvent::CursorMoved { position, .. }, .. } => { mouse = (position.x as f32, position.y as f32); let bw=200.0; let bh=80.0; let cx=config.width as f32/2.0; let cy=config.height as f32/2.0; let x0=cx-bw/2.0; let y0=cy-bh/2.0; let x1=cx+bw/2.0; let y1=cy+bh/2.0; let h = mouse.0>=x0 && mouse.0<=x1 && mouse.1>=y0 && mouse.1<=y1; if h!=hovered { hovered=h; queue.write_buffer(&vbuf, 0, bytemuck::cast_slice(&make_quad(config.width, config.height, hovered))); } window.request_redraw(); }
-        Event::WindowEvent { event: WindowEvent::MouseInput { state: ElementState::Pressed, button: MouseButton::Left, .. }, .. } => { let bw=200.0; let bh=80.0; let cx=config.width as f32/2.0; let cy=config.height as f32/2.0; let x0=cx-bw/2.0; let y0=cy-bh/2.0; let x1=cx+bw/2.0; let y1=cy+bh/2.0; if mouse.0>=x0 && mouse.0<=x1 && mouse.1>=y0 && mouse.1<=y1 { count += 1; window.set_title(&format!("{} — count {}", title_owned, count)); on_change(count); } }
-        Event::RedrawRequested(_) => {
-            let frame = match surface.get_current_texture() { Ok(f)=>f, Err(wgpu::SurfaceError::Lost)=>{ surface.configure(&device, &config); return; }, Err(_) => return };
-            let view = frame.texture.create_view(&wgpu::TextureViewDescriptor::default());
-            let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("velox-enc") });
-            {
-                let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor { label: Some("velox-pass"), color_attachments: &[Some(wgpu::RenderPassColorAttachment { view: &view, resolve_target: None, ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color { r: 0.12, g: 0.12, b: 0.14, a: 1.0 }), store: true } })], depth_stencil_attachment: None });
-                rpass.set_pipeline(&pipeline);
-                rpass.set_vertex_buffer(0, vbuf.slice(..));
-                rpass.draw(0..6, 0..1);
-            }
-            queue.submit(Some(encoder.finish()));
-            frame.present();
+    fn resize_test_guard() -> MutexGuard<'static, ()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    fn register_recorder(calls: Rc<RefCell<Vec<(u32, u32)>>>) -> usize {
+        let id = generate_component_id();
+        set_current_component(id);
+        on_resize(move |width, height| calls.borrow_mut().push((width, height)));
+        clear_current_component();
+        id
+    }
+
+    #[test]
+    fn renderer_resize_state_coalesces_raw_events_and_dispatches_once() {
+        let _guard = resize_test_guard();
+        let calls = Rc::new(RefCell::new(Vec::new()));
+        let id = register_recorder(calls.clone());
+        let mut state = ResizeState::new();
+
+        assert_eq!(state.record_initial(640, 480, 1.0), (640, 480));
+        state.queue((800, 600));
+        state.queue((900, 700));
+        // Raw events only update the pending size; they do not dispatch hooks.
+        assert!(calls.borrow().is_empty());
+        assert_eq!(state.take_pending(), Some((900, 700)));
+        assert_eq!(state.frame_logical_size(900, 700, 1.0, true), (900, 700));
+        assert_eq!(state.take_pending(), None);
+        assert_eq!(state.frame_logical_size(900, 700, 1.0, true), (900, 700));
+
+        assert_eq!(&*calls.borrow(), &[(900, 700)]);
+        cleanup_component(id);
+    }
+
+    #[test]
+    fn renderer_resize_state_initial_logical_size_suppresses_notification() {
+        let _guard = resize_test_guard();
+        let calls = Rc::new(RefCell::new(Vec::new()));
+        let id = register_recorder(calls.clone());
+        let mut state = ResizeState::new();
+
+        assert_eq!(state.record_initial(800, 600, 1.0), (800, 600));
+        assert_eq!(state.frame_logical_size(800, 600, 1.0, true), (800, 600));
+        assert!(calls.borrow().is_empty());
+        cleanup_component(id);
+    }
+
+    #[test]
+    fn renderer_resize_state_uses_viewport_logical_pixels_for_dpi() {
+        let _guard = resize_test_guard();
+        let calls = Rc::new(RefCell::new(Vec::new()));
+        let id = register_recorder(calls.clone());
+        let mut state = ResizeState::new();
+
+        assert_eq!(state.record_initial(1600, 1200, 2.0), (800, 600));
+        state.queue((2000, 1000));
+        assert_eq!(state.take_pending(), Some((2000, 1000)));
+        assert_eq!(state.frame_logical_size(2000, 1000, 2.0, true), (1000, 500));
+        assert_eq!(&*calls.borrow(), &[(1000, 500)]);
+        cleanup_component(id);
+    }
+
+    #[test]
+    fn two_windows_with_equal_committed_sizes_both_dispatch() {
+        let _guard = resize_test_guard();
+        let calls = Rc::new(RefCell::new(Vec::new()));
+        let id = register_recorder(calls.clone());
+        let mut first_window = ResizeState::new();
+        let mut second_window = ResizeState::new();
+
+        // Each window owns its baseline; both legitimately commit 900x600.
+        first_window.record_initial(800, 600, 1.0);
+        second_window.record_initial(700, 600, 1.0);
+        first_window.queue((900, 600));
+        second_window.queue((900, 600));
+
+        first_window.frame_logical_size(900, 600, 1.0, true);
+        second_window.frame_logical_size(900, 600, 1.0, true);
+
+        assert_eq!(&*calls.borrow(), &[(900, 600), (900, 600)]);
+        cleanup_component(id);
+    }
+
+    #[test]
+    fn renderer_resize_state_runs_all_hooks_and_allows_signal_mutation() {
+        let _guard = resize_test_guard();
+        let first_calls = Rc::new(RefCell::new(Vec::new()));
+        let second_calls = Rc::new(RefCell::new(Vec::new()));
+        let signal = Rc::new(Signal::new(0u32));
+        let id = generate_component_id();
+
+        set_current_component(id);
+        {
+            let calls = first_calls.clone();
+            on_resize(move |width, height| calls.borrow_mut().push((width, height)));
         }
-        Event::MainEventsCleared => { window.request_redraw(); }
-        _ => {}
-    });
+        {
+            let calls = second_calls.clone();
+            let signal = signal.clone();
+            on_resize(move |width, height| {
+                calls.borrow_mut().push((width, height));
+                signal.set(width + height);
+            });
+        }
+        clear_current_component();
+
+        let mut state = ResizeState::new();
+        state.record_initial(100, 100, 1.0);
+        state.queue((200, 150));
+        assert_eq!(state.take_pending(), Some((200, 150)));
+        assert_eq!(state.frame_logical_size(200, 150, 1.0, true), (200, 150));
+
+        assert_eq!(&*first_calls.borrow(), &[(200, 150)]);
+        assert_eq!(&*second_calls.borrow(), &[(200, 150)]);
+        assert_eq!(signal.get(), 350);
+        cleanup_component(id);
+    }
+
+    #[test]
+    fn cleanup_component_removes_only_its_resize_hook() {
+        let _guard = resize_test_guard();
+        let removed_calls = Rc::new(RefCell::new(Vec::new()));
+        let retained_calls = Rc::new(RefCell::new(Vec::new()));
+        let removed_id = register_recorder(removed_calls.clone());
+        let retained_id = register_recorder(retained_calls.clone());
+
+        cleanup_component(removed_id);
+        let mut state = ResizeState::new();
+        state.record_initial(100, 100, 1.0);
+        state.frame_logical_size(200, 150, 1.0, true);
+
+        assert!(removed_calls.borrow().is_empty());
+        assert_eq!(&*retained_calls.borrow(), &[(200, 150)]);
+        cleanup_component(retained_id);
+    }
 }
 
-#[cfg(feature = "wgpu")]
-pub fn run_counter_window() {
-    use winit::event::{ElementState, Event, MouseButton, WindowEvent};
-    use winit::event_loop::{ControlFlow, EventLoop};
-    use winit::window::WindowBuilder;
-
-    let event_loop = EventLoop::new();
-    let window = WindowBuilder::new()
-        .with_title("Velox - Count: 0 (click to increment)")
-        .build(&event_loop)
-        .expect("create window");
-
-    let mut count: i32 = 0;
-    let mut update_title = move |c: i32| {
-        window.set_title(&format!("Velox - Count: {} (click to increment)", c));
+// ---------------------------------------------------------------------------
+// Task 5.6a — characterisation tests for the text-input edit and focus path.
+//
+// `apply_click_focus`, `apply_edit_to_focused` and `edit_action_for_key` are the
+// three functions both copies of the event loop call into, and until this
+// module landed none of them had any test coverage at all. A dedup that dropped
+// or re-pointed an arm would have shipped silently, which is the failure mode
+// these tests exist to prevent.
+//
+// They live here rather than in `tests/` because all three are *private* `fn`s
+// behind `#[cfg(feature = "skia-native")]`; an integration test can only reach
+// the crate's public API.
+#[cfg(all(test, feature = "skia-native"))]
+mod edit_focus_tests {
+    use super::{
+        apply_click_focus, apply_edit_to_focused, edit_action_for_key, inject_input_caret_attrs,
+        recompute_targets, style_vnode_with_hover,
     };
+    use crate::events::{EditAction, InputTarget};
+    use velox_dom::{Props, VNode};
+    use winit::event::VirtualKeyCode as K;
 
-    let _ = event_loop.run(move |event, _, control_flow| match event {
-        Event::WindowEvent { event: WindowEvent::CloseRequested, .. } => {
-            *control_flow = ControlFlow::Exit;
+    const W: i32 = 400;
+    const H: i32 = 300;
+    /// Absolutely positioned so the field's rect is known exactly: the click
+    /// tests below use literal coordinates and must not depend on layout order.
+    const FIELD_STYLE: &str = "position:absolute;left:20px;top:20px;width:200px;height:40px;font-size:15px;padding-left:2px";
+    const VALUE: &str = "hello";
+    const HANDLER: &str = "set_value";
+    /// The field spans x 20..220, y 20..60; its text starts at x 20 + 2px padding.
+    const TEXT_X: f32 = 22.0;
+    const TEXT_Y: f32 = 40.0;
+    const EMPTY_X: f32 = 350.0;
+    const EMPTY_Y: f32 = 250.0;
+
+    /// `(handler, value)` pairs handed to the app, in dispatch order.
+    type Dispatches = Vec<(String, Option<String>)>;
+
+    /// One text input on a page, built through the frame order the loops use:
+    /// style cascade, caret-attr injection, layout, then target collection.
+    /// Going through the real pipeline is the point — a hand-assembled target
+    /// vector would not exercise the `path`/`rect` plumbing these functions read.
+    struct Scene {
+        /// `None` models the window before the first `RedrawRequested`, when the
+        /// loop has painted a frame but has not published it as `last_vnode`.
+        vnode: Option<VNode>,
+        inputs: Vec<InputTarget>,
+        /// The loops' index-free mirror of "which input is focused". It is
+        /// asserted on below, because after Esc it has to follow the blur
+        /// rather than keep naming a field that is no longer focused.
+        focused: Option<Vec<usize>>,
+    }
+
+    fn scene(attrs: &[(&str, &str)]) -> Scene {
+        let mut p = Props::new()
+            .set("type", "text")
+            .set("style", FIELD_STYLE)
+            .set("value", VALUE)
+            .set("on:input", HANDLER);
+        for (k, v) in attrs.iter().copied() {
+            p = p.set(k, v);
         }
-        Event::WindowEvent { event: WindowEvent::MouseInput { state: ElementState::Pressed, button: MouseButton::Left, .. }, .. } => {
-            count += 1;
-            update_title(count);
+        let raw = VNode::Element {
+            tag: "div".into(),
+            props: Props::new().set("style", "background:#000000"),
+            children: vec![VNode::Element {
+                tag: "input".into(),
+                props: p,
+                children: vec![],
+            }],
+        };
+        let sheet = velox_style::Stylesheet::default();
+        let styled = style_vnode_with_hover(&raw, &sheet, &|_tag: &str, _p: &Props| false);
+        let vnode = inject_input_caret_attrs(&styled, None);
+        let layout = velox_dom::layout::compute_layout(&vnode, W, H);
+        let mut clicks: Vec<crate::events::ClickTarget> = Vec::new();
+        let mut hovers: Vec<crate::events::HoverTarget> = Vec::new();
+        let mut inputs: Vec<InputTarget> = Vec::new();
+        recompute_targets(&vnode, &layout, &mut clicks, &mut hovers, &mut inputs);
+        assert_eq!(inputs.len(), 1, "fixture must yield exactly one text input");
+        Scene {
+            vnode: Some(vnode),
+            inputs,
+            focused: None,
         }
-        Event::MainEventsCleared => {}
-        _ => {}
-    });
+    }
+
+    impl Scene {
+        /// Focus the field with the caret `cursor` chars in.
+        fn focused_at(mut self, cursor: usize) -> Self {
+            self.inputs[0].focused = true;
+            self.inputs[0].cursor = cursor;
+            self
+        }
+    }
+
+    /// Run one edit, returning whether the caller must repaint and everything
+    /// dispatched to the app. Asserting on the dispatch log, not just the
+    /// caret, is the point: a caret that moves while the handler is never
+    /// called is precisely the silent-typing failure this suite must not miss.
+    fn run_edit(s: &mut Scene, action: EditAction) -> (bool, Dispatches) {
+        let mut log: Dispatches = Vec::new();
+        let repaint = {
+            let mut sink = |name: &str, data: Option<&str>| {
+                log.push((name.to_string(), data.map(str::to_string)))
+            };
+            apply_edit_to_focused(&mut s.inputs, action, &s.vnode, &mut s.focused, &mut sink)
+        };
+        (repaint, log)
+    }
+
+    /// Click at (x, y), returning whether the caller must repaint. `focused` is
+    /// the loop's own mirror of the focus flag, kept in `Scene` so the blur tests
+    /// can assert it alongside the flag itself.
+    fn run_click(s: &mut Scene, x: f32, y: f32) -> bool {
+        // The viewport the loops pass is the live surface's logical size; this
+        // module has no surface, so it passes the page it laid out against
+        // (`W` x `H`) at scale 1. Only viewport-unit lengths (`vw`/`vh`) can
+        // tell the two apart, and none of the fixtures below declare one.
+        apply_click_focus(
+            &mut s.inputs,
+            &s.vnode,
+            &mut s.focused,
+            x,
+            y,
+            1.0,
+            (W as f32, H as f32),
+        )
+    }
+
+    // -- apply_edit_to_focused ------------------------------------------------
+
+    #[test]
+    fn insert_at_caret_dispatches_new_value_and_advances_caret() {
+        let mut s = scene(&[]).focused_at(5);
+        let (repaint, log) = run_edit(&mut s, EditAction::Insert('X'));
+        assert!(repaint, "an inserted char must repaint");
+        assert_eq!(log, vec![(HANDLER.to_string(), Some("helloX".into()))]);
+        assert_eq!(s.inputs[0].cursor, 6);
+    }
+
+    #[test]
+    fn insert_lands_at_the_caret_not_at_the_end() {
+        let mut s = scene(&[]).focused_at(0);
+        let (repaint, log) = run_edit(&mut s, EditAction::Insert('X'));
+        assert!(repaint);
+        assert_eq!(log, vec![(HANDLER.to_string(), Some("Xhello".into()))]);
+        assert_eq!(s.inputs[0].cursor, 1);
+    }
+
+    #[test]
+    fn backspace_removes_the_char_before_the_caret() {
+        let mut s = scene(&[]).focused_at(5);
+        let (repaint, log) = run_edit(&mut s, EditAction::Backspace);
+        assert!(repaint);
+        assert_eq!(log, vec![(HANDLER.to_string(), Some("hell".into()))]);
+        assert_eq!(s.inputs[0].cursor, 4);
+    }
+
+    #[test]
+    fn submit_dispatches_the_unchanged_value() {
+        let mut s = scene(&[]).focused_at(5);
+        let (repaint, log) = run_edit(&mut s, EditAction::Submit);
+        assert!(
+            repaint,
+            "submit must repaint even though the text is unchanged"
+        );
+        assert_eq!(
+            log,
+            vec![(HANDLER.to_string(), Some("hello".into()))],
+            "a submit with no selection must still reach the handler"
+        );
+        assert_eq!(s.inputs[0].cursor, 5);
+    }
+
+    #[test]
+    fn caret_move_repaints_without_announcing_a_text_change() {
+        let mut s = scene(&[]).focused_at(3);
+        let (repaint, log) = run_edit(&mut s, EditAction::MoveLeft { shift: false });
+        assert!(repaint, "a caret move is a visual change and must repaint");
+        assert!(
+            log.is_empty(),
+            "a caret move must not dispatch a value change"
+        );
+        assert_eq!(s.inputs[0].cursor, 2);
+    }
+
+    #[test]
+    fn shift_caret_move_anchors_a_selection() {
+        let mut s = scene(&[]).focused_at(3);
+        let (repaint, log) = run_edit(&mut s, EditAction::MoveLeft { shift: true });
+        assert!(repaint);
+        assert!(log.is_empty());
+        assert_eq!(s.inputs[0].cursor, 2);
+        assert_eq!(
+            s.inputs[0].anchor,
+            Some(3),
+            "a shift-move must anchor at the caret's old position"
+        );
+    }
+
+    #[test]
+    fn no_focused_input_is_a_no_op() {
+        let mut s = scene(&[]);
+        assert!(!s.inputs[0].focused);
+        let (repaint, log) = run_edit(&mut s, EditAction::Insert('X'));
+        assert!(!repaint, "an edit with nothing focused must not repaint");
+        assert!(log.is_empty());
+    }
+
+    #[test]
+    fn backspace_at_caret_zero_changes_nothing() {
+        let mut s = scene(&[]).focused_at(0);
+        let (repaint, log) = run_edit(&mut s, EditAction::Backspace);
+        assert!(!repaint, "backspace at index 0 is a no-op, not a repaint");
+        assert!(log.is_empty(), "backspace at index 0 must not dispatch");
+        assert_eq!(s.inputs[0].cursor, 0);
+    }
+
+    /// The target holds no value of its own — the tree does. This is the coupling
+    /// that makes an unpublished frame (below) a correctness problem rather than
+    /// a cosmetic one.
+    #[test]
+    fn dispatch_uses_the_value_in_the_tree_not_the_target() {
+        let mut s = scene(&[("value", "world")]).focused_at(5);
+        let (repaint, log) = run_edit(&mut s, EditAction::Backspace);
+        assert!(repaint);
+        assert_eq!(log, vec![(HANDLER.to_string(), Some("worl".into()))]);
+    }
+
+    // -- edit_action_for_key --------------------------------------------------
+
+    /// Every key the two loops route to the editor. This is the mapping a dedup
+    /// could silently transpose, and `Back`/`Delete`/`Return` are exactly the
+    /// keys whose mis-wiring stays invisible until someone types.
+    #[test]
+    fn editing_keys_map_to_their_actions() {
+        use EditAction::*;
+        let cases: &[(K, bool, EditAction)] = &[
+            (K::Left, false, MoveLeft { shift: false }),
+            (K::Left, true, MoveLeft { shift: true }),
+            (K::Right, false, MoveRight { shift: false }),
+            (K::Right, true, MoveRight { shift: true }),
+            (K::Home, false, Home { shift: false }),
+            (K::Home, true, Home { shift: true }),
+            (K::End, false, End { shift: false }),
+            (K::End, true, End { shift: true }),
+            (K::Back, false, Backspace),
+            (K::Delete, false, Delete),
+            (K::Return, false, Submit),
+            // Esc is an editing key even though it changes no text: it is the
+            // only way out of a field, and the match has no fallthrough to user
+            // code, so anything absent here simply cannot happen.
+            (K::Escape, false, Blur),
+        ];
+        for (key, shift, want) in cases {
+            assert_eq!(
+                edit_action_for_key(*key, *shift),
+                Some(*want),
+                "{key:?} with shift={shift}"
+            );
+        }
+    }
+
+    /// A printable key must map to `None`: characters reach the editor through
+    /// `ReceivedCharacter`, so claiming one here would insert it twice.
+    ///
+    /// `Escape` is deliberately *not* in this list. It used to be, and that
+    /// assertion was what pinned the bug: with Esc mapping to `None` and no
+    /// other code handling it, the key was inert and a focused field could not
+    /// be left. Esc maps to [`EditAction::Blur`] and the blur behaviour is
+    /// asserted below.
+    #[test]
+    fn non_editing_keys_produce_no_action() {
+        for key in [K::A, K::R, K::Key1, K::Space, K::Tab, K::Up, K::Down] {
+            assert_eq!(
+                edit_action_for_key(key, false),
+                None,
+                "{key:?} is not an editing key"
+            );
+        }
+    }
+
+    // -- Esc unfocuses --------------------------------------------------------
+
+    /// Esc on a focused field drops focus, the selection and the caret, and
+    /// leaves the text alone.
+    ///
+    /// The caret goes because Esc is an explicit "I am done here" rather than a
+    /// click that wandered off — that is the difference from the empty-space
+    /// blur above, which deliberately keeps the caret. The value must not
+    /// change: Esc is not an edit, so the app must not be woken with an
+    /// `on:input` it did not cause.
+    #[test]
+    fn escape_on_a_focused_field_blurs_it_and_drops_its_caret_and_selection() {
+        let mut s = scene(&[]).focused_at(4);
+        s.inputs[0].anchor = Some(1);
+        assert_eq!(s.inputs[0].selection(), Some((1, 4)));
+
+        let (repaint, log) = run_edit(&mut s, EditAction::Blur);
+
+        assert!(
+            repaint,
+            "the focus ring and highlight disappear, so it repaints"
+        );
+        assert!(!s.inputs[0].focused, "Esc must leave the field");
+        assert_eq!(
+            s.inputs[0].anchor, None,
+            "a selection cannot outlive the focus"
+        );
+        assert_eq!(s.inputs[0].cursor, 0, "Esc clears the caret");
+        assert!(
+            s.inputs[0].blink_on,
+            "the caret comes back solid, not blinking"
+        );
+        assert!(
+            log.is_empty(),
+            "Esc changes no text, so nothing is dispatched"
+        );
+        assert_eq!(
+            s.focused, None,
+            "the loop's mirror of the focus must follow the blur, or it names a \
+             field that is no longer focused"
+        );
+    }
+
+    /// Esc with nothing focused is free — no repaint, no dispatch.
+    ///
+    /// Same contract as every other no-op keypress: the loops branch on
+    /// `needs_repaint()`, and a wake-up here would repaint for nothing.
+    #[test]
+    fn escape_with_nothing_focused_is_a_no_op() {
+        let mut s = scene(&[]);
+        assert!(!s.inputs[0].focused);
+        let (repaint, log) = run_edit(&mut s, EditAction::Blur);
+        assert!(
+            !repaint,
+            "there was no focus to drop, so there is nothing to redraw"
+        );
+        assert!(log.is_empty());
+        assert_eq!(s.focused, None);
+    }
+
+    /// Esc reaches the editor at all only because the key map claims it, so pin
+    /// the mapping through the same call the loops make.
+    #[test]
+    fn escape_is_routed_to_the_blur_action() {
+        assert_eq!(
+            edit_action_for_key(K::Escape, false),
+            Some(EditAction::Blur)
+        );
+        assert_eq!(
+            edit_action_for_key(K::Escape, true),
+            Some(EditAction::Blur),
+            "Shift does not change what Esc means"
+        );
+    }
+
+    // -- apply_click_focus ----------------------------------------------------
+
+    #[test]
+    fn focus_gain_puts_the_caret_at_the_end_of_the_value() {
+        let mut s = scene(&[]);
+        assert_eq!(s.inputs[0].cursor, 0);
+        assert!(run_click(&mut s, TEXT_X + 1.0, TEXT_Y));
+        assert!(s.inputs[0].focused);
+        assert_eq!(
+            s.inputs[0].cursor, 5,
+            "focus gain must put the caret at the end, so typing appends"
+        );
+    }
+
+    #[test]
+    fn click_into_a_focused_field_repositions_the_caret() {
+        let mut s = scene(&[]).focused_at(5);
+        assert!(run_click(&mut s, TEXT_X + 1.0, TEXT_Y));
+        assert!(s.inputs[0].focused);
+        assert_eq!(
+            s.inputs[0].cursor, 0,
+            "clicking the first glyph must move the caret there, not leave it at the end"
+        );
+    }
+
+    /// The regression this lane had: the origin was computed from a lookup of
+    /// the literal key `padding-left`, which the cascade never writes for an
+    /// authored shorthand. `padding: 6px 30px` therefore resolved to
+    /// `rect.x + 0` while the painter drew the first glyph at `rect.x + 30`, so
+    /// every caret sat 30px left of the glyph it claimed to be on. With the
+    /// field focused, a click on the *first* glyph was measured 30px further
+    /// right than it is and landed past the end of the value.
+    #[test]
+    fn shorthand_padding_places_the_caret_on_the_painted_glyph() {
+        const SHORTHAND_STYLE: &str = "position:absolute;left:20px;top:20px;width:200px;height:40px;font-size:15px;padding:6px 30px";
+        let mut s = scene(&[("style", SHORTHAND_STYLE)]).focused_at(5);
+        let rect = s.inputs[0].rect;
+        assert_eq!(rect.x, 20, "fixture must stay absolutely positioned");
+        let text_left = rect.x as f32 + 30.0;
+
+        assert!(run_click(&mut s, text_left + 1.0, TEXT_Y));
+        assert_eq!(
+            s.inputs[0].cursor, 0,
+            "a click on the first glyph must put the caret before it, whatever \
+             syntax the author used for the padding"
+        );
+    }
+
+    /// The origin is not merely "shifted": it must equal the painter's
+    /// `text_left` for every spelling of the same declaration, because both
+    /// lanes now read the same computed value out of
+    /// `input_metrics::input_text_metrics`.
+    #[test]
+    fn text_origin_agrees_with_the_paint_authority_for_every_padding_spelling() {
+        use velox_dom::Props;
+        let rect = velox_dom::layout::Rect {
+            x: 20,
+            y: 20,
+            w: 200,
+            h: 40,
+        };
+        let viewport = (W as f32, H as f32);
+        let authored = [
+            "padding: 6px 30px",
+            "padding-left: 30px",
+            "padding: 6px 30px; padding-left: 30px",
+            "padding-left: 30px; padding: 6px 30px",
+            "padding: 30px 6px 6px 30px",
+        ];
+        for decl in authored {
+            let props = Props::new().set("style", decl);
+            assert_eq!(
+                super::resolve_text_metrics(&props, rect, viewport).text_left,
+                50.0,
+                "`{decl}` must resolve the same first-glyph x as the paint lane"
+            );
+            // …and the authority itself, not a local copy of it.
+            let authority = crate::input_metrics::input_text_metrics(
+                props.attrs.get("style").map(|s| s.as_str()),
+                rect,
+                viewport,
+                velox_dom::layout::DEFAULT_ROOT_FONT_SIZE,
+            );
+            assert_eq!(
+                super::resolve_text_metrics(&props, rect, viewport).text_left,
+                authority.text_left,
+                "`{decl}`: the hit-test lane must not re-derive what paint computed"
+            );
+        }
+        // A viewport-unit left padding must resolve against the viewport the
+        // caller threaded in — the same one paint resolves `vw` against.
+        let props = Props::new().set("style", "padding-left: 5vw");
+        assert_eq!(
+            super::resolve_text_metrics(&props, rect, viewport).text_left,
+            rect.x as f32 + 0.05 * W as f32
+        );
+    }
+
+    /// The caret index a click at `click_x` leaves on a field styled `style`.
+    ///
+    /// The field is pre-focused on purpose: `apply_click_focus` sends the caret
+    /// to the END of the value on focus gain, so a never-focused fixture would
+    /// report "end of value" for every click x and any comparison built on it
+    /// would pass without ever running the code under test.
+    ///
+    /// Overriding `style` and `value` on top of `FIELD_STYLE` matters for the
+    /// same reason: `FIELD_STYLE` pins `font-size:15px`, and every fixture that
+    /// inherits it silently opts out of the undeclared-font-size case these
+    /// tests exist to cover.
+    fn caret_from_click(style: &str, value: &str, click_x: f32) -> usize {
+        let mut s = scene(&[("style", style), ("value", value)]).focused_at(0);
+        assert!(
+            run_click(&mut s, click_x, TEXT_Y),
+            "the click at x={click_x} must land on the field, not on empty space"
+        );
+        s.inputs[0].cursor
+    }
+
+    /// Assert that two styles describing visually identical fields answer
+    /// identically at every click x across the field, and that the answers are
+    /// non-degenerate.
+    ///
+    /// `equal_windows` sweeps the whole field rather than probing one x on
+    /// purpose. A single probe can land on a char boundary where two disagreeing
+    /// advances happen to round to the same index, and the test would pass with
+    /// the defect still in place; sweeping makes that unfalsifiable at one lucky
+    /// coordinate.
+    fn assert_carets_agree_across_field(equal: (&str, &str), value: &str) {
+        let (a, b) = equal;
+        // Collect the WHOLE profile before asserting, so a failure reports how
+        // far apart the two lanes end up rather than only the first coordinate
+        // where they parted.
+        let mut profile: Vec<(f32, usize, usize)> = Vec::new();
+        let mut indices: Vec<usize> = Vec::new();
+        let mut x = 20.0;
+        while x <= 219.0 {
+            let ca = caret_from_click(a, value, x);
+            let cb = caret_from_click(b, value, x);
+            if ca != cb {
+                profile.push((x, ca, cb));
+            }
+            indices.push(ca);
+            x += 1.0;
+        }
+        let worst = profile
+            .iter()
+            .map(|&(_, u, v)| (u as i64 - v as i64).abs())
+            .max()
+            .unwrap_or(0);
+        assert!(
+            profile.is_empty(),
+            "`{a}` and `{b}` paint identically, so the caret must land on the same \
+             glyph at every click x. They disagree at {} of 200 coordinates, by up \
+             to {worst} character(s); first divergence: {:?}",
+            profile.len(),
+            profile.first()
+        );
+        // Anti-vacuity: a lane that ignored the click entirely, or that always
+        // answered "end of value", would satisfy the equality above trivially.
+        let len = value.chars().count();
+        assert!(
+            indices.iter().any(|&i| i > 0 && i < len),
+            "every click resolved to an end-of-value caret, so this compared \
+             nothing: {indices:?}"
+        );
+    }
+
+    /// The click-to-caret lane must measure advances at the size the PAINT lane
+    /// draws them at, and must not hold a second answer to "how big is this
+    /// field".
+    ///
+    /// The proof is differential and needs no font metric, no geometry constant
+    /// and no knowledge of which face is bundled: an input that declares no
+    /// `font-size` paints at the painter's root size — that is what "declares
+    /// none" means — which is by definition the same size an input declaring
+    /// that size *explicitly* paints at. The two fixtures are therefore
+    /// identical on screen, so a click at the same x must leave the caret on
+    /// the same glyph, whatever each lane measured with.
+    ///
+    /// This is exactly the shipped-boilerplate-shaped hole: the UA sheet
+    /// declares no `font-size` for `input`, so a field that never says it
+    /// inherits 14px from the painter's root `TextStyle` while the hit-test lane
+    /// fell back to its own 16px. Every advance came out `16/14` wide, so a
+    /// click at the far end of the value landed the caret roughly one character
+    /// short for every seven clicked.
+    #[test]
+    fn the_caret_lane_measures_at_the_size_an_undeclared_font_size_paints_at() {
+        // Wide glyphs, and enough of them that a 14%-wide advance error cannot
+        // hide inside one character's slack over the 200px field.
+        assert_carets_agree_across_field(
+            (
+                "position:absolute;left:20px;top:20px;width:200px;height:40px",
+                "position:absolute;left:20px;top:20px;width:200px;height:40px;font-size:14px",
+            ),
+            &"M".repeat(20),
+        );
+    }
+
+    /// The origin half of the same defect, which survived after the origin was
+    /// first routed through the shared authority: an `em` padding resolves
+    /// against the ELEMENT's font size, so an element that inherits its size has
+    /// to resolve `4em` against the inherited size in *both* lanes. The hit-test
+    /// lane passed its own 16px where paint inherits 14px, so the caret sat a
+    /// whole `4em` — 16px — to the right of the glyph it claimed to be on.
+    #[test]
+    fn em_padding_resolves_against_the_same_inherited_size_in_both_lanes() {
+        // Vertical padding stays 0 so the only thing under test is the
+        // horizontal origin, and the field's box cannot move out from under the
+        // literal click coordinates the sweep uses.
+        assert_carets_agree_across_field(
+            (
+                "position:absolute;left:20px;top:20px;width:200px;height:40px;padding:0 4em",
+                "position:absolute;left:20px;top:20px;width:200px;height:40px;padding:0 4em;font-size:14px",
+            ),
+            &"M".repeat(20),
+        );
+    }
+
+    /// A relative `font-size` is resolved against the inherited size by the
+    /// cascade, so `2em` on a field that inherits 14px paints at 28px — and
+    /// nothing about that declaration contains a `px` suffix for a lane-local
+    /// literal parser to find.
+    #[test]
+    fn a_relative_font_size_reaches_the_caret_lane_at_its_resolved_size() {
+        assert_carets_agree_across_field(
+            (
+                "position:absolute;left:20px;top:20px;width:200px;height:40px;font-size:2em",
+                "position:absolute;left:20px;top:20px;width:200px;height:40px;font-size:28px",
+            ),
+            &"M".repeat(20),
+        );
+    }
+
+    #[test]
+    fn clicking_empty_space_blurs_clears_the_selection_and_keeps_the_caret() {
+        let mut s = scene(&[]).focused_at(5);
+        s.inputs[0].anchor = Some(1);
+        assert!(
+            run_click(&mut s, EMPTY_X, EMPTY_Y),
+            "a blur is a visual change"
+        );
+        assert!(!s.inputs[0].focused);
+        assert_eq!(
+            s.inputs[0].anchor, None,
+            "a stale highlight must not survive a blur"
+        );
+        assert_eq!(
+            s.inputs[0].cursor, 5,
+            "blur keeps the caret, so re-entering the field restores position"
+        );
+    }
+
+    #[test]
+    fn clicking_empty_space_with_nothing_focused_changes_nothing() {
+        let mut s = scene(&[]);
+        assert!(
+            !run_click(&mut s, EMPTY_X, EMPTY_Y),
+            "a click on empty space with nothing focused is not a change"
+        );
+    }
+
+    // -- the `last_vnode` window ----------------------------------------------
+    //
+    // Both loops declare `last_vnode` as `None` and only assign it on
+    // `RedrawRequested`, so before the loop's first redraw it is empty. The HMR
+    // loop additionally publishes its pre-loop frame; these tests pin what the
+    // plain loop must do to match, and what happens if it does not.
+
+    /// With no published frame there is nothing to measure or to read a value
+    /// from, so focus gain leaves the caret at 0 — which turns "click a field
+    /// and type" into a *prepend*.
+    #[test]
+    fn focus_gain_with_no_published_frame_puts_the_caret_at_zero() {
+        let mut s = scene(&[]);
+        s.vnode = None;
+        assert!(run_click(&mut s, TEXT_X + 1.0, TEXT_Y));
+        assert!(s.inputs[0].focused);
+        assert_eq!(
+            s.inputs[0].cursor, 0,
+            "with no frame to measure, focus gain leaves the caret at 0 and typing prepends"
+        );
+    }
+
+    /// The other half of the same window: the edit mutates the caret, reports
+    /// "repaint", and reaches the app not at all. The keystroke is lost and the
+    /// caret is left corrupted — the value reads as `""`, so the caret is
+    /// clamped to 0 before the insert and lands at 1 rather than 6.
+    #[test]
+    fn insert_with_no_published_frame_is_silently_dropped() {
+        let mut s = scene(&[]).focused_at(5);
+        s.vnode = None;
+        let (repaint, log) = run_edit(&mut s, EditAction::Insert('X'));
+        assert!(
+            repaint,
+            "the edit still reports a repaint, so the loop schedules a frame for nothing"
+        );
+        assert!(
+            log.is_empty(),
+            "no dispatch at all: the app never sees the keystroke, yet the caret moved"
+        );
+        assert_eq!(
+            s.inputs[0].cursor, 1,
+            "the caret is clamped to an empty value and corrupted, not advanced to 6"
+        );
+    }
+
+    /// `last_vnode` is what the two functions above read, so both loops must
+    /// publish the frame they render *before* they start dispatching input, not
+    /// only once the first `RedrawRequested` arrives. Structural — the loops need
+    /// a live window — but it is the only thing that binds the requirement to the
+    /// loops themselves rather than to one call site.
+    #[test]
+    fn both_loops_publish_their_pre_loop_frame_before_they_start() {
+        let src = include_str!("lib.rs");
+        // Assembled from two halves on purpose: `include_str!` reads this test
+        // module too, and a needle written out in full would match its own
+        // source and look like a third loop.
+        let decl = format!("last_vnode: Option<{}::VNode> = None;", "velox_dom");
+        let mut loops = 0usize;
+        let mut rest = src;
+        while let Some(at) = rest.find(decl.as_str()) {
+            loops += 1;
+            let body = &rest[at..];
+            let run_at = body
+                .find("event_loop.run(")
+                .unwrap_or_else(|| panic!("loop {loops} has no `event_loop.run(`"));
+            assert!(
+                body[..run_at].contains("last_vnode = Some("),
+                "loop {loops} must assign last_vnode in its pre-loop frame; until it does, every \
+                 click and keystroke before the first redraw is handled against an empty value"
+            );
+            rest = &body[run_at..];
+        }
+        assert_eq!(loops, 2, "expected the plain loop and the HMR loop");
+    }
 }

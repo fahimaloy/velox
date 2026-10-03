@@ -1,15 +1,143 @@
 use crate::template_ast::{AttrKind, Node, TemplateAttr};
 
+/// Hard ceiling on element nesting depth, in unclosed elements.
+///
+/// The parse loop below is iterative and keeps its open elements on a heap
+/// `Vec`, so it cannot blow the native stack the way a recursive-descent parser
+/// would. It still needs a bound for a different reason: without one, a
+/// hostile or hand-mangled `.vx` file — tens of thousands of `<div>` openers —
+/// drives unbounded work (one `Vec` entry, one `open_info` entry, and one
+/// `String` allocation per level) and ends in memory exhaustion or an
+/// arbitrarily long parse, with no error a user could act on. 256 levels is
+/// several times deeper than any hand-written template needs, so hitting this
+/// means the input is machine-generated or malformed rather than merely
+/// elaborate.
+pub const MAX_TEMPLATE_DEPTH: usize = 256;
+
 /// Minimal hand-rolled HTML-ish parser with support for:
 /// - nested elements and self-closing tags (`<input/>`)
 /// - attributes: static (`class="x"`), bind (`:value="expr"`), event (`@click="foo"`)
 /// - text and `{{ interpolation }}` splits
+///
+/// Warnings (unclosed/unmatched tags) are printed to stderr, preserving the
+/// historical behavior of this entry point.
 pub fn parse_template_to_ast(input: &str) -> Result<Vec<Node>, String> {
+    let mut warnings = Vec::new();
+    let nodes = parse_template_inner(input, &mut warnings)?;
+    emit_warnings(&warnings);
+    Ok(nodes)
+}
+
+fn emit_warnings(warnings: &[String]) {
+    for warning in warnings {
+        eprintln!("velox: warning: {warning}");
+    }
+}
+
+/// Warnings collected while parsing a template, alongside the parsed AST.
+#[derive(Debug, Clone)]
+pub struct TemplateDiag {
+    /// The parsed template AST.
+    pub nodes: Vec<Node>,
+    /// Non-fatal warnings: structural leniency notes (unclosed/unmatched
+    /// tags) plus `unknown component` diagnostics for PascalCase tags that
+    /// are not registered component imports.
+    pub warnings: Vec<String>,
+}
+
+/// Parse a template into an AST plus a list of non-fatal warnings.
+///
+/// `known_components` lists the component tag names registered for this SFC
+/// (its resolved `<script setup>` imports). A tag starting with an uppercase
+/// ASCII letter that is not in that list produces an `unknown component`
+/// warning: PascalCase tags are treated as component references, and an
+/// unregistered one renders as an inert unknown element instead of the
+/// intended component.
+///
+/// Unlike [`parse_template_to_ast`], warnings are returned to the caller
+/// instead of being printed to stderr.
+pub fn parse_template(input: &str, known_components: &[&str]) -> Result<TemplateDiag, String> {
+    let mut warnings = Vec::new();
+    let nodes = parse_template_inner(input, &mut warnings)?;
+    warnings.extend(unknown_component_warnings(&nodes, known_components, input));
+    Ok(TemplateDiag { nodes, warnings })
+}
+
+/// Warnings for PascalCase tags that are not registered components.
+///
+/// `known_components` is the set of imported component names for the SFC
+/// being compiled; `source` is the raw template text (used for best-effort
+/// line/column positions in the messages).
+pub fn unknown_component_warnings(
+    nodes: &[Node],
+    known_components: &[&str],
+    source: &str,
+) -> Vec<String> {
+    let mut warnings = Vec::new();
+    collect_unknown_components(nodes, known_components, source, &mut warnings);
+    warnings
+}
+
+fn collect_unknown_components(
+    nodes: &[Node],
+    known_components: &[&str],
+    source: &str,
+    warnings: &mut Vec<String>,
+) {
+    for node in nodes {
+        if let Node::Element { tag, .. } = node
+            && tag.starts_with(|c: char| c.is_ascii_uppercase())
+            && !known_components.contains(&tag.as_str())
+        {
+            let suggestion = format!(
+                "PascalCase tags are component references; \
+                 import it in <script setup> (import {tag} from './{tag}.vx') or fix the tag name"
+            );
+            match tag_position(source, tag) {
+                Some((line, col)) => warnings.push(format!(
+                    "unknown component <{tag}> at {line},{col} — {suggestion}"
+                )),
+                None => warnings.push(format!("unknown component <{tag}> — {suggestion}")),
+            }
+        }
+        if let Node::Element { children, .. } = node {
+            collect_unknown_components(children, known_components, source, warnings);
+        }
+    }
+}
+
+/// Best-effort (line, col) of the first occurrence of `<tag` in `source`.
+/// The template AST does not record source offsets, so the position is
+/// located by scanning for the opening tag with a word boundary after it.
+fn tag_position(source: &str, tag: &str) -> Option<(usize, usize)> {
+    let needle = format!("<{tag}");
+    let bytes = source.as_bytes();
+    let mut search_from = 0usize;
+    while let Some(rel) = source[search_from..].find(&needle) {
+        let at = search_from + rel;
+        let after = at + needle.len();
+        let boundary = match bytes.get(after) {
+            Some(&b) => !(b as char).is_ascii_alphanumeric() && b != b'_' && b != b'-',
+            None => true,
+        };
+        if boundary {
+            return Some(crate::diagnostic::line_col_at(source, at));
+        }
+        search_from = after;
+    }
+    None
+}
+
+fn parse_template_inner(input: &str, warnings: &mut Vec<String>) -> Result<Vec<Node>, String> {
     let mut i = 0usize;
     let bytes = input.as_bytes();
     let mut stack: Vec<Node> = Vec::new();
+    // Parallel stack tracking (tag, byte_offset) of *opening* elements, so we
+    // can report precise line/col positions for unclosed-tag warnings.
+    let mut open_info: Vec<(String, usize)> = Vec::new();
     let mut roots: Vec<Node> = Vec::new();
 
+    #[allow(clippy::ptr_arg)]
     fn push_child(stack: &mut Vec<Node>, roots: &mut Vec<Node>, node: Node) {
         if let Some(Node::Element { children, .. }) = stack.last_mut() {
             children.push(node);
@@ -22,9 +150,10 @@ pub fn parse_template_to_ast(input: &str) -> Result<Vec<Node>, String> {
         if bytes[i] == b'<' {
             // closing tag?
             if i + 1 < bytes.len() && bytes[i + 1] == b'/' {
+                let close_pos = i;
                 i += 2;
-                let tag = read_ident(&bytes, &mut i);
-                skip_ws(&bytes, &mut i);
+                let tag = read_ident(bytes, &mut i);
+                skip_ws(bytes, &mut i);
                 // expect '>'
                 if i < bytes.len() && bytes[i] == b'>' {
                     i += 1;
@@ -32,27 +161,40 @@ pub fn parse_template_to_ast(input: &str) -> Result<Vec<Node>, String> {
                 // pop until matching tag
                 let mut popped: Option<Node> = None;
                 while let Some(n) = stack.pop() {
-                    if let Node::Element { tag: t, .. } = &n {
-                        if t == &tag {
-                            popped = Some(n);
-                            break;
-                        }
+                    let tag_matches = match &n {
+                        Node::Element { tag: t, .. } => t == &tag,
+                        _ => false,
+                    };
+                    if tag_matches {
+                        popped = Some(n);
+                        break;
                     }
                 }
                 if let Some(n) = popped {
+                    // Drop the innermost recorded opening tag of the same name
+                    // so it is no longer reported as unclosed.
+                    if let Some(idx) = open_info.iter().rposition(|(t, _)| *t == tag) {
+                        open_info.remove(idx);
+                    }
                     push_child(&mut stack, &mut roots, n);
+                } else {
+                    let (line, col) = crate::diagnostic::line_col_at(input, close_pos);
+                    warnings.push(format!(
+                        "unmatched closing tag </{tag}> at {line},{col} — no matching opening tag; ignoring"
+                    ));
                 }
                 continue;
             }
 
             // opening or self-closing tag
+            let open_pos = i;
             i += 1;
-            let tag = read_ident(&bytes, &mut i);
+            let tag = read_ident(bytes, &mut i);
             let mut attrs: Vec<TemplateAttr> = Vec::new();
             let mut self_closing = false;
 
             loop {
-                skip_ws(&bytes, &mut i);
+                skip_ws(bytes, &mut i);
                 if i >= bytes.len() {
                     break;
                 }
@@ -61,7 +203,7 @@ pub fn parse_template_to_ast(input: &str) -> Result<Vec<Node>, String> {
                         // possible "/>"
                         self_closing = true;
                         i += 1;
-                        skip_ws(&bytes, &mut i);
+                        skip_ws(bytes, &mut i);
                         if i < bytes.len() && bytes[i] == b'>' {
                             i += 1;
                         }
@@ -73,7 +215,7 @@ pub fn parse_template_to_ast(input: &str) -> Result<Vec<Node>, String> {
                     }
                     _ => {
                         // attribute
-                        if let Some(attr) = read_attribute(&bytes, &mut i) {
+                        if let Some(attr) = read_attribute(bytes, &mut i) {
                             attrs.push(attr);
                         } else {
                             // skip unknown token
@@ -95,6 +237,28 @@ pub fn parse_template_to_ast(input: &str) -> Result<Vec<Node>, String> {
                     },
                 );
             } else {
+                // `stack` holds exactly the elements still awaiting a closing tag,
+                // so its length is the current nesting depth. Bounding it here —
+                // before the push, and only for the branch that grows the stack —
+                // turns a hostile nesting bomb into an actionable error. See
+                // `MAX_TEMPLATE_DEPTH` for why an iterative parser still needs this.
+                if stack.len() >= MAX_TEMPLATE_DEPTH {
+                    let (line, col) = crate::diagnostic::line_col_at(input, open_pos);
+                    let message =
+                        format!("template nesting depth {MAX_TEMPLATE_DEPTH} exceeded at <{tag}>");
+                    let suggestion = format!(
+                        "split the markup into smaller components, or reduce nesting below {MAX_TEMPLATE_DEPTH} levels"
+                    );
+                    return Err(crate::diagnostic::render_parse_error(
+                        input,
+                        line,
+                        col,
+                        tag.len() + 1,
+                        &message,
+                        Some(&suggestion),
+                    ));
+                }
+                open_info.push((tag.clone(), open_pos));
                 stack.push(Node::Element {
                     tag,
                     attrs,
@@ -104,15 +268,30 @@ pub fn parse_template_to_ast(input: &str) -> Result<Vec<Node>, String> {
             }
         } else if i + 1 < bytes.len() && bytes[i] == b'{' && bytes[i + 1] == b'{' {
             // interpolation
+            let open_pos = i;
             i += 2;
             let start = i;
             while i + 1 < bytes.len() && !(bytes[i] == b'}' && bytes[i + 1] == b'}') {
                 i += 1;
             }
+            if i + 1 >= bytes.len() {
+                // Unclosed interpolation: report a rich, user-facing error instead
+                // of silently treating the remainder as text.
+                let (line, col) = crate::diagnostic::line_col_at(input, open_pos);
+                let message = "unclosed '{{' — expected a matching '}}'".to_string();
+                let suggestion =
+                    "close the interpolation with '}}', e.g. '{{ count }}'".to_string();
+                return Err(crate::diagnostic::render_parse_error(
+                    input,
+                    line,
+                    col,
+                    2,
+                    &message,
+                    Some(&suggestion),
+                ));
+            }
             let expr = input[start..i].trim().to_string();
-            if i + 1 < bytes.len() {
-                i += 2;
-            } // skip "}}"
+            i += 2; // skip "}}"
             push_child(&mut stack, &mut roots, Node::Interpolation(expr));
         } else {
             // text until next '<' or '{{'
@@ -135,8 +314,19 @@ pub fn parse_template_to_ast(input: &str) -> Result<Vec<Node>, String> {
         }
     }
 
-    // Unclosed tags: drain stack to roots (best-effort)
+    // Unclosed tags: drain stack to roots (best-effort), warning about each so
+    // users know their markup is malformed even though we parse leniently.
     while let Some(n) = stack.pop() {
+        if let Node::Element { tag, .. } = &n
+            && let Some((line, col)) = open_info
+                .iter()
+                .find(|(t, _)| t == tag)
+                .map(|(_, pos)| crate::diagnostic::line_col_at(input, *pos))
+        {
+            warnings.push(format!(
+                "unclosed tag <{tag}> at {line},{col} — add a matching </{tag}>"
+            ));
+        }
         push_child(&mut stack, &mut roots, n);
     }
 
@@ -149,7 +339,7 @@ pub fn parse_template_to_ast(input: &str) -> Result<Vec<Node>, String> {
     Ok(roots)
 }
 
-fn is_all_ws(s: &str) -> bool {
+pub fn is_all_ws(s: &str) -> bool {
     s.chars().all(|c| c.is_whitespace())
 }
 
@@ -173,6 +363,35 @@ fn read_ident(bytes: &[u8], i: &mut usize) -> String {
 }
 
 fn read_attribute(bytes: &[u8], i: &mut usize) -> Option<TemplateAttr> {
+    // `#` is the slot shorthand (`#footer="slotProps"`), so it opens an attribute
+    // name the way `:` and `@` do. It is read here rather than added to the
+    // character class below so a bare `#` in an attribute position stays the
+    // skipped token it was instead of becoming an attribute named `#`.
+    if *i < bytes.len() && bytes[*i] == b'#' {
+        *i += 1;
+        let name = read_ident(bytes, i);
+        if name.is_empty() {
+            return None;
+        }
+        return Some(TemplateAttr {
+            // `#foo` names the same slot `v-slot:foo` does, so the two spellings
+            // are folded onto one name here and nothing downstream has to know
+            // which was written. Both go through `normalize_directive_name` so
+            // `#footerBar` and `v-slot:footerBar` agree on `slot:footer-bar` —
+            // a slot name is kebab-case whichever way it was authored.
+            //
+            // The `= "slotProps"` value is parsed and kept, but nothing binds it:
+            // a slot prop would have to be a channel from the child's `<slot>`
+            // back into the caller's fragment, and the fragment is rendered by
+            // the caller with the caller's bindings and no way to receive one.
+            // So a shorthand that uses the name gets the ordinary "cannot be
+            // resolved" report from the render pass, naming it as a key nothing
+            // can supply — rather than silently rendering empty.
+            name: format!("slot:{}", normalize_directive_name(&name)),
+            value: read_attr_value(bytes, i),
+            kind: AttrKind::Directive,
+        });
+    }
     let name_start = *i;
     while *i < bytes.len() {
         let c = bytes[*i] as char;
@@ -187,21 +406,15 @@ fn read_attribute(bytes: &[u8], i: &mut usize) -> Option<TemplateAttr> {
     }
     let raw_name = String::from_utf8(bytes[name_start..*i].to_vec()).ok()?;
 
-    skip_ws(bytes, i);
-    let mut value: Option<String> = None;
-    if *i < bytes.len() && bytes[*i] == b'=' {
-        *i += 1;
-        skip_ws(bytes, i);
-        value = read_quoted(bytes, i);
-    }
+    let value = read_attr_value(bytes, i);
 
-    let (kind, name) = if raw_name.starts_with(':') {
-        (AttrKind::Bind, raw_name[1..].to_string())
-    } else if raw_name.starts_with('@') {
-        (AttrKind::On, raw_name[1..].to_string())
-    } else if raw_name.starts_with("v-") {
+    let (kind, name) = if let Some(rest) = raw_name.strip_prefix(':') {
+        (AttrKind::Bind, rest.to_string())
+    } else if let Some(rest) = raw_name.strip_prefix('@') {
+        (AttrKind::On, rest.to_string())
+    } else if let Some(rest) = raw_name.strip_prefix("v-") {
         // normalize directive name: strip `v-` and convert camelCase or underscores to kebab-case
-        let raw_dir = raw_name[2..].to_string();
+        let raw_dir = rest.to_string();
         let name = normalize_directive_name(&raw_dir);
         (AttrKind::Directive, name)
     } else {
@@ -209,6 +422,19 @@ fn read_attribute(bytes: &[u8], i: &mut usize) -> Option<TemplateAttr> {
     };
 
     Some(TemplateAttr { name, value, kind })
+}
+
+/// The `= "..."` tail of an attribute, if it has one. A trailing bare token is
+/// not a value: the parser has no unquoted-value form to offer, and guessing one
+/// would swallow the next attribute.
+fn read_attr_value(bytes: &[u8], i: &mut usize) -> Option<String> {
+    skip_ws(bytes, i);
+    if *i < bytes.len() && bytes[*i] == b'=' {
+        *i += 1;
+        skip_ws(bytes, i);
+        return read_quoted(bytes, i);
+    }
+    None
 }
 
 fn read_quoted(bytes: &[u8], i: &mut usize) -> Option<String> {
@@ -231,14 +457,27 @@ fn read_quoted(bytes: &[u8], i: &mut usize) -> Option<String> {
     Some(s)
 }
 
-fn normalize_directive_name(s: &str) -> String {
+/// Fold a directive name to kebab-case: `v-slot:footerBar` → `slot:footer-bar`.
+///
+/// `pub(crate)` because a slot name is written on BOTH sides of a component
+/// boundary and both sides have to fold it the same way. This is the parent's
+/// side (a `v-slot:` / `#` directive on content being passed in);
+/// `template_codegen::normalize_slot_name` is the child's side (a static
+/// `name="footerBar"` on a `<slot>` outlet) and calls this. They are one
+/// decision, so they are one function — a second implementation here would be
+/// free to drift and the drift is invisible: a parent writing
+/// `v-slot:footerBar` and a child writing `name="footerBar"` would then simply
+/// never match, and the child would render its fallback with nothing said.
+pub(crate) fn normalize_directive_name(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for ch in s.chars() {
         if ch == '_' {
             out.push('-');
         } else if ch.is_ascii_uppercase() {
             out.push('-');
-            for lc in ch.to_lowercase() { out.push(lc); }
+            for lc in ch.to_lowercase() {
+                out.push(lc);
+            }
         } else {
             out.push(ch.to_ascii_lowercase());
         }
@@ -248,8 +487,14 @@ fn normalize_directive_name(s: &str) -> String {
     let mut compact = String::with_capacity(out.len());
     for c in out.chars() {
         if c == '-' {
-            if !prev_dash { compact.push(c); prev_dash = true; }
-        } else { compact.push(c); prev_dash = false; }
+            if !prev_dash {
+                compact.push(c);
+                prev_dash = true;
+            }
+        } else {
+            compact.push(c);
+            prev_dash = false;
+        }
     }
     compact.trim_matches('-').to_string()
 }

@@ -1,0 +1,143 @@
+   Compiling velox-style v0.1.0 (/home/fahimaloy/Projects/personal/velox/velox-style)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.97s
+     Running unittests src/lib.rs (target/debug/deps/velox_style-57614df974989df4)
+
+running 27 tests
+test fonts::tests::test_font_weight ... ok
+test fonts::tests::test_font_family_parsing ... ok
+test fonts::tests::test_generic_family ... ok
+test fonts::tests::test_line_height ... ok
+test placeholder_tests::a_class_with_a_placeholder_pseudo_keeps_its_class ... ok
+test placeholder_tests::a_double_colon_pseudo_element_is_not_mistaken_for_a_single_colon_one ... ok
+test placeholder_tests::a_filled_input_is_not_showing_its_placeholder ... ok
+test placeholder_tests::a_non_input_never_shows_a_placeholder ... ok
+test placeholder_tests::a_placeholder_as_the_sole_subject_part_is_accepted ... ok
+test placeholder_tests::a_placeholder_after_a_descendant_chain_is_still_the_subject ... ok
+test placeholder_tests::a_placeholder_in_the_chain_order_does_not_change_the_subject ... ok
+test placeholder_tests::a_placeholder_only_matches_a_control_that_is_showing_it ... ok
+test placeholder_tests::a_placeholder_that_is_not_the_subject_is_rejected ... ok
+test placeholder_tests::a_second_placeholder_part_disqualifies_the_selector ... ok
+test placeholder_tests::a_selector_with_no_placeholder_part_is_not_a_placeholder_selector ... ok
+test placeholder_tests::a_selector_with_no_pseudo_is_untouched ... ok
+test placeholder_tests::an_input_with_no_placeholder_attribute_does_not_match ... ok
+test placeholder_tests::an_unknown_pseudo_is_ignored_rather_than_rejecting_the_selector ... ok
+test placeholder_tests::the_placeholder_pseudo_is_case_insensitive ... ok
+test placeholder_tests::the_single_colon_pseudo_classes_still_parse ... ok
+test placeholder_tests::two_pseudos_in_one_selector_keep_both_flags ... ok
+test visual_effects::tests::test_border_radius_four ... ok
+test visual_effects::tests::test_border_radius_single ... ok
+test visual_effects::tests::test_box_shadow ... ok
+test placeholder_tests::a_placeholder_rule_does_not_land_on_a_filled_field ... ok
+test placeholder_tests::a_placeholder_rule_lands_on_its_own_attribute_and_not_on_style ... ok
+test placeholder_tests::a_placeholder_rule_is_not_inherited_by_descendants ... ok
+
+test result: ok. 27 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/cascade.rs (target/debug/deps/cascade-c15614bdf72690bd)
+
+running 15 tests
+test font_style_keywords_and_garbage ... ok
+test ua_body_has_8px_margin_and_h1_has_em_margin ... ok
+test ua_applies_body_margin_with_empty_author ... ok
+test author_overrides_ua_when_no_inline ... ok
+test apply_respects_ua_lt_author_lt_inline ... ok
+test inline_style_display_wins_over_author_block ... ok
+test author_display_block_overrides_ua_display_inline ... ok
+test text_align_inherits ... ok
+test font_family_inherits ... ok
+test font_style_reaches_the_computed_style_it_is_inherited_into ... ok
+test full_inheritable_set_propagates_to_children ... ok
+test ua_inline_tag_list_matches_the_layout_fallback_table ... ok
+test ua_gives_phrasing_elements_display_inline ... ok
+test ua_gives_label_inline_but_leaves_inline_block_elements_blocked ... ok
+test ua_does_not_make_block_elements_inline ... ok
+
+test result: ok. 15 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/computed_properties_tests.rs (target/debug/deps/computed_properties_tests-fa70d27522a1ce9b)
+
+running 5 tests
+test display_none_and_fixed ... ok
+test resolves_position_and_overflow ... ok
+test resolves_box_shadow_and_transitions ... ok
+test resolves_z_index_and_transform ... ok
+test stylesheet_rules_resolve_new_properties ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/hover_tests.rs (target/debug/deps/hover_tests-43fc639d6e18560f)
+
+running 1 test
+test hover_selector_applies_conditionally ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/placeholder_targeting.rs (target/debug/deps/placeholder_targeting-72bd10651ec55844)
+
+running 6 tests
+test a_placeholder_as_a_descendant_link_does_not_repaint_the_descendant ... ok
+test a_bare_input_placeholder_lands_on_the_placeholder_attribute ... ok
+test a_placeholder_on_both_a_link_and_the_subject_still_rejects ... ok
+test the_same_chain_without_a_placeholder_still_paints_the_descendant ... ok
+test a_rejected_placeholder_chain_does_not_disturb_the_rules_around_it ... ok
+test a_placeholder_rule_can_have_a_descendant_chain_before_its_subject ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/scoped_repro.rs (target/debug/deps/scoped_repro-5c1ced765c125ffe)
+
+running 3 tests
+test scoped_btn_data_v_matches ... ok
+test scoped_attr_value_and_universal ... ok
+test scoped_media_prelude_not_scoped_inner_only ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/selector_combinators.rs (target/debug/deps/selector_combinators-256334e9bcc9c56f)
+
+running 10 tests
+test descendant_matches_any_ancestor ... ok
+test leading_child_combinator_is_dropped_as_invalid ... ok
+test hover_rule_still_applies_conditionally ... ok
+test child_then_descendant_chain_matches ... ok
+test child_combinator_matches_direct_child_only ... ok
+test scoped_attribute_selector_still_matches ... ok
+test tag_and_class_rules_still_match ... ok
+test scoped_child_selector_output_matches_end_to_end ... ok
+test three_part_descendant_chain_matches_in_order ... ok
+test unspaced_child_combinator_matches_direct_child_only ... ok
+
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/style_apply_tests.rs (target/debug/deps/style_apply_tests-2c4b599d14038786)
+
+running 4 tests
+test applies_tag_and_class_rules ... ok
+test class_overrides_tag_for_same_prop ... ok
+test children_receive_styles_recursively ... ok
+test class_rule_applies_background ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/style_parse_tests.rs (target/debug/deps/style_parse_tests-086a529e7ccbfbf0)
+
+running 1 test
+test parses_color_and_fontsize_from_style_string ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/unsupported_not_pseudo.rs (target/debug/deps/unsupported_not_pseudo-ec52eb97f345a007)
+
+running 3 tests
+test a_not_bracket_group_is_kept_as_a_requirement ... ok
+test a_not_without_a_bracket_group_broadens_to_the_bare_tag ... ok
+test the_not_pseudo_is_unsupported_and_inverts_the_condition ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests velox_style
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+

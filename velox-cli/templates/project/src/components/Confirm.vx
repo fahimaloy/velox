@@ -1,0 +1,284 @@
+<template>
+  <div :class="{ dark: dark }">
+    <div class="overlay" @click="confirm_scrim">
+      <div class="panel" @click="confirm_panel">
+        <div class="head">
+          <span class="badge"><span class="badge-mark">!</span></span>
+          <h2 class="title">{{ title }}</h2>
+        </div>
+        <p class="message">{{ message }}</p>
+        <div class="foot">
+          <button class="cancel" @click="confirm_dismiss">{{ cancel_label }}</button>
+          <button class="accept" @click="confirm_accept">{{ accept_label }}</button>
+        </div>
+      </div>
+    </div>
+  </div>
+</template>
+
+<script setup>
+// A yes/no question about something destructive.
+//
+// The root element is the theme carrier, and it carries no class of its own —
+// only the `dark` flag. The cascade matches a selector's leftmost part only
+// against a STRICT ancestor (velox-style/src/lib.rs `match_prefix`), so the
+// element holding the class can never be the one a `.dark …` rule styles.
+// Comments live here and in the style block because this template parser has no
+// comment syntax of its own.
+//
+//   <Confirm
+//     :title="q"
+//     :message="m"
+//     :accept_label="go"
+//     :cancel_label="stay"
+//     :dark="dark"
+//     @accept="do_it"
+//     @dismiss="nothing_happened"
+//   />
+//
+// Render it behind a `v-if`. Events: `accept` on the primary button, `dismiss`
+// on Cancel or on the scrim.
+//
+// It is deliberately not built out of `Modal`. `Modal` takes its body and its
+// footer copy as props, and a component's scoped CSS cannot reach into anything
+// it did not render itself — content handed to a child carries the CALLER's
+// `data-v-*`, not the child's (velox-sfc `append_scope_attr`). Composing the two
+// would mean restyling every panel surface from the outside, which is worse than
+// a small self-contained component a caller can still override rule by rule.
+//
+// There is no ✕ here, only Cancel, and no Esc-to-dismiss: Velox only ever reads
+// `on:click` and `on:input`, so a `keydown` handler would be inert, and there is
+// no focus traversal for a focus trap to move. An explicit, labelled Cancel is
+// the honest version of that affordance — and the right default for a
+// destructive question, where the safe answer should be spelled out rather than
+// inferred from where the pointer happens to be.
+//
+// The primary action is the danger colour, so the cost of a mis-click is visible
+// before it is committed rather than after.
+//
+// Handler names are prefixed with `confirm_` because the root dispatcher keys its
+// arms by handler NAME alone; an unprefixed `on_dismiss` would collide with
+// `Modal`'s and leave this component's Cancel dead. See `Modal.vx`.
+pub struct Props {
+    pub title: String,
+    pub message: String,
+    pub accept_label: String,
+    pub cancel_label: String,
+    pub dark: bool,
+}
+
+pub struct State {
+    pub props: Props,
+}
+
+impl State {
+    pub fn new() -> Self {
+        Self {
+            props: Props {
+                title: String::from("Are you sure?"),
+                message: String::new(),
+                accept_label: String::from("Confirm"),
+                cancel_label: String::from("Cancel"),
+                dark: false,
+            },
+        }
+    }
+
+    pub fn title(&self) -> String {
+        self.props.title.clone()
+    }
+
+    pub fn message(&self) -> String {
+        self.props.message.clone()
+    }
+
+    pub fn accept_label(&self) -> String {
+        self.props.accept_label.clone()
+    }
+
+    pub fn cancel_label(&self) -> String {
+        self.props.cancel_label.clone()
+    }
+
+    pub fn dark(&self) -> bool {
+        self.props.dark
+    }
+
+    // Both buttons report back through the emit channel: the parent decides what
+    // `accept` means, and Cancel is just an `accept` that was declined. The
+    // parent may bind a handler that takes no payload; this one sends "1"
+    // anyway, and the caller is free to ignore it.
+    pub fn confirm_accept(&self) {
+        emit("accept", "1");
+    }
+
+    pub fn confirm_dismiss(&self) {
+        emit("dismiss", "");
+    }
+
+    // Scrim click is a third way out, matching `Modal`. The panel's own
+    // handler exists so that clicking inside the dialog does not close it —
+    // Velox hit-tests the deepest target and never bubbles.
+    pub fn confirm_scrim(&self) {
+        emit("dismiss", "");
+    }
+
+    pub fn confirm_panel(&self) {}
+}
+</script>
+
+<style scoped>
+/* The carrier needs no rule — see the template note. */
+.overlay {
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 24px;
+    background: rgba(20, 24, 27, 0.34);
+    font-family: "Inter", "Noto Sans", "DejaVu Sans", sans-serif;
+    font-size: 15px;
+    line-height: 1.45;
+}
+.panel {
+    display: flex;
+    flex-direction: column;
+    width: 100%;
+    max-width: 400px;
+    padding: 24px;
+    border: 1px solid #DFDBD2;
+    border-radius: 16px;
+    background: #ffffff;
+    color: #14181b;
+}
+
+/* The badge sits on the text's own baseline grid rather than floating above it:
+   a 26px disc against a 17px heading is a note, not a poster. */
+.head {
+    display: flex;
+    flex-direction: row;
+    align-items: center;
+    gap: 12px;
+}
+.badge {
+    flex: 0 0 auto;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 24px;
+    height: 24px;
+    border: 1px solid #f0d6d2;
+    border-radius: 999px;
+    background: #f7e9e7;
+    color: #8a2a23;
+}
+.badge-mark {
+    display: block;
+    font-size: 15px;
+    font-weight: 700;
+    line-height: 1;
+}
+.title {
+    flex: 1 1 auto;
+    min-width: 0;
+    margin: 0;
+    font-size: 20px;
+    font-weight: 700;
+    line-height: 1.25;
+    color: #14181b;
+}
+.message {
+    margin: 12px 0 0;
+    font-size: 15px;
+    line-height: 1.45;
+    color: #4A555B;
+}
+.foot {
+    display: flex;
+    flex-direction: row;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 8px;
+    margin-top: 24px;
+}
+.cancel {
+    flex: 0 0 auto;
+    height: 40px;
+    padding: 0 16px;
+    border: 1px solid #868D92;
+    border-radius: 8px;
+    background: #ffffff;
+    color: #4A555B;
+    font-size: 13px;
+    font-weight: 600;
+    line-height: 1.35;
+    text-align: center;
+}
+.cancel:hover {
+    border: 1px solid #636A70;
+    background: #EFEDE8;
+    color: #14181b;
+}
+.accept {
+    flex: 0 0 auto;
+    height: 40px;
+    padding: 0 16px;
+    border: 1px solid #a3342c;
+    border-radius: 999px;
+    background: #a3342c;
+    color: #ffffff;
+    font-size: 13px;
+    font-weight: 600;
+    line-height: 1.35;
+    text-align: center;
+}
+.accept:hover {
+    border: 1px solid #8a2a23;
+    background: #8a2a23;
+}
+
+/* Dark overrides — source order decides the winner (velox-style/src/lib.rs
+   `apply_styles_with_hover`), so they come last. */
+.dark .overlay {
+    background: rgba(4, 7, 9, 0.72);
+}
+.dark .panel {
+    border: 1px solid #313B42;
+    background: #1A2126;
+    color: #EDF2F3;
+}
+.dark .badge {
+    border: 1px solid #4A2B28;
+    background: #2a1614;
+    color: #FF8A80;
+}
+.dark .title {
+    color: #EDF2F3;
+}
+.dark .message {
+    color: #A8B4B9;
+}
+.dark .cancel {
+    border: 1px solid #64727B;
+    background: #1A2126;
+    color: #A8B4B9;
+}
+.dark .cancel:hover {
+    border: 1px solid #7F8C94;
+    background: #20282D;
+    color: #EDF2F3;
+}
+.dark .accept {
+    border: 1px solid #FF8A80;
+    background: #FF8A80;
+    color: #2B0704;
+}
+.dark .accept:hover {
+    border: 1px solid #FFA9A1;
+    background: #FFA9A1;
+}
+</style>

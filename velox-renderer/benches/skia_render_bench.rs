@@ -1,4 +1,6 @@
-use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
+#[cfg(feature = "skia-native")]
+use criterion::BenchmarkId;
+use criterion::{Criterion, criterion_group, criterion_main};
 
 #[cfg(feature = "skia-native")]
 use velox_dom::h;
@@ -11,11 +13,7 @@ fn build_repeated_boxes(count: usize) -> velox_dom::VNode {
     for i in 0..count {
         let color = if i % 2 == 0 { "#FF5533" } else { "#3355FF" };
         let style = format!("background-color:{};width:8px;height:8px", color);
-        children.push(h(
-            "div",
-            vec![("style", style.as_str())],
-            vec![],
-        ));
+        children.push(h("div", vec![("style", style.as_str())], vec![]));
     }
     h("div", vec![("style", "width:256px;height:256px")], children)
 }

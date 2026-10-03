@@ -1,8 +1,11 @@
-
 [package]
 name = "velox-renderer"
-version = "0.1.1"
+version = "0.1.0"
 edition = "2024"
+license = "MIT"
+description = "Rendering backends (Skia) for the Velox UI framework"
+authors = ["fahimaloy"]
+repository = "https://github.com/fahimaloy/velox"
 publish = false
 
 [features]
@@ -10,15 +13,31 @@ publish = false
 default = []
 
 # Optional backends
-wgpu = ["dep:winit", "dep:wgpu"]
 # `skia` enables the API surface; `skia-native` pulls the heavy dependency.
 skia = []
 # Enable platform crates when building the native Skia backend.
 # This ensures `raw-window-handle`, `egl`, and `glow` are available to the
 # `skia_gl` module when the feature is enabled.
-skia-native = ["dep:skia-safe", "skia", "dep:raw-window-handle", "dep:egl", "dep:glow", "dep:winit", "dep:softbuffer"]
+#
+# These four are NOT target-gated to `cfg(unix)` any more. `skia_surface.rs`
+# and `presenter.rs` are compiled on every target, so they name
+# `raw_window_handle::`, `egl::`, `glow::` and `softbuffer::` on every target;
+# a `cfg(unix)`-only dependency left those paths unresolvable off unix and the
+# whole feature uncompilable on Windows. `egl`/`glow`/`raw-window-handle` build
+# anywhere (no build script, no C toolchain), and `softbuffer` supports Windows
+# natively, so the GPU *platform* support stays unix-gated in `skia_gl.rs` while
+# the crates themselves are available everywhere.
+skia-native = ["dep:skia-safe", "skia", "dep:raw-window-handle", "dep:egl", "dep:glow", "dep:winit", "dep:softbuffer", "svg"]
+# SVG rasterisation support for `<img src="logo.svg">`. Split out of
+# `skia-native` so a build that never paints SVG can skip resvg entirely;
+# `skia-native` implies it to preserve the current behaviour.
+svg = ["dep:resvg"]
 
-[target.'cfg(unix)'.dependencies]
+[dependencies]
+velox-core = { path = "../velox-core" }
+# Optional backends (do NOT compile unless feature enabled)
+winit = { version = "0.28", optional = true }
+skia-safe = { version = "0.91.1", features = ["gl", "egl"], optional = true }
 # raw-window-handle helps obtain native window handles from winit
 raw-window-handle = { version = "0.5", optional = true }
 # egl bindings for creating contexts on Linux
@@ -26,25 +45,57 @@ egl = { version = "0.2", optional = true }
 # glow for loading GL function pointers where needed
 glow = { version = "0.12", optional = true }
 softbuffer = { version = "0.3", optional = true }
-
-[dependencies]
-# Optional backends (do NOT compile unless feature enabled)
-winit = { version = "0.28", optional = true }
-wgpu = { version = "0.16", optional = true }
-skia-safe = { version = "0.91.1", features = ["gl", "egl"], optional = true }
-raw-window-handle = { version = "0.5", optional = true }
-egl = { version = "0.2", optional = true }
-glow = { version = "0.12", optional = true }
 velox-dom = { path = "../velox-dom" }
 velox-style = { path = "../velox-style" }
-pollster = "0.3"
+log = "0.4"
 bytemuck = { version = "1", features = ["derive"] }
-wgpu_glyph = "0.20"
-ab_glyph = "0.2"
+
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# SVG rasterisation, for `<img src="logo.svg">` and nothing else.
+#
+# `default-features = false` is deliberate and is the whole reason this line is
+# written out longhand. resvg's default set is `svgz + text + system-fonts +
+# memmap-fonts + raster-images`; the two font features pull fontdb, rustybuzz,
+# ttf-parser and fontconfig-parser, which exist to typeset SVG `<text>` -- by far
+# the largest new build cost in the tree, spent on the one thing a logo never
+# has. `raster-images` IS kept: it is what lets an SVG that embeds a PNG (the
+# `image-webp`/`zune-jpeg`/`gif` codecs behind it) resolve, which a brand logo
+# produced by a design tool plausibly does.
+#
+# The version is a bare major because cargo has to resolve it: usvg 0.48 needs
+# tiny-skia `^0.12`, and this host already has tiny-skia 0.8.4 and 0.11.4 in its
+# cargo cache from unrelated work. Pinning tiny-skia by hand here would only
+# constrain one side of that resolution and risk an unsatisfiable tree; the
+# right answer is to let cargo pick, which it does.
+resvg = { version = "0.48", default-features = false, features = ["raster-images"], optional = true }
 
 [dev-dependencies]
 velox-core = { path = "../velox-core" }
 velox-style = { path = "../velox-style" }
+velox-sfc = { path = "../velox-sfc" }
+skia-safe = { version = "0.91.1", features = ["gl", "egl"] }
+# `criterion` is a dev-dependency of `velox-renderer` for
+# `benches/skia_render_bench.rs` and nothing else; the crate is
+# `publish = false`, so neither it nor criterion can reach anything a user
+# builds.
+#
+# WAIVED ADVISORY: RUSTSEC-2026-0204 (crossbeam-epoch 0.9.18). Its only path is
+#   crossbeam-epoch <- crossbeam-deque <- rayon-core <- rayon <- criterion
+# reached through the `[dev-dependencies]` edge below. Measured 2026-10-02:
+# `cargo tree -i crossbeam-epoch --workspace -e normal` prints "nothing to
+# print". No patched version is published, so the benchmarks are kept and the
+# advisory is waived instead; the full rationale and re-check trigger live in
+# the `dependency-audit` job in `.github/workflows/ci.yml` and in
+# `velox-core/Cargo.toml`, which has the identical dev-dependency.
+#
+# The other four waived advisories in that job are build-time only and do not
+# touch this file: RUSTSEC-2026-0067 / -0068 (tar 0.4.44) are reached through
+# `skia-bindings`' build script, and RUSTSEC-2026-0194 / -0195 (quick-xml
+# 0.38.4) through the `wayland-scanner` proc-macro that `wayland-client` builds
+# with. A build script and a proc-macro both run on the host at compile time, so
+# neither `tar` nor `quick-xml` is linked into any binary this repo produces.
 criterion = "0.5"
 
 [[bench]]

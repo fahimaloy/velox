@@ -1,0 +1,202 @@
+<template>
+  <div class="app">
+    <h1 class="title">{{ title }}</h1>
+    <section class="section">
+      <h2 class="heading">Centering: margin 0 auto</h2>
+      <div class="centered">centered block</div>
+    </section>
+    <section class="section">
+      <h2 class="heading">Spacing: margin, padding, gap</h2>
+      <div class="spacing-row">
+        <div class="box box-a"></div>
+        <div class="box box-b"></div>
+        <div class="box box-c"></div>
+      </div>
+    </section>
+    <section class="section">
+      <h2 class="heading">Flex row and column</h2>
+      <div class="flex-row"><div class="cell"></div><div class="cell"></div><div class="cell"></div></div>
+      <div class="flex-col"><div class="dot"></div><div class="dot"></div></div>
+    </section>
+    <section class="section">
+      <h2 class="heading">Scroll: overflow auto</h2>
+      <div class="scroll-box">
+        <div class="scroll-item">Scroll item 1</div>
+        <div class="scroll-item">Scroll item 2</div>
+        <div class="scroll-item">Scroll item 3</div>
+        <div class="scroll-item">Scroll item 4</div>
+        <div class="scroll-item">Scroll item 5</div>
+      </div>
+    </section>
+    <section class="section section-center">
+      <h2 class="heading">Text align: center</h2>
+      <p class="line">Inherited text-align centers this line.</p>
+    </section>
+    <section class="section section-right">
+      <h2 class="heading">Text align: right</h2>
+      <p class="line">Inherited text-align right-aligns this line.</p>
+    </section>
+    <section class="section">
+      <h2 class="heading">Wrap: flex-wrap and 30% widths</h2>
+      <div class="wrap-row"><div class="wrap-cell"></div><div class="wrap-cell"></div><div class="wrap-cell"></div><div class="wrap-cell"></div></div>
+    </section>
+  </div>
+</template>
+
+<script setup>
+pub struct State;
+
+impl State {
+    pub fn new() -> Self {
+        Self
+    }
+
+    pub fn title(&self) -> String {
+        String::from("Velox Layout Showcase")
+    }
+}
+</script>
+
+<style scoped>
+.app {
+    width: 100%;
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    padding: 10px 0 20px 0;
+    background: #0f172a;
+    color: #e2e8f0;
+    font-family: system-ui, -apple-system, sans-serif;
+}
+.title {
+    display: block;
+    flex-shrink: 0;
+    margin: 0 0 4px 0;
+    font-size: 22px;
+    font-weight: 700;
+    color: #f1f5f9;
+}
+.section {
+    display: block;
+    flex-shrink: 0;
+    margin: 0 8px 4px 8px;
+    padding: 6px 10px;
+    border-radius: 10px;
+    background: #1e293b;
+}
+.heading {
+    display: block;
+    margin: 0 0 4px 0;
+    font-size: 14px;
+    font-weight: 600;
+    color: #93c5fd;
+}
+/* A fixed width plus `margin: 0 auto` centers the block in its section. */
+.centered {
+    display: block;
+    width: 320px;
+    margin: 0 auto;
+    padding: 10px;
+    border-radius: 8px;
+    background: #a78bfa;
+    color: #0f172a;
+    text-align: center;
+    font-weight: 600;
+    font-size: 13px;
+}
+/* Per-item padding, margin and the flex `gap` all show up as spacing. */
+.spacing-row {
+    display: flex;
+    flex-direction: row;
+    align-items: flex-start;
+    gap: 8px;
+}
+.box {
+    border-radius: 6px;
+}
+.box-a {
+    width: 90px;
+    height: 24px;
+    padding: 12px;
+    background: #38bdf8;
+}
+.box-b {
+    width: 90px;
+    height: 24px;
+    padding: 20px;
+    background: #4ade80;
+}
+.box-c {
+    width: 90px;
+    height: 24px;
+    padding: 12px;
+    margin: 8px;
+    background: #fbbf24;
+}
+.flex-row {
+    display: flex;
+    flex-direction: row;
+    gap: 8px;
+    margin-bottom: 6px;
+}
+.cell {
+    flex: 1;
+    height: 20px;
+    border-radius: 6px;
+    background: #334155;
+}
+.flex-col {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+.dot {
+    width: 40px;
+    height: 10px;
+    border-radius: 3px;
+    background: #f472b6;
+}
+/* A fixed height plus `overflow: auto` turns the list into a scroll box. */
+.scroll-box {
+    height: 68px;
+    overflow: auto;
+    padding: 4px;
+    border-radius: 8px;
+    background: #0b1220;
+}
+.scroll-item {
+    padding: 4px 8px;
+    margin-bottom: 4px;
+    border-radius: 6px;
+    background: #334155;
+    font-size: 13px;
+}
+/*
+ * `text-align` and `font-family` are inherited: the section sets the
+ * alignment and the paragraph only sets its own size.
+ */
+.section-center {
+    text-align: center;
+}
+.section-right {
+    text-align: right;
+}
+.line {
+    display: block;
+    margin: 0;
+    font-size: 14px;
+}
+/* Percentage widths plus `flex-wrap` flow the cells onto a second row. */
+.wrap-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+}
+.wrap-cell {
+    width: 30%;
+    height: 12px;
+    border-radius: 6px;
+    background: #22c55e;
+}
+</style>

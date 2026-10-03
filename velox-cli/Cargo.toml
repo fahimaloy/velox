@@ -1,12 +1,52 @@
 
 [package]
 name = "velox-cli"
-version = "0.1.1"
-edition = "2021"
+version = "0.1.0"
+edition = "2024"
+description = "CLI tools for building Velox applications"
+authors = ["fahimaloy"]
+license = "MIT"
+repository = "https://github.com/fahimaloy/velox"
+homepage = "https://velox.dev"
 publish = false
+
+[[bin]]
+name = "velox"
+path = "src/bin/main.rs"
 
 [dependencies]
 clap = { version = "4", features = ["derive"] }
 anyhow = "1"
-# path dep to your parser crate (hyphenated name maps to `velox_sfc` in code)
+log = "0.4"
+env_logger = "0.11"
 velox-sfc = { path = "../velox-sfc" }
+velox-style = { path = "../velox-style" }
+
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0.149"
+velox-renderer = { version = "0.1.0", path = "../velox-renderer" }
+# Real filesystem watching for the dev server. Replaces a 400 ms polling
+# `read_dir` walk: `notify` reports changes in well under 100 ms and does not
+# touch every file on every tick. See `commands::dev::DirWatcher`.
+#
+# NOTE a failure mode this introduces that the old poll did not have: on Linux
+# `notify` uses inotify, which is a *finite* kernel resource. Exhausting
+# `fs.inotify.max_user_watches` / `max_user_instances` makes `watcher.watch()`
+# fail with "No space left on device". The dev server surfaces that error and
+# keeps running rather than going silently blind — see `DirWatcher`.
+notify = "6"
+
+[lib]
+name = "velox_cli"
+path = "src/lib.rs"
+
+[dev-dependencies]
+# Integration tests assert on styled vnodes (`Props`/`VNode`/`h`) and drive the
+# real layout pass, so they need velox-dom directly rather than through
+# velox-style's re-exports.
+velox-dom = { path = "../velox-dom" }
+# `skia-native` is enabled here (not just for a separate CI job) so the
+# pixel-level scoping proof runs in the DEFAULT `cargo test` pass rather than
+# behind `#[ignore]`, which is how the unscoped-merge defect survived a green
+# suite. It is a dev-dependency, so it never reaches a scaffolded app.
+velox-renderer = { path = "../velox-renderer", features = ["skia-native"] }

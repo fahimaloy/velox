@@ -4,14 +4,17 @@
 
 #[cfg(all(feature = "skia-native", unix))]
 #[test]
-#[ignore]
+#[ignore = "requires skia-native feature and GPU hardware"]
 fn render_hover_styles_checksum() {
     use velox_dom::h;
-    use velox_style::{apply_styles_with_hover, Stylesheet};
+    use velox_style::{Stylesheet, apply_styles_with_hover};
 
     let vnode = h(
         "div",
-        vec![("class", "btn"), ("style", "background-color:#00FF00;width:60px;height:24px")],
+        vec![
+            ("class", "btn"),
+            ("style", "background-color:#00FF00;width:60px;height:24px"),
+        ],
         vec![],
     );
     let sheet = Stylesheet::parse(".btn:hover { background-color: #FF0000; }");
@@ -21,24 +24,16 @@ fn render_hover_styles_checksum() {
         velox_renderer::events::is_hoverable(tag, props)
     });
 
-    let png_normal = match velox_renderer::render_vnode_to_raster_png(
-        &vnode_normal,
-        &sheet,
-        64,
-        32,
-    ) {
+    let png_normal = match velox_renderer::render_vnode_to_raster_png(&vnode_normal, &sheet, 64, 32)
+    {
         Ok(b) => b,
         Err(e) => panic!("render failed: {}", e),
     };
-    let png_hovered = match velox_renderer::render_vnode_to_raster_png(
-        &vnode_hovered,
-        &sheet,
-        64,
-        32,
-    ) {
-        Ok(b) => b,
-        Err(e) => panic!("render failed: {}", e),
-    };
+    let png_hovered =
+        match velox_renderer::render_vnode_to_raster_png(&vnode_hovered, &sheet, 64, 32) {
+            Ok(b) => b,
+            Err(e) => panic!("render failed: {}", e),
+        };
 
     let checksum_normal = fnv1a(&png_normal);
     let checksum_hovered = fnv1a(&png_hovered);
@@ -50,6 +45,7 @@ fn render_hover_styles_checksum() {
     assert_eq!(checksum_hovered, EXPECTED_HOVER_CHECKSUM);
 }
 
+#[cfg(all(feature = "skia-native", unix))]
 fn fnv1a(bytes: &[u8]) -> u32 {
     let mut hash: u32 = 0x811c9dc5;
     for b in bytes {

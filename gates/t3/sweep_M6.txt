@@ -1,0 +1,47 @@
+$ cargo test -p velox-renderer --test wrapped_text_each_line_once
+RC=101
+
+running 8 tests
+test a_single_line_is_untouched ... ok
+test the_last_line_of_a_wrapped_paragraph_is_painted ... ok
+test a_wrapped_inline_element_paints_the_same_as_the_bare_paragraph ... ok
+test a_forced_line_break_narrower_than_its_container_still_breaks_per_line ... ok
+test two_lines_each_painted_once_at_its_own_line ... ok
+test every_glyph_of_a_wrapped_paragraph_is_inked_exactly_once ... FAILED
+test two_inline_elements_on_one_line_keep_their_places ... ok
+test two_paragraphs_whose_source_index_collides_both_paint ... ok
+
+failures:
+
+---- every_glyph_of_a_wrapped_paragraph_is_inked_exactly_once stdout ----
+
+thread 'every_glyph_of_a_wrapped_paragraph_is_inked_exactly_once' (1976091) panicked at velox-renderer/tests/wrapped_text_each_line_once.rs:541:5:
+assertion `left == right` failed: wrapped bands [Rect { y0: 3, y1: 13, x0: 0, x1: 105, ink: 545 }, Rect { y0: 25, y1: 39, x0: 1, x1: 116, ink: 605 }, Rect { y0: 47, y1: 57, x0: 0, x1: 35, ink: 201 }] vs hand-split reference [Rect { y0: 3, y1: 13, x0: 0, x1: 105, ink: 545 }, Rect { y0: 25, y1: 39, x0: 1, x1: 116, ink: 605 }, Rect { y0: 47, y1: 57, x0: 0, x1: 62, ink: 318 }]
+  left: [Rect { y0: 3, y1: 13, x0: 0, x1: 105, ink: 545 }, Rect { y0: 25, y1: 39, x0: 1, x1: 116, ink: 605 }, Rect { y0: 47, y1: 57, x0: 0, x1: 35, ink: 201 }]
+ right: [Rect { y0: 3, y1: 13, x0: 0, x1: 105, ink: 545 }, Rect { y0: 25, y1: 39, x0: 1, x1: 116, ink: 605 }, Rect { y0: 47, y1: 57, x0: 0, x1: 62, ink: 318 }]
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    every_glyph_of_a_wrapped_paragraph_is_inked_exactly_once
+
+test result: FAILED. 7 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.12s
+
+   Compiling velox-renderer v0.1.0 (/home/fahimaloy/Projects/personal/velox/velox-renderer)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.13s
+     Running tests/wrapped_text_each_line_once.rs (target/debug/deps/wrapped_text_each_line_once-b27fb5b3c2c47737)
+error: test failed, to rerun pass `-p velox-renderer --test wrapped_text_each_line_once`
+error: 1 target failed:
+    `-p velox-renderer --test wrapped_text_each_line_once`
+
+$ cargo test -p velox-renderer --test tagline_tail_is_painted
+RC=0
+
+running 1 test
+test the_tagline_paints_its_tail_and_the_png_is_written ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.24s
+
+   Compiling velox-renderer v0.1.0 (/home/fahimaloy/Projects/personal/velox/velox-renderer)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.55s
+     Running tests/tagline_tail_is_painted.rs (target/debug/deps/tagline_tail_is_painted-b2de028e62832146)

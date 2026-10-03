@@ -1,0 +1,8 @@
+   Compiling velox-renderer v0.1.0 (/home/fahimaloy/Projects/personal/velox/velox-renderer)
+   Compiling velox-cli v0.1.0 (/home/fahimaloy/Projects/personal/velox/velox-cli)
+    Checking velox-dom v0.1.0 (/home/fahimaloy/Projects/personal/velox/velox-dom)
+    Checking velox-sfc v0.1.0 (/home/fahimaloy/Projects/personal/velox/velox-sfc)
+   Compiling velox-example-todo v0.1.0 (/home/fahimaloy/Projects/personal/velox/examples/todo)
+   Compiling velox-example-showcase v0.1.0 (/home/fahimaloy/Projects/personal/velox/examples/showcase)
+   Compiling velox-example-counter v0.1.0 (/home/fahimaloy/Projects/personal/velox/examples/counter)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 3.88s

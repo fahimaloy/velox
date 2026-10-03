@@ -1,0 +1,54 @@
+   Compiling velox-renderer v0.1.0 (/home/fahimaloy/Projects/personal/velox/velox-renderer)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.42s
+     Running unittests src/lib.rs (target/debug/deps/velox_renderer-05af19ad498b958d)
+
+running 1 test
+PROBE "Buy milk"               1=75w/13a 1.25=75w/13a 1.5=75w/13a     distinct3=false
+PROBE "Hg"                     1=24w/12a 1.25=24w/12a 1.5=24w/12a     distinct3=false
+PROBE "W"                      1=17w/12a 1.25=17w/12a 1.5=17w/12a     distinct3=false
+PROBE "i"                      1=5w/13a 1.25=5w/13a 1.5=5w/13a        distinct3=false
+PROBE "The quick brown fox"    1=171w/13a 1.25=171w/13a 1.5=171w/13a  distinct3=false
+PROBE "abcdefghij"             1=89w/13a 1.25=89w/13a 1.5=89w/13a     distinct3=false
+PROBE "Todo"                   1=41w/13a 1.25=41w/13a 1.5=41w/13a     distinct3=false
+PROBE "MMMM"                   1=60w/12a 1.25=60w/12a 1.5=60w/12a     distinct3=false
+PROBE "0.5"                    1=27w/12a 1.25=27w/12a 1.5=27w/12a     distinct3=false
+PROBE "Hello, world!"          1=107w/13a 1.25=107w/13a 1.5=107w/13a  distinct3=false
+PROBE "x1"                     1=21w/12a 1.25=21w/12a 1.5=21w/12a     distinct3=false
+PROBE "A"                      1=12w/12a 1.25=12w/12a 1.5=12w/12a     distinct3=false
+PROBE "1234567890"             1=110w/12a 1.25=110w/12a 1.5=110w/12a  distinct3=false
+PROBE "mmmmm"                  1=85w/9a 1.25=85w/9a 1.5=85w/9a        distinct3=false
+PROBE "iiiii"                  1=25w/13a 1.25=25w/13a 1.5=25w/13a     distinct3=false
+PROBE "Wave"                   1=47w/12a 1.25=47w/12a 1.5=47w/12a     distinct3=false
+PROBE "Buy  milk"              1=80w/13a 1.25=80w/13a 1.5=80w/13a     distinct3=false
+PROBE "todo-item"              1=83w/13a 1.25=83w/13a 1.5=83w/13a     distinct3=false
+PROBE "remove"                 1=64w/9a 1.25=64w/9a 1.5=64w/9a        distinct3=false
+PROBE "check"                  1=49w/13a 1.25=49w/13a 1.5=49w/13a     distinct3=false
+PROBE "Wk"                     1=27w/13a 1.25=27w/13a 1.5=27w/13a     distinct3=false
+PROBE "aa"                     1=20w/9a 1.25=20w/9a 1.5=20w/9a        distinct3=false
+PROBE "ab"                     1=21w/13a 1.25=21w/13a 1.5=21w/13a     distinct3=false
+PROBE "ba"                     1=21w/13a 1.25=21w/13a 1.5=21w/13a     distinct3=false
+PROBE "0"                      1=11w/12a 1.25=11w/12a 1.5=11w/12a     distinct3=false
+PROBE "00"                     1=22w/12a 1.25=22w/12a 1.5=22w/12a     distinct3=false
+PROBE "000"                    1=33w/12a 1.25=33w/12a 1.5=33w/12a     distinct3=false
+PROBE "mm"                     1=34w/9a 1.25=34w/9a 1.5=34w/9a        distinct3=false
+PROBE "Wm"                     1=34w/12a 1.25=34w/12a 1.5=34w/12a     distinct3=false
+PROBE "MM"                     1=30w/12a 1.25=30w/12a 1.5=30w/12a     distinct3=false
+PROBE "mmM"                    1=49w/12a 1.25=49w/12a 1.5=49w/12a     distinct3=false
+PROBE "1l"                     1=16w/13a 1.25=16w/13a 1.5=16w/13a     distinct3=false
+PROBE "Add"                    1=34w/13a 1.25=34w/13a 1.5=34w/13a     distinct3=false
+PROBE "new_todo"               1=82w/13a 1.25=82w/13a 1.5=82w/13a     distinct3=false
+PROBE "white"                  1=47w/13a 1.25=47w/13a 1.5=47w/13a     distinct3=false
+PROBE "TodoInput"              1=86w/13a 1.25=86w/13a 1.5=86w/13a     distinct3=false
+PROBE "the composer"           1=116w/13a 1.25=116w/13a 1.5=116w/13a  distinct3=false
+PROBE "x"                      1=10w/9a 1.25=10w/9a 1.5=10w/9a        distinct3=false
+PROBE "ll"                     1=10w/13a 1.25=10w/13a 1.5=10w/13a     distinct3=false
+PROBE "111"                    1=33w/12a 1.25=33w/12a 1.5=33w/12a     distinct3=false
+PROBE "aaa"                    1=30w/9a 1.25=30w/9a 1.5=30w/9a        distinct3=false
+PROBE "AA"                     1=24w/12a 1.25=24w/12a 1.5=24w/12a     distinct3=false
+PROBE "OO"                     1=26w/12a 1.25=26w/12a 1.5=26w/12a     distinct3=false
+PROBE "QQ"                     1=26w/12a 1.25=26w/12a 1.5=26w/12a     distinct3=false
+PROBE "gjpqy"                  1=48w/13a 1.25=48w/13a 1.5=48w/13a     distinct3=false
+test skia_render::skia_impl::tests::zz_probe_widths ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 128 filtered out; finished in 0.03s
+

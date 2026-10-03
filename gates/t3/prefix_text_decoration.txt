@@ -1,0 +1,30 @@
+   Compiling velox-renderer v0.1.0 (/home/fahimaloy/Projects/personal/velox/velox-renderer)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 2.03s
+     Running tests/text_decoration_render.rs (target/debug/deps/text_decoration_render-ab39a23f620d7bf7)
+
+running 7 tests
+test line_through_paints_a_rule_that_the_baseline_does_not ... ok
+test none_paints_no_rule_at_all ... ok
+test the_rule_is_drawn_once_per_wrapped_line ... FAILED
+test underline_line_through_draws_both_bands ... ok
+test the_wrapped_strike_and_underline_stay_one_band_per_line_each ... ok
+test a_later_none_clears_an_earlier_decoration_in_the_same_block ... ok
+test the_strike_is_a_different_band_from_the_underline ... ok
+
+failures:
+
+---- the_rule_is_drawn_once_per_wrapped_line stdout ----
+
+thread 'the_rule_is_drawn_once_per_wrapped_line' (1669182) panicked at velox-renderer/tests/text_decoration_render.rs:351:9:
+assertion `left != right` failed: bands 0 and 1 are both 62px wide: line 1's rule is struck at another line's advance. All bands: [Band { top: 10, bottom: 10, left: 0, right: 61 }, Band { top: 32, bottom: 32, left: 0, right: 61 }, Band { top: 54, bottom: 54, left: 0, right: 61 }]
+  left: 62
+ right: 62
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    the_rule_is_drawn_once_per_wrapped_line
+
+test result: FAILED. 6 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.23s
+
+error: test failed, to rerun pass `-p velox-renderer --test text_decoration_render`

@@ -1,0 +1,54 @@
+skia_render.rs sha256 93cd720e4db118ec75a32d66de9866ebde728d7e19ca0dd2ba8d31c61733157d
+layout.rs      sha256 f5e69d4a884b11a5a479ff255157a33025c5686b436f103f187460b8965556b9
+
+=== M1: revert the whole fix: the pre-fix painter, which draws the whole string at every line node and breaks after line 0
+  COMPILED: yes
+  suite RC: ['RC=101', 'RC=101', 'RC=101']
+  RED: ['a_forced_line_break_narrower_than_its_container_still_breaks_per_line', 'a_wrapped_inline_element_paints_the_same_as_the_bare_paragraph', 'every_glyph_of_a_wrapped_paragraph_is_inked_exactly_once', 'every_wrapped_line_of_a_paragraph_is_painted_once', 'the_last_line_of_a_wrapped_paragraph_is_painted', 'the_rule_is_drawn_once_per_wrapped_line', 'two_lines_each_painted_once_at_its_own_line']
+  restored, digest verified
+=== M2: dedupe instead of fix: paint only the FIRST node of a run and return early on the rest, so lines 1..N-1 are never drawn
+  COMPILED: yes
+  suite RC: ['RC=101']
+  RED: []
+  restored, digest verified
+=== M3: drop the word offset: every line node starts at word 0, so each line paints the whole paragraph and overruns its box
+  COMPILED: yes
+  suite RC: ['RC=101']
+  RED: ['every_glyph_of_a_wrapped_paragraph_is_inked_exactly_once', 'the_last_line_of_a_wrapped_paragraph_is_painted']
+  restored, digest verified
+=== M4: key the word tally on one constant instead of the VNode address: the key then collides between the tree's two paragraphs
+  COMPILED: yes
+  suite RC: ['RC=101']
+  RED: ['a_forced_line_break_narrower_than_its_container_still_breaks_per_line', 'every_glyph_of_a_wrapped_paragraph_is_inked_exactly_once', 'two_inline_elements_on_one_line_keep_their_places', 'two_paragraphs_whose_source_index_collides_both_paint']
+  restored, digest verified
+=== M5: break at the CONTAINER width again rather than at this line's own advance: for text inside a wrapped inline element the container is a per-line fragment box, so a different string is broken on every line
+  COMPILED: yes
+  suite RC: ['RC=101']
+  RED: ['a_forced_line_break_narrower_than_its_container_still_breaks_per_line']
+  restored, digest verified
+=== M6: never carry the tally forward: store 0 whenever this is not the first line box, so every line node redraws line 0
+  COMPILED: yes
+  suite RC: ['RC=101']
+  RED: ['every_glyph_of_a_wrapped_paragraph_is_inked_exactly_once']
+  restored, digest verified
+=== D1: the design the T3 brief proposed, implemented: hoist `merged` above the per-line loop so one text VNode becomes ONE LayoutNode carrying every line, emitted once
+  COMPILED: yes
+  suite RC: ['RC=101', 'RC=0', 'RC=101', 'RC=101']
+  RED: ['a_forced_line_break_narrower_than_its_container_still_breaks_per_line', 'a_wrapped_inline_element_paints_the_same_as_the_bare_paragraph', 'a_wrapped_text_yields_one_node_per_line_in_line_order', 'each_line_reports_its_own_advance_not_the_whole_strings', 'every_glyph_of_a_wrapped_paragraph_is_inked_exactly_once', 'every_wrapped_line_of_a_paragraph_is_painted_once', 'the_last_line_of_a_wrapped_paragraph_is_painted', 'two_lines_each_painted_once_at_its_own_line']
+  restored, digest verified
+
+=================== SWEEP TABLE ====================
+M1  | compiled=yes | CAUGHT      | RED: ['a_forced_line_break_narrower_than_its_container_still_breaks_per_line', 'a_wrapped_inline_element_paints_the_same_as_the_bare_paragraph', 'every_glyph_of_a_wrapped_paragraph_is_inked_exactly_once', 'every_wrapped_line_of_a_paragraph_is_painted_once', 'the_last_line_of_a_wrapped_paragraph_is_painted', 'the_rule_is_drawn_once_per_wrapped_line', 'two_lines_each_painted_once_at_its_own_line']
+     | revert the whole fix: the pre-fix painter, which draws the whole string at every line node and breaks after line 0
+M2  | compiled=yes | NOT CAUGHT  | RED: []
+     | dedupe instead of fix: paint only the FIRST node of a run and return early on the rest, so lines 1..N-1 are never drawn
+M3  | compiled=yes | CAUGHT      | RED: ['every_glyph_of_a_wrapped_paragraph_is_inked_exactly_once', 'the_last_line_of_a_wrapped_paragraph_is_painted']
+     | drop the word offset: every line node starts at word 0, so each line paints the whole paragraph and overruns its box
+M4  | compiled=yes | CAUGHT      | RED: ['a_forced_line_break_narrower_than_its_container_still_breaks_per_line', 'every_glyph_of_a_wrapped_paragraph_is_inked_exactly_once', 'two_inline_elements_on_one_line_keep_their_places', 'two_paragraphs_whose_source_index_collides_both_paint']
+     | key the word tally on one constant instead of the VNode address: the key then collides between the tree's two paragraphs
+M5  | compiled=yes | CAUGHT      | RED: ['a_forced_line_break_narrower_than_its_container_still_breaks_per_line']
+     | break at the CONTAINER width again rather than at this line's own advance: for text inside a wrapped inline element the container is a per-line fragment box, so a different string is broken on every line
+M6  | compiled=yes | CAUGHT      | RED: ['every_glyph_of_a_wrapped_paragraph_is_inked_exactly_once']
+     | never carry the tally forward: store 0 whenever this is not the first line box, so every line node redraws line 0
+D1  | compiled=yes | CAUGHT      | RED: ['a_forced_line_break_narrower_than_its_container_still_breaks_per_line', 'a_wrapped_inline_element_paints_the_same_as_the_bare_paragraph', 'a_wrapped_text_yields_one_node_per_line_in_line_order', 'each_line_reports_its_own_advance_not_the_whole_strings', 'every_glyph_of_a_wrapped_paragraph_is_inked_exactly_once', 'every_wrapped_line_of_a_paragraph_is_painted_once', 'the_last_line_of_a_wrapped_paragraph_is_painted', 'two_lines_each_painted_once_at_its_own_line']
+     | the design the T3 brief proposed, implemented: hoist `merged` above the per-line loop so one text VNode becomes ONE LayoutNode carrying every line, emitted once

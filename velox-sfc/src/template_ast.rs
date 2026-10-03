@@ -1,8 +1,8 @@
 #[derive(Debug, Clone, PartialEq)]
 pub enum AttrKind {
-    Static, // class="app"
-    Bind,   // :value="count"
-    On,     // @click="increment"
+    Static,    // class="app"
+    Bind,      // :value="count"
+    On,        // @click="increment"
     Directive, // v-if, v-else, v-for etc
 }
 

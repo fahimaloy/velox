@@ -4,14 +4,17 @@
 
 #[cfg(all(feature = "skia-native", unix))]
 #[test]
-#[ignore]
+#[ignore = "requires skia-native feature and GPU hardware"]
 fn render_dpr2_checksum() {
     use velox_dom::{h, text};
     use velox_style::Stylesheet;
 
     let vnode = h(
         "div",
-        vec![("style", "background-color:#FFFFFF;border:1px solid #000000;width:64px;height:32px")],
+        vec![(
+            "style",
+            "background-color:#FFFFFF;border:1px solid #000000;width:64px;height:32px",
+        )],
         vec![text("Hi")],
     );
 
@@ -33,6 +36,7 @@ fn render_dpr2_checksum() {
     assert_eq!(checksum, EXPECTED_DPR_CHECKSUM);
 }
 
+#[cfg(all(feature = "skia-native", unix))]
 fn fnv1a(bytes: &[u8]) -> u32 {
     let mut hash: u32 = 0x811c9dc5;
     for b in bytes {

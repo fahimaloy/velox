@@ -1,0 +1,74 @@
+   Compiling velox-cli v0.1.0 (/home/fahimaloy/Projects/personal/velox/velox-cli)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.59s
+     Running tests/template_palette_wcag.rs (target/debug/deps/template_palette_wcag-e33fb7c24f4e8eb3)
+
+running 7 tests
+test one_value_per_role ... ok
+test decorative_edges_clear_their_documented_floor ... ok
+test no_colour_hides_in_an_unread_property ... ok
+test the_scrims_are_not_transparent ... FAILED
+test every_colour_declaration_has_a_role ... FAILED
+test every_control_boundary_clears_three_to_one ... FAILED
+test every_text_pair_clears_four_five_to_one ... FAILED
+
+failures:
+
+---- the_scrims_are_not_transparent stdout ----
+
+thread 'the_scrims_are_not_transparent' (2139900) panicked at velox-cli/tests/template_palette_wcag.rs:766:9:
+components/Modal.vx `.dark .overlay` is "rgba(3, 5, 6, 0.66)"; dark mode raises the scrim on purpose so a bright page cannot glare through it
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- every_colour_declaration_has_a_role stdout ----
+
+thread 'every_colour_declaration_has_a_role' (2139895) panicked at velox-cli/tests/template_palette_wcag.rs:648:9:
+assertion `left == right` failed: border-control-light: `border` of `.toggle` in App.vx is #dedbd3, not the #868D92 this table recorded
+  left: "#dedbd3"
+ right: "#868D92"
+
+---- every_control_boundary_clears_three_to_one stdout ----
+
+thread 'every_control_boundary_clears_three_to_one' (2139896) panicked at velox-cli/tests/template_palette_wcag.rs:601:5:
+18 of 35 pairs fail SC 1.4.11 (3:1 non-text contrast):
+  SC 1.4.11 (3:1 non-text contrast): `border` of `.input` (#dedbd3) on `background` of `.input` (#ffffff) is 1.38:1, needs 3.00:1
+  SC 1.4.11 (3:1 non-text contrast): `border` of `.toggle` (#dedbd3) on `background` of `.app` (#f6f5f2) is 1.27:1, needs 3.00:1
+  SC 1.4.11 (3:1 non-text contrast): `border` of `.ghost` (#dedbd3) on `background` of `.ghost` (#ffffff) is 1.38:1, needs 3.00:1
+  SC 1.4.11 (3:1 non-text contrast): `border` of `.toggle:hover` (#c4bfb4) on `background` of `.toggle:hover` (#efece5) is 1.55:1, needs 3.00:1
+  SC 1.4.11 (3:1 non-text contrast): `border` of `.ghost:hover` (#c4bfb4) on `background` of `.ghost:hover` (#efece5) is 1.55:1, needs 3.00:1
+  SC 1.4.11 (3:1 non-text contrast): `border` of `.cancel` (#dedbd3) on `background` of `.cancel` (#ffffff) is 1.38:1, needs 3.00:1
+  SC 1.4.11 (3:1 non-text contrast): `border` of `.cancel:hover` (#c4bfb4) on `background` of `.cancel:hover` (#f6f5f2) is 1.68:1, needs 3.00:1
+  SC 1.4.11 (3:1 non-text contrast): `border` of `.dismiss:hover` (#dedbd3) on `background` of `.dismiss:hover` (#f6f5f2) is 1.27:1, needs 3.00:1
+  SC 1.4.11 (3:1 non-text contrast): `border` of `.check` (#c4bfb4) on `background` of `.todo-item` (#ffffff) is 1.83:1, needs 3.00:1
+  SC 1.4.11 (3:1 non-text contrast): `border` of `.dark .toggle` (#242c31) on `background` of `.dark .app` (#0f1316) is 1.32:1, needs 3.00:1
+  SC 1.4.11 (3:1 non-text contrast): `border` of `.dark .ghost` (#242c31) on `background` of `.dark .app` (#0f1316) is 1.32:1, needs 3.00:1
+  SC 1.4.11 (3:1 non-text contrast): `border` of `.dark .toggle:hover` (#333d45) on `background` of `.dark .toggle:hover` (#1d2429) is 1.42:1, needs 3.00:1
+  SC 1.4.11 (3:1 non-text contrast): `border` of `.dark .ghost:hover` (#333d45) on `background` of `.dark .ghost:hover` (#1d2429) is 1.42:1, needs 3.00:1
+  SC 1.4.11 (3:1 non-text contrast): `border` of `.dark .cancel` (#333d45) on `background` of `.dark .panel` (#181e22) is 1.52:1, needs 3.00:1
+  SC 1.4.11 (3:1 non-text contrast): `border` of `.dark .cancel:hover` (#414c55) on `background` of `.dark .cancel:hover` (#222a2f) is 1.66:1, needs 3.00:1
+  SC 1.4.11 (3:1 non-text contrast): `border` of `.dark .dismiss:hover` (#333d45) on `background` of `.dark .dismiss:hover` (#222a2f) is 1.32:1, needs 3.00:1
+  SC 1.4.11 (3:1 non-text contrast): `border` of `.dark .input` (#333d45) on `background` of `.dark .composer` (#161b1f) is 1.56:1, needs 3.00:1
+  SC 1.4.11 (3:1 non-text contrast): `border` of `.dark .check` (#333d45) on `background` of `.dark .todo-item` (#161b1f) is 1.56:1, needs 3.00:1
+
+---- every_text_pair_clears_four_five_to_one stdout ----
+
+thread 'every_text_pair_clears_four_five_to_one' (2139897) panicked at velox-cli/tests/template_palette_wcag.rs:601:5:
+6 of 63 pairs fail SC 1.4.3 (4.5:1 body text):
+  SC 1.4.3 (4.5:1 body text): `color` of `.footnote` (#6b7377) on `background` of `.app` (#f6f5f2) is 4.43:1, needs 4.50:1
+  SC 1.4.3 (4.5:1 body text): `color` of `.dark .dismiss` (#75818a) on `background` of `.dark .dismiss` (#181e22) is 4.22:1, needs 4.50:1
+  SC 1.4.3 (4.5:1 body text): `color` of `.dark .input::placeholder` (#75818a) on `background` of `.dark .input` (#161b1f) is 4.35:1, needs 4.50:1
+  SC 1.4.3 (4.5:1 body text): `color` of `.dark .remove` (#75818a) on `background` of `.dark .remove` (#161b1f) is 4.35:1, needs 4.50:1
+  SC 1.4.3 (4.5:1 body text): `color` of `.dark .completed .todo-text` (#75818a) on `background` of `.dark .todo-item` (#161b1f) is 4.35:1, needs 4.50:1
+  SC 1.4.3 (4.5:1 body text): `color` of `.dark .empty` (#75818a) on `background` of `.dark .empty` (#161b1f) is 4.35:1, needs 4.50:1
+
+
+failures:
+    every_colour_declaration_has_a_role
+    every_control_boundary_clears_three_to_one
+    every_text_pair_clears_four_five_to_one
+    the_scrims_are_not_transparent
+
+test result: FAILED. 3 passed; 4 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `-p velox-cli --test template_palette_wcag`
+error: 1 target failed:
+    `-p velox-cli --test template_palette_wcag`

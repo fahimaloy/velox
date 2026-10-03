@@ -1,0 +1,21 @@
+   Compiling velox-renderer v0.1.0 (/home/fahimaloy/Projects/personal/velox/velox-renderer)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.23s
+     Running unittests src/lib.rs (target/debug/deps/velox_renderer-05af19ad498b958d)
+
+running 1 test
+PROBE11     Buy milk scales=[1.0, 1.25, 1.5] hits=0 []
+PROBE11     Buy milk scales=[1.0, 1.25, 2.0] hits=0 []
+PROBE11     Buy milk scales=[1.0, 1.5, 2.0] hits=0 []
+PROBE11     Buy milk scales=[1.0, 2.0, 3.0] hits=0 []
+PROBE11    todo-item scales=[1.0, 1.25, 1.5] hits=0 []
+PROBE11    todo-item scales=[1.0, 1.25, 2.0] hits=0 []
+PROBE11    todo-item scales=[1.0, 1.5, 2.0] hits=0 []
+PROBE11    todo-item scales=[1.0, 2.0, 3.0] hits=0 []
+PROBE11           Hg scales=[1.0, 1.25, 1.5] hits=0 []
+PROBE11           Hg scales=[1.0, 1.25, 2.0] hits=0 []
+PROBE11           Hg scales=[1.0, 1.5, 2.0] hits=0 []
+PROBE11           Hg scales=[1.0, 2.0, 3.0] hits=0 []
+test skia_render::skia_impl::tests::zz_probe_widths ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 128 filtered out; finished in 2.42s
+

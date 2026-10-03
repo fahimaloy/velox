@@ -1,0 +1,9 @@
+name = "velox"
+version = "0.1.0"
+authors = ["Velox Contributors"]
+description = "Velox .vx file language support"
+repository = "https://github.com/fahimaloy/velox"
+
+[grammars.tree-sitter-velox]
+repository = "https://github.com/fahimaloy/tree-sitter-velox"
+rev = "main"

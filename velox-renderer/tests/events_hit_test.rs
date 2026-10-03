@@ -17,10 +17,7 @@ fn hit_test_click_targets() {
             ),
             h(
                 "button",
-                vec![
-                    ("on:click", "btn-b"),
-                    ("style", "width:60px;height:30px"),
-                ],
+                vec![("on:click", "btn-b"), ("style", "width:60px;height:30px")],
                 vec![],
             ),
         ],
@@ -28,7 +25,15 @@ fn hit_test_click_targets() {
 
     let layout = velox_dom::layout::compute_layout(&vnode, 120, 80);
     let mut targets = Vec::new();
-    velox_renderer::events::collect_click_targets(&vnode, &layout, &mut targets);
+    let mut order = 0;
+    velox_renderer::events::collect_click_targets(
+        &vnode,
+        &layout,
+        None,
+        velox_renderer::events::StackCtx::ROOT,
+        &mut order,
+        &mut targets,
+    );
 
     let hit_first = velox_renderer::events::hit_test_click(&targets, 10.0, 10.0);
     assert_eq!(hit_first, Some(("btn-a", Some("payload-a"))));

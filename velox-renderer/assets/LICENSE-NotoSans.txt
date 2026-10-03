@@ -1,0 +1,11 @@
+Bundled font: NotoSans-Regular.ttf
+Source path: /usr/share/fonts/google-noto/NotoSans-Regular.ttf
+Verbatim from the font's own OpenType `name` table (nameID 0 = copyright,
+nameID 13 = licence description). Redistribution terms follow from these.
+========================================================================
+
+--- nameID 0 (copyright) ---
+Copyright 2022 The Noto Project Authors (https://github.com/notofonts/latin-greek-cyrillic)
+
+--- nameID 13 (licence) ---
+This Font Software is licensed under the SIL Open Font License, Version 1.1. This license is available with a FAQ at: https://scripts.sil.org/OFL

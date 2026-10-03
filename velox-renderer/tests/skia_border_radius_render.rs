@@ -4,7 +4,7 @@
 
 #[cfg(all(feature = "skia-native", unix))]
 #[test]
-#[ignore]
+#[ignore = "requires skia-native feature and GPU hardware"]
 fn render_border_radius_vnode_checksum() {
     use velox_dom::h;
     use velox_style::Stylesheet;
@@ -12,13 +12,18 @@ fn render_border_radius_vnode_checksum() {
     let vnode = h(
         "div",
         vec![("style", "background-color:#FFFFFF;border-radius:12px")],
-        vec![h("div", vec![("style", "background-color:#FF0000")], vec![])],
+        vec![h(
+            "div",
+            vec![("style", "background-color:#FF0000")],
+            vec![],
+        )],
     );
 
-    let png = match velox_renderer::render_vnode_to_raster_png(&vnode, &Stylesheet::default(), 64, 64) {
-        Ok(b) => b,
-        Err(e) => panic!("render failed: {}", e),
-    };
+    let png =
+        match velox_renderer::render_vnode_to_raster_png(&vnode, &Stylesheet::default(), 64, 64) {
+            Ok(b) => b,
+            Err(e) => panic!("render failed: {}", e),
+        };
 
     let checksum = fnv1a(&png);
     println!("border-radius checksum: 0x{checksum:08x}");
@@ -27,6 +32,7 @@ fn render_border_radius_vnode_checksum() {
     assert_eq!(checksum, EXPECTED_BORDER_RADIUS_CHECKSUM);
 }
 
+#[cfg(all(feature = "skia-native", unix))]
 fn fnv1a(bytes: &[u8]) -> u32 {
     let mut hash: u32 = 0x811c9dc5;
     for b in bytes {

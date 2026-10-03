@@ -1,0 +1,40 @@
+{
+  "name": "velox-language",
+  "displayName": "Velox Language Support",
+  "description": "Syntax highlighting and language support for Velox .vx files",
+  "version": "0.1.0",
+  "publisher": "velox",
+  "engines": {
+    "vscode": "^1.75.0"
+  },
+  "categories": [
+    "Programming Languages"
+  ],
+  "contributes": {
+    "languages": [
+      {
+        "id": "velox",
+        "aliases": ["Velox", "velox"],
+        "extensions": [".vx"],
+        "configuration": "./language-configuration.json",
+        "icon": {
+          "light": "./icons/velox-icon-light.svg",
+          "dark": "./icons/velox-icon-dark.svg"
+        }
+      }
+    ],
+    "grammars": [
+      {
+        "language": "velox",
+        "scopeName": "source.velox",
+        "path": "./syntaxes/velox.tmLanguage.json",
+        "embeddedLanguages": {
+          "meta.template.velox": "html",
+          "source.rust.embedded.velox": "rust",
+          "source.css.embedded.velox": "css",
+          "expression.embedded.velox": "rust"
+        }
+      }
+    ]
+  }
+}

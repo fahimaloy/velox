@@ -1,0 +1,13 @@
+   Compiling velox-dom v0.1.0 (/home/fahimaloy/Projects/personal/velox/velox-dom)
+   Compiling velox-style v0.1.0 (/home/fahimaloy/Projects/personal/velox/velox-style)
+   Compiling velox-renderer v0.1.0 (/home/fahimaloy/Projects/personal/velox/velox-renderer)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.88s
+     Running tests/todo_item_pixels.rs (target/debug/deps/todo_item_pixels-4c140bbbe16611b0)
+
+running 3 tests
+test a_definite_flex_basis_is_not_widened_by_the_unconstrained_sentinel ... ok
+test todo_row_scanline_report ... ok
+test non_grow_flex_item_must_not_absorb_the_row ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.05s
+

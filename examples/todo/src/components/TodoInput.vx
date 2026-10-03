@@ -1,0 +1,71 @@
+<template>
+  <div class="todo-input"><input type="text" class="input" :value="value" :placeholder="placeholder" @input="on_input" /></div>
+</template>
+
+<script setup>
+use velox_core::signal::Signal;
+
+pub struct Props {
+    pub value: String,
+    pub placeholder: String,
+}
+
+pub struct State {
+    pub props: Props,
+    pub draft: std::rc::Rc<Signal<String>>,
+}
+
+impl State {
+    pub fn new() -> Self {
+        Self {
+            props: Props {
+                value: String::new(),
+                placeholder: String::from("What needs to be done?"),
+            },
+            draft: velox_core::signal!(draft = String::new()),
+        }
+    }
+
+    pub fn value(&self) -> String {
+        self.props.value.clone()
+    }
+
+    pub fn placeholder(&self) -> String {
+        self.props.placeholder.clone()
+    }
+
+    pub fn draft(&self) -> String {
+        self.draft.get()
+    }
+
+    pub fn clear(&self) {
+        self.draft.set(String::new());
+    }
+
+    pub fn on_input(&self, payload: &str) {
+        self.draft.set(payload.to_string());
+    }
+}
+</script>
+
+<style scoped>
+.todo-input {
+    display: flex;
+    flex: 0 1 70%;
+    width: 70%;
+    min-width: 0;
+    align-items: center;
+}
+.input {
+    flex: 1;
+    width: 100%;
+    min-width: 0;
+    height: 34px;
+    padding: 6px 10px;
+    border: 1px solid #334155;
+    border-radius: 6px;
+    background: #1e293b;
+    color: #e2e8f0;
+    font-size: 14px;
+}
+</style>

@@ -4,7 +4,7 @@
 
 #[cfg(all(feature = "skia-native", unix))]
 #[test]
-#[ignore]
+#[ignore = "requires skia-native feature and GPU hardware"]
 fn render_text_styles_checksum() {
     use velox_dom::{h, text};
     use velox_style::Stylesheet;
@@ -18,10 +18,11 @@ fn render_text_styles_checksum() {
         vec![text("Hello")],
     );
 
-    let png = match velox_renderer::render_vnode_to_raster_png(&vnode, &Stylesheet::default(), 80, 32) {
-        Ok(b) => b,
-        Err(e) => panic!("render failed: {}", e),
-    };
+    let png =
+        match velox_renderer::render_vnode_to_raster_png(&vnode, &Stylesheet::default(), 80, 32) {
+            Ok(b) => b,
+            Err(e) => panic!("render failed: {}", e),
+        };
 
     let checksum = fnv1a(&png);
     println!("text checksum: 0x{checksum:08x}");
@@ -30,6 +31,7 @@ fn render_text_styles_checksum() {
     assert_eq!(checksum, EXPECTED_TEXT_CHECKSUM);
 }
 
+#[cfg(all(feature = "skia-native", unix))]
 fn fnv1a(bytes: &[u8]) -> u32 {
     let mut hash: u32 = 0x811c9dc5;
     for b in bytes {

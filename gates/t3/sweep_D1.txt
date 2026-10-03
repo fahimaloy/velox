@@ -1,0 +1,173 @@
+$ cargo test -p velox-dom --test text_wrap_one_node_per_line
+RC=101
+
+running 4 tests
+test an_unwrapped_text_is_one_node ... ok
+test a_wrapped_text_yields_one_node_per_line_in_line_order ... FAILED
+test each_line_reports_its_own_advance_not_the_whole_strings ... FAILED
+test a_nested_text_shares_its_parents_sibling_index_and_does_not_collide ... ok
+
+failures:
+
+---- a_wrapped_text_yields_one_node_per_line_in_line_order stdout ----
+
+thread 'a_wrapped_text_yields_one_node_per_line_in_line_order' (1977111) panicked at velox-dom/tests/text_wrap_one_node_per_line.rs:84:5:
+this text must wrap in a 120px box at 14px; got 1 line box(es): [LayoutNode { rect: Rect { x: 0, y: 0, w: 35, h: 19 }, z_index: 0, display_none: false, source_index: Some(0), scroll_x: 0, scroll_y: 0, clip: None, stacking_context: false, scroll_height: 0, max_scroll_y: 0, scrollable: false, children: [] }]
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- each_line_reports_its_own_advance_not_the_whole_strings stdout ----
+
+thread 'each_line_reports_its_own_advance_not_the_whole_strings' (1977113) panicked at velox-dom/tests/text_wrap_one_node_per_line.rs:140:5:
+must wrap: [LayoutNode { rect: Rect { x: 0, y: 0, w: 35, h: 19 }, z_index: 0, display_none: false, source_index: Some(0), scroll_x: 0, scroll_y: 0, clip: None, stacking_context: false, scroll_height: 0, max_scroll_y: 0, scrollable: false, children: [] }]
+
+
+failures:
+    a_wrapped_text_yields_one_node_per_line_in_line_order
+    each_line_reports_its_own_advance_not_the_whole_strings
+
+test result: FAILED. 2 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Compiling velox-renderer v0.1.0 (/home/fahimaloy/Projects/personal/velox/velox-renderer)
+   Compiling velox-style v0.1.0 (/home/fahimaloy/Projects/personal/velox/velox-style)
+   Compiling velox-dom v0.1.0 (/home/fahimaloy/Projects/personal/velox/velox-dom)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.36s
+     Running tests/text_wrap_one_node_per_line.rs (target/debug/deps/text_wrap_one_node_per_line-3b6348dc313855aa)
+error: test failed, to rerun pass `-p velox-dom --test text_wrap_one_node_per_line`
+error: 1 target failed:
+    `-p velox-dom --test text_wrap_one_node_per_line`
+
+$ cargo test -p velox-dom --test layout_golden
+RC=0
+
+running 5 tests
+test root_fills_without_explicit_styles ... ok
+test root_fills_viewport_with_vw_vh_units ... ok
+test percent_chain_fills_when_parent_definite ... ok
+test dvh_and_min_height_viewport_filling ... ok
+test flex_column_min_height_definite_children_shrink ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Compiling velox-dom v0.1.0 (/home/fahimaloy/Projects/personal/velox/velox-dom)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.19s
+     Running tests/layout_golden.rs (target/debug/deps/layout_golden-cc9bef1736a7a754)
+
+$ cargo test -p velox-renderer --test wrapped_text_each_line_once
+RC=101
+
+running 8 tests
+test every_glyph_of_a_wrapped_paragraph_is_inked_exactly_once ... FAILED
+test two_lines_each_painted_once_at_its_own_line ... FAILED
+test a_wrapped_inline_element_paints_the_same_as_the_bare_paragraph ... FAILED
+test the_last_line_of_a_wrapped_paragraph_is_painted ... FAILED
+test a_forced_line_break_narrower_than_its_container_still_breaks_per_line ... FAILED
+test a_single_line_is_untouched ... ok
+test two_inline_elements_on_one_line_keep_their_places ... ok
+test two_paragraphs_whose_source_index_collides_both_paint ... ok
+
+failures:
+
+---- every_glyph_of_a_wrapped_paragraph_is_inked_exactly_once stdout ----
+
+thread 'every_glyph_of_a_wrapped_paragraph_is_inked_exactly_once' (1977600) panicked at velox-renderer/tests/wrapped_text_each_line_once.rs:515:5:
+this test needs a paragraph of at least three lines; got [LayoutNode { rect: Rect { x: 0, y: 0, w: 72, h: 22 }, z_index: 0, display_none: false, source_index: Some(0), scroll_x: 0, scroll_y: 0, clip: None, stacking_context: false, scroll_height: 0, max_scroll_y: 0, scrollable: false, children: [] }]
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- two_lines_each_painted_once_at_its_own_line stdout ----
+
+thread 'two_lines_each_painted_once_at_its_own_line' (1977603) panicked at velox-renderer/tests/wrapped_text_each_line_once.rs:278:5:
+assertion `left == right` failed: this test is about the two-line case
+  left: 1
+ right: 2
+
+---- a_wrapped_inline_element_paints_the_same_as_the_bare_paragraph stdout ----
+
+thread 'a_wrapped_inline_element_paints_the_same_as_the_bare_paragraph' (1977599) panicked at velox-renderer/tests/wrapped_text_each_line_once.rs:350:5:
+assertion `left == right` failed: the span must wrap onto two line boxes, got [LayoutNode { rect: Rect { x: 0, y: 0, w: 58, h: 22 }, z_index: 0, display_none: false, source_index: Some(0), scroll_x: 0, scroll_y: 0, clip: None, stacking_context: false, scroll_height: 0, max_scroll_y: 0, scrollable: false, children: [LayoutNode { rect: Rect { x: 0, y: 0, w: 58, h: 22 }, z_index: 0, display_none: false, source_index: Some(0), scroll_x: 0, scroll_y: 0, clip: None, stacking_context: false, scroll_height: 0, max_scroll_y: 0, scrollable: false, children: [] }] }]
+  left: 1
+ right: 2
+
+---- the_last_line_of_a_wrapped_paragraph_is_painted stdout ----
+
+thread 'the_last_line_of_a_wrapped_paragraph_is_painted' (1977601) panicked at velox-renderer/tests/wrapped_text_each_line_once.rs:223:5:
+this test needs a paragraph that wraps; the layout produced 1 line box(es)
+
+---- a_forced_line_break_narrower_than_its_container_still_breaks_per_line stdout ----
+
+thread 'a_forced_line_break_narrower_than_its_container_still_breaks_per_line' (1977597) panicked at velox-renderer/tests/wrapped_text_each_line_once.rs:596:5:
+assertion `left == right` failed: three text line boxes expected (one before the atomic, two after): [LayoutNode { rect: Rect { x: 0, y: 0, w: 175, h: 22 }, z_index: 0, display_none: false, source_index: Some(0), scroll_x: 0, scroll_y: 0, clip: None, stacking_context: false, scroll_height: 0, max_scroll_y: 0, scrollable: false, children: [] }, LayoutNode { rect: Rect { x: 200, y: 45, w: -161, h: 22 }, z_index: 0, display_none: false, source_index: Some(2), scroll_x: 0, scroll_y: 0, clip: None, stacking_context: false, scroll_height: 0, max_scroll_y: 0, scrollable: false, children: [] }]
+  left: 2
+ right: 3
+
+
+failures:
+    a_forced_line_break_narrower_than_its_container_still_breaks_per_line
+    a_wrapped_inline_element_paints_the_same_as_the_bare_paragraph
+    every_glyph_of_a_wrapped_paragraph_is_inked_exactly_once
+    the_last_line_of_a_wrapped_paragraph_is_painted
+    two_lines_each_painted_once_at_its_own_line
+
+test result: FAILED. 3 passed; 5 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.14s
+
+   Compiling velox-renderer v0.1.0 (/home/fahimaloy/Projects/personal/velox/velox-renderer)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 2.19s
+     Running tests/wrapped_text_each_line_once.rs (target/debug/deps/wrapped_text_each_line_once-b27fb5b3c2c47737)
+error: test failed, to rerun pass `-p velox-renderer --test wrapped_text_each_line_once`
+error: 1 target failed:
+    `-p velox-renderer --test wrapped_text_each_line_once`
+
+$ cargo test -p velox-renderer --test skia_text_wrap_render
+RC=101
+
+running 1 test
+test every_wrapped_line_of_a_paragraph_is_painted_once ... FAILED
+
+failures:
+
+---- every_wrapped_line_of_a_paragraph_is_painted_once stdout ----
+
+thread 'every_wrapped_line_of_a_paragraph_is_painted_once' (1977933) panicked at velox-renderer/tests/skia_text_wrap_render.rs:65:5:
+an 80px box must wrap this sentence; layout produced 1 line box(es): [LayoutNode { rect: Rect { x: 0, y: 0, w: 68, h: 22 }, z_index: 0, display_none: false, source_index: Some(0), scroll_x: 0, scroll_y: 0, clip: None, stacking_context: false, scroll_height: 0, max_scroll_y: 0, scrollable: false, children: [] }]
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    every_wrapped_line_of_a_paragraph_is_painted_once
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.05s
+
+   Compiling velox-renderer v0.1.0 (/home/fahimaloy/Projects/personal/velox/velox-renderer)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.98s
+     Running tests/skia_text_wrap_render.rs (target/debug/deps/skia_text_wrap_render-9f636508e1b458ba)
+error: test failed, to rerun pass `-p velox-renderer --test skia_text_wrap_render`
+error: 1 target failed:
+    `-p velox-renderer --test skia_text_wrap_render`
+
+$ cargo test -p velox-renderer --test tagline_tail_is_painted
+RC=101
+
+running 1 test
+test the_tagline_paints_its_tail_and_the_png_is_written ... FAILED
+
+failures:
+
+---- the_tagline_paints_its_tail_and_the_png_is_written stdout ----
+
+thread 'the_tagline_paints_its_tail_and_the_png_is_written' (1978032) panicked at velox-renderer/tests/tagline_tail_is_painted.rs:321:5:
+assertion `left == right` failed: the tagline must wrap onto exactly two line boxes at this width, or this test is not exercising the defect: [(24, 96, 167, 19)]
+  left: 1
+ right: 2
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    the_tagline_paints_its_tail_and_the_png_is_written
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.06s
+
+   Compiling velox-renderer v0.1.0 (/home/fahimaloy/Projects/personal/velox/velox-renderer)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.65s
+     Running tests/tagline_tail_is_painted.rs (target/debug/deps/tagline_tail_is_painted-b2de028e62832146)
+error: test failed, to rerun pass `-p velox-renderer --test tagline_tail_is_painted`
+error: 1 target failed:
+    `-p velox-renderer --test tagline_tail_is_painted`

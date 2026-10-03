@@ -1,0 +1,20 @@
+[package]
+name = "velox-example-counter"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+repository = "https://github.com/fahimaloy/velox"
+description = "Minimal reactive counter example for the Velox UI framework"
+
+[[bin]]
+name = "counter"
+path = "src/main.rs"
+
+[dependencies]
+velox-core = { path = "../../velox-core" }
+velox-dom = { path = "../../velox-dom" }
+velox-style = { path = "../../velox-style" }
+velox-renderer = { path = "../../velox-renderer", features = ["skia-native"] }
+
+[build-dependencies]
+velox-cli = { path = "../../velox-cli" }

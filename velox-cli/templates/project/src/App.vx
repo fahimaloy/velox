@@ -1,0 +1,641 @@
+<template>
+  <div :class="{ dark: is_dark }">
+    <div class="app">
+      <div class="shell">
+        <header class="masthead">
+          <div class="lockup">
+            <span class="mark">
+              <img class="mark-img" src="assets/velox-logo.svg" alt="Velox" />
+            </span>
+            <div class="brand">
+              <p class="eyebrow">VELOX</p>
+              <h1 class="title">{{ title }}</h1>
+              <p class="tagline">{{ tagline }}</p>
+            </div>
+          </div>
+          <button class="toggle" @click="toggle_theme">
+            <span class="glyph" v-if="is_dark">☀</span>
+            <span class="glyph" v-else>☾</span>
+          </button>
+        </header>
+
+        <div class="meta">
+          <span class="meta-count">{{ summary }}</span>
+          <span class="meta-fill"></span>
+          <button class="ghost" v-if="can_clear" @click="open_clear">
+            <span class="btn-icon">⌫</span>
+            <span class="btn-label">Clear completed</span>
+          </button>
+          <button class="ghost" @click="open_about">
+            <span class="btn-icon">ℹ</span>
+            <span class="btn-label">About</span>
+          </button>
+        </div>
+        <span class="rule"></span>
+
+        <div class="work">
+          <Todos />
+        </div>
+
+        <p class="footnote">{{ footnote }}</p>
+      </div>
+    </div>
+
+    <Confirm
+      v-if="clear_open"
+      :title="clear_title"
+      :message="clear_message"
+      :accept_label="clear_accept"
+      :cancel_label="clear_cancel"
+      :dark="is_dark"
+      @accept="on_clear_accept"
+      @dismiss="on_clear_cancel"
+    />
+
+    <Modal
+      v-if="about_open"
+      :title="about_title"
+      :body="about_body"
+      :confirm_label="about_confirm"
+      :cancel_label="about_cancel"
+      :dark="is_dark"
+      @confirm="on_about_close"
+      @dismiss="on_about_close"
+    />
+  </div>
+</template>
+
+<script setup>
+// A NOTE ON THE TEMPLATE ABOVE, since this parser has no comment syntax of its
+// own: an HTML comment inside `<template>` is read as an opening tag whose name
+// is the empty string, which then never closes — so every comment in this
+// template lives here or in the style block instead.
+//
+// The root element carries the theme class, and it has to be a
+// WRAPPER rather than the page itself. A selector's leftmost part is matched
+// only against a STRICT ancestor of the element the rest of it names
+// (velox-style/src/lib.rs `match_prefix` starts one level above the target), and
+// the cascade cannot say "this element has two classes" — `parse_selector_part`
+// reads `.app.dark` as one class literally named "app.dark". So the element
+// that HOLDS `.dark` can never be the element a `.dark …` rule styles, and every
+// themed element has to sit one level below a carrier. That is the same reason
+// `TodoItem` nests twice.
+//
+// The two dialogs are siblings of `.app` rather than children of `.shell`.
+// `position: fixed` puts them out of flow, and out-of-flow children paint after
+// their in-flow siblings (velox-dom/src/layout.rs
+// `out_of_flow_containing_block`, and the paint sort in
+// velox-renderer/src/skia_render.rs), so they land above the page; and nothing
+// above them sets `overflow: hidden`, which would clip a fixed overlay.
+//
+// THE MARK IS AN IMAGE, and it is the only one on this page, so the three
+// things a first `<img>` gets wrong are all visible here and all avoided:
+//
+//   * `src` is a PATH RESOLVED AGAINST THE PROCESS WORKING DIRECTORY
+//     (`std::fs::read` in velox-renderer), not against this file. `velox dev`
+//     and `cargo run` both set it to the project root, which is why
+//     `assets/velox-logo.svg` works and why `src="/…"` or a path relative to
+//     `src/` would not.
+//   * The size is declared HERE, in CSS, not inherited from the file. An SVG is
+//     rasterised at its own intrinsic size and SCALED at draw time, so it is
+//     crisp at any size — but only because a size was declared. Nothing declares
+//     one here, and the element is laid out at 0x0, which paints nothing.
+//   * `alt` is not decoration. The accessibility tree reads it as this node's
+//     name (`a11y_name_for`, velox-renderer/src/lib.rs), so an image with no
+//     `alt` is an unnamed node.
+//
+// Both `.mark` and `.mark-img` carry a declared size for the same reason: a
+// child `width`/`height` is what the image rect is taken from, and the parent
+// only reserves the space.
+//
+// The toggle swaps one glyph for another rather than re-colouring one, and the
+// glyph names the theme you are IN rather than the one you would move to. They
+// are written as literal characters on purpose: NOTHING in Velox decodes an HTML
+// character reference — `&#9728;` reaches the text painter as the seven
+// characters `&#9728;`, not as U+2600.
+//
+// THE GLYPHS ARE A HOST-FONT RISK, and this is the honest statement of it. An
+// earlier version of this comment claimed U+2600 ☀ and U+263E ☾ were "both
+// present in the only two faces the renderer can load". That was true for
+// DejaVu Sans and FALSE for Noto Sans, which has neither — and which face wins
+// depends on the machine. Measured from the real cmaps:
+//
+//   face         U+2600 ☀   U+263E ☾   U+2713 ✓   U+2715 ✕   U+00D7 ×
+//   DejaVu Sans  present    present    present    present    present
+//   Noto Sans    MISSING    MISSING    MISSING    MISSING    present
+//
+// Velox has exactly ONE face and NO glyph fallback: the only text draw is
+// `draw_str`, a single typeface with no shaping, so an unmapped codepoint
+// becomes glyph 0 — a tofu box, which is what an earlier screenshot of this
+// template showed. `load_default_typeface` now prefers DejaVu Sans precisely
+// because of this table (velox-renderer/src/skia_render.rs `CANDIDATES`), and
+// the same two faces are bundled under `velox-renderer/assets/`, so the glyphs
+// are covered wherever either file can be read. If you add a character to this
+// template, check it against that table first: adding a symbol no candidate
+// face carries puts a tofu box back on the page, and there is no runtime
+// fallback to catch it for you.
+import Todos from './components/Todos.vx'
+import Confirm from './components/Confirm.vx'
+import Modal from './components/Modal.vx'
+use velox_core::signal::Signal;
+
+// This component owns the page chrome and the two dialogs' open/closed flags,
+// and it is the only one that has to know about the other components at all.
+//
+// The `todos`, `confirm` and `modal` fields are load-bearing, and not for the
+// reason a reader would guess. Velox routes a handler found INSIDE a child's
+// template to `state.<lowercased tag name>.<method>()` — but only when the root
+// declares a field of that name, and only for the first component in the tree
+// that has one (velox-sfc/src/template_codegen.rs `collect_tree_handlers_inner`,
+// `becomes_owner = owner.is_none() && fields.contains(&field)`). So:
+//
+//   * `todos` puts the list on the persistent path. `<Todos />` is rendered
+//     with no props, no events and no slots, which is exactly the condition for
+//     `render_with_state`, so the list and the theme flag survive every render.
+//   * `confirm` and `modal` give the root dispatcher somewhere to send a click
+//     on a dialog's own buttons. Without them those handlers are compiled as
+//     methods of THIS State, and `state.modal_scrim()` is a method that does not
+//     exist here — a compile error, not a silently dead button.
+//
+// The theme flag itself lives on `todos` because that is the one child whose
+// state survives a render. `App` flips it, `Todos` reads it and hands it down as
+// a prop, and each component puts it on one of its OWN elements — scoped CSS
+// cannot cross a component boundary (velox-sfc/src/codegen.rs
+// `scope_single_selector` appends this component's `data-v-*` to EVERY compound,
+// leftmost included, and the id is per component), so a `.dark` class on this
+// root alone would style nothing outside this file.
+pub struct State {
+    pub todos: std::sync::Arc<super::todos::script_rs::State>,
+    pub confirm: std::sync::Arc<super::confirm::script_rs::State>,
+    pub modal: std::sync::Arc<super::modal::script_rs::State>,
+    pub clear_open: Signal<bool>,
+    pub about_open: Signal<bool>,
+}
+
+impl State {
+    pub fn new() -> Self {
+        Self {
+            todos: std::sync::Arc::new(super::todos::script_rs::State::new()),
+            confirm: std::sync::Arc::new(super::confirm::script_rs::State::new()),
+            modal: std::sync::Arc::new(super::modal::script_rs::State::new()),
+            clear_open: Signal::new(false),
+            about_open: Signal::new(false),
+        }
+    }
+
+    pub fn title(&self) -> String {
+        String::from("Velox Todo")
+    }
+
+    pub fn tagline(&self) -> String {
+        String::from("One file per component. A template, a state block and a scoped style block, drawn natively with Skia.")
+    }
+
+    pub fn footnote(&self) -> String {
+        String::from("Everything above is live: add a task, tick a row, clear what is done, or open the About panel.")
+    }
+
+    // `--dark` needs the string form, not a bool. A `:class` object binding is
+    // evaluated through the same resolver as an interpolation
+    // (velox-sfc/src/template_codegen.rs `resolver_truthiness`), which reads the
+    // value as text. It also means a ternary would be wrong here — a non-object
+    // bind is never resolved at all and silently yields "".
+    pub fn is_dark(&self) -> String {
+        self.todos.is_dark()
+    }
+
+    pub fn toggle_theme(&self) {
+        let next = self.todos.dark.get();
+        self.todos.dark.set(!next);
+    }
+
+    pub fn can_clear(&self) -> bool {
+        self.todos.can_clear()
+    }
+
+    pub fn summary(&self) -> String {
+        let total = self.todos.total();
+        let done = self.todos.done_count();
+        if total == 0 {
+            return String::from("An empty list");
+        }
+        if done == total {
+            return String::from("All of it done");
+        }
+        String::from(format!("{} left of {}", total - done, total))
+    }
+
+    // ---- Clear completed ------------------------------------------------
+    pub fn clear_open(&self) -> String {
+        if self.clear_open.get() {
+            String::from("true")
+        } else {
+            String::from("false")
+        }
+    }
+
+    pub fn open_clear(&self) {
+        self.clear_open.set(true);
+    }
+
+    pub fn clear_title(&self) -> String {
+        String::from("Clear completed tasks?")
+    }
+
+    pub fn clear_message(&self) -> String {
+        String::from("Finished tasks are removed from the list. This cannot be undone.")
+    }
+
+    pub fn clear_accept(&self) -> String {
+        String::from("Clear them")
+    }
+
+    pub fn clear_cancel(&self) -> String {
+        String::from("Keep them")
+    }
+
+    // No payload parameter on purpose. The dispatcher emits `if let Some(p) =
+    // payload { state.method(p) }` for any handler whose State method takes one,
+    // so a bare component click — which carries no payload — would never reach
+    // it. `Confirm` still sends one; ignoring it is the caller's choice.
+    pub fn on_clear_accept(&self) {
+        self.todos.remove_completed();
+        self.clear_open.set(false);
+    }
+
+    pub fn on_clear_cancel(&self) {
+        self.clear_open.set(false);
+    }
+
+    // ---- About ----------------------------------------------------------
+    pub fn about_open(&self) -> String {
+        if self.about_open.get() {
+            String::from("true")
+        } else {
+            String::from("false")
+        }
+    }
+
+    pub fn open_about(&self) {
+        self.about_open.set(true);
+    }
+
+    pub fn about_title(&self) -> String {
+        String::from("About this app")
+    }
+
+    pub fn about_body(&self) -> String {
+        String::from("Every part of this window is a .vx single-file component: a template, a state block and a scoped style block in one file. The dialog you are reading is one of them, and it is a reusable component rather than a one-off.")
+    }
+
+    pub fn about_confirm(&self) -> String {
+        String::from("Understood")
+    }
+
+    pub fn about_cancel(&self) -> String {
+        String::from("Close")
+    }
+
+    pub fn on_about_close(&self) {
+        self.about_open.set(false);
+    }
+}
+</script>
+
+<style scoped>
+/* The one place a font is named. It is INHERITABLE (velox-style/src/lib.rs:761),
+   so every descendant picks it up and no child rule has to repeat it.
+
+   Today the stack documents intent rather than being resolved: the renderer's
+   font cache holds exactly ONE typeface — whatever `load_default_typeface`
+   finds, which is DejaVu Sans or Noto Sans — and `parse_font_family` keeps only
+   the FIRST name in a comma list (velox-renderer/src/skia_render.rs:512), so
+   there is no per-family fallback and no way to ask for a second face. The list
+   is written the way a CSS author would write it so that it starts working the
+   day the cache does, and it costs nothing today. `get_or_load_family` no
+   longer writes the default face into the cache under a name that missed, so
+   this stays honestly inert rather than becoming permanently wrong. */
+
+/* THE DESIGN SYSTEM. Three scales and four surfaces, and every rule below is
+   one entry in one of them. The scales are the point: a value that is not on a
+   scale is a decision nobody has made yet.
+
+   TYPE — 11 / 12 / 13 / 15 / 20 / 28, the sizes libadwaita itself ships
+   (`.app` declares the 15 body size, and a child only ever names its own).
+     28 / 700  display   `.title`
+     20 / 700  headline  the dialogs' `.title` (Confirm.vx, Modal.vx)
+     15 / 400  body      the default, `.tagline`, `.todo-text`, `.input`
+     13 / 600  label     `.meta-count`, `.ghost`, the dialog buttons
+     12 / 400  caption   `.footnote`, `.empty`
+     11 / 700  overline  `.eyebrow`
+     16 / 400  icon      `.glyph`, `.btn-icon`, `.remove`, `.dismiss`
+
+   SPACE — 4 / 8 / 12 / 16 / 24 / 32 / 40 / 48, and nothing else. The page runs
+   on 24 between sections: masthead → meta → rule → list → footnote, with 16
+   between the meta row and the rule it sits above. Control heights are on the
+   same ladder (20 / 28 / 32 / 40) so a row of mixed controls lines up.
+
+   SURFACE — four levels, lightest is highest. `box-shadow` and `transform` are
+   both unread by the framework, so elevation is carried by VALUE plus a hairline
+   rather than a shadow, which is why the ladder is shallow and every level has
+   a matching edge.
+     page   #f6f5f2 / #0A0E11   the window behind everything
+     card   #ffffff / #141A1E   a raised plane: composer, rows, ghost buttons
+     raised #1A2126             a plane above the page: the dialog panels
+     inset  #EFEDE8 / #20282D   a recess, and the hover fill
+
+   INK — three text roles, one accent, one danger.
+     primary   #14181b / #EDF2F3
+     secondary #4A555B / #A8B4B9   labels, supporting copy, control labels
+     muted     #5F6A70 / #849299   captions, completed rows, the delete glyph
+     accent    #0d6e66 / #2DD4BF   spent exactly twice: `.eyebrow` and the
+                                  primary button
+     danger    #a3342c / #FF8A80   the destructive button and the delete hover
+
+   RADIUS — 8 for a control, 12 for a card, 16 for a panel, 999 for a circle.
+   Every one of them is a multiple of the space scale's base. */
+
+.app {
+    width: 100%;
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    /* INERT, and deliberately so — see the note above this block. Kept because
+       it costs nothing and starts working the day the font cache does. */
+    font-family: "Inter", "Noto Sans", "DejaVu Sans", sans-serif;
+    font-size: 15px;
+    line-height: 1.45;
+    background: #f6f5f2;
+    color: #14181b;
+}
+.shell {
+    display: flex;
+    flex-direction: column;
+    width: 100%;
+    max-width: 620px;
+    min-width: 0;
+    padding: 40px 24px 32px;
+}
+.masthead {
+    display: flex;
+    flex-direction: row;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 24px;
+}
+/* The mark and the wordmark are ONE lockup. The plate is TOP-aligned to the
+   eyebrow, not centred on the brand column, and that is a measured choice rather
+   than a default: the brand column is three lines tall (eyebrow, 28px title, a
+   tagline that wraps), so `center` puts the plate's middle between the title and
+   the tagline and the mark reads as belonging to the tagline. Top-aligned, the
+   plate's own centre lands ON the title — the one line the mark introduces — and
+   the eyebrow tucks against its top-left, which is what a logo lockup looks like.
+   Verified by rendering every candidate at 1x (`scaffold_render_proof.rs`), which
+   is the only size that matters: this is measured in device pixels, not in
+   whatever the reader's screen happens to scale. */
+.lockup {
+    display: flex;
+    flex-direction: row;
+    align-items: flex-start;
+    gap: 16px;
+    min-width: 0;
+}
+/* A white plate rather than a bare `<img>`, and that is the whole reason this
+   works in BOTH themes: the logo is pure `stroke="black"` on transparency, so
+   against the dark page (#0A0E11) its ink is 1.09:1 — a black shape on a black
+   field, invisible. The plate is what the ink is measured against: #000000 on
+   #ffffff is 21:1 in either theme, so the mark is legible whether the page is
+   #f6f5f2 or #0A0E11, and it is the one surface in this template that does not
+   change with the theme. It carries the same #DFDBD2 hairline the dialog panels
+   use, because at 1.09:1 the plate's own edge would otherwise vanish against the
+   light page — the hairline is what you read as the plate's boundary, the same
+   way `.panel` relies on it. */
+.mark {
+    flex: 0 0 auto;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 64px;
+    height: 64px;
+    border: 1px solid #DFDBD2;
+    border-radius: 16px;
+    background: #ffffff;
+}
+/* 48px of logo in a 64px plate: an 8px inset all round, two steps on the space
+   scale.
+   The size is set by the RASTER, not by taste. An `<img src="…svg">` is
+   rasterised once at the file's own intrinsic size (106px here) and then scaled
+   at draw time with no mipmaps, so every extra factor of downscale is blur the
+   renderer cannot undo. The gear has 32 teeth around a 43px-radius ring: at 32px
+   drawn they land under a pixel and the whole mark collapses into a grey ring;
+   at 48px — a 2.2x reduction, barely over the 2x HiDPI line — the teeth and the
+   V's counter still separate. Everything smaller was rendered and looked at
+   before settling here. */
+.mark-img {
+    display: block;
+    width: 48px;
+    height: 48px;
+}
+/* The three brand lines are spaced by `gap`, not by three separate margins, so
+   the rhythm survives an edit to any one of them. */
+.brand {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    min-width: 0;
+}
+.eyebrow {
+    margin: 0;
+    font-size: 11px;
+    font-weight: 700;
+    line-height: 1.2;
+    color: #0d6e66;
+}
+.title {
+    margin: 0;
+    font-size: 28px;
+    font-weight: 700;
+    line-height: 1.15;
+    color: #14181b;
+}
+.tagline {
+    margin: 0;
+    font-size: 15px;
+    line-height: 1.45;
+    color: #4A555B;
+}
+.toggle {
+    flex: 0 0 auto;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 40px;
+    height: 40px;
+    padding: 0;
+    border: 1px solid #868D92;
+    border-radius: 999px;
+    background: #ffffff;
+    color: #4A555B;
+}
+.toggle:hover {
+    border: 1px solid #636A70;
+    background: #EFEDE8;
+    color: #14181b;
+}
+/* OPTICAL CENTRING. `justify-content: center` centres the glyph's ADVANCE, and
+   the advance is not the drawing: in the bundled DejaVu Sans the sun's ink sits
+   4.5px right of the centre of its advance and the crescent's sits 0.5px left of
+   it, so the sun reads visibly off-centre in a circle while the moon reads true.
+   There is no `transform` to nudge with and no second face to swap, and a
+   `<button>` will not take the obvious nudge: with exactly one child the layout
+   pass places that child at `content_x + (content_w - child_w) / 2`
+   (velox-dom/src/layout.rs:5922) and a `margin` on the child is never read, so
+   `margin-right` on `.glyph` does nothing at all. The one lever that IS read is
+   the button's own PADDING: a 4px right padding narrows `content_w` by 4 and so
+   moves the centred child, and the glyph inside it, 2px left.
+
+   Both states are pinned by `velox-cli/tests/scaffold_render_proof.rs`, which
+   measures the glyph's INK in the rasterised frame against the button's own fill
+   and fails if either drifts more than 1px off the button centre. */
+.glyph {
+    display: block;
+    font-size: 16px;
+    line-height: 1;
+}
+.meta {
+    display: flex;
+    flex-direction: row;
+    align-items: center;
+    gap: 8px;
+    margin-top: 24px;
+    padding-bottom: 16px;
+}
+.meta-count {
+    font-size: 13px;
+    font-weight: 600;
+    line-height: 1.35;
+    color: #4A555B;
+}
+.meta-fill {
+    flex: 1 1 auto;
+}
+/* Its own element because only the `border` shorthand and `border-width` are
+   read — `border-style` and `border-color` are in the renderer's
+   PARSED_BUT_UNRENDERED list — so a divider has to be a box with a fill. */
+.rule {
+    display: block;
+    width: 100%;
+    height: 1px;
+    background: #dcdad3;
+}
+/* The section gap belongs to `.work`, the wrapper around the list, so the rule
+   above it and the list below it are 16 and 24 away from their neighbours
+   without either neighbour carrying a margin for a section it is not part of. */
+.work {
+    margin-top: 24px;
+}
+/* Icon BEFORE label, and both wrapped: a `<button>`'s contents are centred as a
+   flex row only when it has element children to lay out, and `white-space`
+   keeps a two-word label on one line in a 32px control. */
+.ghost {
+    flex: 0 0 auto;
+    display: flex;
+    flex-direction: row;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    height: 32px;
+    padding: 0 12px;
+    border: 1px solid #868D92;
+    border-radius: 8px;
+    background: #ffffff;
+    color: #4A555B;
+    font-size: 13px;
+    font-weight: 600;
+    line-height: 1.35;
+}
+.ghost:hover {
+    border: 1px solid #636A70;
+    background: #EFEDE8;
+    color: #14181b;
+}
+/* U+232B ERASE, for "Clear completed". The obvious candidate — a cross — is
+   already the delete glyph on every row, and a control that means "remove" and
+   a control that means "remove" must not look alike. U+2139 INFORMATION SOURCE
+   is the About icon; U+24D8 CIRCLED LATIN SMALL LETTER I, the character most
+   font sets would reach for, is NOT in DejaVu's cmap and paints as tofu, so it
+   was ruled out by measurement rather than by taste — see
+   `the_shipped_face_carries_every_glyph_the_template_uses`. */
+.btn-icon {
+    font-size: 16px;
+    line-height: 1;
+}
+.btn-label {
+    white-space: nowrap;
+}
+.footnote {
+    margin: 24px 0 0;
+    font-size: 12px;
+    line-height: 1.5;
+    color: #5F6A70;
+}
+
+/* ---- Dark -----------------------------------------------------------------
+   Same scales, same roles, different values: the ladder is re-stated in dark
+   tones rather than filtered, which is why each rule repeats a selector it
+   already has above it. */
+
+.dark .app {
+    background: #0A0E11;
+    color: #EDF2F3;
+}
+.dark .eyebrow {
+    color: #2DD4BF;
+}
+.dark .title {
+    color: #EDF2F3;
+}
+.dark .tagline {
+    color: #A8B4B9;
+}
+.dark .toggle {
+    /* The measured half of the nudge `.glyph` documents: the sun's ink is 4.5px
+       right of its advance's centre, this moves it 2px left, and the crescent in
+       the light toggle needs no correction at all. Asymmetric padding is the only
+       lever here — see `.glyph`. */
+    padding: 0 4px 0 0;
+    border: 1px solid #64727B;
+    background: #141A1E;
+    color: #A8B4B9;
+}
+.dark .toggle:hover {
+    border: 1px solid #7F8C94;
+    background: #20282D;
+    color: #EDF2F3;
+}
+/* The measured half of the nudge `.glyph` documents. Same sign, same cause. */
+.dark .meta-count {
+    color: #A8B4B9;
+}
+.dark .rule {
+    background: #313B42;
+}
+.dark .ghost {
+    /* `#64727B`, the control token, not the decorative `#313B42` the cards use.
+       A button's edge on the `#0A0E11` page has to clear 3:1 (WCAG 1.4.11) and
+       `#313B42` is 1.69:1 — which is also why the border roles are three tokens
+       rather than two. */
+    border: 1px solid #64727B;
+    background: #141A1E;
+    color: #A8B4B9;
+}
+.dark .ghost:hover {
+    border: 1px solid #7F8C94;
+    background: #20282D;
+    color: #EDF2F3;
+}
+.dark .footnote {
+    color: #849299;
+}
+</style>
