@@ -6,7 +6,7 @@ license = "MIT"
 description = "Single-file component compiler for the Velox UI framework"
 authors = ["fahimaloy"]
 repository = "https://github.com/fahimaloy/velox"
-categories = ["development-tools::compilers", "gui"]
+categories = ["gui"]
 keywords = ["compiler", "sfc", "component", "template", "velox"]
 documentation = "https://velox.dev/docs/sfc"
 
