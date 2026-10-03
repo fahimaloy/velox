@@ -19,6 +19,37 @@ pub(crate) fn find_velox_workspace() -> Option<PathBuf> {
     }
 }
 
+/// The workspace this binary was built from, when it still exists on disk.
+///
+/// `find_velox_workspace` walks up from the CWD, which fails the moment `velox
+/// init` is run from anywhere outside a checkout — which is the normal case,
+/// since the usual command is `velox init myapp` from a scratch directory. The
+/// walk then fails, the caller falls back to git dependencies, and those are
+/// pinned to `velox_git_rev()`: the commit the CLI was BUILT at. On any
+/// locally-built binary that commit is on an unpushed branch, so the scaffold
+/// cannot resolve its own dependencies and dies with
+/// `failed to get 'velox-core' as a dependency`. That is the first thing a new
+/// user sees.
+///
+/// This binary already knows the answer. `CARGO_MANIFEST_DIR` is baked in at
+/// compile time, and its parent is the workspace root, so the walk is strictly
+/// weaker information than what the binary was compiled with.
+///
+/// The `.exists()` check is load-bearing, not defensive. A `cargo install`ed
+/// binary compiles with `CARGO_MANIFEST_DIR` pointing inside the registry cache,
+/// where only `velox-cli` exists and `velox-core` is a separate crate in a
+/// different directory. The check makes that case fall through to git
+/// dependencies, which is the correct answer for an installed CLI — so this
+/// returns `Some` only for a binary built inside a real checkout.
+fn compiled_in_workspace() -> Option<PathBuf> {
+    let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let root = manifest_dir.parent()?;
+    root.join("velox-core")
+        .join("Cargo.toml")
+        .exists()
+        .then(|| root.to_path_buf())
+}
+
 #[doc(hidden)]
 pub fn find_velox_workspace_for_test() -> Option<std::path::PathBuf> {
     find_velox_workspace()
@@ -321,7 +352,7 @@ pub(crate) fn generate_cargo_toml(name: &str, project_dir: &Path) -> String {
         }
     }
     // Try to find the velox workspace root by walking up from CWD
-    let workspace_root = find_velox_workspace();
+    let workspace_root = find_velox_workspace().or_else(compiled_in_workspace);
 
     if let Some(workspace) = &workspace_root {
         // Compute relative paths from project to each velox crate

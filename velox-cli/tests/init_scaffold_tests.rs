@@ -24,6 +24,15 @@ struct ScratchProject {
 
 impl ScratchProject {
     fn new(tag: &str) -> Self {
+        Self::with_cwd(tag, None)
+    }
+
+    /// `cwd`, when given, is the working directory `velox init` runs *from* —
+    /// which is a different thing from where it writes. `init` locates the
+    /// velox workspace by walking up from the CWD, so the CWD decides which
+    /// dependency form the generated `Cargo.toml` gets. Tests that care about
+    /// that must set it deliberately.
+    fn with_cwd(tag: &str, cwd: Option<&Path>) -> Self {
         let root = Path::new(env!("CARGO_MANIFEST_DIR"))
             .parent()
             .expect("velox-cli has a parent")
@@ -33,11 +42,12 @@ impl ScratchProject {
         // pid-scoped so that is only ever our own leftovers.
         let _ = fs::remove_dir_all(&root);
 
-        let out = Command::new(env!("CARGO_BIN_EXE_velox"))
-            .arg("init")
-            .arg(&root)
-            .output()
-            .expect("run velox init");
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_velox"));
+        cmd.arg("init").arg(&root);
+        if let Some(dir) = cwd {
+            cmd.current_dir(dir);
+        }
+        let out = cmd.output().expect("run velox init");
         assert!(
             out.status.success(),
             "velox init failed: {}",
@@ -49,6 +59,10 @@ impl ScratchProject {
 
     fn app_vx(&self) -> String {
         fs::read_to_string(self.root.join("src").join("App.vx")).expect("init wrote an App.vx")
+    }
+
+    fn cargo_toml(&self) -> String {
+        fs::read_to_string(self.root.join("Cargo.toml")).expect("init wrote a Cargo.toml")
     }
 }
 
@@ -144,6 +158,70 @@ fn init_writes_confirm_and_modal_because_app_vx_renders_them() {
              in `super`\"."
         );
     }
+}
+
+#[test]
+fn a_scaffold_from_outside_the_checkout_uses_path_dependencies() {
+    // The defect this guards: `velox init myapp` is normally run from a scratch
+    // directory that is NOT inside a velox checkout. `init` located the workspace
+    // by walking up from the CWD, so that walk failed, it fell back to git
+    // dependencies pinned at `velox_git_rev()` — the commit this CLI was BUILT
+    // at — and on any locally-built binary that commit is on an unpushed branch.
+    // The scaffold could not resolve its own dependencies:
+    //
+    //     error: failed to get `velox-core` as a dependency of package `myapp`
+    //
+    // It is the first thing a new user hits after `velox init`.
+    //
+    // This test runs `velox init` with its CWD deliberately set to a directory
+    // with no velox checkout above it. That is the whole point: cargo runs tests
+    // with the CWD inside the workspace, where the old CWD walk *succeeded*, so
+    // a test that does not move the CWD passes against the unfixed code.
+    let outside = std::env::temp_dir().join(format!("velox-outside-{}", std::process::id()));
+    fs::create_dir_all(&outside).expect("make scratch cwd");
+    // Guard the premise: if this directory is somehow inside a checkout, the
+    // test is vacuous and would pass against the old behaviour.
+    assert!(
+        !outside.join("velox-core").exists()
+            && !outside
+                .canonicalize()
+                .unwrap_or_else(|_| outside.clone())
+                .join("velox-core")
+                .exists(),
+        "scratch cwd {outside:?} sits inside a velox checkout; this test proves nothing"
+    );
+
+    let p = ScratchProject::with_cwd("outside", Some(&outside));
+    let toml = p.cargo_toml();
+    let _ = fs::remove_dir_all(&outside);
+
+    assert!(
+        !toml.contains("git = "),
+        "velox init wrote git-pinned dependencies:\n{toml}\n\
+         A binary built from an unpushed commit cannot produce a scaffold that \
+         resolves, so this makes every locally-built `velox init` app unbuildable. \
+         init must use the workspace it was compiled from when that still exists."
+    );
+    assert!(
+        toml.contains("path = "),
+        "velox init wrote neither path nor git dependencies:\n{toml}"
+    );
+    // The path must point at a crate that exists, or cargo will not resolve it.
+    let first = toml
+        .split("path = \"")
+        .nth(1)
+        .and_then(|rest| rest.split('"').next())
+        .expect("a path = entry");
+    let resolved = if Path::new(first).is_absolute() {
+        PathBuf::from(first)
+    } else {
+        p.root.join(first)
+    };
+    assert!(
+        resolved.join("Cargo.toml").is_file(),
+        "generated Cargo.toml points velox-core at {resolved:?}, which has no \
+         Cargo.toml — the scaffold still would not resolve."
+    );
 }
 
 #[test]
