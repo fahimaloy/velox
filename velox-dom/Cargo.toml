@@ -6,7 +6,9 @@ license = "MIT"
 description = "Virtual DOM and layout engine for the Velox UI framework"
 authors = ["fahimaloy"]
 repository = "https://github.com/fahimaloy/velox"
-publish = false
+documentation = "https://velox.dev/docs/dom"
+keywords = ["virtual-dom", "layout", "flexbox", "ui", "framework"]
+categories = ["gui"]
 
 [features]
 # Headless pixel proofs for layout live in `tests/`. They need the renderer's
@@ -23,5 +25,5 @@ skia-native = ["velox-renderer/skia-native"]
 # `velox-dom` itself. It exists so the pixel proofs in `tests/` can go through
 # the real cascade + `compute_layout` path (`render_vnode_to_rgba`).
 [dev-dependencies]
-velox-renderer = { path = "../velox-renderer" }
-velox-style = { path = "../velox-style" }
+velox-renderer = { version = "0.1.0", path = "../velox-renderer" }
+velox-style = { version = "0.1.0", path = "../velox-style" }
