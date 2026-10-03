@@ -53,6 +53,11 @@ thread_local! {
     // "does this effect still exist?" without keeping it alive itself. See
     // `mark_stopped`.
     static STOPPED_EFFECTS: RefCell<HashMap<u64, WeakEffect>> = RefCell::new(HashMap::new());
+
+    // Depth of explicit `batch()` scopes on this thread. While nonzero,
+    // `Signal::set` only enqueues subscribers and the flush is deferred until
+    // the outermost batch closes, so N sets cause one flush instead of N.
+    static BATCH_DEPTH: Cell<usize> = const { Cell::new(0) };
 }
 
 /// Stop tracking the effects that no longer exist, once the set has grown past
@@ -115,6 +120,38 @@ fn enqueue_effect(eff: Effect) {
             }
         });
     });
+}
+
+/// Run `f` with effect flushing deferred until it returns.
+///
+/// Every `Signal::set` inside `f` still updates its value and enqueues its
+/// subscribers immediately — only the *flush* is batched, so a hundred sets
+/// across any number of signals cause a single flush at the end instead of a
+/// hundred synchronous ones. Batches nest; only the outermost close flushes.
+/// Panics inside `f` unwind normally and simply skip the deferred flush, the
+/// same as a `set` that never happened to schedule one.
+pub fn batch(f: impl FnOnce()) {
+    struct BatchGuard;
+    impl Drop for BatchGuard {
+        fn drop(&mut self) {
+            BATCH_DEPTH.with(|d| d.set(d.get().saturating_sub(1)));
+        }
+    }
+
+    BATCH_DEPTH.with(|d| d.set(d.get().saturating_add(1)));
+    let _guard = BatchGuard;
+    f();
+    drop(_guard);
+    flush_if_not_batching();
+}
+
+/// Flush unless an explicit `batch()` scope is open (in which case the
+/// outermost batch close flushes) or a flush is already running (in which
+/// case the running flush drains the newly queued effects itself).
+fn flush_if_not_batching() {
+    if BATCH_DEPTH.with(|d| d.get()) == 0 {
+        flush_queue();
+    }
 }
 
 /// Resets `IS_FLUSHING` on the way out of `flush_queue`, including on unwind.
@@ -210,12 +247,33 @@ fn flush_queue() {
 
         // The dependency target and the re-entrancy guard are both in place for
         // the run, and both are restored when the body returns or unwinds.
+        // The body is borrowed fallibly: a `try_borrow_mut` failure means this
+        // same body is already running further down the stack (a re-entrant
+        // schedule of the effect currently executing), so borrowing it again
+        // would panic. Re-enqueueing instead is always progress — the borrow
+        // is released when the outer run returns, and the queue is drained in
+        // order — while skipping would silently drop a scheduled run.
         let _scope = EffectScopeGuard::enter(&eff);
-        eff.body.borrow_mut()();
+        match eff.body.try_borrow_mut() {
+            Ok(mut body) => body(),
+            Err(_) => enqueue_effect(eff.clone()),
+        }
     }
 }
 
 /// A handle to stop/dispose a reactive effect.
+///
+/// Like `Signal`, this is `!Send` by construction (`Rc` + `Cell`) and must
+/// stay that way; see the `Signal` docs for why. Pinned by:
+///
+/// ```compile_fail
+/// fn requires_send<T: Send>(_: T) {}
+/// let sig = velox_core::signal::Signal::new(0u32);
+/// let handle = velox_core::signal::effect(move || {
+///     sig.get();
+/// });
+/// requires_send(handle);
+/// ```
 pub struct EffectHandle {
     effect: Effect,
     active: Cell<bool>,
@@ -254,6 +312,19 @@ impl Drop for EffectHandle {
 }
 
 /// A reactive signal wrapping a `T: Clone`.
+///
+/// Single-threaded by construction: the value, the deferred update slot and
+/// the subscriber list all live behind `RefCell`, and effects are `Rc` — so
+/// `Signal` is `!Send` and must stay that way. Scaling to threads means a
+/// different primitive (`Arc`/`Mutex` or message passing), not widening this
+/// one. The two compile-fail guards below pin that property: if either type
+/// ever becomes `Send`, its doctest starts compiling and `cargo test` fails.
+///
+/// ```compile_fail
+/// fn requires_send<T: Send>(_: T) {}
+/// let sig = velox_core::signal::Signal::new(0u32);
+/// requires_send(sig);
+/// ```
 pub struct Signal<T> {
     value: RefCell<T>,
     /// Stores a deferred update when `set()` is called while `value` is borrowed.
@@ -279,6 +350,12 @@ where
 
     /// Read the value, and if inside an `effect`, register that effect as a subscriber.
     /// Applies any pending deferred update before reading.
+    ///
+    /// The final read is fallible (`try_borrow`): if the value is already
+    /// mutably borrowed on this stack — i.e. a `set` is mid-write above us —
+    /// the read falls back to the deferred slot rather than panicking. Both
+    /// borrows are brief and never held across user code, so the fallback is a
+    /// safety net, not a path well-formed programs take.
     pub fn get(&self) -> T {
         // Apply any pending deferred update before returning the value.
         if let Some(pending) = self.pending.borrow_mut().take() {
@@ -339,17 +416,34 @@ where
                 }
             }
         });
-        self.value.borrow().clone()
+        self.value
+            .try_borrow()
+            .ok()
+            .map(|v| v.clone())
+            .or_else(|| self.pending.try_borrow().ok().and_then(|slot| slot.clone()))
+            .expect(
+                "Signal::get: value is mutably borrowed and no deferred update \
+                 is available; RefCell borrows never escape this module, so \
+                 this indicates a borrow held across user code",
+            )
     }
 
     /// Update the value and notify all subscribers via the scheduler.
+    ///
+    /// Inside a `batch()` scope the subscriber flush is deferred until the
+    /// outermost batch closes; otherwise it runs before `set` returns, exactly
+    /// as before.
     pub fn set(&self, new: T) {
         match self.value.try_borrow_mut() {
             Ok(mut v) => *v = new,
             Err(_) => {
                 // Value is currently borrowed (likely by an active effect reading this signal).
                 // Store the new value as pending; it will be applied on the next `get()` call.
-                *self.pending.borrow_mut() = Some(new);
+                *self.pending.try_borrow_mut().expect(
+                    "Signal::set: deferred slot is already borrowed; \
+                         RefCell borrows never escape this module, so this \
+                         indicates a borrow held across user code",
+                ) = Some(new);
             }
         }
 
@@ -368,27 +462,62 @@ where
         for subscriber in subscribers {
             enqueue_effect(subscriber);
         }
-        flush_queue();
+        flush_if_not_batching();
     }
 
     /// Functional update: apply a closure to the current value and set the result.
     /// Useful for updates like `count.update(|v| v + 1)`.
+    ///
+    /// Drains any deferred update first (like `get` does) so `f` sees the
+    /// latest value instead of the stale one a pending write would overwrite.
+    /// Reads without registering as a subscriber to avoid self-subscription.
     pub fn update<F>(&self, f: F)
     where
         F: FnOnce(T) -> T,
     {
+        if let Some(pending) = self
+            .pending
+            .try_borrow_mut()
+            .ok()
+            .and_then(|mut slot| slot.take())
+        {
+            match self.value.try_borrow_mut() {
+                Ok(mut v) => *v = pending,
+                Err(_) => {
+                    // Value is mid-write above us; hand the update back to the
+                    // slot and let the read below pick whichever is available.
+                    if let Ok(mut slot) = self.pending.try_borrow_mut() {
+                        *slot = Some(pending);
+                    }
+                }
+            }
+        }
         // Read directly without registering as subscriber to avoid self-subscription
-        let current = self.value.borrow().clone();
+        let current = self
+            .value
+            .try_borrow()
+            .ok()
+            .map(|v| v.clone())
+            .or_else(|| self.pending.try_borrow().ok().and_then(|slot| slot.clone()))
+            .expect(
+                "Signal::update: value is mutably borrowed and no deferred \
+                 update is available; RefCell borrows never escape this module",
+            );
         let new = f(current);
         self.set(new);
     }
 
     /// Set value only if it changed (requires T: PartialEq).
+    ///
+    /// A contended read conservatively assumes the value changed and goes
+    /// through `set`, which already handles a borrowed value via the deferred
+    /// slot — so this never panics where the old `borrow()` would have.
     pub fn set_if_changed(&self, new: T)
     where
         T: PartialEq,
     {
-        if *self.value.borrow() != new {
+        let changed = self.value.try_borrow().map(|v| *v != new).unwrap_or(true);
+        if changed {
             self.set(new);
         }
     }
@@ -430,7 +559,17 @@ where
     // what a write from inside `flush_queue` already does.
     {
         let _scope = EffectScopeGuard::enter(&eff);
-        eff.body.borrow_mut()();
+        match eff.body.try_borrow_mut() {
+            Ok(mut body) => body(),
+            Err(_) => {
+                // A fresh body cannot be borrowed anywhere yet, so this is
+                // unreachable; enqueue rather than panic to keep the invariant
+                // that scheduling never fails.
+                drop(_scope);
+                enqueue_effect(eff.clone());
+                flush_if_not_batching();
+            }
+        }
     }
 
     handle
@@ -457,8 +596,14 @@ where
             if let Some(sig) = signal_weak.upgrade() {
                 let new_value = (compute_rc.borrow())();
                 // Use set_if_changed to notify subscribers but avoid infinite loops
-                // when the value hasn't actually changed
-                if *sig.value.borrow() != new_value {
+                // when the value hasn't actually changed. A contended read
+                // assumes change and lets `set` defer via the pending slot.
+                let changed = sig
+                    .value
+                    .try_borrow()
+                    .map(|v| *v != new_value)
+                    .unwrap_or(true);
+                if changed {
                     sig.set(new_value);
                 }
             }
@@ -910,5 +1055,56 @@ mod tests {
                  so the bounded sweep is not reclaiming them (threshold {SUBSCRIBER_SWEEP_AT})"
             );
         }
+    }
+
+    /// Sets inside `batch` update values immediately but flush exactly once.
+    ///
+    /// Without the batch, three `set`s on the same signal would flush three
+    /// times (the dedup keeps it to one run per flush, but the flush loop
+    /// itself still runs per `set`). Inside a batch the effect must not run
+    /// at all until the outermost scope closes, and nested batches must not
+    /// flush early either.
+    #[test]
+    fn batch_defers_the_flush_until_the_outermost_scope_closes() {
+        let sig = Rc::new(Signal::new(0u32));
+        let runs = Rc::new(Cell::new(0u32));
+
+        let s = sig.clone();
+        let r = runs.clone();
+        let _handle = effect(move || {
+            r.set(r.get() + 1);
+            s.get();
+        });
+        assert_eq!(runs.get(), 1, "the effect runs once on registration");
+
+        batch(|| {
+            sig.set(1);
+            sig.set(2);
+            assert_eq!(
+                runs.get(),
+                1,
+                "an effect ran mid-batch: the flush was not deferred"
+            );
+            batch(|| {
+                sig.set(3);
+            });
+            assert_eq!(
+                runs.get(),
+                1,
+                "a nested batch flushed early: only the outermost close may flush"
+            );
+        });
+
+        assert_eq!(sig.get(), 3, "batched sets must all land, last one wins");
+        assert_eq!(
+            runs.get(),
+            2,
+            "three batched sets must cause exactly one re-run, got {}",
+            runs.get()
+        );
+
+        // Outside any batch, `set` still flushes synchronously as before.
+        sig.set(4);
+        assert_eq!(runs.get(), 3);
     }
 }

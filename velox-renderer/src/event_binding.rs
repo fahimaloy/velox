@@ -194,14 +194,21 @@ impl EventBinder {
     }
 
     /// Dispatch an event to all matching handlers
+    ///
+    /// A `try_borrow`, never a `borrow`: a handler that synchronously emits
+    /// another event (re-entrant `dispatch`) would otherwise panic the event
+    /// loop with an "already borrowed" error. A re-entered handler is skipped
+    /// for that emission — the outer dispatch still runs it — so re-entrancy
+    /// degrades to a dropped inner call, never to a panic.
     pub fn dispatch(&self, event: &EventData) -> bool {
         if let Some(bindings) = self.bindings.get(&event.target_id) {
             let mut handled = false;
             for binding in bindings {
                 if binding.event_type == event.event_type
                     && let Some(handler) = &binding.handler
+                    && let Ok(borrowed) = handler.try_borrow()
                 {
-                    handler.borrow()(event);
+                    borrowed(event);
                     handled = true;
                 }
             }
@@ -258,7 +265,9 @@ mod tests {
         let called_clone = called.clone();
 
         let handler = Rc::new(RefCell::new(move |_: &EventData| {
-            *called_clone.lock().unwrap() = true;
+            *called_clone
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()) = true;
         }));
 
         binder.on_click("btn1", handler);
@@ -266,7 +275,11 @@ mod tests {
         let event = EventData::new(EventType::Click, "btn1");
         binder.dispatch(&event);
 
-        assert!(*called.lock().unwrap());
+        assert!(
+            *called
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+        );
     }
 
     #[test]

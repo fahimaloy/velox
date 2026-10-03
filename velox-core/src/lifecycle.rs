@@ -1,4 +1,14 @@
 // velox-core/src/lifecycle.rs
+//
+// All registry state here is thread-local `RefCell` behind `Rc`-free plain
+// data, so every hook map is `!Send` by construction — the same
+// single-threaded contract as `signal.rs` (no `Arc`/`Mutex`). Every borrow is
+// therefore fallible (`try_borrow`/`try_borrow_mut`): user hooks run without
+// any registry borrow held, so a hook that registers, runs, or cleans up other
+// hooks re-enters these functions instead of panicking with `BorrowMutError`.
+// A borrow that still fails means genuine contention further down this same
+// stack; run paths skip that pass and registration paths warn and drop the
+// hook rather than bringing down the event loop.
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -7,8 +17,7 @@ use std::rc::Rc;
 type ComponentId = usize;
 
 thread_local! {
-    #[allow(clippy::missing_const_for_thread_local)]
-    static NEXT_COMPONENT_ID: RefCell<usize> = RefCell::new(1);
+    static NEXT_COMPONENT_ID: Cell<usize> = const { Cell::new(1) };
     #[allow(clippy::type_complexity, clippy::missing_const_for_thread_local)]
     static MOUNTED_HOOKS: RefCell<HashMap<ComponentId, Vec<Box<dyn FnOnce()>>>> = RefCell::new(HashMap::new());
     #[allow(clippy::type_complexity, clippy::missing_const_for_thread_local)]
@@ -20,8 +29,8 @@ thread_local! {
 /// Generate a new unique component ID
 pub fn generate_component_id() -> ComponentId {
     NEXT_COMPONENT_ID.with(|id| {
-        let current = *id.borrow();
-        *id.borrow_mut() = current + 1;
+        let current = id.get();
+        id.set(current.saturating_add(1));
         current
     })
 }
@@ -29,74 +38,97 @@ pub fn generate_component_id() -> ComponentId {
 /// Set the current component context for registering hooks
 pub fn set_current_component(id: ComponentId) {
     CURRENT_COMPONENT.with(|c| {
-        *c.borrow_mut() = Some(id);
+        if let Ok(mut guard) = c.try_borrow_mut() {
+            *guard = Some(id);
+        }
     });
 }
 
 /// Clear the current component context
 pub fn clear_current_component() {
     CURRENT_COMPONENT.with(|c| {
-        *c.borrow_mut() = None;
+        if let Ok(mut guard) = c.try_borrow_mut() {
+            *guard = None;
+        }
     });
 }
 
 /// Get the current component ID if any
+///
+/// Returns `None` when no context is set *or* the context cell is borrowed
+/// further down the stack; hook registration treats both as "no context".
 pub fn current_component_id() -> Option<ComponentId> {
-    CURRENT_COMPONENT.with(|c| *c.borrow())
+    CURRENT_COMPONENT.with(|c| c.try_borrow().ok().and_then(|guard| *guard))
 }
 
 /// Register a hook to run when the current component is mounted
 pub fn on_mounted(f: impl FnOnce() + 'static) {
-    CURRENT_COMPONENT.with(|c| {
-        if let Some(id) = *c.borrow() {
-            MOUNTED_HOOKS.with(|h| {
-                h.borrow_mut().entry(id).or_default().push(Box::new(f));
-            });
-        } else {
-            log::warn!(
-                "on_mounted called without a current component context. \
-                 Did you forget to call set_current_component()? The hook will not be registered."
-            );
-        }
-    });
+    if let Some(id) = current_component_id() {
+        MOUNTED_HOOKS.with(|h| {
+            if let Ok(mut map) = h.try_borrow_mut() {
+                map.entry(id).or_default().push(Box::new(f));
+            } else {
+                log::warn!(
+                    "on_mounted: hook registry is borrowed; the hook was dropped \
+                     instead of panicking. This indicates a hook running while \
+                     the registry is held, which run paths never do."
+                );
+            }
+        });
+    } else {
+        log::warn!(
+            "on_mounted called without a current component context. \
+             Did you forget to call set_current_component()? The hook will not be registered."
+        );
+    }
 }
 
 /// Internal: run all mounted hooks for a specific component and clear them
+///
+/// The hook vec is removed while borrowed and run after the borrow is
+/// released, so a hook may register or run other hooks without panicking. A
+/// contended registry skips this pass instead of panicking.
 pub fn run_mounted_hooks(id: ComponentId) {
-    MOUNTED_HOOKS.with(|h| {
-        if let Some(hooks) = h.borrow_mut().remove(&id) {
-            for hook in hooks {
-                hook();
-            }
+    let hooks = MOUNTED_HOOKS.with(|h| h.try_borrow_mut().ok().and_then(|mut map| map.remove(&id)));
+    if let Some(hooks) = hooks {
+        for hook in hooks {
+            hook();
         }
-    });
+    }
 }
 
 /// Register a hook to run before a component is destroyed
 pub fn before_destroy(f: impl FnOnce() + 'static) {
-    CURRENT_COMPONENT.with(|c| {
-        if let Some(id) = *c.borrow() {
-            DESTROY_HOOKS.with(|h| {
-                h.borrow_mut().entry(id).or_default().push(Box::new(f));
-            });
-        } else {
-            log::warn!(
-                "before_destroy called without a current component context. \
-                 Did you forget to call set_current_component()? The hook will not be registered."
-            );
-        }
-    });
+    if let Some(id) = current_component_id() {
+        DESTROY_HOOKS.with(|h| {
+            if let Ok(mut map) = h.try_borrow_mut() {
+                map.entry(id).or_default().push(Box::new(f));
+            } else {
+                log::warn!(
+                    "before_destroy: hook registry is borrowed; the hook was \
+                     dropped instead of panicking."
+                );
+            }
+        });
+    } else {
+        log::warn!(
+            "before_destroy called without a current component context. \
+             Did you forget to call set_current_component()? The hook will not be registered."
+        );
+    }
 }
 
 /// Internal: run all destroy hooks for a specific component and clear them
+///
+/// Same remove-then-run discipline as `run_mounted_hooks`: no registry borrow
+/// is held across user code, and contention skips the pass.
 pub fn run_destroy_hooks(id: ComponentId) {
-    DESTROY_HOOKS.with(|h| {
-        if let Some(hooks) = h.borrow_mut().remove(&id) {
-            for hook in hooks {
-                hook();
-            }
+    let hooks = DESTROY_HOOKS.with(|h| h.try_borrow_mut().ok().and_then(|mut map| map.remove(&id)));
+    if let Some(hooks) = hooks {
+        for hook in hooks {
+            hook();
         }
-    });
+    }
 }
 
 /// Register a hook to run when the current component is unmounted.
@@ -132,34 +164,69 @@ thread_local! {
 /// The hook is re-runnable and stays registered until [`cleanup_component`] is
 /// called (e.g. when the component is unmounted), so it fires on every update.
 pub fn on_updated(f: impl FnMut() + 'static) {
-    CURRENT_COMPONENT.with(|c| {
-        if let Some(id) = *c.borrow() {
-            UPDATED_HOOKS.with(|h| {
-                h.borrow_mut().entry(id).or_default().push(Box::new(f));
-            });
-        } else {
-            log::warn!(
-                "on_updated called without a current component context. \
-                 Did you forget to call set_current_component()? The hook will not be registered."
-            );
-        }
-    });
+    if let Some(id) = current_component_id() {
+        UPDATED_HOOKS.with(|h| {
+            if let Ok(mut map) = h.try_borrow_mut() {
+                map.entry(id).or_default().push(Box::new(f));
+            } else {
+                log::warn!(
+                    "on_updated: hook registry is borrowed; the hook was \
+                     dropped instead of panicking."
+                );
+            }
+        });
+    } else {
+        log::warn!(
+            "on_updated called without a current component context. \
+             Did you forget to call set_current_component()? The hook will not be registered."
+        );
+    }
 }
 
 /// Internal: run all updated hooks for a specific component.
 /// Unlike mounted/destroy hooks, updated hooks are NOT removed — they fire on
-/// every update. Run against a length snapshot to stay correct even if a hook
-/// registers another `on_updated` while it runs.
+/// every update.
+///
+/// The vec is taken out of the registry before any hook runs, so a hook that
+/// registers another `on_updated` (or triggers a nested update dispatch) does
+/// not borrow the map while it is borrowed — the old code held `borrow_mut`
+/// across every `hook()` call and panicked on exactly that. After the run the
+/// hooks are merged back in front of any newly registered ones, preserving
+/// registration order; a hook registered mid-run therefore fires from the
+/// next dispatch, matching the old length-snapshot semantics. A contended
+/// registry skips this pass instead of panicking.
 pub fn run_updated_hooks(id: ComponentId) {
+    let Some(mut running) =
+        UPDATED_HOOKS.with(|h| h.try_borrow_mut().ok().and_then(|mut map| map.remove(&id)))
+    else {
+        return;
+    };
+    let len = running.len();
+    for i in 0..len {
+        if let Some(hook) = running.get_mut(i) {
+            hook();
+        }
+    }
     UPDATED_HOOKS.with(|h| {
-        let mut guard = h.borrow_mut();
-        if let Some(hooks) = guard.get_mut(&id) {
-            let len = hooks.len();
-            for i in 0..len {
-                if let Some(hook) = hooks.get_mut(i) {
-                    hook();
+        if let Ok(mut map) = h.try_borrow_mut() {
+            match map.get_mut(&id) {
+                Some(fresh) => {
+                    // Hooks that ran go back in front, in order; anything
+                    // registered mid-run stays queued behind them.
+                    let mut done = std::mem::take(&mut running);
+                    done.append(fresh);
+                    *fresh = done;
+                }
+                None => {
+                    map.insert(id, running);
                 }
             }
+        } else {
+            log::warn!(
+                "run_updated_hooks: registry is borrowed while merging hooks \
+                 back; the component's updated hooks were dropped instead of \
+                 panicking."
+            );
         }
     });
 }
@@ -167,13 +234,20 @@ pub fn run_updated_hooks(id: ComponentId) {
 /// Internal: clear all updated hooks for a component.
 pub fn clear_updated_hooks(id: ComponentId) {
     UPDATED_HOOKS.with(|h| {
-        h.borrow_mut().remove(&id);
+        if let Ok(mut map) = h.try_borrow_mut() {
+            map.remove(&id);
+        }
     });
 }
 
 /// Check whether a component has any registered `on_updated` hooks.
+///
+/// A contended registry reports `false` rather than panicking.
 pub fn has_updated_hooks(id: ComponentId) -> bool {
-    UPDATED_HOOKS.with(|h| h.borrow().get(&id).is_some_and(|hooks| !hooks.is_empty()))
+    UPDATED_HOOKS.with(|h| match h.try_borrow() {
+        Ok(map) => map.get(&id).is_some_and(|hooks| !hooks.is_empty()),
+        Err(_) => false,
+    })
 }
 
 // ===== on_resize =====
@@ -199,10 +273,14 @@ thread_local! {
 pub fn on_resize(f: impl FnMut(u32, u32) + 'static) {
     if let Some(id) = current_component_id() {
         RESIZE_HOOKS.with(|h| {
-            h.borrow_mut()
-                .entry(id)
-                .or_default()
-                .push(Rc::new(RefCell::new(f)));
+            if let Ok(mut map) = h.try_borrow_mut() {
+                map.entry(id).or_default().push(Rc::new(RefCell::new(f)));
+            } else {
+                log::warn!(
+                    "on_resize: hook registry is borrowed; the hook was \
+                     dropped instead of panicking."
+                );
+            }
         });
     } else {
         log::warn!(
@@ -220,12 +298,17 @@ pub fn on_resize(f: impl FnMut(u32, u32) + 'static) {
 pub fn run_resize_hooks(width: u32, height: u32) {
     // Clone handles while the registry is borrowed, then drop that borrow
     // before invoking any user code. A newly registered hook is intentionally
-    // deferred until the next dispatch.
+    // deferred until the next dispatch. A contended registry dispatches to
+    // nothing instead of panicking.
     let hooks: Vec<ResizeHookRef> = RESIZE_HOOKS.with(|h| {
-        h.borrow()
-            .values()
-            .flat_map(|component_hooks| component_hooks.iter().cloned())
-            .collect()
+        h.try_borrow()
+            .ok()
+            .map(|map| {
+                map.values()
+                    .flat_map(|component_hooks| component_hooks.iter().cloned())
+                    .collect()
+            })
+            .unwrap_or_default()
     });
 
     for hook in hooks {
@@ -247,21 +330,34 @@ pub fn run_all_resize_hooks(width: u32, height: u32) {
 /// Clear all resize hooks for a component (call when component is destroyed).
 pub fn clear_resize_hooks(id: ComponentId) {
     RESIZE_HOOKS.with(|h| {
-        h.borrow_mut().remove(&id);
+        if let Ok(mut map) = h.try_borrow_mut() {
+            map.remove(&id);
+        }
     });
 }
 
 /// Check whether a component has any registered resize hooks.
+///
+/// A contended registry reports `false` rather than panicking.
 pub fn has_resize_hooks(id: ComponentId) -> bool {
-    RESIZE_HOOKS.with(|h| h.borrow().get(&id).is_some_and(|hooks| !hooks.is_empty()))
+    RESIZE_HOOKS.with(|h| match h.try_borrow() {
+        Ok(map) => map.get(&id).is_some_and(|hooks| !hooks.is_empty()),
+        Err(_) => false,
+    })
 }
 
 /// Run *all* queued `on_mounted` hooks that have not yet fired.
 ///
 /// Mounted hooks are removed after they run, so this call is idempotent — the
 /// renderer may safely call it at the top of every `RedrawRequested` frame.
+/// A contended registry runs nothing instead of panicking.
 pub fn run_all_mounted_hooks() {
-    let ids: Vec<ComponentId> = MOUNTED_HOOKS.with(|h| h.borrow().keys().copied().collect());
+    let ids: Vec<ComponentId> = MOUNTED_HOOKS.with(|h| {
+        h.try_borrow()
+            .ok()
+            .map(|map| map.keys().copied().collect())
+            .unwrap_or_default()
+    });
     for id in ids {
         run_mounted_hooks(id);
     }
@@ -269,7 +365,12 @@ pub fn run_all_mounted_hooks() {
 
 /// Run all `on_updated` hooks for every mounted component.
 pub fn run_all_updated_hooks() {
-    let ids: Vec<ComponentId> = UPDATED_HOOKS.with(|h| h.borrow().keys().copied().collect());
+    let ids: Vec<ComponentId> = UPDATED_HOOKS.with(|h| {
+        h.try_borrow()
+            .ok()
+            .map(|map| map.keys().copied().collect())
+            .unwrap_or_default()
+    });
     for id in ids {
         run_updated_hooks(id);
     }
@@ -280,13 +381,30 @@ pub fn run_all_updated_hooks() {
 /// this from `CloseRequested` (window close) and from the drop guard around the
 /// event loop.
 pub fn run_all_destroy_hooks() {
-    let ids: Vec<ComponentId> = DESTROY_HOOKS.with(|h| h.borrow().keys().copied().collect());
+    let ids: Vec<ComponentId> = DESTROY_HOOKS.with(|h| {
+        h.try_borrow()
+            .ok()
+            .map(|map| map.keys().copied().collect())
+            .unwrap_or_default()
+    });
     for id in ids {
         run_destroy_hooks(id);
     }
-    UPDATED_HOOKS.with(|h| h.borrow_mut().clear());
-    RESIZE_HOOKS.with(|h| h.borrow_mut().clear());
-    MOUNTED_HOOKS.with(|h| h.borrow_mut().clear());
+    UPDATED_HOOKS.with(|h| {
+        if let Ok(mut map) = h.try_borrow_mut() {
+            map.clear();
+        }
+    });
+    RESIZE_HOOKS.with(|h| {
+        if let Ok(mut map) = h.try_borrow_mut() {
+            map.clear();
+        }
+    });
+    MOUNTED_HOOKS.with(|h| {
+        if let Ok(mut map) = h.try_borrow_mut() {
+            map.clear();
+        }
+    });
     // `DESTROY_HOOKS` entries were already removed by `run_destroy_hooks`; the
     // clear above covers cases where cleanup_component was not yet called.
 }
@@ -294,13 +412,19 @@ pub fn run_all_destroy_hooks() {
 /// Clean up all hooks for a component (call when component is fully destroyed)
 pub fn cleanup_component(id: ComponentId) {
     MOUNTED_HOOKS.with(|h| {
-        h.borrow_mut().remove(&id);
+        if let Ok(mut map) = h.try_borrow_mut() {
+            map.remove(&id);
+        }
     });
     DESTROY_HOOKS.with(|h| {
-        h.borrow_mut().remove(&id);
+        if let Ok(mut map) = h.try_borrow_mut() {
+            map.remove(&id);
+        }
     });
     UPDATED_HOOKS.with(|h| {
-        h.borrow_mut().remove(&id);
+        if let Ok(mut map) = h.try_borrow_mut() {
+            map.remove(&id);
+        }
     });
     clear_resize_hooks(id);
 }
