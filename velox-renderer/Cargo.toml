@@ -1,9 +1,10 @@
 [package]
 name = "velox-renderer"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 license = "MIT"
 description = "Rendering backends (Skia) for the Velox UI framework"
+readme = "README.md"
 authors = ["fahimaloy"]
 repository = "https://github.com/fahimaloy/velox"
 documentation = "https://velox.dev/docs/renderer"
@@ -36,7 +37,7 @@ skia-native = ["dep:skia-safe", "skia", "dep:raw-window-handle", "dep:egl", "dep
 svg = ["dep:resvg"]
 
 [dependencies]
-velox-core = { version = "0.1.0", path = "../velox-core" }
+velox-core = { version = "0.1.1", path = "../velox-core" }
 # Optional backends (do NOT compile unless feature enabled)
 winit = { version = "0.28", optional = true }
 skia-safe = { version = "0.91.1", features = ["gl", "egl"], optional = true }
@@ -47,8 +48,8 @@ egl = { version = "0.2", optional = true }
 # glow for loading GL function pointers where needed
 glow = { version = "0.12", optional = true }
 softbuffer = { version = "0.3", optional = true }
-velox-dom = { version = "0.1.0", path = "../velox-dom" }
-velox-style = { version = "0.1.0", path = "../velox-style" }
+velox-dom = { version = "0.1.1", path = "../velox-dom" }
+velox-style = { version = "0.1.1", path = "../velox-style" }
 log = "0.4"
 bytemuck = { version = "1", features = ["derive"] }
 
@@ -74,9 +75,13 @@ serde_json = "1.0"
 resvg = { version = "0.48", default-features = false, features = ["raster-images"], optional = true }
 
 [dev-dependencies]
-velox-core = { version = "0.1.0", path = "../velox-core" }
-velox-style = { version = "0.1.0", path = "../velox-style" }
-velox-sfc = { version = "0.1.0", path = "../velox-sfc" }
+# Path-only (no `version`): version-less dev-dependencies are stripped from the
+# published manifest, so packaging never resolves them against crates.io — which
+# matters for velox-sfc, since velox-sfc also dev-depends on this crate and the
+# two versioned dev-deps would deadlock in either publish order.
+velox-core = { path = "../velox-core" }
+velox-style = { path = "../velox-style" }
+velox-sfc = { path = "../velox-sfc" }
 skia-safe = { version = "0.91.1", features = ["gl", "egl"] }
 # `criterion` is a dev-dependency of `velox-renderer` for
 # `benches/skia_render_bench.rs` and nothing else; the crate is

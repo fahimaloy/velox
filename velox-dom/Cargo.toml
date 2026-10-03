@@ -1,9 +1,10 @@
 [package]
 name = "velox-dom"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 license = "MIT"
 description = "Virtual DOM and layout engine for the Velox UI framework"
+readme = "README.md"
 authors = ["fahimaloy"]
 repository = "https://github.com/fahimaloy/velox"
 documentation = "https://velox.dev/docs/dom"
@@ -17,4 +18,13 @@ categories = ["gui"]
 # Everything else in `tests/` runs by default with no features.
 
 [dependencies]
+
+[dev-dependencies]
+# Two DOM-side integration tests (`ua_defaults_live`, `button_single_child_justify`)
+# assert the pairing DOM-types + CSS-cascade end to end, so they need velox-style.
+# PATH-ONLY on purpose: velox-style normal-depends on velox-dom, so velox-dom must
+# publish first and a `version` here would deadlock publishing (cargo's own help:
+# remove the version so it is implicitly stripped). Cargo drops version-less
+# dev-dependencies from the published manifest; only workspace builds see it.
+velox-style = { path = "../velox-style" }
 

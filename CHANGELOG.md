@@ -123,3 +123,20 @@
 
 ### Removed
 - Removed outdated example projects (`gallery`, `myapp`, `interactive_skia`, `vx_demo`); retained `counter` and `todo`
+
+## 0.1.1 - 2026-10-04
+
+### Added
+- Per-crate `readme = "README.md"` in the `[package]` section of every published
+  crate (`velox-core`, `velox-dom`, `velox-style`, `velox-renderer`, `velox-sfc`,
+  `veloxc`), so crates.io renders the README on each crate's version page
+
+### Changed
+- `velox-cli` → `veloxc` rename completed across the workspace (c11dd60): crate,
+  binary, CI, docs, examples and scaffold output all use the single name `veloxc`
+
+### Fixed
+- Corrected the logo glyph to a single Rust-style mark
+
+### Removed
+- `.opencode/` is no longer tracked by git and is gitignored (6092341)

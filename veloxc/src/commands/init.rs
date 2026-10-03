@@ -134,7 +134,7 @@ pub(crate) fn velox_dep_path(
     leaf: &str,
 ) -> String {
     let p = compute_relative_path(project_dir, &workspace.join(leaf));
-    format!(r#"{{ path = "{}", version = "0.1.0" }}"#, p.display())
+    format!(r#"{{ path = "{}", version = "0.1.1" }}"#, p.display())
 }
 
 /// Initialize a new Velox project
@@ -263,7 +263,7 @@ pub fn init_app(name: &str) -> Result<PathBuf> {
     let cargo = format!(
         r#"[package]
 name = "{name}"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 
 [dependencies]
@@ -342,7 +342,7 @@ pub(crate) fn generate_cargo_toml(name: &str, project_dir: &Path) -> String {
             let renderer_path = compute_relative_path(project_dir, &ws.join("velox-renderer"));
             let cli_path = compute_relative_path(project_dir, &ws.join("veloxc"));
             return format!(
-                "[package]\nname = \"{name}\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[workspace]\n\n[dependencies]\nvelox-core = {{ path = \"{}\", version = \"0.1.0\" }}\nvelox-dom = {{ path = \"{}\", version = \"0.1.0\" }}\nvelox-style = {{ path = \"{}\", version = \"0.1.0\" }}\nvelox-renderer = {{ path = \"{}\", version = \"0.1.0\", features = [\"skia-native\"] }}\nserde_json = \"1.0\"\n\n[build-dependencies]\nveloxc = {{ path = \"{}\", version = \"0.1.0\" }}\n",
+                "[package]\nname = \"{name}\"\nversion = \"0.1.1\"\nedition = \"2021\"\n\n[workspace]\n\n[dependencies]\nvelox-core = {{ path = \"{}\", version = \"0.1.1\" }}\nvelox-dom = {{ path = \"{}\", version = \"0.1.1\" }}\nvelox-style = {{ path = \"{}\", version = \"0.1.1\" }}\nvelox-renderer = {{ path = \"{}\", version = \"0.1.1\", features = [\"skia-native\"] }}\nserde_json = \"1.0\"\n\n[build-dependencies]\nveloxc = {{ path = \"{}\", version = \"0.1.1\" }}\n",
                 core_path.display(),
                 dom_path.display(),
                 style_path.display(),
@@ -365,20 +365,20 @@ pub(crate) fn generate_cargo_toml(name: &str, project_dir: &Path) -> String {
         format!(
             r#"[package]
 name = "{name}"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 
 [workspace]
 
 [dependencies]
-velox-core = {{ path = "{}", version = "0.1.0" }}
-velox-dom = {{ path = "{}", version = "0.1.0" }}
-velox-style = {{ path = "{}", version = "0.1.0" }}
-velox-renderer = {{ path = "{}", version = "0.1.0", features = ["skia-native"] }}
+velox-core = {{ path = "{}", version = "0.1.1" }}
+velox-dom = {{ path = "{}", version = "0.1.1" }}
+velox-style = {{ path = "{}", version = "0.1.1" }}
+velox-renderer = {{ path = "{}", version = "0.1.1", features = ["skia-native"] }}
 serde_json = "1.0"
 
 [build-dependencies]
-veloxc = {{ path = "{}", version = "0.1.0" }}
+veloxc = {{ path = "{}", version = "0.1.1" }}
 "#,
             core_path.display(),
             dom_path.display(),
@@ -390,7 +390,7 @@ veloxc = {{ path = "{}", version = "0.1.0" }}
         // No workspace found — fall back to git dependencies
         let rev = crate::velox_git_rev();
         format!(
-            "[package]\nname = \"{name}\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[workspace]\n\n[dependencies]\nvelox-core = {{ git = \"https://github.com/fahimaloy/velox\", rev = \"{rev}\", version = \"0.1.0\" }}\nvelox-dom = {{ git = \"https://github.com/fahimaloy/velox\", rev = \"{rev}\", version = \"0.1.0\" }}\nvelox-style = {{ git = \"https://github.com/fahimaloy/velox\", rev = \"{rev}\", version = \"0.1.0\" }}\nvelox-renderer = {{ git = \"https://github.com/fahimaloy/velox\", rev = \"{rev}\", version = \"0.1.0\", features = [\"skia-native\"] }}\nserde_json = \"1.0\"\n\n[build-dependencies]\nveloxc = {{ git = \"https://github.com/fahimaloy/velox\", rev = \"{rev}\", version = \"0.1.0\" }}\n"
+            "[package]\nname = \"{name}\"\nversion = \"0.1.1\"\nedition = \"2021\"\n\n[workspace]\n\n[dependencies]\nvelox-core = {{ git = \"https://github.com/fahimaloy/velox\", rev = \"{rev}\", version = \"0.1.1\" }}\nvelox-dom = {{ git = \"https://github.com/fahimaloy/velox\", rev = \"{rev}\", version = \"0.1.1\" }}\nvelox-style = {{ git = \"https://github.com/fahimaloy/velox\", rev = \"{rev}\", version = \"0.1.1\" }}\nvelox-renderer = {{ git = \"https://github.com/fahimaloy/velox\", rev = \"{rev}\", version = \"0.1.1\", features = [\"skia-native\"] }}\nserde_json = \"1.0\"\n\n[build-dependencies]\nveloxc = {{ git = \"https://github.com/fahimaloy/velox\", rev = \"{rev}\", version = \"0.1.1\" }}\n"
         )
     }
 }

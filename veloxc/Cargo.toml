@@ -1,9 +1,10 @@
 
 [package]
 name = "veloxc"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 description = "CLI tools for building Velox applications"
+readme = "README.md"
 authors = ["fahimaloy"]
 license = "MIT"
 repository = "https://github.com/fahimaloy/velox"
@@ -21,12 +22,12 @@ clap = { version = "4", features = ["derive"] }
 anyhow = "1"
 log = "0.4"
 env_logger = "0.11"
-velox-sfc = { version = "0.1.0", path = "../velox-sfc" }
-velox-style = { version = "0.1.0", path = "../velox-style" }
+velox-sfc = { version = "0.1.1", path = "../velox-sfc" }
+velox-style = { version = "0.1.1", path = "../velox-style" }
 
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0.149"
-velox-renderer = { version = "0.1.0", path = "../velox-renderer" }
+velox-renderer = { version = "0.1.1", path = "../velox-renderer" }
 # Real filesystem watching for the dev server. Replaces a 400 ms polling
 # `read_dir` walk: `notify` reports changes in well under 100 ms and does not
 # touch every file on every tick. See `commands::dev::DirWatcher`.
@@ -46,9 +47,11 @@ path = "src/lib.rs"
 # Integration tests assert on styled vnodes (`Props`/`VNode`/`h`) and drive the
 # real layout pass, so they need velox-dom directly rather than through
 # velox-style's re-exports.
-velox-dom = { version = "0.1.0", path = "../velox-dom" }
+# Path-only (no `version`): version-less dev-dependencies are stripped from the
+# published manifest, so packaging never has to resolve them against crates.io.
+velox-dom = { path = "../velox-dom" }
 # `skia-native` is enabled here (not just for a separate CI job) so the
 # pixel-level scoping proof runs in the DEFAULT `cargo test` pass rather than
 # behind `#[ignore]`, which is how the unscoped-merge defect survived a green
 # suite. It is a dev-dependency, so it never reaches a scaffolded app.
-velox-renderer = { version = "0.1.0", path = "../velox-renderer", features = ["skia-native"] }
+velox-renderer = { path = "../velox-renderer", features = ["skia-native"] }

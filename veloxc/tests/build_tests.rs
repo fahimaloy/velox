@@ -18,8 +18,9 @@ fn init_toml_pins_version_and_rev() {
     }
     let dir = std::env::temp_dir().join(format!("velox-pin-{}", std::process::id()));
     let toml = veloxc::commands::init::generate_cargo_toml_for_test("demo", &dir);
+    let expected = format!(r#"version = "{}""#, env!("CARGO_PKG_VERSION"));
     assert!(
-        toml.contains(r#"version = "0.1.0""#),
+        toml.contains(&expected),
         "must bind version:\n{toml}"
     );
 }
@@ -70,8 +71,9 @@ fn init_local_override_uses_given_path() {
     let ws = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..");
     let dir = std::env::temp_dir().join(format!("velox-local-{}", std::process::id()));
     let toml = veloxc::commands::init::init_toml_with_local("demo", &dir, Some(ws.as_path()));
+    let expected = format!(r#"version = "{}""#, env!("CARGO_PKG_VERSION"));
     assert!(
-        toml.contains(r#"version = "0.1.0""#),
+        toml.contains(&expected),
         "local path must also pin version:\n{toml}"
     );
     assert!(

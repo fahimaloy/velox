@@ -4,7 +4,7 @@ use std::path::PathBuf;
 
 #[derive(Parser)]
 #[command(name = "velox")]
-#[command(version = "0.1.0")]
+#[command(version = env!("CARGO_PKG_VERSION"))]
 #[command(author = "fahimaloy")]
 #[command(about = "🚀 Velox - A modern UI framework for Rust", long_about = None)]
 struct Cli {
