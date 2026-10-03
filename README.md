@@ -6,7 +6,7 @@
 
 **Reactive components · Instant rebuilds · Skia rendering**
 
-[![Crates.io](https://img.shields.io/crates/v/velox-cli.svg?style=for-the-badge&color=blue)](https://crates.io/crates/velox-cli)
+[![Crates.io](https://img.shields.io/crates/v/veloxc.svg?style=for-the-badge&color=blue)](https://crates.io/crates/veloxc)
 [![Docs](https://img.shields.io/badge/docs-velox.dev?style=for-the-badge&color=lightblue)](https://velox.dev/docs/cli)
 [![License: MIT](https://img.shields.io/badge/license-MIT?style=for-the-badge&color=green)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-1.85%2B?style=for-the-badge&color=orange)](https://rustup.rs)
@@ -69,7 +69,7 @@ xcode-select --install
 ### Install the CLI
 
 ```bash
-cargo install velox-cli
+cargo install veloxc
 ```
 
 Verify:
@@ -81,7 +81,7 @@ Edition: 2024
 Platform: Linux
 ```
 
-> **Dev tip:** Install from a cloned repo with `cargo install --path velox-cli --force` to get the latest `main` branch without waiting for a crates.io release.
+> **Dev tip:** Install from a cloned repo with `cargo install --path veloxc --force` to get the latest `main` branch without waiting for a crates.io release.
 
 ---
 
@@ -244,7 +244,7 @@ Velox is a **modular workspace** of 6 published crates. Use any combination:
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│  velox-cli  (velox binary)                                     │
+│  veloxc  (veloxc binary)                                      │
 │  init · build · dev · run · lint · version                    │
 ├─────────────────────────────────────────────────────────────────┤
 │  velox-renderer   skia-native · skia · svg                     │
@@ -457,7 +457,7 @@ All crates are published and installable:
 | [`velox-dom`](https://crates.io/crates/velox-dom) | `cargo add velox-dom` | VNode + layout engine |
 | [`velox-style`](https://crates.io/crates/velox-style) | `cargo add velox-style` | CSS cascade engine |
 | [`velox-renderer`](https://crates.io/crates/velox-renderer) | `cargo add velox-renderer` | Skia rendering |
-| [`velox-cli`](https://crates.io/crates/velox-cli) | `cargo install velox-cli` | The `velox` CLI binary |
+| [`veloxc`](https://crates.io/crates/veloxc) | `cargo install veloxc` | The `veloxc` CLI binary |
 
 ---
 

@@ -6,7 +6,7 @@ members = [
     "velox-dom",
     "velox-renderer",
     "velox-style",
-    "velox-cli",
+    "veloxc",
     "examples/counter",
     "examples/todo",
     "examples/showcase",

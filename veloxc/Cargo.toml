@@ -1,6 +1,6 @@
 
 [package]
-name = "velox-cli"
+name = "veloxc"
 version = "0.1.0"
 edition = "2024"
 description = "CLI tools for building Velox applications"
@@ -13,7 +13,7 @@ keywords = ["cli", "scaffold", "build", "compiler", "velox"]
 categories = ["command-line-utilities", "development-tools::build-utils"]
 
 [[bin]]
-name = "velox"
+name = "veloxc"
 path = "src/bin/main.rs"
 
 [dependencies]
@@ -39,7 +39,7 @@ velox-renderer = { version = "0.1.0", path = "../velox-renderer" }
 notify = "6"
 
 [lib]
-name = "velox_cli"
+name = "veloxc"
 path = "src/lib.rs"
 
 [dev-dependencies]
