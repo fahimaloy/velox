@@ -131,7 +131,10 @@ fn compile_component_tree(
             let source_path = if Path::new(&import.source).is_absolute() {
                 PathBuf::from(&import.source)
             } else {
-                vx_file.parent().unwrap().join(&import.source)
+                vx_file
+                    .parent()
+                    .unwrap_or_else(|| Path::new("."))
+                    .join(&import.source)
             };
 
             if source_path.exists() {

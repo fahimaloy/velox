@@ -118,7 +118,7 @@ impl Tokenizer {
 
     fn advance(&mut self) -> Option<char> {
         if self.pos < self.input.len() {
-            let c = self.input[self.pos..].chars().next().unwrap();
+            let c = self.input[self.pos..].chars().next()?;
             self.pos += c.len_utf8();
             Some(c)
         } else {
@@ -534,14 +534,18 @@ impl Parser {
                 Ok(Expr::NumberLit(val))
             }
             Some(Token::StringLit(_)) => {
-                let tok = self.advance().unwrap();
+                let tok = self
+                    .advance()
+                    .ok_or_else(|| "unexpected end of expression".to_string())?;
                 match tok {
                     Token::StringLit(s) => Ok(Expr::StringLit(s)),
                     _ => unreachable!(),
                 }
             }
             Some(Token::Ident(_)) => {
-                let tok = self.advance().unwrap();
+                let tok = self
+                    .advance()
+                    .ok_or_else(|| "unexpected end of expression".to_string())?;
                 match tok {
                     Token::Ident(name) => {
                         // Check if followed by ( -> function call (no receiver)

@@ -124,8 +124,12 @@ impl BoxShadow {
     pub fn parse(value: &str) -> Option<Self> {
         let value = value.trim();
         let inset = value.starts_with("inset");
+        // `strip_prefix` cannot fail after the `starts_with` check above, but a
+        // `map(...).unwrap_or(value)` keeps a malformed value parseable instead
+        // of panicking the styling pass: the fallback simply parses without the
+        // inset prefix stripped.
         let value = if inset {
-            value.strip_prefix("inset").unwrap().trim()
+            value.strip_prefix("inset").map(str::trim).unwrap_or(value)
         } else {
             value
         };

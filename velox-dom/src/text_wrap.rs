@@ -1,6 +1,6 @@
 // Text wrapping and layout utilities — Skia-unified, white-space/ellipsis aware.
 
-use crate::layout::{FontMetrics, LayoutNode, Rect};
+use crate::layout::{DEFAULT_TEXT_FAMILY, FontMetrics, LayoutNode, Rect};
 use crate::style::{TextOverflow, WhiteSpace};
 
 /// Result of wrapping text into lines
@@ -240,12 +240,14 @@ pub(crate) fn truncate_fragments_with_ellipsis(
     let mut done = 0.0f32;
     for (fi, fragment) in fragments.iter().enumerate() {
         let snapped = snapped_size(fragment.font_size, scale);
-        let ellipsis_w = measure_text_internal(ELLIPSIS, snapped, &fragment.font_family, scale);
+        let ellipsis_w =
+            measure_text_internal(ELLIPSIS, snapped, fragment.font_family.as_str(), scale);
         let mut cur = String::new();
         let mut width = 0.0f32;
         for ch in fragment.text.chars() {
             cur.push(ch);
-            let next = measure_text_internal(&cur, snapped, &fragment.font_family, scale);
+            let next =
+                measure_text_internal(cur.as_str(), snapped, fragment.font_family.as_str(), scale);
             if done + next + ellipsis_w > max_width {
                 break;
             }
@@ -286,7 +288,10 @@ fn truncate_with_ellipsis(
     else {
         return text.to_string();
     };
-    let kept: String = text.chars().take(kept[0]).collect();
+    let kept: String = text
+        .chars()
+        .take(kept.first().copied().unwrap_or(0))
+        .collect();
     format!("{kept}{ELLIPSIS}")
 }
 
@@ -379,7 +384,7 @@ pub fn wrap_text_with_style(
             if ellipsis && m(text) > limit {
                 let truncated =
                     truncate_with_ellipsis(text, limit, font_size_px, font_family, scale);
-                let w = m(&truncated);
+                let w = m(truncated.as_str());
                 vec![(truncated, w)]
             } else {
                 vec![(text.to_string(), m(text))]
@@ -392,7 +397,7 @@ pub fn wrap_text_with_style(
                 // Keep para as-is (including empty)
                 if ellipsis && m(para) > limit {
                     let tr = truncate_with_ellipsis(para, limit, font_size_px, font_family, scale);
-                    let w = m(&tr);
+                    let w = m(tr.as_str());
                     out.push((tr, w));
                 } else {
                     out.push((para.to_string(), m(para)));
@@ -428,14 +433,14 @@ pub fn wrap_text_with_style(
                     } else {
                         format!("{} {}", current, word)
                     };
-                    let candidate_w = m(&candidate);
+                    let candidate_w = m(candidate.as_str());
                     if candidate_w <= limit || current.is_empty() {
                         current = candidate;
                         current_w = candidate_w;
                     } else {
                         out.push((current.clone(), current_w));
                         current = word.to_string();
-                        current_w = m(&current);
+                        current_w = m(current.as_str());
                     }
                 }
                 if !current.is_empty() {
@@ -446,9 +451,15 @@ pub fn wrap_text_with_style(
                 out.push((String::new(), 0.0));
             }
             // ellipsis on single-line pre-wrap? If single para and ellipsis, truncate each line that overflows
-            if ellipsis && out.len() == 1 && m(&out[0].0) > limit {
-                let tr = truncate_with_ellipsis(&out[0].0, limit, font_size_px, font_family, scale);
-                let w = m(&tr);
+            if ellipsis && out.len() == 1 && m(out[0].0.as_str()) > limit {
+                let tr = truncate_with_ellipsis(
+                    out[0].0.as_str(),
+                    limit,
+                    font_size_px,
+                    font_family,
+                    scale,
+                );
+                let w = m(tr.as_str());
                 out[0] = (tr, w);
             }
             out
@@ -474,14 +485,14 @@ pub fn wrap_text_with_style(
                     } else {
                         format!("{} {}", current, word)
                     };
-                    let candidate_w = m(&candidate);
+                    let candidate_w = m(candidate.as_str());
                     if candidate_w <= limit || current.is_empty() {
                         current = candidate;
                         current_w = candidate_w;
                     } else {
                         lines.push((current, current_w));
                         current = word.to_string();
-                        current_w = m(&current);
+                        current_w = m(current.as_str());
                     }
                 }
                 if !current.is_empty() {
@@ -494,10 +505,15 @@ pub fn wrap_text_with_style(
             // Single-line ellipsis handling: when nowrap would be inferred? For normal with ellipsis, only if wrapping disabled — we are in Normal, so ellipsis not applied unless we detect single-line overflow? Brief says if ellipsis and single-line overflow, truncate.
             // For Normal, ellipsis only meaningful when rendered as single line (e.g., white-space:nowrap + overflow ellipsis). So we keep lines as-is.
             // However if caller passed ellipsis=true with Normal and text would be single line that overflows, we should truncate to single line.
-            if ellipsis && lines.len() == 1 && m(&lines[0].0) > limit {
-                let tr =
-                    truncate_with_ellipsis(&lines[0].0, limit, font_size_px, font_family, scale);
-                let w = m(&tr);
+            if ellipsis && lines.len() == 1 && m(lines[0].0.as_str()) > limit {
+                let tr = truncate_with_ellipsis(
+                    lines[0].0.as_str(),
+                    limit,
+                    font_size_px,
+                    font_family,
+                    scale,
+                );
+                let w = m(tr.as_str());
                 lines[0] = (tr, w);
             } else if ellipsis && lines.len() > 1 {
                 // still truncate last? No, per spec single-line only.
@@ -512,7 +528,7 @@ pub fn wrap_text_with_style(
 pub fn wrap_text(text: &str, max_width: i32, font_size_px: f32) -> Vec<TextLine> {
     let max_w = max_width as f32;
     let scale = current_scale();
-    let measured = wrap_text_measured(text, max_w, font_size_px, "system-ui", scale);
+    let measured = wrap_text_measured(text, max_w, font_size_px, DEFAULT_TEXT_FAMILY, scale);
     let metrics = FontMetrics::from_font_size(font_size_px);
     let line_height = metrics.line_height.round() as i32;
     // Fallback if measured empty?
@@ -530,7 +546,7 @@ pub fn wrap_text(text: &str, max_width: i32, font_size_px: f32) -> Vec<TextLine>
             // The line's height comes from the run that is actually in it, not
             // from the font's nominal line height: two lines whose text reaches
             // different heights get different heights.
-            let run = measure_text_metrics(&s, snapped, "system-ui", scale);
+            let run = measure_text_metrics(s.as_str(), snapped, DEFAULT_TEXT_FAMILY, scale);
             TextLine {
                 text: s,
                 width: w.round() as i32,
@@ -575,7 +591,7 @@ pub fn wrap_text_with_options(
     measured
         .into_iter()
         .map(|(s, w)| {
-            let run = measure_text_metrics(&s, snapped, font_family, scale);
+            let run = measure_text_metrics(s.as_str(), snapped, font_family, scale);
             TextLine {
                 text: s,
                 width: w.round() as i32,

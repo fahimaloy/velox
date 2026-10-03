@@ -238,7 +238,13 @@ mod unix_impl {
             return Err("egl: make_current failed".into());
         }
 
-        // Build skia-safe GL interface from current GL funcs
+        // Build skia-safe GL interface from current GL funcs.
+        //
+        // SAFETY: `new_load_with` resolves GL symbols through EGL's
+        // `get_proc_address`, which requires a current EGL context on this
+        // thread. `make_current` succeeded two statements above on this same
+        // thread, so the context is current. A null symbol would only make
+        // interface creation return `None` (mapped to `Err` below), never UB.
         let interface = unsafe {
             skia_safe::gpu::gl::Interface::new_load_with(|name: &str| {
                 // Use EGL's get_proc_address to load GL symbols
@@ -309,6 +315,9 @@ mod unix_impl {
             return Err("egl: make_current failed".into());
         }
 
+        // SAFETY: same contract as the windowed path above — `make_current`
+        // succeeded on this thread immediately above, so EGL symbol
+        // resolution is valid. Failure surfaces as `None` → `Err`, never UB.
         let interface = unsafe {
             skia_safe::gpu::gl::Interface::new_load_with(|name: &str| {
                 let f = egl::get_proc_address(name);
@@ -370,6 +379,12 @@ mod unix_impl {
             .ok_or_else(|| "skia: could not create DirectContext".to_string())?;
 
         // Attempt to build a GPU-backed Surface using the current framebuffer.
+        //
+        // SAFETY: `from_loader_function` + `get_parameter_i32` need a current
+        // GL context on this thread. `gl_ctx.make_current()` ran two lines
+        // above and `owned` keeps that context alive for this whole block, so
+        // the context is current. The queried FBO id only selects the wrap
+        // target (`None` → raster fallback below), so no UB is reachable.
         let mut surface = {
             let gl = unsafe {
                 glow::Context::from_loader_function(|s| egl::get_proc_address(s) as *const _)

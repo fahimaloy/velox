@@ -54,8 +54,14 @@ pub enum Patch {
 
 impl VNode {
     pub fn key(&self) -> Option<String> {
+        self.key_str().map(str::to_string)
+    }
+
+    /// Borrowed `key`: the keyed diff routes through this so matching never
+    /// allocates a `String` per node per comparison.
+    pub fn key_str(&self) -> Option<&str> {
         match self {
-            VNode::Element { props, .. } => props.attrs.get("key").cloned(),
+            VNode::Element { props, .. } => props.attrs.get("key").map(String::as_str),
             _ => None,
         }
     }
@@ -115,7 +121,7 @@ fn diff_props(a: &Props, b: &Props) -> Vec<Patch> {
 fn diff_children_keyed(
     old: &[VNode],
     new: &[VNode],
-    get_key: impl Fn(&VNode) -> Option<String>,
+    get_key: impl Fn(&VNode) -> Option<&str>,
 ) -> Vec<Patch> {
     // We simulate the live DOM child list as patches are emitted so that every
     // index (Update / Insert / Remove / Move) refers to the DOM order as it is
@@ -144,11 +150,11 @@ fn diff_children_keyed(
 
         // Find a still-unused old child carrying the same key, in live order.
         let mut reuse: Option<usize> = None; // index into `sim`
-        if let Some(key) = &key {
+        if let Some(key) = key {
             for (j, slot) in sim.iter().enumerate() {
                 if let Slot::Old(i) = slot
                     && !used_old.contains(i)
-                    && get_key(&old[*i]).as_ref() == Some(key)
+                    && get_key(&old[*i]) == Some(key)
                 {
                     reuse = Some(j);
                     break;
@@ -201,9 +207,9 @@ fn diff_children_keyed(
 }
 
 fn diff_children(a: &[VNode], b: &[VNode]) -> Vec<Patch> {
-    let has_keys = b.iter().any(|n| n.key().is_some());
+    let has_keys = b.iter().any(|n| n.key_str().is_some());
     if has_keys {
-        return diff_children_keyed(a, b, |n| n.key());
+        return diff_children_keyed(a, b, |n| n.key_str());
     }
 
     let mut patches = Vec::new();

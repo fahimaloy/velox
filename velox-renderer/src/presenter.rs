@@ -99,6 +99,12 @@ fn is_wayland_socket_alive() -> bool {
 /// By forcing the X11 backend (which panics instead of exiting), we stay safe.
 fn force_backend(backend: &str) {
     if cfg!(target_os = "linux") {
+        // SAFETY: `set_var` races with `getenv` in other threads, which is
+        // why it is `unsafe`. This runs during startup window-bootstrap,
+        // before the event loop (and any thread that reads
+        // `WINIT_UNIX_BACKEND`) exists, so no concurrent read can observe a
+        // torn value. The single-threaded test below serialises the env-var
+        // tests for the same reason.
         unsafe { std::env::set_var("WINIT_UNIX_BACKEND", backend) }
     }
 }
@@ -267,6 +273,12 @@ impl SoftbufferPresenter {
                 "softbuffer: no display server detected (WAYLAND_DISPLAY and DISPLAY are both unset)",
             )));
         }
+        // SAFETY: `Context::new` is `unsafe` because softbuffer cannot verify
+        // the window handle outlives the context. `window` is borrowed from
+        // the winit event loop, which outlives this presenter by construction
+        // (the presenter is created and dropped inside the loop's lifetime),
+        // so the handle is valid for the whole `Self`. A creation failure is
+        // a `Result::Err`, not undefined behaviour, and is mapped below.
         let context = unsafe {
             Context::new(window).map_err(|e| {
                 let msg = e.to_string();
@@ -279,6 +291,9 @@ impl SoftbufferPresenter {
                 }
             })?
         };
+        // SAFETY: same lifetime contract as `Context::new` above — `window`
+        // outlives `Self`, and `Surface::new` only reads the handle during
+        // this call. Failure is a mapped `Err`, never UB.
         let mut surface = unsafe {
             Surface::new(&context, window).map_err(|e| {
                 let msg = e.to_string();
@@ -472,6 +487,10 @@ mod tests {
     impl EnvVarGuard {
         fn set(key: &'static str, value: &str) -> Self {
             let prev = std::env::var(key).ok();
+            // SAFETY: process-global env mutation. All env-var assertions in
+            // this module live in ONE test (`debug_flag_does_not_change_...`),
+            // and no other test in this crate touches these keys, so no
+            // thread can read the var mid-mutation. See that test's note.
             unsafe { std::env::set_var(key, value) };
             Self { key, prev }
         }
@@ -479,6 +498,7 @@ mod tests {
         /// Removes the var now; restores the prior value on drop.
         fn remove(key: &'static str) -> Self {
             let prev = std::env::var(key).ok();
+            // SAFETY: same single-test serialisation as `set` above.
             unsafe { std::env::remove_var(key) };
             Self { key, prev }
         }
@@ -487,6 +507,7 @@ mod tests {
     impl Drop for EnvVarGuard {
         fn drop(&mut self) {
             match self.prev.take() {
+                // SAFETY: same single-test serialisation as `set` above.
                 Some(v) => unsafe { std::env::set_var(self.key, v) },
                 None => unsafe { std::env::remove_var(self.key) },
             };

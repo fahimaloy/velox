@@ -277,6 +277,16 @@ mod native {
         // Skia BackendRenderTarget. This is a best-effort implementation
         // for EGL/GL on Unix. If anything fails, return None and the
         // caller will fall back to a raster surface.
+        //
+        // SAFETY: `from_loader_function` only stores the loader for later
+        // symbol resolution, and `get_parameter_i32` reads the currently
+        // bound FBO — both require a current GL context on this thread. The
+        // sole caller (`create_window_surface_from_handle`, via
+        // `create_gpu_surface_from_direct_context`) runs after
+        // `into_direct_context` made the context current, so the context is
+        // current here. A wrong FBO id would only mis-target the wrap (which
+        // returns `None` and falls back to raster), never UB: no raw
+        // pointers escape this block.
         unsafe {
             // Create a glow context loader using EGL's get_proc_address.
             let gl = glow::Context::from_loader_function(|s| egl::get_proc_address(s) as *const _);

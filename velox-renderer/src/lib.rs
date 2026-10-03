@@ -2487,7 +2487,12 @@ where
     if let Some(proxy) = proxy_opt {
         match std::sync::Arc::try_unwrap(hmr_rx) {
             Ok(mutex) => {
-                let rx = mutex.into_inner().expect("hmr mutex poisoned");
+                // `into_inner`, never `expect`: a poisoned mutex still owns a
+                // valid `Receiver`, and panicking here would kill the app over
+                // a previous panic's side effect. The receiver is taken as-is.
+                let rx = mutex
+                    .into_inner()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
                 std::thread::spawn(move || {
                     let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                         while let Ok(msg) = rx.recv() {
@@ -2505,7 +2510,14 @@ where
                     let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                         loop {
                             let res = {
-                                let guard = shared.lock().expect("hmr mutex poisoned");
+                                // `into_inner`, never `expect`: poisoning must
+                                // not panic the HMR thread (which would kill
+                                // forwarding silently). The guard is dropped
+                                // before `recv` either way — no lock is held
+                                // across the blocking call.
+                                let guard = shared
+                                    .lock()
+                                    .unwrap_or_else(|poisoned| poisoned.into_inner());
                                 guard.try_recv()
                             };
                             match res {

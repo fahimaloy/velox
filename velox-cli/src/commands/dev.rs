@@ -434,7 +434,10 @@ fn seed_cache(cache: &Arc<Mutex<HashMap<PathBuf, String>>>, root: &Path) {
             if path.is_dir() {
                 walk(cache, &path, root);
             } else if let Ok(content) = std::fs::read_to_string(&path) {
-                cache.lock().unwrap().insert(rel.to_path_buf(), content);
+                cache
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .insert(rel.to_path_buf(), content);
             }
         }
     }
@@ -451,7 +454,7 @@ fn classify_observed(previous: &Arc<Mutex<HashMap<PathBuf, String>>>, path: &Pat
     let Ok(after) = std::fs::read_to_string(path) else {
         return ChangeKind::Script;
     };
-    let mut cache = previous.lock().unwrap();
+    let mut cache = previous.lock().unwrap_or_else(|e| e.into_inner());
     match cache.remove(path) {
         Some(before) => {
             let kind = classify_change(&before, &after);
@@ -910,7 +913,12 @@ impl BuildWorker {
 
 impl Drop for BuildWorker {
     fn drop(&mut self) {
-        if let Some(mut c) = self.cargo_slot.lock().unwrap().take() {
+        if let Some(mut c) = self
+            .cargo_slot
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take()
+        {
             let _ = c.kill();
             let _ = c.wait();
         }
@@ -961,7 +969,7 @@ fn run_build(
     let pipe = child.stderr.take();
     // Publish the handle first: from here on `BuildWorker::drop` can kill and
     // reap `cargo` if the dev server shuts down mid-compile.
-    *cargo_slot.lock().unwrap() = Some(child);
+    *cargo_slot.lock().unwrap_or_else(|e| e.into_inner()) = Some(child);
 
     let mut stderr = Vec::new();
     if let Some(mut err) = pipe {
@@ -971,7 +979,7 @@ fn run_build(
     // Reap, unless `BuildWorker::drop` already took the handle and killed it
     // because the dev server is shutting down. In that case there is no result
     // to report and nothing left to run.
-    let still_ours = cargo_slot.lock().unwrap().take();
+    let still_ours = cargo_slot.lock().unwrap_or_else(|e| e.into_inner()).take();
     let Some(mut c) = still_ours else {
         return;
     };
@@ -1096,7 +1104,7 @@ impl HmrListener {
                     Ok((stream, addr)) => {
                         eprintln!("[velox] HMR client connected: {}", addr);
                         // Store the connected stream so the dev server can send to it.
-                        *slot_clone.lock().unwrap() = Some(stream);
+                        *slot_clone.lock().unwrap_or_else(|e| e.into_inner()) = Some(stream);
                     }
                     Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
                         thread::sleep(Duration::from_millis(50));
@@ -1425,7 +1433,7 @@ type HmrSlot = std::sync::Arc<std::sync::Mutex<Option<std::net::TcpStream>>>;
 
 /// Send an HMR `FullReload` message to the connected app.
 fn send_hmr_reload(slot: &HmrSlot) {
-    let mut guard = slot.lock().unwrap();
+    let mut guard = slot.lock().unwrap_or_else(|e| e.into_inner());
     if let Some(ref mut stream) = *guard {
         let msg = velox_renderer::HmrMessage::FullReload;
         let json = serde_json::to_string(&msg).unwrap_or_default();
