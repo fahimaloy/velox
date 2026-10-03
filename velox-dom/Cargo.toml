@@ -18,11 +18,3 @@ categories = ["gui"]
 
 [dependencies]
 
-# Dev-only. `velox-renderer` depends on `velox-dom`, so this is a dev-dependency
-# cycle -- legal in Cargo, because dev-dependencies are only resolved for the
-# test/bench/example targets of this crate and never for a downstream build of
-# `velox-dom` itself. It exists so the pixel proofs in `tests/` can go through
-# the real cascade + `compute_layout` path (`render_vnode_to_rgba`).
-[dev-dependencies]
-velox-renderer = { version = "0.1.0", path = "../velox-renderer" }
-velox-style = { version = "0.1.0", path = "../velox-style" }
