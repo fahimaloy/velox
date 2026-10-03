@@ -27,7 +27,11 @@ skia = []
 # anywhere (no build script, no C toolchain), and `softbuffer` supports Windows
 # natively, so the GPU *platform* support stays unix-gated in `skia_gl.rs` while
 # the crates themselves are available everywhere.
-skia-native = ["dep:skia-safe", "skia", "dep:raw-window-handle", "dep:egl", "dep:glow", "dep:winit", "dep:softbuffer"]
+skia-native = ["dep:skia-safe", "skia", "dep:raw-window-handle", "dep:egl", "dep:glow", "dep:winit", "dep:softbuffer", "svg"]
+# SVG rasterisation support for `<img src="logo.svg">`. Split out of
+# `skia-native` so a build that never paints SVG can skip resvg entirely;
+# `skia-native` implies it to preserve the current behaviour.
+svg = ["dep:resvg"]
 
 [dependencies]
 velox-core = { path = "../velox-core" }
@@ -65,7 +69,7 @@ serde_json = "1.0"
 # cargo cache from unrelated work. Pinning tiny-skia by hand here would only
 # constrain one side of that resolution and risk an unsatisfiable tree; the
 # right answer is to let cargo pick, which it does.
-resvg = { version = "0.48", default-features = false, features = ["raster-images"] }
+resvg = { version = "0.48", default-features = false, features = ["raster-images"], optional = true }
 
 [dev-dependencies]
 velox-core = { path = "../velox-core" }

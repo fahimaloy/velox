@@ -19,6 +19,19 @@ pub const DEFAULT_ROOT_FONT_SIZE: f32 = 16.0;
 /// context to name one. Matches the family `text_wrap::wrap_text` assumes.
 pub const DEFAULT_TEXT_FAMILY: &str = "system-ui";
 
+/// Static defaults for style keywords, so every lookup site shares one value
+/// instead of repeating its own literal (and its own allocation).
+pub const DEFAULT_WHITE_SPACE: &str = "normal";
+pub const DEFAULT_POSITION: &str = "static";
+pub const DEFAULT_BOX_SIZING: &str = "content-box";
+pub const DEFAULT_TEXT_ALIGN: &str = "left";
+pub const DEFAULT_DISPLAY_BLOCK: &str = "block";
+pub const DEFAULT_FLEX_DIRECTION: &str = "row";
+pub const DEFAULT_FLEX_WRAP: &str = "nowrap";
+pub const DEFAULT_JUSTIFY_CONTENT: &str = "flex-start";
+pub const DEFAULT_ALIGN_ITEMS: &str = "stretch";
+pub const DEFAULT_TRANSFORM: &str = "none";
+
 // ===== INLINE FORMATTING CONTEXT =========================================
 //
 // A `display: inline` box has no box of its own: its text participates in the
@@ -241,7 +254,7 @@ fn collect_inline_run<'a>(
             if !is_inline_run_member(node) {
                 return false;
             }
-            let style = props.attrs.get("style").map(|s| s.as_str());
+            let style = props.attrs.get("style").map(String::as_str);
             let size = inline_font_size(style, inherited_size);
             let family = inline_font_family(style, inherited_family);
             let align = inline_vertical_align(style, inherited_align);
@@ -500,7 +513,7 @@ fn atomic_padding_and_border(node: &VNode, ctx: &InlineContext<'_>) -> i32 {
     let VNode::Element { props, .. } = node else {
         return 0;
     };
-    let style = props.attrs.get("style").map(|s| s.as_str());
+    let style = props.attrs.get("style").map(String::as_str);
     let basis = ctx.cb.w as f32;
     let (vw, vh) = (ctx.viewport_w as f32, ctx.viewport_h as f32);
     let fs = font_size_of(node, ctx);
@@ -516,7 +529,7 @@ fn font_size_of(node: &VNode, ctx: &InlineContext<'_>) -> f32 {
     let VNode::Element { props, .. } = node else {
         return ctx.font_size;
     };
-    let style = props.attrs.get("style").map(|s| s.as_str());
+    let style = props.attrs.get("style").map(String::as_str);
     style_lookup_font_size(
         style,
         ctx.font_size,
@@ -598,7 +611,7 @@ fn last_inline_leaf_below<'a>(node: &'a VNode, inherited: f32) -> Option<InlineL
     else {
         return None;
     };
-    let style = props.attrs.get("style").map(|s| s.as_str());
+    let style = props.attrs.get("style").map(String::as_str);
     let fs = own_font_size(style, inherited);
     children.iter().rev().find_map(|c| match c {
         VNode::Text(_) => Some(InlineLeaf::Text(fs)),
@@ -621,7 +634,7 @@ fn inherited_font_size(node: &VNode) -> f32 {
     let VNode::Element { props, .. } = node else {
         return DEFAULT_ROOT_FONT_SIZE;
     };
-    let style = props.attrs.get("style").map(|s| s.as_str());
+    let style = props.attrs.get("style").map(String::as_str);
     style_lookup_font_size(
         style,
         DEFAULT_ROOT_FONT_SIZE,
@@ -638,9 +651,9 @@ fn atomic_overflow_is_visible(node: &VNode) -> bool {
     let VNode::Element { props, .. } = node else {
         return true;
     };
-    match style_lookup_str(props.attrs.get("style").map(|s| s.as_str()), "overflow") {
+    match style_lookup_str(props.attrs.get("style").map(String::as_str), "overflow") {
         None => true,
-        Some(v) => v.trim() == "visible",
+        Some(v) => v.trim().eq_ignore_ascii_case("visible"),
     }
 }
 
@@ -708,6 +721,9 @@ fn build_inline_slots(merged: &[MergedRun], run: &[InlineRunItem<'_>]) -> Vec<In
         let path = match &run[m.item] {
             InlineRunItem::Fragment { path, .. } | InlineRunItem::Atomic { path, .. } => path,
         };
+        let Some(&last) = path.last() else {
+            continue;
+        };
         let mut cur = &mut root;
         for &idx in &path[..path.len() - 1] {
             if cur.len() <= idx {
@@ -721,7 +737,6 @@ fn build_inline_slots(merged: &[MergedRun], run: &[InlineRunItem<'_>]) -> Vec<In
                 _ => unreachable!("just replaced with a Node"),
             };
         }
-        let last = path[path.len() - 1];
         if cur.len() <= last {
             cur.resize(last + 1, InlineSlot::Empty);
         }
@@ -787,10 +802,14 @@ fn inline_slots_to_nodes(slots: &[InlineSlot], merged: &[MergedRun]) -> Vec<Layo
                 // the line box's height here instead would report a top-aligned
                 // inline element as as tall as the line, which is the one thing
                 // its own box is not.
-                let x = kids.iter().map(|k| k.rect.x).min().unwrap();
-                let right = kids.iter().map(|k| k.rect.x + k.rect.w).max().unwrap();
-                let top = kids.iter().map(|k| k.rect.y).min().unwrap();
-                let bottom = kids.iter().map(|k| k.rect.y + k.rect.h).max().unwrap();
+                let x = kids.iter().map(|k| k.rect.x).min().unwrap_or(0);
+                let right = kids.iter().map(|k| k.rect.x + k.rect.w).max().unwrap_or(x);
+                let top = kids.iter().map(|k| k.rect.y).min().unwrap_or(0);
+                let bottom = kids
+                    .iter()
+                    .map(|k| k.rect.y + k.rect.h)
+                    .max()
+                    .unwrap_or(top);
                 out.push(inline_leaf_node(
                     Rect {
                         x,
@@ -1005,15 +1024,10 @@ fn flush_inline_run(
                 align: _,
             } => {
                 let strut = FontMetrics::from_font_size(*font_size);
-                let laid = lay_out_atomic(
-                    node,
-                    *path
-                        .last()
-                        .expect("an inline run item's path is never empty"),
-                    ctx,
-                    0,
-                    cur_y,
-                );
+                let Some(&source_index) = path.last() else {
+                    continue;
+                };
+                let laid = lay_out_atomic(node, source_index, ctx, 0, cur_y);
                 let (ascent, descent) = atomic_baseline(node, &laid);
                 pieces.push(InlinePiece {
                     item: ii,
@@ -1060,8 +1074,10 @@ fn flush_inline_run(
                     line_w.push(0);
                     continue;
                 }
-                lines.last_mut().expect("one line").push(pi);
-                *line_w.last_mut().expect("one width") += p.width;
+                if let (Some(line), Some(w)) = (lines.last_mut(), line_w.last_mut()) {
+                    line.push(pi);
+                    *w += p.width;
+                }
             }
             false => {
                 let cur_empty = lines.last().is_some_and(Vec::is_empty);
@@ -1072,8 +1088,10 @@ fn flush_inline_run(
                     lines.push(Vec::new());
                     line_w.push(0);
                 }
-                lines.last_mut().expect("one line").push(pi);
-                *line_w.last_mut().expect("one width") += p.width;
+                if let (Some(line), Some(w)) = (lines.last_mut(), line_w.last_mut()) {
+                    line.push(pi);
+                    *w += p.width;
+                }
             }
         }
     }
@@ -1200,11 +1218,11 @@ fn flush_inline_run(
         // A space at the very end of a line hangs past it and does not count
         // towards the line's width for `text-align`.
         let mut ink = line_w[li];
-        if line
-            .last()
-            .is_some_and(|pi| pieces[*pi].is_space && !pieces[*pi].atomic)
+        if let Some(&last_pi) = line.last()
+            && pieces[last_pi].is_space
+            && !pieces[last_pi].atomic
         {
-            ink -= pieces[line[line.len() - 1]].width;
+            ink -= pieces[last_pi].width;
         }
         let left = match ctx.text_align {
             "center" => ctx.content_x + ((ctx.line_limit - ink).max(0) / 2),
@@ -2504,7 +2522,7 @@ fn parse_length_value(
 ) -> Option<f32> {
     let val = val.trim();
 
-    if val == "auto" {
+    if val.eq_ignore_ascii_case("auto") {
         return None;
     }
 
@@ -2635,7 +2653,10 @@ pub const INLINE_BY_DEFAULT_TAGS: &[&str] = &[
 /// `display: inline-block` on the element, and now gets a real atomic inline
 /// box.
 fn default_display_for_tag(tag: &str) -> &'static str {
-    if INLINE_BY_DEFAULT_TAGS.contains(&tag.to_ascii_lowercase().as_str()) {
+    if INLINE_BY_DEFAULT_TAGS
+        .iter()
+        .any(|t| tag.eq_ignore_ascii_case(t))
+    {
         "inline"
     } else {
         "block"
@@ -2652,7 +2673,7 @@ pub fn explicit_display(node: &VNode) -> Option<String> {
     match node {
         VNode::Text(_) => None,
         VNode::Element { props, .. } => {
-            let style = props.attrs.get("style").map(|s| s.as_str());
+            let style = props.attrs.get("style").map(String::as_str);
             style_lookup_str(style, "display").map(|value| value.trim().to_ascii_lowercase())
         }
     }
@@ -2663,7 +2684,7 @@ pub fn is_out_of_flow(node: &VNode) -> bool {
     match node {
         VNode::Text(_) => false,
         VNode::Element { props, .. } => {
-            let style = props.attrs.get("style").map(|s| s.as_str());
+            let style = props.attrs.get("style").map(String::as_str);
             style_lookup_str(style, "position")
                 .map(|value| value.trim().to_ascii_lowercase())
                 .is_some_and(|p| p == "absolute" || p == "fixed")
@@ -2905,7 +2926,7 @@ fn should_drop_collapsible_whitespace(
     }
     let white_space = style_lookup_str(parent_style, "white-space")
         .map(|value| value.trim().to_ascii_lowercase())
-        .unwrap_or_else(|| "normal".to_string());
+        .unwrap_or_else(|| DEFAULT_WHITE_SPACE.to_string());
     if !matches!(white_space.as_str(), "normal" | "nowrap") {
         return false;
     }
@@ -2929,7 +2950,11 @@ fn style_lookup_i32(style: Option<&str>, key: &str) -> Option<i32> {
 #[allow(dead_code)]
 fn style_box_sides(style: Option<&str>, base: &str) -> (i32, i32, i32, i32) {
     // returns (left, right, top, bottom)
-    let t = table_for(style.unwrap_or(""));
+    let Some(t) = style.map(table_for) else {
+        // No style: every side resolves to `None` and falls back to 0, so
+        // short-circuit instead of building and caching an empty table.
+        return (0, 0, 0, 0);
+    };
     let get = |k: &str| -> Option<i32> { parse_px(t.value(t.first(k)?)) };
     let all = get(base).unwrap_or(0);
     let mut buf = [0u8; 48];
@@ -2964,8 +2989,8 @@ fn relative_offset_delta(
     viewport_w: f32,
     viewport_h: f32,
 ) -> (i32, i32) {
-    let pos = style_lookup_str(style, "position").unwrap_or_else(|| "static".to_string());
-    if pos != "relative" && pos != "sticky" {
+    let pos = style_lookup_str(style, "position").unwrap_or_else(|| DEFAULT_POSITION.to_string());
+    if !pos.trim().eq_ignore_ascii_case("relative") && !pos.trim().eq_ignore_ascii_case("sticky") {
         return (0, 0);
     }
     let axis_delta = |near: &str, far: &str, base: i32| -> i32 {
@@ -3009,8 +3034,8 @@ fn apply_relative_position(
     viewport_w: f32,
     viewport_h: f32,
 ) {
-    let pos = style_lookup_str(style, "position").unwrap_or_else(|| "static".to_string());
-    if pos != "relative" && pos != "sticky" {
+    let pos = style_lookup_str(style, "position").unwrap_or_else(|| DEFAULT_POSITION.to_string());
+    if !pos.trim().eq_ignore_ascii_case("relative") && !pos.trim().eq_ignore_ascii_case("sticky") {
         return;
     }
     let (dx, dy) = relative_offset_delta(
@@ -3041,8 +3066,8 @@ fn apply_sticky_position(
     viewport_w: f32,
     viewport_h: f32,
 ) {
-    let pos = style_lookup_str(style, "position").unwrap_or_else(|| "static".to_string());
-    if pos != "sticky" {
+    let pos = style_lookup_str(style, "position").unwrap_or_else(|| DEFAULT_POSITION.to_string());
+    if !pos.trim().eq_ignore_ascii_case("sticky") {
         return;
     }
 
@@ -3610,7 +3635,7 @@ pub fn compute_layout(node: &VNode, viewport_w: i32, viewport_h: i32) -> LayoutN
                 props,
                 children,
             } => {
-                let style = props.attrs.get("style").map(|s| s.as_str());
+                let style = props.attrs.get("style").map(String::as_str);
 
                 // Resolve this element's font-size for children to inherit
                 let my_font_size = style_lookup_font_size(
@@ -3652,8 +3677,8 @@ pub fn compute_layout(node: &VNode, viewport_w: i32, viewport_h: i32) -> LayoutN
                 );
                 let box_sizing = style_lookup_str(style, "box-sizing")
                     .map(|s| s.trim().to_ascii_lowercase())
-                    .unwrap_or_else(|| "content-box".to_string());
-                let is_border_box = box_sizing == "border-box";
+                    .unwrap_or_else(|| DEFAULT_BOX_SIZING.to_string());
+                let is_border_box = box_sizing.eq_ignore_ascii_case("border-box");
                 let is_root_tag = matches!(tag.as_str(), "body" | "html");
                 let is_root_index = root_is_viewport_filling(source_index);
                 // Viewport root normalization: first VNode (and html/body) always fills.
@@ -3693,7 +3718,7 @@ pub fn compute_layout(node: &VNode, viewport_w: i32, viewport_h: i32) -> LayoutN
                                 continue;
                             }
                             if let Some((k, v)) = d.split_once(':')
-                                && k.trim() == "min-height"
+                                && k.trim().eq_ignore_ascii_case("min-height")
                             {
                                 return Some(v.trim().to_string());
                             }
@@ -3954,9 +3979,9 @@ pub fn compute_layout(node: &VNode, viewport_w: i32, viewport_h: i32) -> LayoutN
                 // using the block flow (there is no inline layout yet).
                 let display = style_lookup_str(style, "display")
                     .unwrap_or_else(|| default_display_for_tag(tag).to_string());
-                let position =
-                    style_lookup_str(style, "position").unwrap_or_else(|| "static".to_string());
-                let z_index = if position != "static" {
+                let position = style_lookup_str(style, "position")
+                    .unwrap_or_else(|| DEFAULT_POSITION.to_string());
+                let z_index = if !position.trim().eq_ignore_ascii_case("static") {
                     style_lookup_i32(style, "z-index").unwrap_or(0)
                 } else {
                     0
@@ -3968,12 +3993,12 @@ pub fn compute_layout(node: &VNode, viewport_w: i32, viewport_h: i32) -> LayoutN
                             .map(|f| if f.is_finite() { f } else { 1.0 })
                     })
                     .unwrap_or(1.0);
-                let transform =
-                    style_lookup_str(style, "transform").unwrap_or_else(|| "none".to_string());
+                let transform = style_lookup_str(style, "transform")
+                    .unwrap_or_else(|| DEFAULT_TRANSFORM.to_string());
                 let stacking_context = opacity < 1.0
-                    || (transform != "none" && !transform.is_empty())
-                    || position != "static";
-                if display == "none" {
+                    || (!transform.trim().eq_ignore_ascii_case("none") && !transform.is_empty())
+                    || !position.trim().eq_ignore_ascii_case("static");
+                if display.trim().eq_ignore_ascii_case("none") {
                     return LayoutNode {
                         rect: Rect {
                             x: elem_x,
@@ -4053,16 +4078,20 @@ pub fn compute_layout(node: &VNode, viewport_w: i32, viewport_h: i32) -> LayoutN
                 };
                 let descendant_cb = out_of_flow_cb(_rect_h);
 
-                if display == "flex" {
+                if display.trim().eq_ignore_ascii_case("flex") {
                     // Full CSS Flexbox implementation
                     let flex_dir = style_lookup_str(style, "flex-direction")
-                        .unwrap_or_else(|| "row".to_string());
+                        .map(|v| v.trim().to_ascii_lowercase())
+                        .unwrap_or_else(|| DEFAULT_FLEX_DIRECTION.to_string());
                     let flex_wrap = style_lookup_str(style, "flex-wrap")
-                        .unwrap_or_else(|| "nowrap".to_string());
+                        .map(|v| v.trim().to_ascii_lowercase())
+                        .unwrap_or_else(|| DEFAULT_FLEX_WRAP.to_string());
                     let justify_content = style_lookup_str(style, "justify-content")
-                        .unwrap_or_else(|| "flex-start".to_string());
+                        .map(|v| v.trim().to_ascii_lowercase())
+                        .unwrap_or_else(|| DEFAULT_JUSTIFY_CONTENT.to_string());
                     let align_items = style_lookup_str(style, "align-items")
-                        .unwrap_or_else(|| "stretch".to_string());
+                        .map(|v| v.trim().to_ascii_lowercase())
+                        .unwrap_or_else(|| DEFAULT_ALIGN_ITEMS.to_string());
                     let row_gap = style_lookup_len_full(
                         style,
                         "row-gap",
@@ -4122,24 +4151,26 @@ pub fn compute_layout(node: &VNode, viewport_w: i32, viewport_h: i32) -> LayoutN
                         }
                         let child_style = match c {
                             VNode::Element { props, .. } => {
-                                props.attrs.get("style").map(|s| s.as_str())
+                                props.attrs.get("style").map(String::as_str)
                             }
                             _ => None,
                         };
                         let child_display = style_lookup_str(child_style, "display")
-                            .unwrap_or_else(|| "block".to_string());
-                        if child_display == "none" {
+                            .unwrap_or_else(|| DEFAULT_DISPLAY_BLOCK.to_string());
+                        if child_display.trim().eq_ignore_ascii_case("none") {
                             continue;
                         }
                         let position = style_lookup_str(child_style, "position")
-                            .unwrap_or_else(|| "static".to_string());
-                        if position == "absolute" || position == "fixed" {
+                            .unwrap_or_else(|| DEFAULT_POSITION.to_string());
+                        if position.trim().eq_ignore_ascii_case("absolute")
+                            || position.trim().eq_ignore_ascii_case("fixed")
+                        {
                             // Out of flow: laid out but never a flex item. `fixed` is
                             // pinned to the viewport; `absolute` resolves against the
                             // container's own containing block. The actual offset
                             // resolution is deferred to the shared tail, once this
                             // element's own box is final.
-                            let is_fixed = position == "fixed";
+                            let is_fixed = position.trim().eq_ignore_ascii_case("fixed");
                             let out_cb = out_of_flow_containing_block(
                                 is_fixed,
                                 descendant_cb,
@@ -4204,7 +4235,7 @@ pub fn compute_layout(node: &VNode, viewport_w: i32, viewport_h: i32) -> LayoutN
                     let has_dir = style.is_some_and(|s| {
                         s.split(';').any(|decl| {
                             if let Some((k, _)) = decl.split_once(':') {
-                                k.trim() == "flex-direction"
+                                k.trim().eq_ignore_ascii_case("flex-direction")
                             } else {
                                 false
                             }
@@ -4213,7 +4244,7 @@ pub fn compute_layout(node: &VNode, viewport_w: i32, viewport_h: i32) -> LayoutN
                     let has_wrap = style.is_some_and(|s| {
                         s.split(';').any(|decl| {
                             if let Some((k, _)) = decl.split_once(':') {
-                                k.trim() == "flex-wrap"
+                                k.trim().eq_ignore_ascii_case("flex-wrap")
                             } else {
                                 false
                             }
@@ -4225,13 +4256,16 @@ pub fn compute_layout(node: &VNode, viewport_w: i32, viewport_h: i32) -> LayoutN
                     if has_wrap {
                         flex_wrap_val = flex_wrap.clone();
                     }
-                    let is_column = flex_dir_val == "column" || flex_dir_val == "column-reverse";
-                    let is_reverse =
-                        flex_dir_val == "row-reverse" || flex_dir_val == "column-reverse";
-                    let is_wrap = flex_wrap_val == "wrap" || flex_wrap_val == "wrap-reverse";
-                    let wrap_reverse = flex_wrap_val == "wrap-reverse";
+                    let is_column = flex_dir_val.eq_ignore_ascii_case("column")
+                        || flex_dir_val.eq_ignore_ascii_case("column-reverse");
+                    let is_reverse = flex_dir_val.eq_ignore_ascii_case("row-reverse")
+                        || flex_dir_val.eq_ignore_ascii_case("column-reverse");
+                    let is_wrap = flex_wrap_val.eq_ignore_ascii_case("wrap")
+                        || flex_wrap_val.eq_ignore_ascii_case("wrap-reverse");
+                    let wrap_reverse = flex_wrap_val.eq_ignore_ascii_case("wrap-reverse");
                     let align_content = style_lookup_str(style, "align-content")
-                        .unwrap_or_else(|| "stretch".to_string());
+                        .map(|v| v.trim().to_ascii_lowercase())
+                        .unwrap_or_else(|| DEFAULT_ALIGN_ITEMS.to_string());
 
                     let main_size = if is_column {
                         content_h_available
@@ -4877,6 +4911,7 @@ pub fn compute_layout(node: &VNode, viewport_w: i32, viewport_h: i32) -> LayoutN
                             flex_grow,
                             flex_shrink,
                             align_self: style_lookup_str(fc.style, "align-self")
+                                .map(|v| v.trim().to_ascii_lowercase())
                                 .unwrap_or_else(|| "auto".to_string()),
                             min_main_size: min_main,
                             max_main_size: max_main,
@@ -5156,8 +5191,8 @@ pub fn compute_layout(node: &VNode, viewport_w: i32, viewport_h: i32) -> LayoutN
                         // When cross-size is indefinite (fit-content), stretch behaves as flex-start
                         let effective_align_items = align_items.clone();
                         let is_single_line = pre_lines_len == 1;
-                        let can_stretch =
-                            has_definite_cross_size && effective_align_items == "stretch";
+                        let can_stretch = has_definite_cross_size
+                            && effective_align_items.eq_ignore_ascii_case("stretch");
                         if can_stretch {
                             let stretch_target = if is_single_line {
                                 cross_size as f32
@@ -5180,11 +5215,13 @@ pub fn compute_layout(node: &VNode, viewport_w: i32, viewport_h: i32) -> LayoutN
                                     vh_f,
                                 );
                                 // baseline fallback: treat as flex-start, so don't stretch baseline items
-                                let is_baseline = items[item_idx].align_self == "baseline"
-                                    || (items[item_idx].align_self == "auto"
-                                        && effective_align_items == "baseline");
+                                let is_baseline = items[item_idx]
+                                    .align_self
+                                    .eq_ignore_ascii_case("baseline")
+                                    || (items[item_idx].align_self.eq_ignore_ascii_case("auto")
+                                        && effective_align_items.eq_ignore_ascii_case("baseline"));
                                 if explicit_cross.is_none()
-                                    && items[item_idx].align_self == "auto"
+                                    && items[item_idx].align_self.eq_ignore_ascii_case("auto")
                                     && !is_baseline
                                     && let Some(ref mut ln) = items[item_idx].layout_node
                                 {
@@ -5249,10 +5286,12 @@ pub fn compute_layout(node: &VNode, viewport_w: i32, viewport_h: i32) -> LayoutN
                                     line.cross_size += cross_line_extra;
                                 }
                                 // Re-stretch items that were stretch to new line size
-                                if align_items == "stretch" {
+                                if align_items.eq_ignore_ascii_case("stretch") {
                                     for line in &lines {
                                         for &(item_idx, _) in &line.main_positions {
-                                            if items[item_idx].align_self == "auto"
+                                            if items[item_idx]
+                                                .align_self
+                                                .eq_ignore_ascii_case("auto")
                                                 && let Some(ref mut ln) =
                                                     items[item_idx].layout_node
                                             {
@@ -5434,18 +5473,20 @@ pub fn compute_layout(node: &VNode, viewport_w: i32, viewport_h: i32) -> LayoutN
                                     vw_f,
                                     vh_f,
                                 );
-                                let item_align = if items[item_idx].align_self == "auto" {
-                                    align_items.clone()
-                                } else {
-                                    items[item_idx].align_self.clone()
-                                };
+                                let item_align =
+                                    if items[item_idx].align_self.eq_ignore_ascii_case("auto") {
+                                        align_items.clone()
+                                    } else {
+                                        items[item_idx].align_self.clone()
+                                    };
                                 let item_cross_size = if is_column {
                                     ln.rect.w as f32
                                 } else {
                                     ln.rect.h as f32
                                 };
                                 // baseline fallback to flex-start
-                                let resolved_align = if item_align == "baseline" {
+                                let resolved_align = if item_align.eq_ignore_ascii_case("baseline")
+                                {
                                     "flex-start"
                                 } else {
                                     item_align.as_str()
@@ -5578,7 +5619,7 @@ pub fn compute_layout(node: &VNode, viewport_w: i32, viewport_h: i32) -> LayoutN
                     let container_align = inline_vertical_align(style, VerticalAlign::Baseline);
                     let container_text_align = style_lookup_str(style, "text-align")
                         .map(|v| v.trim().to_ascii_lowercase())
-                        .unwrap_or_else(|| "left".to_string());
+                        .unwrap_or_else(|| DEFAULT_TEXT_ALIGN.to_string());
                     let container_ws = style_lookup_str(style, "white-space")
                         .and_then(|v| WhiteSpace::parse(&v))
                         .unwrap_or_default();
@@ -5593,13 +5634,13 @@ pub fn compute_layout(node: &VNode, viewport_w: i32, viewport_h: i32) -> LayoutN
                         }
                         let child_style = match c {
                             VNode::Element { props, .. } => {
-                                props.attrs.get("style").map(|s| s.as_str())
+                                props.attrs.get("style").map(String::as_str)
                             }
                             _ => None,
                         };
                         let child_display = style_lookup_str(child_style, "display")
-                            .unwrap_or_else(|| "block".to_string());
-                        if child_display == "none" {
+                            .unwrap_or_else(|| DEFAULT_DISPLAY_BLOCK.to_string());
+                        if child_display.trim().eq_ignore_ascii_case("none") {
                             continue;
                         }
                         // Inline-level content is COLLECTED into a run and laid out
@@ -5658,15 +5699,17 @@ pub fn compute_layout(node: &VNode, viewport_w: i32, viewport_h: i32) -> LayoutN
                             continue;
                         }
                         let position = style_lookup_str(child_style, "position")
-                            .unwrap_or_else(|| "static".to_string());
-                        if position == "absolute" || position == "fixed" {
+                            .unwrap_or_else(|| DEFAULT_POSITION.to_string());
+                        if position.trim().eq_ignore_ascii_case("absolute")
+                            || position.trim().eq_ignore_ascii_case("fixed")
+                        {
                             // Out of flow: laid out, but it never advances `cur_y` and
                             // never reaches `max_y_end`, so the parent's height is
                             // unaffected. `fixed` is pinned to the viewport; `absolute`
                             // resolves against this element's own containing block.
                             // Offset resolution is deferred to the shared tail, once
                             // this element's box is final.
-                            let is_fixed = position == "fixed";
+                            let is_fixed = position.trim().eq_ignore_ascii_case("fixed");
                             let out_cb = out_of_flow_containing_block(
                                 is_fixed,
                                 descendant_cb,
@@ -5951,10 +5994,12 @@ pub fn compute_layout(node: &VNode, viewport_w: i32, viewport_h: i32) -> LayoutN
                     // browsers.
                     if let Some(align) = style_lookup_str(style, "text-align") {
                         let child_w = child.rect.w;
-                        let offset_x = match align.as_str() {
-                            "center" => ((content_w - child_w).max(0)) / 2,
-                            "right" => (content_w - child_w).max(0),
-                            _ => 0,
+                        let offset_x = if align.trim().eq_ignore_ascii_case("center") {
+                            ((content_w - child_w).max(0)) / 2
+                        } else if align.trim().eq_ignore_ascii_case("right") {
+                            (content_w - child_w).max(0)
+                        } else {
+                            0
                         };
                         child.rect.x = content_x + offset_x;
                     }

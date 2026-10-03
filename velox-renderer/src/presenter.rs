@@ -217,6 +217,44 @@ fn compositor_help(err_detail: &str) -> String {
 /// per-frame spam is suppressed.
 static EPIPE_WARNED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
+/// Largest softbuffer staging buffer, in bytes (`w*h*4`).
+///
+/// 128 MiB is a 5792x5792 RGBA surface: anything above it is a degenerate
+/// resize, not a window, and `vec!` would abort the process trying. Callers
+/// that exceed it get a `VeloxError::Render` before a single byte is
+/// allocated — the same error shape every other presenter failure uses.
+const MAX_STAGING_BYTES: usize = 128 * 1024 * 1024;
+
+/// `NonZeroU32` without the panic: `w`/`h` arrive `.max(1)`-clamped at every
+/// call site, so the fallback is unreachable in practice, but `expect` would
+/// still abort the event loop on the one caller that forgot the clamp.
+/// `MIN` (1) is the same value the clamp would have produced.
+fn nonzero_dim(v: u32) -> std::num::NonZeroU32 {
+    std::num::NonZeroU32::new(v).unwrap_or(std::num::NonZeroU32::MIN)
+}
+
+/// Checked `w * h * 4` for the `read_pixels` staging buffer.
+///
+/// `checked_mul` throughout: `w`/`h` are `u32` and a `0xFFFFFFFF x
+/// 0xFFFFFFFF` resize overflows `usize` multiplication in debug (panic) and
+/// wraps in release (a too-small staging buffer `read_pixels` then overruns).
+fn staging_len(w: u32, h: u32) -> Result<usize, VeloxError> {
+    let len = (w as usize)
+        .checked_mul(h as usize)
+        .and_then(|px| px.checked_mul(4))
+        .ok_or_else(|| {
+            VeloxError::Render(
+                "softbuffer: presenter dimensions overflow the staging buffer".into(),
+            )
+        })?;
+    if len > MAX_STAGING_BYTES {
+        return Err(VeloxError::Render(format!(
+            "softbuffer: presenter {w}x{h} needs {len} bytes, over the {MAX_STAGING_BYTES}-byte cap"
+        )));
+    }
+    Ok(len)
+}
+
 /// Claims the right to report an EPIPE degrade against `flag`.
 /// Returns `true` only on the first call; every later call returns `false`.
 fn claim_epipe_warning(flag: &std::sync::atomic::AtomicBool) -> bool {
@@ -308,10 +346,7 @@ impl SoftbufferPresenter {
         };
         let w = width.max(1);
         let h = height.max(1);
-        if let Err(e) = surface.resize(
-            std::num::NonZeroU32::new(w).expect("w >= 1 guaranteed by .max(1)"),
-            std::num::NonZeroU32::new(h).expect("h >= 1 guaranteed by .max(1)"),
-        ) {
+        if let Err(e) = surface.resize(nonzero_dim(w), nonzero_dim(h)) {
             let msg = e.to_string();
             if is_broken_pipe_error(&msg) {
                 return Err(VeloxError::Render(compositor_help(&format!(
@@ -325,13 +360,19 @@ impl SoftbufferPresenter {
             }
         }
         let viewport = Viewport::new(w, h, 1.0);
+        // Sized through `staging_len` BEFORE allocating: `w`/`h` are raw
+        // `u32` and a degenerate resize would otherwise overflow the
+        // multiplication (debug panic) or allocate until the OOM killer
+        // arrives. An over-cap size is a `Render` error like any other
+        // presenter failure, returned before a single byte is allocated.
+        let rgba = vec![0u8; staging_len(w, h)?];
         Ok(Self {
             _context: context,
             surface,
             viewport,
             width: w,
             height: h,
-            rgba: vec![0u8; (w as usize) * (h as usize) * 4],
+            rgba,
             degraded: false,
         })
     }
@@ -349,10 +390,11 @@ impl SoftbufferPresenter {
         if w == self.width && h == self.height {
             return Ok(());
         }
-        if let Err(e) = self.surface.resize(
-            std::num::NonZeroU32::new(w).expect("w >= 1 guaranteed by .max(1)"),
-            std::num::NonZeroU32::new(h).expect("h >= 1 guaranteed by .max(1)"),
-        ) {
+        // Checked BEFORE touching the surface: on failure nothing has been
+        // resized yet, so the presenter keeps its old (working) geometry
+        // instead of a resized surface paired with a stale staging buffer.
+        let len = staging_len(w, h)?;
+        if let Err(e) = self.surface.resize(nonzero_dim(w), nonzero_dim(h)) {
             let msg = e.to_string();
             if is_broken_pipe_error(&msg) {
                 warn_epipe_once(&msg);
@@ -368,7 +410,7 @@ impl SoftbufferPresenter {
         self.viewport.set_physical(w, h);
         self.width = w;
         self.height = h;
-        self.rgba.resize((w as usize) * (h as usize) * 4, 0);
+        self.rgba.resize(len, 0);
         Ok(())
     }
 

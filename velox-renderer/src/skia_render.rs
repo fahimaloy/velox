@@ -1341,12 +1341,26 @@ pub mod skia_impl {
     /// the two branches converge on one representation and nothing downstream
     /// can tell which produced the bitmap.
     fn rasterize_svg(bytes: &[u8]) -> Option<sk::Image> {
+        rasterize_svg_impl(bytes)
+    }
+
+    /// SVG on/off switch. With the `svg` feature disabled there is no resvg
+    /// to call, so every vector `src` resolves to "draw nothing" — the same
+    /// silence a missing file gets — rather than failing the build.
+    #[cfg(feature = "svg")]
+    fn rasterize_svg_impl(bytes: &[u8]) -> Option<sk::Image> {
         if !looks_like_svg(bytes) {
             return None;
         }
         let tree = resvg::usvg::Tree::from_data(bytes, &resvg::usvg::Options::default()).ok()?;
         let (w, h) = (tree.size().width().ceil(), tree.size().height().ceil());
         if !w.is_finite() || !h.is_finite() || w < 1.0 || h < 1.0 {
+            return None;
+        }
+        // A hostile `width="1000000" height="1000000"` viewBox would otherwise
+        // ask tiny-skia for a 4 TB pixmap before `Pixmap::new` says no. Reject
+        // it here, where the failure is a `None` the draw site already skips.
+        if (w as f64) * (h as f64) > MAX_SVG_PIXELS as f64 {
             return None;
         }
         let (w, h) = (w as u32, h as u32);
@@ -1369,15 +1383,157 @@ pub mod skia_impl {
         sk::images::raster_from_data(&info, sk::Data::new_copy(pixmap.data()), row_bytes)
     }
 
-    /// Decoded sources for the `<img src>` paint walk, keyed by the `src` the
-    /// author wrote.
+    /// No-`svg`-feature twin: vectors are unresolvable, never an error.
+    #[cfg(not(feature = "svg"))]
+    fn rasterize_svg_impl(_bytes: &[u8]) -> Option<sk::Image> {
+        None
+    }
+
+    /// Largest SVG raster this renderer will produce, in pixels. A 4096x4096
+    /// bitmap is 64 MB premultiplied — anything above it is a hostile viewBox,
+    /// not a logo, and `Pixmap::new` would refuse it anyway with a less
+    /// diagnostic `None`.
+    #[cfg(feature = "svg")]
+    const MAX_SVG_PIXELS: u32 = 4096 * 4096;
+
+    /// Where a relative `<img src>` is looked for, in order.
+    ///
+    /// `VELOX_ASSET_ROOT` wins when set (the host embedding the renderer
+    /// knows where its assets live); otherwise the process working directory,
+    /// otherwise the executable's own directory and its ancestors (a bundled
+    /// app is usually launched with a CWD that is not its asset dir).
+    fn asset_roots() -> Vec<std::path::PathBuf> {
+        let mut roots = Vec::new();
+        if let Ok(root) = std::env::var("VELOX_ASSET_ROOT")
+            && !root.trim().is_empty()
+        {
+            roots.push(std::path::PathBuf::from(root));
+        }
+        if let Ok(cwd) = std::env::current_dir() {
+            roots.push(cwd);
+        }
+        // `current_exe` and up to four ancestors: `.../target/debug/app` puts
+        // the crate dir four up, an installed `.../bin/app` one up. Bounded so
+        // a deep build path cannot turn every missing image into a walk to `/`.
+        if let Ok(exe) = std::env::current_exe()
+            && let Some(dir) = exe.parent()
+        {
+            let mut dir = dir.to_path_buf();
+            for _ in 0..5 {
+                roots.push(dir.clone());
+                if !dir.pop() {
+                    break;
+                }
+            }
+        }
+        roots
+    }
+
+    /// Resolve an `<img src>` to a file on disk, or `None` when it must not be
+    /// read.
+    ///
+    /// Rejected outright: remote URLs (`http://`, `https://`, `blob:`) and
+    /// inline payloads (`data:`) — this renderer has no network and no data-URI
+    /// decoder, so attempting a filesystem read of one is a guaranteed miss at
+    /// best — and any `src` with a `..` component, which is a directory
+    /// traversal past the asset root no authorial image needs (`a/../b` is
+    /// still a traversal even when it stays inside: the check is syntactic, on
+    /// purpose, so no canonicalisation race can smuggle one through).
+    ///
+    /// An absolute path is used as-is when it names an existing regular file.
+    /// A relative path is tried against [`asset_roots`] in order; a trailing
+    /// `?...`/`#...` (cache-busting `logo.svg?v=2`) is stripped for the
+    /// filesystem lookup only. The returned path's canonical form is what the
+    /// cache keys on, so two spellings of one file decode once.
+    fn resolve_image_path(src: &str) -> Option<std::path::PathBuf> {
+        let src = src.trim();
+        if src.is_empty() {
+            return None;
+        }
+        let lower = src.to_ascii_lowercase();
+        if lower.starts_with("http://")
+            || lower.starts_with("https://")
+            || lower.starts_with("data:")
+            || lower.starts_with("blob:")
+        {
+            return None;
+        }
+        // Strip a cache-buster/query or fragment before touching the fs.
+        let file_part = src.split(['?', '#']).next().unwrap_or(src).trim();
+        if file_part.is_empty() {
+            return None;
+        }
+        let rel = std::path::Path::new(file_part);
+        // Syntactic traversal check, before any join: `ParentDir` anywhere —
+        // leading, interior, or `a/../b` — rejects the whole `src`.
+        if rel
+            .components()
+            .any(|c| matches!(c, std::path::Component::ParentDir))
+        {
+            return None;
+        }
+        if rel.is_absolute() {
+            return rel.is_file().then(|| rel.to_path_buf());
+        }
+        asset_roots()
+            .iter()
+            .map(|root| root.join(rel))
+            .find(|p| p.is_file())
+    }
+
+    /// Default image-cache entry TTL, in seconds. A changed file is picked up
+    /// at most this long after it changed; `VELOX_IMAGE_CACHE_TTL_SECS`
+    /// overrides it. A negative or unparseable override is NOT honoured — it
+    /// falls back to this default rather than expiring every entry on arrival
+    /// (which would turn the cache off) or never (which would pin stale art).
+    const IMAGE_CACHE_TTL_SECS: u64 = 60;
+
+    /// Effective image-cache TTL. Reads `VELOX_IMAGE_CACHE_TTL_SECS` per
+    /// lookup and clamps a negative or garbage value to
+    /// [`IMAGE_CACHE_TTL_SECS`]. One env read per `<img>` per frame is
+    /// negligible next to a decode, and a hit younger than the TTL skips the
+    /// filesystem entirely — the stat only happens past expiry.
+    fn image_cache_ttl() -> std::time::Duration {
+        let secs = std::env::var("VELOX_IMAGE_CACHE_TTL_SECS")
+            .ok()
+            .and_then(|s| s.trim().parse::<i64>().ok())
+            .filter(|s| *s >= 0)
+            .map(|s| s as u64)
+            .unwrap_or(IMAGE_CACHE_TTL_SECS);
+        std::time::Duration::from_secs(secs)
+    }
+
+    /// Cap on decoded `<img>` bitmaps held per thread, in entries.
+    ///
+    /// The advance memo next door caps at 4096 because its entries are tens of
+    /// bytes; a decoded photo is megabytes, so 128 is the same order of
+    /// resident cost in practice. Past the cap the oldest half is dropped in
+    /// one pass (same amortised shape as `evict_oldest_advances`): refusing to
+    /// cache would pin the first 128 pictures of a session and permanently
+    /// exclude every later one.
+    const IMAGE_CACHE_CAP: usize = 128;
+
+    /// One cached decode: the bitmap plus what it takes to revalidate it.
+    struct CachedImage {
+        image: sk::Image,
+        /// Source mtime at decode time, for change detection past the TTL.
+        mtime: Option<std::time::SystemTime>,
+        /// When this entry was (re)validated, for TTL expiry.
+        cached_at: std::time::Instant,
+        /// Insertion order, for drop-oldest eviction past [`IMAGE_CACHE_CAP`].
+        seq: u64,
+    }
+
+    /// Decoded sources for the `<img src>` paint walk, keyed by canonical path.
     ///
     /// Persistent per thread, not per frame: see the comment on
     /// `RENDER_IMAGE_CACHE`. Every field here is about avoiding work that
     /// happens once per frame otherwise -- a disk read, and a full decode --
     /// for a picture that does not change between frames.
     struct ImageCache {
-        images: HashMap<String, sk::Image>,
+        images: HashMap<String, CachedImage>,
+        /// Monotonic insertion counter, for drop-oldest eviction.
+        img_seq: u64,
     }
 
     impl Default for ImageCache {
@@ -1390,6 +1546,7 @@ pub mod skia_impl {
         fn new() -> Self {
             ImageCache {
                 images: HashMap::new(),
+                img_seq: 0,
             }
         }
 
@@ -1403,19 +1560,51 @@ pub mod skia_impl {
         /// back `None` from `from_encoded` (no Skia magic matches XML) and
         /// falls to `rasterize_svg`.
         ///
+        /// The `src` is resolved through [`resolve_image_path`] first: remote
+        /// URLs, `data:` payloads and `..` traversals never reach the
+        /// filesystem, and a relative `src` is searched under the asset roots
+        /// (including the executable's directory) instead of only the CWD. The
+        /// entry is keyed by the resolved path, so two spellings of one file
+        /// decode once.
+        ///
+        /// A hit younger than [`image_cache_ttl`] is served without touching
+        /// the filesystem. Past the TTL the source mtime is re-stat'ed: an
+        /// unchanged file only refreshes `cached_at`, so a hot-reloaded asset
+        /// (HMR writing a replacement, a build step producing a file) is
+        /// picked up at most one TTL after it changed instead of being pinned
+        /// to the first decode of the session.
+        ///
         /// A `src` that cannot be decoded at all is NOT remembered: `None` is
-        /// returned without an `insert`, so a file that appears later -- HMR
-        /// writing a replacement, a build step producing an asset -- is picked
+        /// returned without an `insert`, so a file that appears later is picked
         /// up on the next frame instead of being pinned to a first-frame
         /// failure. That is a deliberate asymmetry against the success path, and
         /// it is the same asymmetry the PNG path had: a missing file stays a
         /// per-frame read attempt until it resolves. Nothing here panics on any
         /// input; every failure is a `None` that the draw site skips.
         fn load(&mut self, src: &str) -> Option<sk::Image> {
-            if let Some(img) = self.images.get(src) {
-                return Some(img.clone());
+            let path = resolve_image_path(src)?;
+            // Canonicalise so `assets/../assets/logo.png` and
+            // `assets/logo.png` share one entry; fall back to the resolved
+            // (already validated) path when the file cannot be canonicalised.
+            let key = path
+                .canonicalize()
+                .unwrap_or(path.clone())
+                .to_string_lossy()
+                .into_owned();
+            if let Some(entry) = self.images.get_mut(&key) {
+                if entry.cached_at.elapsed() <= image_cache_ttl() {
+                    return Some(entry.image.clone());
+                }
+                let mtime = std::fs::metadata(&path).and_then(|m| m.modified()).ok();
+                if mtime == entry.mtime {
+                    entry.cached_at = std::time::Instant::now();
+                    return Some(entry.image.clone());
+                }
+                // Changed on disk: fall through and re-decode below.
+                self.images.remove(&key);
             }
-            let bytes = std::fs::read(src).ok()?;
+            let bytes = std::fs::read(&path).ok()?;
+            let mtime = std::fs::metadata(&path).and_then(|m| m.modified()).ok();
             let data = sk::Data::new_copy(&bytes);
             let image = sk::Image::from_encoded(data).or_else(|| rasterize_svg(&bytes))?;
             // Counted here, AFTER the decode succeeded and only when it is
@@ -1423,8 +1612,60 @@ pub mod skia_impl {
             // assert is "how many times did a frame actually decode", and a
             // failed decode is not one.
             let _ = IMAGE_DECODE_COUNT.try_with(|c| c.set(c.get() + 1));
-            self.images.insert(src.to_string(), image.clone());
+            self.remember_image(key, image.clone(), mtime);
             Some(image)
+        }
+
+        /// Memoize one decoded image, dropping the oldest entries past the cap.
+        ///
+        /// Same amortised shape as `remember_advance`: evict down to half of
+        /// `IMAGE_CACHE_CAP` in a single pass, then cache anyway. Refusing to
+        /// cache past the cap would pin the working set to whatever decoded
+        /// first and permanently exclude every picture decoded after it.
+        fn remember_image(
+            &mut self,
+            key: String,
+            image: sk::Image,
+            mtime: Option<std::time::SystemTime>,
+        ) {
+            if self.images.len() >= IMAGE_CACHE_CAP {
+                self.evict_oldest_images(IMAGE_CACHE_CAP / 2);
+            }
+            let seq = self.img_seq;
+            self.img_seq = self.img_seq.wrapping_add(1);
+            self.images.insert(
+                key,
+                CachedImage {
+                    image,
+                    mtime,
+                    cached_at: std::time::Instant::now(),
+                    seq,
+                },
+            );
+        }
+
+        /// Drop the `n` oldest decoded images.
+        fn evict_oldest_images(&mut self, n: usize) {
+            if n == 0 || self.images.is_empty() {
+                return;
+            }
+            if n >= self.images.len() {
+                // No sort when everything goes: building and sorting a victim
+                // list just to remove all of it is pure waste.
+                self.images.clear();
+                return;
+            }
+            let mut victims: Vec<(u64, String)> = self
+                .images
+                .iter()
+                .map(|(k, e)| (e.seq, k.clone()))
+                .collect();
+            victims.sort_unstable_by_key(|(seq, _)| *seq);
+            // `seq` is unique per insertion and never reused (it only ever
+            // advances), so this removes exactly the `n` oldest entries.
+            for (_, key) in victims.into_iter().take(n) {
+                self.images.remove(&key);
+            }
         }
     }
 
@@ -1757,6 +1998,43 @@ pub mod skia_impl {
         (styled, layout)
     }
 
+    /// Largest frame this renderer will allocate for, in bytes (`w*h*4`).
+    ///
+    /// 256 MiB is a 8192x8192 RGBA surface: anything above it is a degenerate
+    /// input, not a window, and `vec!` would abort the process trying. Callers
+    /// that exceed it get an `Err` the same shape a failed Skia surface gives,
+    /// before a single byte is allocated.
+    const MAX_FRAME_BYTES: usize = 256 * 1024 * 1024;
+
+    /// Largest single surface dimension, in px. Bounds the `u32 -> i32`
+    /// narrowing in `render_vnode_to_raster_png_with_scale`: the old
+    /// `unwrap_or(i32::MAX)` fallback asked Skia for a 2-billion-pixel surface
+    /// and relied on it saying no. Clamping first says no ourselves, with a
+    /// diagnostic, and never builds the doomed surface at all.
+    const MAX_SURFACE_DIMENSION: i32 = 16_384;
+
+    /// Checked `width * height * 4` for an RGBA readback/surface buffer.
+    ///
+    /// `checked_mul` throughout: `width`/`height` arrive as `i32` from the
+    /// caller and a `50000x50000` frame overflows `i32` multiplication in
+    /// debug (panic) and wraps in release (a too-small buffer `read_pixels`
+    /// then overruns). Negative and zero extents clamp to 1, matching
+    /// `Viewport::from_i32`.
+    fn rgba_buffer_len(width: i32, height: i32) -> Result<usize, String> {
+        let w = (width.max(1) as u32) as usize;
+        let h = (height.max(1) as u32) as usize;
+        let len = w
+            .checked_mul(h)
+            .and_then(|px| px.checked_mul(4))
+            .ok_or_else(|| "skia: frame dimensions overflow the pixel buffer".to_string())?;
+        if len > MAX_FRAME_BYTES {
+            return Err(format!(
+                "skia: frame {width}x{height} needs {len} bytes, over the {MAX_FRAME_BYTES}-byte cap"
+            ));
+        }
+        Ok(len)
+    }
+
     /// Render `vnode` into a raw RGBA8888 byte buffer (premultiplied, opaque
     /// alpha) of size `width * height * 4`. Useful for pixel-level assertions
     /// in tests without decoding a PNG.
@@ -1766,6 +2044,11 @@ pub mod skia_impl {
         width: i32,
         height: i32,
     ) -> Result<Vec<u8>, String> {
+        // Sized BEFORE the surface exists: `SkiaSurface::new_raster` clamps
+        // `max(1)` but never caps, so without this a giant frame would either
+        // panic here on `(width * height * 4) as usize` (debug overflow) or
+        // allocate until the OOM killer arrives.
+        let rgba_len = rgba_buffer_len(width, height)?;
         let mut surface = crate::skia_surface::SkiaSurface::new_raster(width, height)?;
         let (vnode, layout) = prepare_frame(vnode, sheet, width, height, &surface);
         render_frame(&mut surface, &vnode, &layout, sheet)?;
@@ -1776,7 +2059,7 @@ pub mod skia_impl {
             sk::AlphaType::Premul,
             None,
         );
-        let mut rgba = vec![0u8; (width * height * 4) as usize];
+        let mut rgba = vec![0u8; rgba_len];
         if !surface.read_pixels(&info, &mut rgba, (width * 4) as usize, (0, 0)) {
             return Err("skia: read_pixels failed".to_string());
         }
@@ -1810,8 +2093,12 @@ pub mod skia_impl {
             scale_factor,
         );
         let mut surface = crate::skia_surface::SkiaSurface::new_raster(
-            i32::try_from(physical_w).unwrap_or(i32::MAX),
-            i32::try_from(physical_h).unwrap_or(i32::MAX),
+            i32::try_from(physical_w)
+                .map(|w| w.min(MAX_SURFACE_DIMENSION))
+                .unwrap_or(MAX_SURFACE_DIMENSION),
+            i32::try_from(physical_h)
+                .map(|h| h.min(MAX_SURFACE_DIMENSION))
+                .unwrap_or(MAX_SURFACE_DIMENSION),
         )?;
         surface.set_scale_factor(scale_factor);
         // R-8: the prologue is `prepare_frame`, shared with `render_vnode_to_rgba`.
@@ -2130,6 +2417,12 @@ pub mod skia_impl {
             if n == 0 || self.advances.is_empty() {
                 return;
             }
+            if n >= self.advances.len() {
+                // No sort when everything goes: building and sorting a victim
+                // list just to remove all of it is pure waste.
+                self.advances.clear();
+                return;
+            }
             let mut victims: Vec<(u64, AdvanceKey)> = self
                 .advances
                 .iter()
@@ -2191,22 +2484,50 @@ pub mod skia_impl {
     }
 
     /// Borrow the persistent measure-path `FontCache`, resynced to `scale`.
+    ///
+    /// A `try_borrow_mut`, never a `borrow_mut`: `measure_text` is installed
+    /// as the global measurer and layout can re-enter it (an intrinsic probe
+    /// measuring during a measure), and a `borrow_mut` there would panic the
+    /// frame. On a failed borrow the call is served from a throwaway cache —
+    /// one extra typeface probe for that call, no shared state touched — so
+    /// re-entrancy degrades to slowness, never to a panic.
     fn with_measure_font_cache<R>(scale: f32, f: impl FnOnce(&mut FontCache) -> R) -> R {
-        MEASURE_FONT_CACHE.with(|cell| {
-            let mut cache = cell.borrow_mut();
-            // Reusing the cache across calls makes this resync load-bearing:
-            // without it a scale change would keep serving glyphs rastered at
-            // the stale device-pixel size and go blurry at fractional scales
-            // (1.25/1.5). `set_scale_factor` is also what drops the `fonts` map
-            // on a scale change, so this is the re-raster trigger.
-            //
-            // The caller's own non-finite/`<= 0` guard in `measure_text` is
-            // intentionally NOT replaced by this one: `set_scale_factor`
-            // substitutes 1.0 for a degenerate scale, whereas the caller leaves
-            // the snapped size unrounded. Both are kept, as before.
-            cache.set_scale_factor(scale);
-            f(&mut cache)
-        })
+        // `f` is `FnOnce`: it cannot move into the `try_with` closure AND
+        // stay available for the fallback. `pending` holds it; the shared
+        // path `take()`s it on a borrow hit, the fallback `take()`s it
+        // otherwise. The fallback `expect` is unreachable-by-construction:
+        // the only branch that consumes the closure returns `Some`, which
+        // lands in the `Ok(Some(..))` arm — never the fallback.
+        let mut pending = Some(f);
+        let shared = MEASURE_FONT_CACHE.try_with(|cell| {
+            cell.try_borrow_mut().ok().and_then(|mut cache| {
+                // Reusing the cache across calls makes this resync load-bearing:
+                // without it a scale change would keep serving glyphs rastered at
+                // the stale device-pixel size and go blurry at fractional scales
+                // (1.25/1.5). `set_scale_factor` is also what drops the `fonts` map
+                // on a scale change, so this is the re-raster trigger.
+                //
+                // The caller's own non-finite/`<= 0` guard in `measure_text` is
+                // intentionally NOT replaced by this one: `set_scale_factor`
+                // substitutes 1.0 for a degenerate scale, whereas the caller leaves
+                // the snapped size unrounded. Both are kept, as before.
+                cache.set_scale_factor(scale);
+                pending.take().map(|g| g(&mut cache))
+            })
+        });
+        match shared {
+            Ok(Some(result)) => result,
+            // Thread-local destroyed (teardown) or already borrowed
+            // (re-entrant measure): serve from a throwaway so the caller still
+            // gets an answer. The temporary is dropped here, shared caches
+            // untouched.
+            _ => {
+                let g = pending.take().expect(
+                    "measure fallback owns the closure unless the shared path already ran it",
+                );
+                g(&mut FontCache::new_with_scale(scale))
+            }
+        }
     }
 
     /// Owns the render-path `FontCache` for the duration of one frame and
@@ -2239,20 +2560,35 @@ pub mod skia_impl {
             // `&mut FontCache` spanning its whole recursion. `try_with`
             // because a `Drop` during thread teardown must not touch a
             // destroyed slot; dropping the cache there is correct, it just
-            // forfeits the reuse.
+            // forfeits the reuse. `try_borrow_mut` (not `borrow_mut`) because
+            // a re-entrant frame may still hold the slot: panicking in `Drop`
+            // would abort, so the cache is dropped instead and the next frame
+            // rebuilds it.
             if let Some(cache) = self.cache.take() {
                 let _ = RENDER_FONT_CACHE.try_with(|slot| {
-                    *slot.borrow_mut() = Some(cache);
+                    slot.try_borrow_mut().map(|mut guard| {
+                        *guard = Some(cache);
+                    })
                 });
             }
         }
     }
 
     /// Take the persistent render-path `FontCache`, resynced to `scale`.
+    ///
+    /// A `try_borrow_mut`, never a `borrow_mut`: a nested frame finding the
+    /// slot already taken gets a throwaway cache and restores nothing over
+    /// the outer one, so re-entrancy degrades to one extra typeface probe
+    /// rather than a panic.
     fn take_render_font_cache(scale: f32) -> RenderFontCache {
         let taken = RENDER_FONT_CACHE
-            .try_with(|slot| std::mem::take(&mut *slot.borrow_mut()))
+            .try_with(|slot| {
+                slot.try_borrow_mut()
+                    .ok()
+                    .map(|mut guard| std::mem::take(&mut *guard))
+            })
             .ok()
+            .flatten()
             .flatten();
         let mut guard = RenderFontCache {
             // Only the very first frame on this thread pays the
@@ -2351,19 +2687,33 @@ pub mod skia_impl {
             // `try_with` for the same reason `RenderFontCache::drop` uses it: a
             // `Drop` during thread teardown must not touch a destroyed slot.
             // Dropping the cache there is correct, it just forfeits the reuse.
+            // `try_borrow_mut` (not `borrow_mut`) because a nested probe may
+            // still hold the slot: panicking in `Drop` would abort, so the
+            // cache is dropped instead and the next caller rebuilds it.
             if let Some(cache) = self.cache.take() {
                 let _ = RENDER_IMAGE_CACHE.try_with(|slot| {
-                    *slot.borrow_mut() = Some(cache);
+                    slot.try_borrow_mut().map(|mut guard| {
+                        *guard = Some(cache);
+                    })
                 });
             }
         }
     }
 
     /// Take this thread's persistent `ImageCache`.
+    ///
+    /// A `try_borrow_mut`, never a `borrow_mut`: the layout probe shares this
+    /// slot with the paint walk, and a nested take finding it already taken
+    /// gets a throwaway cache rather than a panic.
     fn take_render_image_cache() -> RenderImageCache {
         let taken = RENDER_IMAGE_CACHE
-            .try_with(|slot| std::mem::take(&mut *slot.borrow_mut()))
+            .try_with(|slot| {
+                slot.try_borrow_mut()
+                    .ok()
+                    .map(|mut guard| std::mem::take(&mut *guard))
+            })
             .ok()
+            .flatten()
             .flatten();
         RenderImageCache {
             // First caller on this thread pays for one decode per distinct
@@ -3795,7 +4145,7 @@ pub mod skia_impl {
                 let calls_after_first = cache.skia_measure_calls();
                 assert_eq!(
                     calls_after_first,
-                    texts.iter().position(|t| *t == text).unwrap() as u64 + 1,
+                    texts.iter().position(|t| *t == text).unwrap_or(0) as u64 + 1,
                     "each distinct run should have cost exactly one Skia call"
                 );
                 for _ in 0..16 {
@@ -3957,7 +4307,9 @@ pub mod skia_impl {
                 }
             }
             let mut distinct: Vec<f32> = seen.iter().map(|(_, w)| *w).collect();
-            distinct.sort_by(|a, b| a.partial_cmp(b).expect("a finite advance"));
+            // `total_cmp`, not `partial_cmp(...).expect(...)`: advances are
+            // finite in practice, but a NaN must sort — not panic the test.
+            distinct.sort_by(|a, b| a.total_cmp(b));
             distinct.dedup();
             assert!(
                 distinct.len() > 1,

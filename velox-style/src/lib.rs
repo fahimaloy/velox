@@ -124,16 +124,6 @@ impl SelectorPart {
         };
         tag_ok && class_ok && attr_ok
     }
-
-    #[allow(dead_code)]
-    fn is_simple_tag(&self) -> bool {
-        !self.tag.is_empty() && self.class.is_empty()
-    }
-
-    #[allow(dead_code)]
-    fn is_class_only(&self) -> bool {
-        self.tag.is_empty() && !self.class.is_empty()
-    }
 }
 
 /// A compound CSS selector — a chain of `SelectorPart`s connected by
@@ -151,18 +141,6 @@ pub struct CompoundSelector {
 impl CompoundSelector {
     fn new(parts: Vec<SelectorPart>) -> Self {
         Self { parts }
-    }
-
-    /// True when the selector is a simple tag-only selector (e.g., `button`).
-    #[allow(dead_code)]
-    fn is_simple_tag(&self) -> bool {
-        self.parts.len() == 1 && self.parts[0].is_simple_tag()
-    }
-
-    /// True when the selector is a simple class-only selector (e.g., `.app`).
-    #[allow(dead_code)]
-    fn is_class_only(&self) -> bool {
-        self.parts.len() == 1 && self.parts[0].is_class_only()
     }
 
     /// Whether any part of this selector names the `::placeholder`
@@ -406,9 +384,14 @@ impl<'i> cssparser::AtRuleParser<'i> for DeclarationParser {
 /// and silently dropping an unknown pseudo is strictly better than discarding
 /// the rule an author wrote around it. What changed is only that the one
 /// pseudo-element Velox actually implements is now seen.
-fn split_pseudos(base_trimmed: &str) -> (String, bool, bool) {
+///
+/// Returns the base name borrowed when there is no pseudo to strip, so the
+/// common no-pseudo selector parses without an allocation here (the owner
+/// materialises it with `into_owned` only if it keeps the part).
+fn split_pseudos(base_trimmed: &str) -> (std::borrow::Cow<'_, str>, bool, bool) {
+    use std::borrow::Cow;
     let Some(colon) = base_trimmed.find(':') else {
-        return (base_trimmed.to_string(), false, false);
+        return (Cow::Borrowed(base_trimmed), false, false);
     };
     let name = base_trimmed[..colon].trim().to_string();
     // Everything after the first colon, then peel one leading colon per
@@ -434,7 +417,7 @@ fn split_pseudos(base_trimmed: &str) -> (String, bool, bool) {
             None => break,
         }
     }
-    (name, hover, placeholder)
+    (Cow::Owned(name), hover, placeholder)
 }
 
 fn parse_selector_part(raw: &str) -> Option<SelectorPart> {
@@ -504,7 +487,7 @@ fn parse_selector_part(raw: &str) -> Option<SelectorPart> {
 
     let (name_raw, hover, placeholder) = split_pseudos(base_trimmed);
     // Allow `*` universal selector: treat like empty tag (matches any tag)
-    if name_raw == "*" {
+    if name_raw.as_ref() == "*" {
         return Some(SelectorPart {
             tag: "*".to_string(),
             class: String::new(),
@@ -561,7 +544,7 @@ fn parse_selector_part(raw: &str) -> Option<SelectorPart> {
         })
     } else {
         Some(SelectorPart {
-            tag: name_raw,
+            tag: name_raw.into_owned(),
             class: String::new(),
             hover,
             placeholder,
@@ -769,7 +752,9 @@ fn merge_styles(existing: Option<&str>, new_map: &HashMap<String, String>) -> St
             }
         }
     }
-    let mut keys: Vec<_> = map.keys().cloned().collect();
+    // Borrow the keys for ordering: the merged string is built from `&str`
+    // lookups, so no key or value string is cloned just to be sorted.
+    let mut keys: Vec<&String> = map.keys().collect();
     keys.sort();
     let mut out = String::new();
     for (i, k) in keys.iter().enumerate() {
@@ -778,7 +763,7 @@ fn merge_styles(existing: Option<&str>, new_map: &HashMap<String, String>) -> St
         }
         out.push_str(k);
         out.push_str(": ");
-        out.push_str(&map[k]);
+        out.push_str(&map[*k]);
         out.push(';');
     }
     out
@@ -792,8 +777,10 @@ pub fn apply_styles(node: &VNode, sheet: &Stylesheet) -> VNode {
 
 /// Apply the 3-layer cascade UA < author < inline.
 ///
-/// Composes the user-agent sheet (`ua::ua_sheet()`) under `author`, then
-/// delegates to `apply_styles_with_hover`. Inline styles win via `merge_styles`.
+/// Borrows the user-agent sheet (`ua::ua_sheet()`, a `OnceLock` singleton) and
+/// `author` as two ordered layers instead of cloning both rule vecs into one
+/// merged sheet per call. The cascade runs on every frame, so the old merge
+/// allocated two full rule vecs plus every declaration string on each pass.
 pub fn apply_with_cascade(node: &VNode, author: &Stylesheet) -> VNode {
     apply_with_cascade_with_hover(node, author, &|_, _| false)
 }
@@ -804,10 +791,7 @@ where
     F: Fn(&str, &Props) -> bool,
 {
     let ua = crate::ua::ua_sheet();
-    let mut merged = ua.rules.clone();
-    merged.extend(author.rules.clone());
-    let cascade = Stylesheet { rules: merged };
-    apply_styles_with_hover(node, &cascade, is_hovered)
+    apply_with_sheets(node, &[ua, author], is_hovered)
 }
 
 /// Properties that inherit to descendants, per browser CSS behavior.
@@ -851,29 +835,45 @@ pub fn apply_styles_with_hover<F>(node: &VNode, sheet: &Stylesheet, is_hovered: 
 where
     F: Fn(&str, &Props) -> bool,
 {
-    fn filter_inheritable(style: Option<&str>) -> HashMap<String, String> {
-        let mut map = HashMap::new();
-        if let Some(s) = style {
-            for decl in s.split(';') {
-                let d = decl.trim();
-                if d.is_empty() {
-                    continue;
-                }
-                if let Some((k, v)) = d.split_once(':') {
-                    let k = k.trim();
-                    let v = v.trim();
-                    if INHERITABLE.contains(&k) {
-                        map.insert(k.to_string(), v.to_string());
-                    }
+    apply_with_sheets(node, &[sheet], is_hovered)
+}
+
+/// Cascade core: style `node` against `sheets` in layer order (earlier sheets
+/// lose to later ones, inline `style` wins over everything).
+///
+/// Sheets are only borrowed: matching reads `&rule.decls` straight out of each
+/// layer, so no merged rule vec is ever built.
+fn apply_with_sheets<F>(node: &VNode, sheets: &[&Stylesheet], is_hovered: &F) -> VNode
+where
+    F: Fn(&str, &Props) -> bool,
+{
+    /// Overlay the inheritable declarations of a `style` attribute onto `map`.
+    ///
+    /// This is the threaded-accumulator half of the cascade: instead of
+    /// serialising the element's resolved style to a string and re-parsing it
+    /// for the inheritable subset (a serialize→parse round-trip per element),
+    /// the children inherit straight from the accumulator this element already
+    /// built, plus the inline declarations that override it — the same sources
+    /// `merge_styles` combined, so the result is identical.
+    fn overlay_inheritable(map: &mut HashMap<String, String>, style: &str) {
+        for decl in style.split(';') {
+            let d = decl.trim();
+            if d.is_empty() {
+                continue;
+            }
+            if let Some((k, v)) = d.split_once(':') {
+                let k = k.trim();
+                let v = v.trim();
+                if INHERITABLE.contains(&k) {
+                    map.insert(k.to_string(), v.to_string());
                 }
             }
         }
-        map
     }
 
     fn apply_rec<FN>(
         node: &VNode,
-        sheet: &Stylesheet,
+        sheets: &[&Stylesheet],
         is_hovered: &FN,
         inherited: &HashMap<String, String>,
         ancestors: &[&VNode],
@@ -901,53 +901,69 @@ where
                 let mut pseudo_acc: HashMap<String, String> = HashMap::new();
                 // Match all selectors against this element, passing the ancestor chain
                 // so compound selectors (e.g., `.header h1`) can walk up the tree.
-                for rule in &sheet.rules {
-                    if matches_selector(&rule.selector, tag, props, hovered, ancestors) {
-                        let target = if rule.selector.has_placeholder() {
-                            // A selector that names `::placeholder` anywhere but
-                            // on its own subject matches no element in real CSS,
-                            // so its declarations must reach NOBODY. Keying off
-                            // the last part alone is what made `.a::placeholder
-                            // .b` repaint `.b`: the placeholder part sat in the
-                            // chain, `.b` was the subject, the last part had no
-                            // placeholder flag, and the declarations fell into
-                            // `.b`'s own `style`.
-                            if !rule.selector.placeholder_is_subject() {
-                                continue;
+                // Layers apply in order so a later sheet wins over an earlier one.
+                for sheet in sheets {
+                    for rule in &sheet.rules {
+                        if matches_selector(&rule.selector, tag, props, hovered, ancestors) {
+                            let target = if rule.selector.has_placeholder() {
+                                // A selector that names `::placeholder` anywhere but
+                                // on its own subject matches no element in real CSS,
+                                // so its declarations must reach NOBODY. Keying off
+                                // the last part alone is what made `.a::placeholder
+                                // .b` repaint `.b`: the placeholder part sat in the
+                                // chain, `.b` was the subject, the last part had no
+                                // placeholder flag, and the declarations fell into
+                                // `.b`'s own `style`.
+                                if !rule.selector.placeholder_is_subject() {
+                                    continue;
+                                }
+                                &mut pseudo_acc
+                            } else {
+                                &mut acc
+                            };
+                            for (k, v) in &rule.decls {
+                                target.insert(k.clone(), v.clone());
                             }
-                            &mut pseudo_acc
-                        } else {
-                            &mut acc
-                        };
-                        for (k, v) in &rule.decls {
-                            target.insert(k.clone(), v.clone());
                         }
                     }
                 }
+                let inline_style: Option<&str> = props.attrs.get("style").map(String::as_str);
                 let mut new_props = props.clone();
-                let merged = merge_styles(new_props.attrs.get("style").map(|s| s.as_str()), &acc);
-                let final_style = merged.clone();
-                if !final_style.is_empty() {
-                    new_props = new_props.set("style", final_style.clone());
+                let merged = merge_styles(inline_style, &acc);
+                if !merged.is_empty() {
+                    new_props = new_props.set("style", merged);
                 }
                 if !pseudo_acc.is_empty() {
                     let merged_pseudo = merge_styles(
                         new_props
                             .attrs
                             .get(PLACEHOLDER_STYLE_ATTR)
-                            .map(|s| s.as_str()),
+                            .map(String::as_str),
                         &pseudo_acc,
                     );
                     new_props = new_props.set(PLACEHOLDER_STYLE_ATTR, merged_pseudo);
                 }
-                let inherit_next = filter_inheritable(Some(&final_style));
+                // Thread the accumulator into the children's inherited map
+                // without re-parsing the serialised `style` string: the
+                // inheritable subset of the merged style is exactly the
+                // inheritable subset of `acc` overlaid with the inheritable
+                // subset of the inline declarations (which win).
+                let mut inherit_next: HashMap<String, String> = HashMap::with_capacity(acc.len());
+                for (k, v) in &acc {
+                    if INHERITABLE.contains(&k.as_str()) {
+                        inherit_next.insert(k.clone(), v.clone());
+                    }
+                }
+                if let Some(inline) = inline_style {
+                    overlay_inheritable(&mut inherit_next, inline);
+                }
                 // Build child ancestors: this element + current ancestors
                 let mut child_ancestors: Vec<&VNode> = Vec::with_capacity(ancestors.len() + 1);
                 child_ancestors.push(node);
                 child_ancestors.extend_from_slice(ancestors);
                 let new_children = children
                     .iter()
-                    .map(|c| apply_rec(c, sheet, is_hovered, &inherit_next, &child_ancestors))
+                    .map(|c| apply_rec(c, sheets, is_hovered, &inherit_next, &child_ancestors))
                     .collect();
                 VNode::Element {
                     tag: tag.clone(),
@@ -959,7 +975,7 @@ where
     }
 
     let inherited_root: HashMap<String, String> = HashMap::new();
-    apply_rec(node, sheet, is_hovered, &inherited_root, &[])
+    apply_rec(node, sheets, is_hovered, &inherited_root, &[])
 }
 
 /// Compute styles for a VNode given inline styles and optional stylesheet
@@ -1025,33 +1041,41 @@ mod placeholder_tests {
     #[test]
     fn a_double_colon_pseudo_element_is_not_mistaken_for_a_single_colon_one() {
         let (name, hover, placeholder) = split_pseudos("input::placeholder");
-        assert_eq!(name, "input");
+        assert_eq!(name.into_owned(), "input");
         assert!(placeholder, "`::placeholder` was not recognised");
         assert!(!hover, "`::placeholder` must not also set :hover");
     }
 
     #[test]
     fn the_single_colon_pseudo_classes_still_parse() {
+        let (name, hover, placeholder) = split_pseudos("div:hover");
         assert_eq!(
-            split_pseudos("div:hover"),
-            ("div".to_string(), true, false),
+            name.into_owned(),
+            "div",
             ":hover regressed while ::placeholder was being added"
         );
+        assert!(hover);
+        assert!(!placeholder);
     }
 
     #[test]
     fn a_selector_with_no_pseudo_is_untouched() {
-        assert_eq!(
-            split_pseudos(".field"),
-            (".field".to_string(), false, false)
-        );
-        assert_eq!(split_pseudos("input"), ("input".to_string(), false, false));
+        // No pseudo means the name is borrowed, not allocated: the Cow stays
+        // `Borrowed` so a plain `input` parses without a heap allocation here.
+        let (field, hover, placeholder) = split_pseudos(".field");
+        assert!(matches!(field, std::borrow::Cow::Borrowed(".field")));
+        assert!(!hover);
+        assert!(!placeholder);
+        let (tag, hover, placeholder) = split_pseudos("input");
+        assert!(matches!(tag, std::borrow::Cow::Borrowed("input")));
+        assert!(!hover);
+        assert!(!placeholder);
     }
 
     #[test]
     fn a_class_with_a_placeholder_pseudo_keeps_its_class() {
         let (name, hover, placeholder) = split_pseudos(".field::placeholder");
-        assert_eq!(name, ".field");
+        assert_eq!(name.into_owned(), ".field");
         assert!(placeholder);
         assert!(!hover);
     }
@@ -1059,7 +1083,7 @@ mod placeholder_tests {
     #[test]
     fn two_pseudos_in_one_selector_keep_both_flags() {
         let (name, hover, placeholder) = split_pseudos("input::placeholder:hover");
-        assert_eq!(name, "input");
+        assert_eq!(name.into_owned(), "input");
         assert!(placeholder);
         assert!(hover);
     }
@@ -1069,7 +1093,7 @@ mod placeholder_tests {
         // The pre-existing behaviour for `:focus` / `::before` was to ignore
         // them, and dropping the whole rule would be a regression.
         let (name, hover, placeholder) = split_pseudos("input::before");
-        assert_eq!(name, "input");
+        assert_eq!(name.into_owned(), "input");
         assert!(!placeholder);
         assert!(!hover);
     }
