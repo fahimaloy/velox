@@ -36,7 +36,7 @@ skia-native = ["dep:skia-safe", "skia", "dep:raw-window-handle", "dep:egl", "dep
 svg = ["dep:resvg"]
 
 [dependencies]
-velox-core = { path = "../velox-core" }
+velox-core = { version = "0.1.0", path = "../velox-core" }
 # Optional backends (do NOT compile unless feature enabled)
 winit = { version = "0.28", optional = true }
 skia-safe = { version = "0.91.1", features = ["gl", "egl"], optional = true }
