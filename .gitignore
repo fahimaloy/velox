@@ -46,13 +46,8 @@ RELEASE_V1_PLAN.yml
 
 plan.txt
 todo.txt
-# Agent instructions and skills ARE project source: every coding agent that
-# touches this repo reads them, and stale claims in them silently cost work.
-# Track them so corrections are reviewable in PRs. `opencode.json` stays
-# ignored — it pins absolute paths to one machine's nvm/flutter/MCP installs.
-.opencode/*
-!.opencode/skills/
-!.opencode/instructions/
+# Local agent workspace — machine-specific, not project source.
+.opencode/
 tmp/
 
 # Agent skill installs (tooling artifacts, not project source)
