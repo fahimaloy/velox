@@ -15,7 +15,6 @@ categories = ["gui"]
 # Skia backend, which is heavy, so they stay behind a feature and are opt-in:
 #   cargo test -p velox-dom --features skia-native
 # Everything else in `tests/` runs by default with no features.
-skia-native = ["velox-renderer/skia-native"]
 
 [dependencies]
 
