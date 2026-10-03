@@ -6,9 +6,11 @@ license = "MIT"
 description = "CSS parsing and styling for the Velox UI framework"
 authors = ["fahimaloy"]
 repository = "https://github.com/fahimaloy/velox"
-publish = false
+categories = ["gui", "text-processing"]
+keywords = ["css", "styling", "parsing", "selectors", "velox"]
+documentation = "https://velox.dev/docs/style"
 
 [dependencies]
 cssparser = "0.29"
 selectors = "0.23"
-velox-dom = { path = "../velox-dom" }
+velox-dom = { version = "0.1.0", path = "../velox-dom" }
