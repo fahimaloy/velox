@@ -2754,10 +2754,6 @@ dependencies = [
 [[package]]
 name = "velox-dom"
 version = "0.1.0"
-dependencies = [
- "velox-renderer",
- "velox-style",
-]
 
 [[package]]
 name = "velox-example-counter"
