@@ -49,7 +49,7 @@ jobs:
   build-test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       # `skia-bindings` normally downloads prebuilt Skia binaries. When those
       # release assets are unavailable it falls back to building Skia from
       # source, which needs the FreeType, Fontconfig and EGL headers below. Keeping
@@ -71,7 +71,7 @@ jobs:
   coverage:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       # See build-test: a missing skia-binaries release asset makes
       # skia-bindings build Skia from source, which needs these headers.
       - name: Install Skia build deps
@@ -98,7 +98,7 @@ jobs:
   dependency-audit:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
       - name: Cache cargo
@@ -255,7 +255,7 @@ jobs:
   property-tests:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
       - name: Cache cargo
@@ -304,7 +304,7 @@ jobs:
   renderer-features:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       # See build-test: a missing skia-binaries release asset makes
       # skia-bindings build Skia from source, which needs these headers.
       - name: Install Skia build deps
@@ -348,7 +348,7 @@ jobs:
   skia-native-non-unix:
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
       - name: Cache cargo
@@ -368,6 +368,6 @@ jobs:
   docker:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Build test image
         run: docker build -t velox:test --target test .
