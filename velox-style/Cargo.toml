@@ -1,6 +1,6 @@
 [package]
 name = "velox-style"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 description = "CSS parsing and styling for the Velox UI framework"
@@ -14,4 +14,4 @@ documentation = "https://velox.dev/docs/style"
 [dependencies]
 cssparser = "0.29"
 selectors = "0.23"
-velox-dom = { version = "0.1.1", path = "../velox-dom" }
+velox-dom = { version = "0.1.2", path = "../velox-dom" }

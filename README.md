@@ -8,16 +8,20 @@
 
 **Reactive signals · Single-file components · Flexbox layout · Skia rendering**
 
+<img src="./docs/src/assets/showcase-window.png" width="880" alt="Velox Layout Showcase — a .vx single-file component laid out and painted by velox-renderer">
+
 <br>
 
 [![Crates.io](https://img.shields.io/crates/v/veloxc.svg)](https://crates.io/crates/veloxc)
 [![Downloads](https://img.shields.io/crates/d/veloxc.svg)](https://crates.io/crates/veloxc)
-[![License: MIT](https://img.shields.io/crates/l/veloxc.svg)](LICENSE)
-[![Docs](https://img.shields.io/docsrs/velox-core)](https://docs.rs/velox-core)
+[![Docs.rs](https://img.shields.io/docsrs/velox-core)](https://docs.rs/velox-core)
+[![Documentation](https://img.shields.io/badge/docs-fahimaloy.github.io%2Fvelox-B0510E)](https://fahimaloy.github.io/velox/)
+[![CI](https://img.shields.io/github/actions/workflow/status/fahimaloy/velox/ci.yml?branch=main)](https://github.com/fahimaloy/velox/actions/workflows/ci.yml)
+[![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-B0510E)](LICENSE)
 
 <br>
 
-[Quick start](#quick-start) · [CLI reference](#cli-reference) · [Architecture](#architecture) · [Template syntax](#template-syntax) · [Feature status](#feature-status) · [Guides](#guides-and-documentation)
+[Quick start](#quick-start) · [Documentation](https://fahimaloy.github.io/velox/) · [Tutorials](https://fahimaloy.github.io/velox/tutorials/counter.html) · [CLI reference](#cli-reference) · [Architecture](#architecture) · [Template syntax](#template-syntax) · [Feature status](#feature-status) · [Guides](#guides-and-documentation)
 
 </div>
 
@@ -88,6 +92,11 @@ veloxc build --release
 # 4. Build and launch once
 veloxc run
 ```
+
+`veloxc dev` watches the project, rebuilds on save, and re-launches the app —
+hot reload means the running window updates as soon as the build lands:
+
+<img src="./docs/src/assets/counter-hmr.gif" width="720" alt="Counter example hot-reloading a style change">
 
 A quick `veloxc lint src/App.vx` checks the generated component before you edit
 anything.
@@ -440,8 +449,8 @@ Child components are imported in `<script setup>` and used as elements:
 <Todos />
 ```
 
-See [`docs/sfc-events.md`](docs/sfc-events.md) for event payload handling
-(`on:<event>-payload` and inline closures).
+See [event payload handling](docs/src/features/events.md) for `on:<event>-payload`
+and inline closures.
 
 ---
 
@@ -483,7 +492,7 @@ callers and had a stale-content bug on key match.
 `:key`. An `<input>` inside a reordered `v-for` loses focus/caret to whichever
 item occupies its index. This is a known limitation, not an oversight.
 
-Full decision record: [`docs/RECONCILER.md`](docs/RECONCILER.md)
+Full decision record: [`docs/internal/RECONCILER.md`](docs/internal/RECONCILER.md)
 
 </details>
 
@@ -542,15 +551,17 @@ build-depend on `veloxc`. Expect a heavy first build.</sub>
 
 | Document | What's in it |
 |:---|:---|
+| **[Documentation book](https://fahimaloy.github.io/velox/)** | Getting started, three tutorials, feature reference, and the advanced internals |
 | [`ARCHITECTURE.md`](ARCHITECTURE.md) | Workspace layout, data flow, backends |
 | [`CHANGELOG.md`](CHANGELOG.md) | Release history and unreleased changes |
-| [`docs/RECONCILER.md`](docs/RECONCILER.md) | Why `:key` reordering works without a production reconciler |
-| [`docs/RENDERING.md`](docs/RENDERING.md) | How Velox paints, and the measurements behind it |
-| [`docs/viewport.md`](docs/viewport.md) | The `make_view(w, h)` viewport contract |
-| [`docs/sfc-events.md`](docs/sfc-events.md) | Event payloads: `on:<event>-payload` and inline closures |
-| [`docs/skia-native-ci.md`](docs/skia-native-ci.md) | Running the headless Skia-native tests locally |
+| [`docs/src/advanced/reconciler.md`](docs/src/advanced/reconciler.md) | Why `:key` reordering works without a production reconciler |
+| [`docs/src/advanced/rendering-pipeline.md`](docs/src/advanced/rendering-pipeline.md) | How Velox paints, and the measurements behind it |
+| [`docs/src/advanced/viewport.md`](docs/src/advanced/viewport.md) | The `make_view(w, h)` viewport contract |
+| [`docs/src/features/events.md`](docs/src/features/events.md) | Event payloads: `on:<event>-payload` and inline closures |
+| [`docs/internal/`](docs/internal/) | Audit records, plans, tasks, and the headless Skia-native CI notes |
 
-API documentation: [docs.rs/velox-core](https://docs.rs/velox-core)
+API documentation: [docs.rs/velox-core](https://docs.rs/velox-core) ·
+[docs.rs/veloxc](https://docs.rs/veloxc) · [docs.rs/velox-renderer](https://docs.rs/velox-renderer)
 
 ---
 
@@ -588,8 +599,12 @@ Update this README when behavior changes.
 
 ## License & Trademark
 
-**Code:** Everything in this repository is MIT licensed — see [`LICENSE`](LICENSE).
+**Code:** Dual-licensed under **MIT OR Apache-2.0** — pick whichever suits your
+project. See [`LICENSE`](LICENSE) for the MIT terms and
+[`LICENSE-APACHE`](LICENSE-APACHE) for Apache 2.0.
 
-**"Velox" is a trademark of this project.** MIT grants the right to copy, modify, and redistribute the code and the logo *as part of a Velox project or derivative*. It does not grant the right to use the name or logo in a way that suggests Velox project endorsement of a third-party product.
+Copyright © 2026 [FAHIM AHMED](mailto:fahimaloy@tutamail.com).
+
+**"Velox" is a trademark of this project.** Both licenses grant the right to copy, modify, and redistribute the code and the logo *as part of a Velox project or derivative*. They do not grant the right to use the name or logo in a way that suggests Velox project endorsement of a third-party product.
 
 If you want the logo in a project that is **not** derived from Velox, ask first — that is a trademark question, not a license one.

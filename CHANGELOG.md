@@ -7,6 +7,37 @@
 
 ## Unreleased
 
+## [0.1.2] - 2026-10-04
+
+### Added
+- Documentation book: an mdBook site under `docs/` — introduction, getting
+  started, three tutorials (counter, todo, showcase), six feature-reference pages
+  (template syntax, events, styling, renderer, dev workflow & hot reload, CLI) and
+  four advanced pages (architecture, rendering pipeline, viewport contract,
+  reconciler). Every claim on those pages was verified against the source.
+- Visual assets for the docs and READMEs: window renders of the counter, todo and
+  showcase examples plus a hot-reload animation showing a style edit live-updating
+  the running window.
+- Project-health files: `CONTRIBUTING.md`, `SECURITY.md` (private reporting to
+  fahimaloy@tutamail.com), `CODE_OF_CONDUCT.md` (Contributor Covenant 2.1), bug and
+  feature issue forms, a pull-request template, `FUNDING.yml`, and `dependabot.yml`
+  for cargo and GitHub Actions.
+- `deploy-docs.yml` publishes the documentation book to GitHub Pages on every push
+  to `main` that touches `docs/`.
+
+### Changed
+- License: dual **MIT OR Apache-2.0** across all published crates (previously
+  MIT-only) — see `LICENSE` and `LICENSE-APACHE`.
+- All six crate READMEs restructured to one consistent template: badges, a verified
+  quick start, the workspace crate table, and the dual license with copyright
+  `FAHIM AHMED <fahimaloy@tutamail.com>`.
+- Root README gained window/GIF media, documentation-book links, and corrected
+  deep-dive links; internal audits and plans moved to `docs/internal/`.
+- Repository setup: `main` is protected (required CI checks, linear history, no
+  force-push or deletion), squash and merge commits are enabled with automatic
+  branch deletion, and the repository now carries a description, homepage and
+  topics.
+
 ### Fixed
 - `velox dev` no longer quantises saves to a 400 ms floor: the watcher is
   `notify`/inotify instead of a full-tree `read_dir` scan on a timer, so a save is

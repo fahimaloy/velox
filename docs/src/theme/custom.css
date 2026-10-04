@@ -1,0 +1,1039 @@
+/* ==========================================================================
+   Velox — premium mdBook theme
+   --------------------------------------------------------------------------
+   Direction: "forged copper on ink & paper".
+
+   The Velox mark (a V inside a gear) is monochrome, so the palette is built
+   around one warm accent that echoes the forged-metal look of the mark:
+   copper on light surfaces, amber on dark ink.
+
+   PALETTE (exact hex)
+   ---------------------------------------------------------------------------
+   Copper   #B0510E  brand accent, light themes — links, icon hover, active nav,
+                     h1 gradient, blockquote bar, table-header edge, focus
+                     rings, footnote highlight, inline-code tints
+   Copper deep   #7E4512  h1 gradient start (light)
+   Copper bright #C05E14  h1 gradient end (light)
+   Amber    #F59E4B  brand accent, dark themes — same roles as copper
+   Amber bright  #F7C88C  h1 gradient start (dark)
+   Amber deep    #EF8E38  h1 gradient end (dark)
+   Coal accent   #EF9440  brand accent on the coal theme
+   Ayu accent    #FFAD4D  brand accent on the ayu theme
+
+   Semantic admonition colors (GitHub-derived, light / dark):
+     note      #0969DA / #4493F8
+     tip       #1A7F37 / #3FB950
+     important #8250DF / #AB7DF8
+     warning   #9A6700 / #D29922
+     caution   #CF222E / #F85149
+
+   Surfaces:
+     rust  (default light)  bg #FAF6EF, fg #2A241C, sidebar #251C16 espresso
+     light                  bg #FDFDFB, fg #24282C, sidebar #F4F4F1
+     navy  (default dark)   bg #151926, fg #C7CBDA, sidebar #10131E
+     coal                   bg #16181B, fg #AEB5BD, sidebar #111316
+     ayu                    bg #0F141A, fg #C6CBD4, sidebar #0C1117
+
+   Code panels: light #F2ECDD / border #E4D8C2, dark #10141F / border #232B40.
+   Syntax tokens are a One-Light / One-Dark derived set; numeric literals pick
+   up the brand copper (light) / warm amber (dark).
+
+   Motion: 120–150 ms hovers and focus rings only, disabled under
+   prefers-reduced-motion. No external fonts or frameworks — system stack.
+   ========================================================================== */
+
+
+/* --------------------------------------------------------------------------
+   1. Design tokens
+   -------------------------------------------------------------------------- */
+
+:root {
+    /* Typography — modern system stack with graceful fallback */
+    --velox-sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto,
+        "Helvetica Neue", Arial, "Noto Sans", sans-serif,
+        "Apple Color Emoji", "Segoe UI Emoji";
+    --mono-font: ui-monospace, "SF Mono", "Cascadia Code", "Source Code Pro",
+        Menlo, Consolas, "DejaVu Sans Mono", monospace;
+
+    /* Layout — comfortable measure and breathing room */
+    --content-max-width: 720px;
+    --page-padding: 20px;
+    --sidebar-target-width: 320px;
+
+    /* Brand accent (overridden per theme below). Derived tints resolve
+       against whichever accent the current theme cascades. */
+    --velox-accent: #B0510E;
+    --velox-accent-soft: color-mix(in srgb, var(--velox-accent) 10%, transparent);
+    --velox-accent-wash: color-mix(in srgb, var(--velox-accent) 8%, transparent);
+    --velox-accent-border: color-mix(in srgb, var(--velox-accent) 26%, transparent);
+
+    /* Velox V-in-gear mark, as an alpha mask — recolored via background-color */
+    --velox-gear-mask: url("data:image/svg+xml,%3Csvg%20xmlns='http://www.w3.org/2000/svg'%20viewBox='-53,-53,106,106'%3E%3Cg%20fill='%23fff'%20stroke='%23fff'%3E%3Cpath%20stroke-width='1'%20stroke-linejoin='round'%20d='M-28,-23L0,27L28,-23L13.67,-23L0,1.42L-13.67,-23Z'/%3E%3Ccircle%20r='43'%20fill='none'%20stroke-width='8'/%3E%3Cg%20stroke-linejoin='round'%20stroke-width='8'%3E%3Cpolygon%20id='t'%20points='47,4,54,0,47,-4'/%3E%3Cuse%20href='%23t'%20transform='rotate(11.25)'/%3E%3Cuse%20href='%23t'%20transform='rotate(33.75)'/%3E%3Cuse%20href='%23t'%20transform='rotate(56.25)'/%3E%3Cuse%20href='%23t'%20transform='rotate(78.75)'/%3E%3Cuse%20href='%23t'%20transform='rotate(101.25)'/%3E%3Cuse%20href='%23t'%20transform='rotate(123.75)'/%3E%3Cuse%20href='%23t'%20transform='rotate(146.25)'/%3E%3Cuse%20href='%23t'%20transform='rotate(168.75)'/%3E%3Cuse%20href='%23t'%20transform='rotate(191.25)'/%3E%3Cuse%20href='%23t'%20transform='rotate(213.75)'/%3E%3Cuse%20href='%23t'%20transform='rotate(236.25)'/%3E%3Cuse%20href='%23t'%20transform='rotate(258.75)'/%3E%3Cuse%20href='%23t'%20transform='rotate(281.25)'/%3E%3Cuse%20href='%23t'%20transform='rotate(303.75)'/%3E%3Cuse%20href='%23t'%20transform='rotate(326.25)'/%3E%3Cuse%20href='%23t'%20transform='rotate(348.75)'/%3E%3C/g%3E%3Cg%20stroke-linejoin='round'%20stroke-width='8'%3E%3Cpolygon%20id='m'%20points='-7,-43,0,-36,7,-43'/%3E%3Cuse%20href='%23m'%20transform='rotate(72)'/%3E%3Cuse%20href='%23m'%20transform='rotate(144)'/%3E%3Cuse%20href='%23m'%20transform='rotate(216)'/%3E%3Cuse%20href='%23m'%20transform='rotate(288)'/%3E%3C/g%3E%3C/g%3E%3C/svg%3E");
+}
+
+/* --------------------------------------------------------------------------
+   2. Theme palettes — one deliberate variable block per mdBook theme
+      (theme classes live on the <html> element in mdBook 0.5)
+   -------------------------------------------------------------------------- */
+
+/* Rust — default light: warm paper, espresso sidebar */
+html.rust {
+    --bg: #FAF6EF;
+    --fg: #2A241C;
+
+    --sidebar-bg: #251C16;
+    --sidebar-fg: #C9BCAC;
+    --sidebar-non-existant: #6E5F4E;
+    --sidebar-active: #F09A45;
+    --sidebar-spacer: #3B2F25;
+
+    --scrollbar: #A89680;
+
+    --icons: #8A7B68;
+    --icons-hover: #B0510E;
+
+    --links: #B0510E;
+    --inline-code-color: #9A4A15;
+
+    --theme-popup-bg: #F5EFE4;
+    --theme-popup-border: #E2D7C2;
+    --theme-hover: #EEE6D6;
+
+    --quote-bg: #F4EDDF;
+    --quote-border: #E5DAC6;
+
+    --warning-border: #D97706;
+
+    --table-border-color: #E7DDC8;
+    --table-header-bg: #F2E9D8;
+    --table-alternate-bg: #F4EFE2;
+
+    --searchbar-border-color: #DFD3BB;
+    --searchbar-bg: #F5F0E4;
+    --searchbar-fg: #2A241C;
+    --searchbar-shadow-color: color-mix(in srgb, var(--velox-accent) 30%, transparent);
+    --searchresults-header-fg: #6E5F4E;
+    --searchresults-border-color: #D8CBB2;
+    --searchresults-li-bg: #F2E8D5;
+    --search-mark-bg: rgba(176, 81, 14, 0.28);
+
+    --color-scheme: light;
+
+    --copy-button-filter: invert(46%) sepia(12%) saturate(700%) hue-rotate(-10deg) brightness(94%) contrast(88%);
+    --copy-button-filter-hover: invert(38%) sepia(78%) saturate(1600%) hue-rotate(-12deg) brightness(96%) contrast(104%);
+
+    --footnote-highlight: #B0510E;
+    --overlay-bg: rgba(42, 32, 20, 0.45);
+
+    --blockquote-note-color: #0969DA;
+    --blockquote-tip-color: #1A7F37;
+    --blockquote-important-color: #8250DF;
+    --blockquote-warning-color: #9A6700;
+    --blockquote-caution-color: #CF222E;
+
+    --sidebar-header-border-color: #B0510E;
+
+    --velox-accent: #B0510E;
+    --velox-gear-mark: #F09A45;          /* amber pops on the espresso sidebar */
+    --velox-h1-gradient: linear-gradient(100deg, #71390D 0%, #C05E14 100%);
+
+    --code-bg: #F2ECDD;
+    --code-border: #E4D8C2;
+    --code-fg: #33291E;
+
+    /* Syntax tokens (light set) */
+    --code-comment: #82796A;
+    --code-keyword: #A626A4;
+    --code-string: #35793B;
+    --code-number: #B0510E;
+    --code-fn: #3A67CC;
+    --code-type: #9A6B0A;
+    --code-var: #B5402B;
+}
+
+/* Light — pure light: airy neutral paper, light sidebar */
+html.light {
+    --bg: #FDFDFB;
+    --fg: #24282C;
+
+    --sidebar-bg: #F4F4F1;
+    --sidebar-fg: #3A4147;
+    --sidebar-non-existant: #9AA1A8;
+    --sidebar-active: #B0510E;
+    --sidebar-spacer: #E4E4DF;
+
+    --scrollbar: #9FA5A8;
+
+    --icons: #7C838A;
+    --icons-hover: #B0510E;
+
+    --links: #B0510E;
+    --inline-code-color: #9A4A15;
+
+    --theme-popup-bg: #F7F7F4;
+    --theme-popup-border: #DDE0DA;
+    --theme-hover: #EBEBE6;
+
+    --quote-bg: #F3F4F1;
+    --quote-border: #E2E4DD;
+
+    --warning-border: #D97706;
+
+    --table-border-color: #E5E7E1;
+    --table-header-bg: #EFEFE9;
+    --table-alternate-bg: #F5F6F1;
+
+    --searchbar-border-color: #D9DCD5;
+    --searchbar-bg: #F4F5F1;
+    --searchbar-fg: #24282C;
+    --searchbar-shadow-color: color-mix(in srgb, var(--velox-accent) 30%, transparent);
+    --searchresults-header-fg: #7C838A;
+    --searchresults-border-color: #D5D8D0;
+    --searchresults-li-bg: #EEF0E9;
+    --search-mark-bg: rgba(176, 81, 14, 0.28);
+
+    --color-scheme: light;
+
+    --copy-button-filter: invert(46%) sepia(12%) saturate(700%) hue-rotate(-10deg) brightness(94%) contrast(88%);
+    --copy-button-filter-hover: invert(38%) sepia(78%) saturate(1600%) hue-rotate(-12deg) brightness(96%) contrast(104%);
+
+    --footnote-highlight: #B0510E;
+    --overlay-bg: rgba(120, 125, 130, 0.35);
+
+    --blockquote-note-color: #0969DA;
+    --blockquote-tip-color: #1A7F37;
+    --blockquote-important-color: #8250DF;
+    --blockquote-warning-color: #9A6700;
+    --blockquote-caution-color: #CF222E;
+
+    --sidebar-header-border-color: #B0510E;
+
+    --velox-accent: #B0510E;
+    --velox-gear-mark: #B0510E;
+    --velox-h1-gradient: linear-gradient(100deg, #71390D 0%, #C05E14 100%);
+
+    --code-bg: #F4F5F0;
+    --code-border: #E2E4DC;
+    --code-fg: #2C3034;
+
+    /* Syntax tokens (light set) */
+    --code-comment: #82796A;
+    --code-keyword: #A626A4;
+    --code-string: #35793B;
+    --code-number: #B0510E;
+    --code-fn: #3A67CC;
+    --code-type: #9A6B0A;
+    --code-var: #B5402B;
+}
+
+/* Navy — default dark: deep ink-navy, layered sidebar */
+html.navy {
+    --bg: #151926;
+    --fg: #C7CBDA;
+
+    --sidebar-bg: #10131E;
+    --sidebar-fg: #B4BACB;
+    --sidebar-non-existant: #5A6076;
+    --sidebar-active: #F59E4B;
+    --sidebar-spacer: #242B41;
+
+    --scrollbar: #3E4559;
+
+    --icons: #6E7488;
+    --icons-hover: #F59E4B;
+
+    --links: #F59E4B;
+    --inline-code-color: #EBA95B;
+
+    --theme-popup-bg: #1A1F30;
+    --theme-popup-border: #333A52;
+    --theme-hover: #232A40;
+
+    --quote-bg: #1B2032;
+    --quote-border: #28304A;
+
+    --warning-border: #E8A13D;
+
+    --table-border-color: #252C42;
+    --table-header-bg: #1E2438;
+    --table-alternate-bg: #191E2E;
+
+    --searchbar-border-color: #313850;
+    --searchbar-bg: #1B2032;
+    --searchbar-fg: #E4E6EF;
+    --searchbar-shadow-color: color-mix(in srgb, var(--velox-accent) 35%, transparent);
+    --searchresults-header-fg: #767C92;
+    --searchresults-border-color: #343B54;
+    --searchresults-li-bg: #232A40;
+    --search-mark-bg: rgba(245, 158, 75, 0.3);
+
+    --color-scheme: dark;
+
+    --copy-button-filter: invert(72%) sepia(10%) saturate(500%) hue-rotate(190deg) brightness(92%);
+    --copy-button-filter-hover: invert(65%) sepia(55%) saturate(1100%) hue-rotate(-12deg) brightness(100%);
+
+    --footnote-highlight: #C77E35;
+    --overlay-bg: rgba(5, 7, 13, 0.6);
+
+    --blockquote-note-color: #4493F8;
+    --blockquote-tip-color: #3FB950;
+    --blockquote-important-color: #AB7DF8;
+    --blockquote-warning-color: #D29922;
+    --blockquote-caution-color: #F85149;
+
+    --sidebar-header-border-color: #F59E4B;
+
+    --velox-accent: #F59E4B;
+    --velox-gear-mark: #F59E4B;
+    --velox-h1-gradient: linear-gradient(100deg, #FBD3A0 0%, #ED8532 100%);
+
+    --code-bg: #10141F;
+    --code-border: #232B40;
+    --code-fg: #C6CBD8;
+
+    /* Syntax tokens (dark set) */
+    --code-comment: #6E7689;
+    --code-keyword: #C678DD;
+    --code-string: #98C379;
+    --code-number: #D8A05C;
+    --code-fn: #61AFEF;
+    --code-type: #E5C07B;
+    --code-var: #E06C75;
+}
+
+/* Coal — dark neutral */
+html.coal {
+    --bg: #16181B;
+    --fg: #AEB5BD;
+
+    --sidebar-bg: #111316;
+    --sidebar-fg: #A6ADB5;
+    --sidebar-non-existant: #585D63;
+    --sidebar-active: #EF9440;
+    --sidebar-spacer: #26292E;
+
+    --scrollbar: #4A4F56;
+
+    --icons: #6B7076;
+    --icons-hover: #EF9440;
+
+    --links: #EF9440;
+    --inline-code-color: #E5A55F;
+
+    --theme-popup-bg: #1B1E22;
+    --theme-popup-border: #3A3F45;
+    --theme-hover: #22262B;
+
+    --quote-bg: #1D2024;
+    --quote-border: #2B2F35;
+
+    --warning-border: #E39A3B;
+
+    --table-border-color: #26292E;
+    --table-header-bg: #1F2226;
+    --table-alternate-bg: #1B1E22;
+
+    --searchbar-border-color: #3C4147;
+    --searchbar-bg: #1D2024;
+    --searchbar-fg: #E8EAEC;
+    --searchbar-shadow-color: color-mix(in srgb, var(--velox-accent) 35%, transparent);
+    --searchresults-header-fg: #7A8087;
+    --searchresults-border-color: #3C4147;
+    --searchresults-li-bg: #22262B;
+    --search-mark-bg: rgba(239, 148, 64, 0.3);
+
+    --color-scheme: dark;
+
+    --copy-button-filter: invert(70%) sepia(10%) saturate(500%) hue-rotate(190deg) brightness(92%);
+    --copy-button-filter-hover: invert(65%) sepia(55%) saturate(1100%) hue-rotate(-12deg) brightness(100%);
+
+    --footnote-highlight: #C77E35;
+    --overlay-bg: rgba(5, 6, 8, 0.6);
+
+    --blockquote-note-color: #4493F8;
+    --blockquote-tip-color: #3FB950;
+    --blockquote-important-color: #AB7DF8;
+    --blockquote-warning-color: #D29922;
+    --blockquote-caution-color: #F85149;
+
+    --sidebar-header-border-color: #EF9440;
+
+    --velox-accent: #EF9440;
+    --velox-gear-mark: #EF9440;
+    --velox-h1-gradient: linear-gradient(100deg, #FBD3A0 0%, #ED8532 100%);
+
+    --code-bg: #121417;
+    --code-border: #26292E;
+    --code-fg: #BFC4CB;
+
+    /* Syntax tokens (dark set) */
+    --code-comment: #6E7689;
+    --code-keyword: #C678DD;
+    --code-string: #98C379;
+    --code-number: #D8A05C;
+    --code-fn: #61AFEF;
+    --code-type: #E5C07B;
+    --code-var: #E06C75;
+}
+
+/* Ayu — dark blue-slate */
+html.ayu {
+    --bg: #0F141A;
+    --fg: #C6CBD4;
+
+    --sidebar-bg: #0C1117;
+    --sidebar-fg: #B2B8C2;
+    --sidebar-non-existant: #566173;
+    --sidebar-active: #FFAD4D;
+    --sidebar-spacer: #1E2630;
+
+    --scrollbar: #3E4652;
+
+    --icons: #6C7683;
+    --icons-hover: #FFAD4D;
+
+    --links: #FFAD4D;
+    --inline-code-color: #F0AC60;
+
+    --theme-popup-bg: #131A21;
+    --theme-popup-border: #2E3842;
+    --theme-hover: #1A222B;
+
+    --quote-bg: #151C24;
+    --quote-border: #222C37;
+
+    --warning-border: #E8A13D;
+
+    --table-border-color: #1E2630;
+    --table-header-bg: #182029;
+    --table-alternate-bg: #131A21;
+
+    --searchbar-border-color: #2E3842;
+    --searchbar-bg: #151C24;
+    --searchbar-fg: #E6E9EE;
+    --searchbar-shadow-color: color-mix(in srgb, var(--velox-accent) 35%, transparent);
+    --searchresults-header-fg: #737D8A;
+    --searchresults-border-color: #2E3842;
+    --searchresults-li-bg: #1A222B;
+    --search-mark-bg: rgba(255, 173, 77, 0.3);
+
+    --color-scheme: dark;
+
+    --copy-button-filter: invert(72%) sepia(10%) saturate(500%) hue-rotate(190deg) brightness(92%);
+    --copy-button-filter-hover: invert(65%) sepia(55%) saturate(1100%) hue-rotate(-12deg) brightness(100%);
+
+    --footnote-highlight: #CC8437;
+    --overlay-bg: rgba(3, 6, 10, 0.6);
+
+    --blockquote-note-color: #4493F8;
+    --blockquote-tip-color: #3FB950;
+    --blockquote-important-color: #AB7DF8;
+    --blockquote-warning-color: #D29922;
+    --blockquote-caution-color: #F85149;
+
+    --sidebar-header-border-color: #FFAD4D;
+
+    --velox-accent: #FFAD4D;
+    --velox-gear-mark: #FFAD4D;
+    --velox-h1-gradient: linear-gradient(100deg, #FBD3A0 0%, #ED8532 100%);
+
+    --code-bg: #0C1117;
+    --code-border: #1E2630;
+    --code-fg: #C2C7D0;
+
+    /* Syntax tokens (dark set) */
+    --code-comment: #6E7689;
+    --code-keyword: #C678DD;
+    --code-string: #98C379;
+    --code-number: #D8A05C;
+    --code-fn: #61AFEF;
+    --code-type: #E5C07B;
+    --code-var: #E06C75;
+}
+
+/* --------------------------------------------------------------------------
+   3. Base typography
+   -------------------------------------------------------------------------- */
+
+html {
+    font-family: var(--velox-sans);
+    -webkit-text-size-adjust: none;
+    text-size-adjust: none;
+}
+
+.content p,
+.content ol,
+.content ul {
+    line-height: 1.75;
+}
+
+.content li {
+    margin-block: 0.3em;
+}
+
+.content hr {
+    border: none;
+    border-top: 1px solid var(--table-border-color);
+    margin: 2.6em 0;
+}
+
+/* --------------------------------------------------------------------------
+   4. Headings
+   -------------------------------------------------------------------------- */
+
+.content h1 {
+    font-size: 2.7rem;
+    font-weight: 800;
+    letter-spacing: -0.022em;
+    line-height: 1.2;
+    margin-block: 0.3em 0.6em;
+}
+
+/* Signature touch: page titles carry a quiet copper sweep */
+@supports ((-webkit-background-clip: text) or (background-clip: text)) {
+    .content h1,
+    .content h1 a {
+        background-image: var(--velox-h1-gradient);
+        -webkit-background-clip: text;
+        background-clip: text;
+        color: transparent;
+    }
+}
+
+.content h2 {
+    font-size: 2.1rem;
+    font-weight: 700;
+    letter-spacing: -0.014em;
+    line-height: 1.3;
+    margin-block: 2.3em 0.8em;
+    padding-bottom: 0.35em;
+    border-bottom: 1px solid color-mix(in srgb, var(--velox-accent) 20%, var(--table-border-color));
+}
+
+.content h3 {
+    font-size: 1.7rem;
+    font-weight: 650;
+    letter-spacing: -0.01em;
+    line-height: 1.35;
+    margin-block: 2.1em 0.6em;
+}
+
+.content h4 {
+    font-size: 1.5rem;
+    font-weight: 650;
+    line-height: 1.4;
+    margin-block: 1.9em 0.5em;
+}
+
+.content h5 {
+    font-size: 1.35rem;
+    font-weight: 600;
+    line-height: 1.4;
+    margin-block: 1.9em 0.5em;
+}
+
+.content h6 {
+    font-size: 1.2rem;
+    font-weight: 600;
+    line-height: 1.4;
+    margin-block: 1.9em 0.5em;
+    color: color-mix(in srgb, var(--fg) 78%, transparent);
+}
+
+.content h2,
+.content h3 {
+    margin-block-start: 2.3em;
+}
+
+.content h4,
+.content h5 {
+    margin-block-start: 1.9em;
+}
+
+/* Accent tick on anchored headings that are the scroll target */
+.content h1:target::before,
+.content h2:target::before,
+.content h3:target::before,
+.content h4:target::before,
+.content h5:target::before,
+.content h6:target::before,
+dt:target::before {
+    color: var(--velox-accent);
+}
+
+/* --------------------------------------------------------------------------
+   5. Links
+   -------------------------------------------------------------------------- */
+
+.content a {
+    transition: color 120ms ease;
+}
+
+.content a:hover {
+    text-decoration: underline;
+    text-underline-offset: 3px;
+    text-decoration-thickness: 1px;
+    text-decoration-color: color-mix(in srgb, var(--links) 55%, transparent);
+}
+
+/* --------------------------------------------------------------------------
+   6. Code — blocks, inline chips, tokens, copy button
+   -------------------------------------------------------------------------- */
+
+pre {
+    border-radius: 10px;
+    border: 1px solid var(--code-border);
+    background: var(--code-bg);
+}
+
+pre > code {
+    padding: 1.4rem 1.6rem;
+    line-height: 1.65;
+    color: var(--code-fg);
+}
+
+.hljs {
+    background: var(--code-bg);
+    color: var(--code-fg);
+}
+
+/* Inline code: quiet copper-tinted chip */
+:not(pre) > code {
+    padding: 0.15em 0.45em;
+    border-radius: 5px;
+    background-color: var(--velox-accent-soft);
+    border: 1px solid var(--velox-accent-border);
+    color: var(--inline-code-color);
+}
+
+:not(pre) > .hljs {
+    padding: 0.15em 0.45em;
+    border-radius: 5px;
+    background-color: var(--velox-accent-soft);
+    border: 1px solid var(--velox-accent-border);
+    color: var(--inline-code-color);
+}
+
+/* Inline code inside a link keeps the link color on the tinted chip */
+.content a :not(pre) > code,
+.content a :not(pre) > .hljs {
+    color: inherit;
+}
+
+/* Syntax tokens — One-Light / One-Dark derived, brand copper numbers */
+.hljs-comment,
+.hljs-quote,
+.hljs-meta {
+    color: var(--code-comment);
+}
+
+.hljs-keyword,
+.hljs-selector-tag,
+.hljs-selector-id,
+.hljs-selector-class,
+.hljs-section {
+    color: var(--code-keyword);
+}
+
+.hljs-string,
+.hljs-addition {
+    color: var(--code-string);
+}
+
+.hljs-number,
+.hljs-literal,
+.hljs-symbol,
+.hljs-bullet {
+    color: var(--code-number);
+}
+
+.hljs-title,
+.hljs-title.function_,
+.hljs-function > .hljs-title {
+    color: var(--code-fn);
+}
+
+.hljs-title.class_,
+.hljs-type,
+.hljs-built_in,
+.hljs-builtin-name,
+.hljs-attr,
+.hljs-attribute,
+.hljs-link {
+    color: var(--code-type);
+}
+
+.hljs-variable,
+.hljs-template-variable,
+.hljs-regexp,
+.hljs-tag,
+.hljs-name,
+.hljs-deletion {
+    color: var(--code-var);
+}
+
+/* Copy button — minimal chip, appears on hover (mdBook handles visibility) */
+pre > .buttons button {
+    border-color: transparent;
+    background-color: transparent;
+    border-radius: 6px;
+    transition: 120ms;
+    transition-property: color, background-color, border-color;
+}
+
+pre > .buttons button:hover {
+    border-color: transparent;
+    background-color: var(--velox-accent-wash);
+    color: var(--velox-accent);
+}
+
+/* --------------------------------------------------------------------------
+   7. Tables — zebra rows, accent-tinted header with brand edge
+   -------------------------------------------------------------------------- */
+
+.content table {
+    margin: 1.2em auto;
+    font-size: 0.95em;
+}
+
+.content table td,
+.content table th {
+    padding: 8px 16px;
+    border: 1px solid var(--table-border-color);
+}
+
+.content table thead {
+    box-shadow: inset 0 -2px 0 color-mix(in srgb, var(--velox-accent) 85%, transparent);
+}
+
+.content table thead td,
+.content table thead th {
+    font-weight: 600;
+    letter-spacing: 0.02em;
+    border: none;
+    border-block-end: none;
+}
+
+/* --------------------------------------------------------------------------
+   8. Blockquotes & admonitions
+   -------------------------------------------------------------------------- */
+
+.content blockquote {
+    margin: 1.4em 0;
+    padding: 10px 18px;
+    background-color: var(--quote-bg);
+    border-inline-start: 3px solid var(--velox-accent);
+    border-block-start: none;
+    border-block-end: none;
+    border-radius: 0 8px 8px 0;
+}
+
+/* Admonition tags (GFM alerts): tinted panel behind the colored bar */
+.blockquote-tag {
+    padding: 10px 16px 10px 18px;
+    border-radius: 0 8px 8px 0;
+}
+
+.blockquote-tag-note {
+    background-color: color-mix(in srgb, var(--blockquote-note-color) 8%, transparent);
+}
+
+.blockquote-tag-tip {
+    background-color: color-mix(in srgb, var(--blockquote-tip-color) 8%, transparent);
+}
+
+.blockquote-tag-important {
+    background-color: color-mix(in srgb, var(--blockquote-important-color) 8%, transparent);
+}
+
+.blockquote-tag-warning {
+    background-color: color-mix(in srgb, var(--blockquote-warning-color) 9%, transparent);
+}
+
+.blockquote-tag-caution {
+    background-color: color-mix(in srgb, var(--blockquote-caution-color) 8%, transparent);
+}
+
+/* --------------------------------------------------------------------------
+   9. Sidebar — wordmark, gear mark, chapter list
+   -------------------------------------------------------------------------- */
+
+/* Velox wordmark: sticky band at the top of the chapter list */
+.sidebar .sidebar-scrollbox::before,
+body.sidebar-iframe-inner::before {
+    content: "VELOX";
+    display: block;
+    position: sticky;
+    top: 0;
+    z-index: 2;
+    margin: 0 -10px; /* full-bleed across the scrollbox padding */
+    padding: 15px 12px 13px 52px;
+    background-color: var(--sidebar-bg);
+    border-bottom: 1px solid var(--sidebar-spacer);
+    font-size: 1.4rem;
+    font-weight: 700;
+    letter-spacing: 0.32em;
+    color: var(--sidebar-fg);
+}
+
+/* The V-in-gear mark, sitting left of the wordmark */
+.sidebar::before {
+    content: "";
+    position: absolute;
+    top: 14px;
+    left: 18px;
+    width: 24px;
+    height: 24px;
+    z-index: 3;
+    background-color: var(--velox-gear-mark, var(--velox-accent));
+    -webkit-mask-image: var(--velox-gear-mask);
+    mask-image: var(--velox-gear-mask);
+    -webkit-mask-repeat: no-repeat;
+    mask-repeat: no-repeat;
+    -webkit-mask-position: center;
+    mask-position: center;
+    -webkit-mask-size: contain;
+    mask-size: contain;
+    pointer-events: none;
+}
+
+/* Chapter links: uniform dot gutter, accent dot marks the active page */
+.chapter li a {
+    transition: color 120ms ease, background-color 120ms ease;
+}
+
+.chapter li a::before {
+    content: "";
+    display: inline-block;
+    width: 4px;
+    height: 4px;
+    border-radius: 50%;
+    background: transparent;
+    margin-right: 8px;
+    vertical-align: 2.5px;
+    transition: background-color 120ms ease;
+}
+
+.chapter li a:hover {
+    color: var(--sidebar-active);
+}
+
+.chapter li a.active {
+    color: var(--sidebar-active);
+    font-weight: 600;
+}
+
+.chapter li a.active::before {
+    background: var(--velox-accent);
+}
+
+/* Muted chapter numbers so titles lead */
+.chapter li a strong {
+    font-weight: 500;
+    color: var(--sidebar-non-existant);
+}
+
+/* Part titles become eyebrow labels */
+.chapter li.part-title {
+    font-size: 1.1rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.14em;
+    color: var(--sidebar-non-existant);
+    margin: 1.6em 0 0.4em;
+}
+
+.chapter .spacer {
+    height: 1px;
+}
+
+/* --------------------------------------------------------------------------
+   10. Top bar — frosted bar, gear + title lockup
+   -------------------------------------------------------------------------- */
+
+#mdbook-menu-bar {
+    background-color: var(--bg);
+    background-color: color-mix(in srgb, var(--bg) 85%, transparent);
+    -webkit-backdrop-filter: blur(12px) saturate(1.2);
+    backdrop-filter: blur(12px) saturate(1.2);
+}
+
+#mdbook-menu-bar.bordered {
+    border-block-end-color: color-mix(in srgb, var(--velox-accent) 14%, var(--table-border-color));
+}
+
+#mdbook-menu-bar .fa-svg,
+#mdbook-menu-bar .icon-button {
+    transition: color 150ms ease;
+}
+
+.menu-title {
+    font-size: 1.9rem;
+    font-weight: 700;
+    letter-spacing: 0.005em;
+}
+
+/* Gear mark beside the centered title */
+.menu-title::before {
+    content: "";
+    display: inline-block;
+    width: 21px;
+    height: 21px;
+    margin-right: 10px;
+    vertical-align: -3px;
+    background-color: var(--velox-accent);
+    -webkit-mask-image: var(--velox-gear-mask);
+    mask-image: var(--velox-gear-mask);
+    -webkit-mask-repeat: no-repeat;
+    mask-repeat: no-repeat;
+    -webkit-mask-position: center;
+    mask-position: center;
+    -webkit-mask-size: contain;
+    mask-size: contain;
+}
+
+/* Page navigation arrows */
+.nav-chapters,
+.mobile-nav-chapters {
+    transition: color 150ms ease, background-color 150ms ease;
+}
+
+/* --------------------------------------------------------------------------
+   11. Search
+   -------------------------------------------------------------------------- */
+
+#mdbook-searchbar {
+    border-radius: 8px;
+    padding: 9px 14px;
+    transition: box-shadow 150ms ease, border-color 150ms ease;
+}
+
+#mdbook-searchbar:focus,
+#mdbook-searchbar.active {
+    border-color: var(--velox-accent);
+    box-shadow: 0 0 0 3px var(--searchbar-shadow-color);
+    outline: none;
+}
+
+ul#mdbook-searchresults li {
+    padding: 6px 8px;
+    border-radius: 6px;
+    transition: background-color 120ms ease;
+}
+
+ul#mdbook-searchresults span.teaser {
+    color: color-mix(in srgb, var(--fg) 70%, transparent);
+}
+
+.searchresults-outer {
+    border-block-end: 1px solid var(--velox-accent-border);
+}
+
+/* --------------------------------------------------------------------------
+   12. Theme popup & help popup
+   -------------------------------------------------------------------------- */
+
+.theme-popup {
+    border-radius: 10px;
+    padding: 4px;
+    font-size: 1.3rem;
+    box-shadow: 0 10px 30px rgba(0, 0, 0, 0.12);
+}
+
+.theme-popup .theme {
+    border-radius: 6px;
+    padding: 4px 14px;
+    transition: background-color 120ms ease;
+}
+
+.theme-selected::before {
+    color: var(--velox-accent);
+}
+
+#mdbook-help-popup {
+    border-radius: 12px;
+    box-shadow: 0 12px 40px rgba(0, 0, 0, 0.18);
+}
+
+/* --------------------------------------------------------------------------
+   13. Footnotes, kbd, images, selection, focus
+   -------------------------------------------------------------------------- */
+
+.footnote-definition {
+    font-size: 0.9em;
+    color: color-mix(in srgb, var(--fg) 82%, transparent);
+}
+
+.footnote-definition > li {
+    margin-block: 6px;
+}
+
+.content img,
+.content video {
+    border-radius: 6px;
+}
+
+::selection {
+    background: color-mix(in srgb, var(--velox-accent) 24%, transparent);
+}
+
+:where(a, button, input, label, [tabindex]):focus-visible {
+    outline: 2px solid var(--velox-accent);
+    outline-offset: 2px;
+}
+
+/* --------------------------------------------------------------------------
+   14. Motion & accessibility
+   -------------------------------------------------------------------------- */
+
+@media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+        transition-duration: 0.01ms !important;
+        animation-duration: 0.01ms !important;
+        animation-iteration-count: 1 !important;
+        scroll-behavior: auto !important;
+    }
+}
+
+/* --------------------------------------------------------------------------
+   15. Print — readable ink on paper regardless of on-screen theme
+   -------------------------------------------------------------------------- */
+
+@media print {
+    .sidebar,
+    #mdbook-menu-bar,
+    .nav-wrapper,
+    .nav-wide-wrapper,
+    pre > .buttons {
+        display: none !important;
+    }
+
+    html,
+    html.light,
+    html.rust,
+    html.coal,
+    html.navy,
+    html.ayu {
+        --code-bg: #FAF7F0;
+        --code-border: #E4D8C2;
+        --code-fg: #33291E;
+        --code-comment: #82796A;
+        --code-keyword: #A626A4;
+        --code-string: #35793B;
+        --code-number: #B0510E;
+        --code-fn: #3A67CC;
+        --code-type: #9A6B0A;
+        --code-var: #B5402B;
+    }
+
+    .content h1,
+    .content h1 a {
+        background: none;
+        -webkit-background-clip: initial;
+        background-clip: initial;
+        -webkit-text-fill-color: #2A241C;
+        color: #2A241C;
+    }
+}

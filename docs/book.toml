@@ -1,0 +1,19 @@
+[book]
+title = "Velox"
+authors = ["FAHIM AHMED"]
+description = "A modern UI framework for Rust: reactive single-file components, Skia rendering, and a native binary."
+src = "src"
+language = "en"
+
+[build]
+build-dir = "book"
+create-missing = false
+
+[output.html]
+additional-css = ["src/theme/custom.css"]
+git-repository-url = "https://github.com/fahimaloy/velox"
+git-repository-icon = "fab-github"
+edit-url-template = "https://github.com/fahimaloy/velox/edit/main/{path}"
+site-url = "/velox/"
+default-theme = "rust"
+preferred-dark-theme = "navy"

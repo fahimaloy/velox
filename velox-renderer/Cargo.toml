@@ -1,6 +1,6 @@
 [package]
 name = "velox-renderer"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 description = "Rendering backends (Skia) for the Velox UI framework"
@@ -37,7 +37,7 @@ skia-native = ["dep:skia-safe", "skia", "dep:raw-window-handle", "dep:egl", "dep
 svg = ["dep:resvg"]
 
 [dependencies]
-velox-core = { version = "0.1.1", path = "../velox-core" }
+velox-core = { version = "0.1.2", path = "../velox-core" }
 # Optional backends (do NOT compile unless feature enabled)
 winit = { version = "0.28", optional = true }
 skia-safe = { version = "0.91.1", features = ["gl", "egl"], optional = true }
@@ -48,8 +48,8 @@ egl = { version = "0.2", optional = true }
 # glow for loading GL function pointers where needed
 glow = { version = "0.12", optional = true }
 softbuffer = { version = "0.3", optional = true }
-velox-dom = { version = "0.1.1", path = "../velox-dom" }
-velox-style = { version = "0.1.1", path = "../velox-style" }
+velox-dom = { version = "0.1.2", path = "../velox-dom" }
+velox-style = { version = "0.1.2", path = "../velox-style" }
 log = "0.4"
 bytemuck = { version = "1", features = ["derive"] }
 
