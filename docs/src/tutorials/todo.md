@@ -405,7 +405,7 @@ The empty state is one line: `<p class="empty" v-if="empty_message">{{ empty_mes
 ## Step 9 — Run it
 
 ```bash
-velox dev
+veloxc dev
 ```
 
 Add a todo, tick a row, cycle the filter, remove a row — every action routes from a click through the parent's handler into the child's state, and the list re-derives.

@@ -30,10 +30,12 @@ cargo install veloxc
 Verify the install:
 
 ```bash
-velox version
+veloxc version
 ```
 
 This prints the version, the edition, and the platform.
+
+> Note: the installed binary is `veloxc`; the CLI's own help text says `velox`, so every `velox …` command in this guide is written as `veloxc …` to make copy-paste work.
 
 ### From source
 
@@ -48,11 +50,11 @@ cargo install --path veloxc
 ## Create a project
 
 ```bash
-velox init my-app
+veloxc init my-app
 cd my-app
 ```
 
-`velox init` scaffolds a complete, working project — not a stub. The generated app is a todo list with a composer, filters, a light/dark theme toggle, and two dialogs, so everything worth learning from is on screen from the first run.
+`veloxc init` scaffolds a complete, working project — not a stub. The generated app is a todo list with a composer, filters, a light/dark theme toggle, and two dialogs, so everything worth learning from is on screen from the first run.
 
 ```text
 my-app/
@@ -82,16 +84,18 @@ my-app/
 | `src/components/*.vx` | The list, the input, a single row, and two reusable dialogs |
 | `assets/` | Static assets; `<img src="…">` paths resolve against the project root |
 
-> Note: `velox init` writes **path** dependencies when it can find a Velox workspace — the `VELOX_PATH` environment variable, a workspace above the current directory, or the checkout the CLI itself was built in. Otherwise it writes **git** dependencies pinned to the commit the CLI was built at, so a scaffold always compiles against tested code.
+> Warning: a **crates.io-installed** `veloxc` has no git revision recorded — it falls back to `"unknown"` and the generated `Cargo.toml` gets `rev = "unknown"`, which Cargo rejects with ``revspec 'unknown' not found``. Until that fallback is fixed, scaffold from a clone (`git clone https://github.com/fahimaloy/velox && cargo install --path veloxc`), pass `veloxc init my-app --local <path>`, or drop the `git = …` / `rev = …` keys from every `velox-*` line in the generated `Cargo.toml` and keep the `version` key.
 
-> Tip: Package names must start with a letter or `_`. Dots and spaces in the name are normalized to dashes: `velox init my.app` creates `my-app`.
+> Note: `veloxc init` writes **path** dependencies when it can find a Velox workspace — the `VELOX_PATH` environment variable, a workspace above the current directory, or the checkout the CLI itself was built in. Otherwise it writes **git** dependencies pinned to the commit the CLI was built at, so a scaffold always compiles against tested code.
+
+> Tip: Package names must start with a letter or `_`. Dots and spaces in the name are normalized to dashes: `veloxc init my.app` creates `my-app`.
 
 ---
 
 ## Run the dev server
 
 ```bash
-velox dev
+veloxc dev
 ```
 
 The first run compiles the project (a full cargo build — it takes a minute), prints a banner, and opens the app window:
@@ -119,28 +123,28 @@ While the server runs, type one of:
 
 Now edit `src/App.vx` and save. The loop does the rest: the save is debounced, classified by which block of the file changed (`<style>`, `<template>`, or script), and answered with a rebuild and an app restart. A compile error does not stop the server — the diagnostics print, the watcher stays alive, and the next save retries. If the app itself exits, the server tells you and keeps watching: press `r` to restart, or save a file to rebuild.
 
-![The velox dev workflow — the dev server in the terminal, the app window beside it](assets/velox-dev-window.png)
+![The veloxc dev workflow — the dev server in the terminal, the app window beside it](assets/velox-dev-window.png)
 
 ---
 
 ## Build for release
 
 ```bash
-velox build --release
+veloxc build --release
 ```
 
 This runs `cargo build --release` for the current project. Start the built app with:
 
 ```bash
-velox run --release
+veloxc run --release
 ```
 
-`velox run` builds first when `--release` is passed, then opens the window.
+`veloxc run` builds first when `--release` is passed, then opens the window.
 
-`velox build` also compiles a single `.vx` file to Rust source — useful when you want to read what the compiler generates from your component:
+`veloxc build` also compiles a single `.vx` file to Rust source — useful when you want to read what the compiler generates from your component:
 
 ```bash
-velox build src/App.vx --out-dir gen
+veloxc build src/App.vx --out-dir gen
 ```
 
 This writes `gen/app.rs`, the compiled component as a Rust module. With no `--out-dir`, the output lands in `target/velox-gen`.
@@ -168,7 +172,7 @@ To persist it, write those two lines to a file in `/etc/sysctl.d/` and run `sudo
 
 | Tutorial | You build |
 | --- | --- |
-| [Counter](tutorials/counter.md) | A reactive counter — state, events, `v-model`, and the hot-reload loop |
+| [Counter](tutorials/counter.md) | A reactive counter — state, events, `v-model`, and the dev loop |
 | [Todo App](tutorials/todo.md) | Component composition, computed state, list rendering, and events |
 | [Showcase](tutorials/showcase.md) | A guided tour of the layout engine — centering, flex, scroll, and wrap |
 

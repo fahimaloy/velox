@@ -77,7 +77,7 @@ Published on [crates.io](https://crates.io/crates/velox-renderer) at **0.1.1**.
 Working today: Skia immediate-mode paint, event hit-testing, the `skia-native` windowed backend, offscreen RGBA/PNG rendering, and accessibility trees. Notes:
 
 - `default` compiles to a stub backend with no native dependencies — opt in with `skia-native` when you're ready. Expect a heavy first build: the Skia stack is large.
-- The render loop is immediate-mode: no retained tree, no previous frame to compare, no patch applier. See [`docs/RECONCILER.md`](https://github.com/fahimaloy/velox/blob/main/docs/RECONCILER.md).
+- The render loop is immediate-mode: no retained tree, no previous frame to compare, no patch applier. See [`docs/internal/RECONCILER.md`](https://github.com/fahimaloy/velox/blob/main/docs/internal/RECONCILER.md).
 - Falls back to headless rendering with `VELOX_HEADLESS=1` or when no compositor is available.
 
 ## License

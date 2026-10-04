@@ -14,13 +14,29 @@ Attach a handler to any element with the `@<event>` syntax, pointing at a method
 </template>
 
 <script setup>
-let count = signal(0);
+use velox_core::ergonomics::Ref;
 
-fn increment() {
-  count.set(count.get() + 1);
+pub struct State {
+    count: Ref<i32>,
+}
+
+impl State {
+    pub fn new() -> Self {
+        Self { count: velox_core::r#ref!(0) }
+    }
+
+    pub fn count(&self) -> i32 {
+        self.count.get()
+    }
+
+    pub fn increment(&self) {
+        self.count.set(self.count.get() + 1);
+    }
 }
 </script>
 ```
+
+State lives as a `Ref<T>` field on `State`, and the template reaches it through an accessor method — the same contract every shipped component uses. See [Template Syntax](template-syntax.md) for the full block rules.
 
 ## Supported events
 
@@ -41,15 +57,13 @@ fn increment() {
 
 You can attach an explicit payload to an event using `on:<event>-payload`, and handlers will receive it. Alternatively, use inline Rust closures in the script to receive the payload (or the event name if no payload was provided).
 
-Example SFC snippet:
+Example SFC snippet — the first button carries an explicit payload string, the second uses an inline closure that receives the payload (or the event name):
 
 ```html
 <template>
   <div>
-    <!-- explicit payload string -->
     <button @click="inc" on:click-payload="amount:5">Add 5</button>
 
-    <!-- inline closure receives payload (or name) -->
     <button @click="|p| state.handle_payload(p)">Handle Payload</button>
   </div>
 </template>
@@ -58,12 +72,13 @@ Example SFC snippet:
 pub struct State;
 impl State {
   pub fn handle_payload(&self, payload: &str) {
-    // payload may be the explicit `on:click-payload` string, or the event name when absent
     println!("payload={} ", payload);
   }
 }
 </script>
 ```
+
+> Note: no HTML comments above — the template parser does not recognize `<!-- -->`. It drops the comment *and everything after it* inside the enclosing element. Put explanatory comments in `<style>` (`/* */`) or `<script setup>` (`//`) instead; see [Comments](template-syntax.md#comments).
 
 Add `on:click-payload` when you want to pass extra data (IDs, quantities) from the template to the handler. Use inline closures in `<script setup>` when you want to handle the raw payload string directly.
 

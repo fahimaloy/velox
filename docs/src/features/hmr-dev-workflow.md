@@ -1,6 +1,6 @@
 # Dev Workflow & HMR
 
-`velox dev` is the inner loop of working with Velox: it watches your files, rebuilds on save, relaunches the app, and keeps a hot-reload channel open so the running app can be told to restart itself. This page is the complete reference — the watch loop, how a save is classified, what updates live versus what restarts, the keyboard shortcuts, and what to do when the OS watch budget runs out.
+`veloxc dev` is the inner loop of working with Velox: it watches your files, rebuilds on save, relaunches the app, and keeps a hot-reload channel open so the running app can be told to restart itself. This page is the complete reference — the watch loop, how a save is classified, what updates live versus what restarts, the keyboard shortcuts, and what to do when the OS watch budget runs out.
 
 ![A Velox app running under the dev server](../assets/velox-dev-window.png)
 
@@ -142,9 +142,9 @@ sudo sysctl -w fs.inotify.max_user_instances=1024
 
 To persist the limit across reboots, write those two lines to a file in `/etc/sysctl.d/` (for example `/etc/sysctl.d/90-velox.conf`) and run `sudo sysctl --system`.
 
-> Tip: if you suspect a dead watcher, press `r` — a manual rebuild works whether or not watching is alive. Then check that `target/` is outside the watched tree: the dev server excludes it itself, but a second watcher you started (another tool, another `velox dev`) may not.
+> Tip: if you suspect a dead watcher, press `r` — a manual rebuild works whether or not watching is alive. Then check that `target/` is outside the watched tree: the dev server excludes it itself, but a second watcher you started (another tool, another `veloxc dev`) may not.
 
-> Tip: run `velox dev` from the project root. The watch roots are resolved relative to it (`src/`, `assets/`), and the banner names exactly what is being watched — if a directory you expect is missing from the banner, it does not exist on disk.
+> Tip: run `veloxc dev` from the project root. The watch roots are resolved relative to it (`src/`, `assets/`), and the banner names exactly what is being watched — if a directory you expect is missing from the banner, it does not exist on disk.
 
 ---
 

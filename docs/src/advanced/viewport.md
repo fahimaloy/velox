@@ -32,7 +32,7 @@ A Velox app follows the Flutter invariant: it survives any window size, includin
 
 ## Template obligation
 
-All shipped templates (`veloxc/templates/project/`, `examples/counter/`, `examples/todo/`, `examples/showcase/`, and projects created via `velox init`) follow two rules:
+All shipped templates (`veloxc/templates/project/`, `examples/counter/`, `examples/todo/`, `examples/showcase/`, and projects created via `veloxc init`) follow two rules:
 
 ### 1. Acknowledge `(w, h)` — don't discard them
 

@@ -67,7 +67,7 @@ Published on [crates.io](https://crates.io/crates/velox-dom) at **0.1.1**.
 
 Working today: block layout, flex layout, `static`/`relative`/`absolute`/`fixed`/`sticky` positioning, z-index, overflow clipping, keyed diffing, and text wrapping. Two notes worth knowing before you rely on them:
 
-- The keyed reconciler (`diff::diff`) ships complete but has **zero production callers** — Velox's render loop is immediate-mode, with no retained tree or patch applier. Full decision record: [`docs/RECONCILER.md`](https://github.com/fahimaloy/velox/blob/main/docs/RECONCILER.md).
+- The keyed reconciler (`diff::diff`) ships complete but has **zero production callers** — Velox's render loop is immediate-mode, with no retained tree or patch applier. Full decision record: [`docs/internal/RECONCILER.md`](https://github.com/fahimaloy/velox/blob/main/docs/internal/RECONCILER.md).
 - `v-for` reordering correctness comes from `VNode` child order, not from `:key`. An `<input>` inside a reordered `v-for` loses focus/caret to whichever item occupies its index. This is a known limitation, not an oversight.
 
 ## License

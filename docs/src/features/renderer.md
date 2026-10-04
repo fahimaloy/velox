@@ -102,7 +102,7 @@ The crate builds nothing by default — `default = []`:
 
 > Note: the platform crates build anywhere — `skia-safe`/`egl`/`glow` need no build script or C toolchain, and `softbuffer` supports Windows natively — so `skia-native` compiles on every target. GPU *acceleration* stays unix-gated; see [From paint to pixels](#from-paint-to-pixels-the-presenter).
 
-Every scaffolded project enables the real backend: `velox init` writes `velox-renderer = { version = "0.1.1", features = ["skia-native"] }` into the generated `Cargo.toml`.
+Every scaffolded project enables the real backend: `veloxc init` writes `velox-renderer = { version = "0.1.2", features = ["skia-native"] }` into the generated `Cargo.toml`.
 
 ---
 

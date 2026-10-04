@@ -2,7 +2,7 @@
 
 The classic first app: a number, three buttons, and a label that reacts to both. You will build it as a single `.vx` component — a `<template>`, a `<script setup>` block and a `<style scoped>` block in one file — rendered natively with Skia.
 
-Along the way you will meet the three ideas every Velox app is built on: the single-file component, reactive state, and the hot-reload loop.
+Along the way you will meet the three ideas every Velox app is built on: the single-file component, reactive state, and the dev loop.
 
 > Prerequisite: `veloxc` installed and Rust 1.91+. See [Getting Started](../getting-started.md) if you have not set up yet.
 
@@ -54,7 +54,7 @@ Four runtime crates and one build dependency:
 
 > Note: The empty `[workspace]` table makes this project its own workspace root. It is required if you create the project inside a Velox checkout and harmless anywhere else.
 
-> Tip: `velox init` pins its git dependencies to a `rev` — the commit the CLI was built at — so a scaffold always compiles against tested code. Pinning a `rev` yourself is optional but recommended for anything you care about.
+> Tip: `veloxc init` pins its git dependencies to a `rev` — the commit the CLI was built at — so a scaffold compiles against tested code. A crates.io-installed `veloxc` has no commit and falls back to `rev = "unknown"`, which Cargo rejects; scaffold from a clone or with `--local <path>` instead. Pinning a `rev` yourself is optional but recommended for anything you care about.
 
 ---
 
@@ -306,10 +306,10 @@ The four pieces the window needs:
 
 ---
 
-## Step 5 — The hot-reload loop
+## Step 5 — The dev loop
 
 ```bash
-velox dev
+veloxc dev
 ```
 
 The dev server compiles the project, opens the window, and watches `src/`. Now change something and save:
@@ -327,17 +327,17 @@ Each save is debounced, classified by which block of the file changed, and answe
 
 You do not touch the terminal. Edit, save, look at the window. `r` rebuilds by hand, `c` clears the terminal, `q` quits.
 
-![The counter hot-reload loop — save, rebuild, the window comes back](../assets/counter-hmr.gif)
+![The counter dev loop — save, rebuild, the window comes back](../assets/counter-hmr.gif)
 
 ---
 
 ## Step 6 — Run and build
 
-For development, keep `velox dev` running. For a release build:
+For development, keep `veloxc dev` running. For a release build:
 
 ```bash
-velox build --release
-velox run --release
+veloxc build --release
+veloxc run --release
 ```
 
 The finished project also lives in the Velox repository at `examples/counter`, with path dependencies instead of git ones:
@@ -352,9 +352,9 @@ cargo run -p velox-example-counter --bin counter
 
 ## Exercises
 
-1. **Change the starting count.** Replace `r#ref!(0)` with `r#ref!(10)` and confirm the hot-reload loop picks it up.
+1. **Change the starting count.** Replace `r#ref!(0)` with `r#ref!(10)` and confirm the dev loop picks it up.
 2. **Make the status smarter.** Change `status()` to return `"even"` / `"odd"` instead of `"positive"` / `"not positive"`.
 3. **Add a step.** Add a `step: Ref<i32>` field and a second input bound with `v-model`, then make `increment` add `step.get()` instead of `1`.
-4. **Inspect the generated code.** Run `velox build src/App.vx --out-dir gen` and read `gen/app.rs` — find the resolver that calls your `State` methods and the event dispatcher that routes `@click`.
+4. **Inspect the generated code.** Run `veloxc build src/App.vx --out-dir gen` and read `gen/app.rs` — find the resolver that calls your `State` methods and the event dispatcher that routes `@click`.
 
 Then continue to the [Todo App](todo.md) tutorial, where the same ideas scale to components, computed state, and list rendering.

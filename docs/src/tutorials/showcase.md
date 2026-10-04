@@ -20,7 +20,7 @@ Or watch it with the dev server, from the example's directory:
 
 ```bash
 cd examples/showcase
-velox dev
+veloxc dev
 ```
 
 ![The Velox layout showcase — centering, spacing, flex, scroll, text align, and wrap in one window](../assets/showcase-window.png)
@@ -183,7 +183,7 @@ Percentage widths plus `flex-wrap` flow the cells onto a second row — four 30%
 
 ## Experiments
 
-1. **Change the gap.** Set `.spacing-row` `gap: 8px` to `16px` and save — the hot-reload loop shows it immediately.
+1. **Change the gap.** Set `.spacing-row` `gap: 8px` to `16px` and save — the dev loop shows it on the next rebuild.
 2. **Add a section.** Copy the centering `<section>` and give `.centered` a different width; watch `margin: 0 auto` re-center it.
 3. **Break the wrap.** Remove `flex-wrap: wrap` from `.wrap-row` and see the four cells shrink instead of flowing.
 
@@ -194,4 +194,4 @@ Percentage widths plus `flex-wrap` flow the cells onto a second row — four 30%
 - [Styling](../features/styling.md) — the full property surface and the scoped-CSS contract
 - [Template Syntax](../features/template-syntax.md) — every directive the SFC parser understands
 - [Renderer](../features/renderer.md) — how the tree is laid out and drawn
-- [Dev Workflow & HMR](../features/hmr-dev-workflow.md) — the loop behind `velox dev`
+- [Dev Workflow & HMR](../features/hmr-dev-workflow.md) — the loop behind `veloxc dev`

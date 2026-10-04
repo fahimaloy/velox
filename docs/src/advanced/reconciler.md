@@ -6,27 +6,27 @@ How Velox handles list reordering, what `:key` does today, and the deliberate de
 
 `:key` compiles, its expression is normalized and analyzed, and it lands as a **plain runtime `key` string attribute** on `VNode::Element.props.attrs["key"]`. It does **not** reorder, does **not** diff, and does **not** preserve per-node identity or state.
 
-Concretely: `velox-sfc/src/template_codegen.rs:93` (`resolve_key_expr`) normalizes the value; the `v-for` emit sites re-insert it as a runtime attribute (`velox-sfc/src/template_codegen.rs:2241`, `:2251`, `:2854`, `:2864`); a non-`v-for` `:key` reaches the renderer through `emit_bind_attr` (`:3873`, the `attr_name == "key"` branch). `VNode::key()` at `velox-dom/src/diff.rs:56` reads it back out.
+Concretely: `velox-sfc/src/template_codegen.rs:93` (`resolve_key_expr`) normalizes the value; the `v-for` emit sites re-insert it as a runtime attribute (`velox-sfc/src/template_codegen.rs:2241`, `:2251`, `:2854`, `:2864`); a non-`v-for` `:key` reaches the renderer through `emit_bind_attr` (`:4554`, the `attr_name == "key"` branch). `VNode::key()` at `velox-dom/src/diff.rs:56` reads it back out.
 
 ## Why there is no production reconciler
 
-The render loop is **immediate-mode**: it paints the `&VNode` handed to it each frame (`run_window_vnode_skia` at `velox-renderer/src/lib.rs:1566`, `run_window_vnode_skia_with_hmr` at `:2133`). There is no retained tree, no patch applier, and no previous tree to diff *against*. Reconciliation is a technique for mutating a live tree in place — and Velox does not keep one.
+The render loop is **immediate-mode**: it paints the `&VNode` handed to it each frame (`run_window_vnode_skia` at `velox-renderer/src/lib.rs:1811`, `run_window_vnode_skia_with_hmr` at `:2421`). There is no retained tree, no patch applier, and no previous tree to diff *against*. Reconciliation is a technique for mutating a live tree in place — and Velox does not keep one.
 
 Two keyed reconcilers have existed:
 
 - **A retired one** (`reconcile_keyed_children`) was **deleted**: it was `pub` with zero production callers (only test call sites), and on a key match it kept the *stale* previous content — a keyed child whose text or attributes changed kept the old version.
-- **A live, correct one** — `pub fn diff` at `velox-dom/src/diff.rs:64` (keyed path in `diff_children_keyed` at `:115`, `Patch::MoveChild` at `:52`). It is complete, duplicate-key safe, and emits reorder as a *move* rather than an insert/remove pair. It is retained, tested, and is what a future retained-rendering step would wire in. Today only tests call it.
+- **A live, correct one** — `pub fn diff` at `velox-dom/src/diff.rs:70` (keyed path in `diff_children_keyed` at `:121`, `Patch::MoveChild` at `:52`). It is complete, duplicate-key safe, and emits reorder as a *move* rather than an insert/remove pair. It is retained, tested, and is what a future retained-rendering step would wire in. Today only tests call it.
 
 ## Where reorder correctness comes from
 
-Reorder correctness comes from `VNode` child order, not from `:key`: `compute_layout` (`velox-dom/src/layout.rs:3337`) lays children out in `VNode` order, so a reordered list already lays out reordered. It is pinned by tests — `velox-dom/tests/key_reorder_layout.rs` asserts that a reordered tree produces reordered geometry and that the key value itself is inert to layout.
+Reorder correctness comes from `VNode` child order, not from `:key`: `compute_layout` (`velox-dom/src/layout.rs:3599`) lays children out in `VNode` order, so a reordered list already lays out reordered. It is pinned by tests — `velox-dom/tests/key_reorder_layout.rs` asserts that a reordered tree produces reordered geometry and that the key value itself is inert to layout.
 
 ## The tradeoff
 
 Template authors writing `:key` get **no state preservation across a reorder**, and this is a real, currently-shipping cost. All cross-frame state is keyed by the structural `path`, never by `key`:
 
-- Input state is `InputTarget.path: Vec<usize>` (`velox-renderer/src/events.rs:68`), restored by `preserve_input_state` (`velox-renderer/src/events.rs:526`), which matches on `p.path == t.path` alone.
-- Scroll offsets live in a `HashMap<Vec<usize>, f32>` (`velox-renderer/src/lib.rs:1297`).
+- Input state is `InputTarget.path: Vec<usize>` (`velox-renderer/src/events.rs:68`), restored by `preserve_input_state` (`velox-renderer/src/events.rs:799`), which matches on `p.path == t.path` alone.
+- Scroll offsets live in a `HashMap<Vec<usize>, f32>` (`velox-renderer/src/lib.rs:1774`).
 
 So when a keyed list reorders, focus, caret, selection and scroll position travel with the **position**, not with the **item**: an `<input>` inside a reordered `v-for` loses its focus and caret to whichever item now occupies its index.
 

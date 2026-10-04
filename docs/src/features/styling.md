@@ -131,6 +131,8 @@ The table below lists every property the style engine parses and which rendering
 | Property | Values | Rendered by |
 |:---|:---|:---|
 | `overflow` | `visible`, `hidden`, `scroll`, `auto` | Layout + box painter |
+| `overflow-x` | `visible`, `hidden`, `scroll`, `auto` | *Parsed only* — use the `overflow` shorthand |
+| `overflow-y` | `visible`, `hidden`, `scroll`, `auto` | *Parsed only* — use the `overflow` shorthand |
 | `white-space` | `normal`, `nowrap`, `pre`, `pre-wrap`, `pre-line` | Text painter (inherits) |
 | `text-overflow` | `clip`, `ellipsis` | Text painter |
 | `visibility` | `visible`, `hidden`, `collapse` | *Parsed only* — `visibility: hidden` hides nothing; use `display: none` or `v-show` |

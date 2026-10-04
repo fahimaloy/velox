@@ -65,6 +65,8 @@ velox init counter
 
 > Note: the scaffold's printed next steps say `velox dev`, but the binary on your `PATH` is `veloxc` — type `veloxc dev` unless you have aliased it.
 
+> Warning: the git-pinned fallback assumes the CLI knows its own commit. A **crates.io-installed** `veloxc` does not — it falls back to `"unknown"` and writes `rev = "unknown"`, which Cargo rejects with ``revspec 'unknown' not found``. Scaffold from a clone (`cargo install --path veloxc`), pass `--local <path>`, or drop the `git = …` / `rev = …` keys from every `velox-*` line in the generated `Cargo.toml`.
+
 ---
 
 ## `velox build [input]`
