@@ -6,6 +6,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential pkg-config clang ninja-build python3 ca-certificates \
     libgl1-mesa-dev libegl1-mesa-dev libx11-dev libxrandr-dev libxi-dev \
     libxcursor-dev libxkbcommon-dev libwayland-dev libvulkan-dev \
+    libfreetype6-dev libfontconfig1-dev \
   && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app

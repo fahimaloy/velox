@@ -424,7 +424,8 @@ fn parse_selector_part(raw: &str) -> Option<SelectorPart> {
     // Robustly extract attribute selector: find '[' and matching ']' (first ']' after '[')
     // Allows trailing pseudo like `.btn[data-v-x]:hover`.
     let (base_raw, attr_raw): (String, Option<String>) = if let Some(lb) = raw.find('[') {
-        if let Some(rb_rel) = raw[lb..].find(']') {
+        {
+            let rb_rel = raw[lb..].find(']')?;
             let rb = lb + rb_rel;
             let attr_inner = raw[lb + 1..rb].to_string();
             let before = &raw[..lb];
@@ -432,8 +433,6 @@ fn parse_selector_part(raw: &str) -> Option<SelectorPart> {
             // base without attr is before + after (after may contain :hover)
             let base = format!("{}{}", before, after);
             (base, Some(attr_inner))
-        } else {
-            return None;
         }
     } else {
         (raw.to_string(), None)

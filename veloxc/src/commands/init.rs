@@ -2,6 +2,14 @@ use anyhow::{Context, Result};
 use std::fs;
 use std::path::{Path, PathBuf};
 
+/// The version every scaffolded manifest pins.
+///
+/// Derived from veloxc's own version so `velox init` cannot emit a dependency
+/// version that was never published: the tests assert the scaffold matches
+/// `CARGO_PKG_VERSION`, and a hardcoded literal silently breaks the moment a
+/// release is cut.
+const SCAFFOLD_VERSION: &str = env!("CARGO_PKG_VERSION");
+
 /// Walk up from the current directory looking for a directory that contains
 /// the velox workspace marker (velox-core/Cargo.toml). Returns the workspace root.
 pub(crate) fn find_velox_workspace() -> Option<PathBuf> {
@@ -12,9 +20,9 @@ pub(crate) fn find_velox_workspace() -> Option<PathBuf> {
         if marker.exists() {
             return Some(current.to_path_buf());
         }
-        match current.parent() {
-            Some(parent) => current = parent,
-            None => return None,
+        {
+            let parent = current.parent()?;
+            current = parent
         }
     }
 }
@@ -134,7 +142,11 @@ pub(crate) fn velox_dep_path(
     leaf: &str,
 ) -> String {
     let p = compute_relative_path(project_dir, &workspace.join(leaf));
-    format!(r#"{{ path = "{}", version = "0.1.1" }}"#, p.display())
+    format!(
+        r#"{{ path = "{}", version = "{v}" }}"#,
+        p.display(),
+        v = SCAFFOLD_VERSION
+    )
 }
 
 /// Initialize a new Velox project
@@ -263,7 +275,7 @@ pub fn init_app(name: &str) -> Result<PathBuf> {
     let cargo = format!(
         r#"[package]
 name = "{name}"
-version = "0.1.1"
+version = "{v}"
 edition = "2021"
 
 [dependencies]
@@ -274,7 +286,8 @@ velox-renderer = {{ path = "../../velox-renderer" }}
 
 [build-dependencies]
 veloxc = {{ path = "../../veloxc" }}
-"#
+"#,
+        v = SCAFFOLD_VERSION
     );
     fs::write(root.join("Cargo.toml"), cargo).context("write Cargo.toml")?;
 
@@ -342,12 +355,13 @@ pub(crate) fn generate_cargo_toml(name: &str, project_dir: &Path) -> String {
             let renderer_path = compute_relative_path(project_dir, &ws.join("velox-renderer"));
             let cli_path = compute_relative_path(project_dir, &ws.join("veloxc"));
             return format!(
-                "[package]\nname = \"{name}\"\nversion = \"0.1.1\"\nedition = \"2021\"\n\n[workspace]\n\n[dependencies]\nvelox-core = {{ path = \"{}\", version = \"0.1.1\" }}\nvelox-dom = {{ path = \"{}\", version = \"0.1.1\" }}\nvelox-style = {{ path = \"{}\", version = \"0.1.1\" }}\nvelox-renderer = {{ path = \"{}\", version = \"0.1.1\", features = [\"skia-native\"] }}\nserde_json = \"1.0\"\n\n[build-dependencies]\nveloxc = {{ path = \"{}\", version = \"0.1.1\" }}\n",
+                "[package]\nname = \"{name}\"\nversion = \"{v}\"\nedition = \"2021\"\n\n[workspace]\n\n[dependencies]\nvelox-core = {{ path = \"{}\", version = \"{v}\" }}\nvelox-dom = {{ path = \"{}\", version = \"{v}\" }}\nvelox-style = {{ path = \"{}\", version = \"{v}\" }}\nvelox-renderer = {{ path = \"{}\", version = \"{v}\", features = [\"skia-native\"] }}\nserde_json = \"1.0\"\n\n[build-dependencies]\nveloxc = {{ path = \"{}\", version = \"{v}\" }}\n",
                 core_path.display(),
                 dom_path.display(),
                 style_path.display(),
                 renderer_path.display(),
-                cli_path.display()
+                cli_path.display(),
+                v = SCAFFOLD_VERSION
             );
         }
     }
@@ -365,32 +379,34 @@ pub(crate) fn generate_cargo_toml(name: &str, project_dir: &Path) -> String {
         format!(
             r#"[package]
 name = "{name}"
-version = "0.1.1"
+version = "{v}"
 edition = "2021"
 
 [workspace]
 
 [dependencies]
-velox-core = {{ path = "{}", version = "0.1.1" }}
-velox-dom = {{ path = "{}", version = "0.1.1" }}
-velox-style = {{ path = "{}", version = "0.1.1" }}
-velox-renderer = {{ path = "{}", version = "0.1.1", features = ["skia-native"] }}
+velox-core = {{ path = "{}", version = "{v}" }}
+velox-dom = {{ path = "{}", version = "{v}" }}
+velox-style = {{ path = "{}", version = "{v}" }}
+velox-renderer = {{ path = "{}", version = "{v}", features = ["skia-native"] }}
 serde_json = "1.0"
 
 [build-dependencies]
-veloxc = {{ path = "{}", version = "0.1.1" }}
+veloxc = {{ path = "{}", version = "{v}" }}
 "#,
             core_path.display(),
             dom_path.display(),
             style_path.display(),
             renderer_path.display(),
-            cli_path.display()
+            cli_path.display(),
+            v = SCAFFOLD_VERSION
         )
     } else {
         // No workspace found — fall back to git dependencies
         let rev = crate::velox_git_rev();
         format!(
-            "[package]\nname = \"{name}\"\nversion = \"0.1.1\"\nedition = \"2021\"\n\n[workspace]\n\n[dependencies]\nvelox-core = {{ git = \"https://github.com/fahimaloy/velox\", rev = \"{rev}\", version = \"0.1.1\" }}\nvelox-dom = {{ git = \"https://github.com/fahimaloy/velox\", rev = \"{rev}\", version = \"0.1.1\" }}\nvelox-style = {{ git = \"https://github.com/fahimaloy/velox\", rev = \"{rev}\", version = \"0.1.1\" }}\nvelox-renderer = {{ git = \"https://github.com/fahimaloy/velox\", rev = \"{rev}\", version = \"0.1.1\", features = [\"skia-native\"] }}\nserde_json = \"1.0\"\n\n[build-dependencies]\nveloxc = {{ git = \"https://github.com/fahimaloy/velox\", rev = \"{rev}\", version = \"0.1.1\" }}\n"
+            "[package]\nname = \"{name}\"\nversion = \"{v}\"\nedition = \"2021\"\n\n[workspace]\n\n[dependencies]\nvelox-core = {{ git = \"https://github.com/fahimaloy/velox\", rev = \"{rev}\", version = \"{v}\" }}\nvelox-dom = {{ git = \"https://github.com/fahimaloy/velox\", rev = \"{rev}\", version = \"{v}\" }}\nvelox-style = {{ git = \"https://github.com/fahimaloy/velox\", rev = \"{rev}\", version = \"{v}\" }}\nvelox-renderer = {{ git = \"https://github.com/fahimaloy/velox\", rev = \"{rev}\", version = \"{v}\", features = [\"skia-native\"] }}\nserde_json = \"1.0\"\n\n[build-dependencies]\nveloxc = {{ git = \"https://github.com/fahimaloy/velox\", rev = \"{rev}\", version = \"{v}\" }}\n",
+            v = SCAFFOLD_VERSION
         )
     }
 }

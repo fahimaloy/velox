@@ -134,7 +134,12 @@ fn px(rgba: &[u8], w: i32, x: i32, y: i32) -> [u8; 4] {
 }
 
 fn all_transparent(rgba: &[u8]) -> bool {
-    rgba.chunks_exact(4).all(|p| p == [0, 0, 0, 0])
+    // `as_chunks` is the 1.99-era form; `chunks_exact(4)` reads better here and
+    // costs nothing, so the new lint is silenced rather than obeyed.
+    #[allow(clippy::chunks_exact_to_as_chunks)]
+    {
+        rgba.chunks_exact(4).all(|p| p == [0, 0, 0, 0])
+    }
 }
 
 /// The tight bounding box of every pixel with any alpha, as `(l, t, r, b)`,

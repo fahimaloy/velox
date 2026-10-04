@@ -50,6 +50,13 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      # `skia-bindings` normally downloads prebuilt Skia binaries. When those
+      # release assets are unavailable it falls back to building Skia from
+      # source, which needs the FreeType and Fontconfig headers below. Keeping
+      # them installed means a vanished upstream asset does not turn into a
+      # confusing compile failure inside vendored C++.
+      - name: Install Skia build deps
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libfreetype6-dev libfontconfig1-dev
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
       - name: Cache cargo
@@ -65,6 +72,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      # See build-test: a missing skia-binaries release asset makes
+      # skia-bindings build Skia from source, which needs these headers.
+      - name: Install Skia build deps
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libfreetype6-dev libfontconfig1-dev
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -294,6 +305,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      # See build-test: a missing skia-binaries release asset makes
+      # skia-bindings build Skia from source, which needs these headers.
+      - name: Install Skia build deps
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libfreetype6-dev libfontconfig1-dev
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
       - name: Cache cargo

@@ -49,7 +49,9 @@ fn write_proof(name: &str, width: i32, height: i32, png: &[u8]) -> std::path::Pa
 }
 
 fn pixels_near(rgba: &[u8], color: [u8; 3], tolerance: i32) -> usize {
-    rgba.chunks_exact(4)
+    rgba.as_chunks::<4>()
+        .0
+        .iter()
         .filter(|px| {
             (px[0] as i32 - color[0] as i32).abs() <= tolerance
                 && (px[1] as i32 - color[1] as i32).abs() <= tolerance
@@ -60,7 +62,7 @@ fn pixels_near(rgba: &[u8], color: [u8; 3], tolerance: i32) -> usize {
 
 fn distinct_colors(rgba: &[u8]) -> usize {
     let mut seen = std::collections::HashSet::new();
-    for px in rgba.chunks_exact(4) {
+    for px in rgba.as_chunks::<4>().0 {
         seen.insert((px[0] / 16, px[1] / 16, px[2] / 16));
     }
     seen.len()

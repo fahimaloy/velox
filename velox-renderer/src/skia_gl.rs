@@ -119,6 +119,11 @@ mod unix_impl {
         /// to re-establish the release order by hand, and the only consumer
         /// (`skia_surface.rs`) has no reason to. `SkiaGlContext` is what a
         /// half-separating caller actually wanted, and it is reachable directly.
+        // `clippy::question_mark` suggests `&self.interface?` here, which does
+        // not compile: `SkiaGlContext` implements `Drop`, so `?` on one of its
+        // fields would move the field out of a type that cannot be moved out
+        // of. The `match` below borrows the handle without cloning it.
+        #[allow(clippy::question_mark)]
         pub fn into_direct_context(self) -> Option<GlDirectContext> {
             let iface = match &self.interface {
                 Some(i) => i,

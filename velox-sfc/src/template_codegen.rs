@@ -3532,16 +3532,13 @@ const PROP_TYPE_WRAPPERS: [(&str, &str); 9] = [
 fn fn_prop_core(ty: &str) -> Option<&str> {
     let mut inner = ty.trim();
     let mut peeled = false;
-    loop {
+    while let Some(marker) = PROP_TYPE_WRAPPERS
+        .iter()
+        .filter(|(marker, _)| inner.starts_with(marker))
+        .map(|(marker, _)| *marker)
+        .max_by_key(|marker| marker.len())
+    {
         // The LONGEST matching marker wins, so `std::rc::Rc<` beats `Rc<`.
-        let Some(marker) = PROP_TYPE_WRAPPERS
-            .iter()
-            .filter(|(marker, _)| inner.starts_with(marker))
-            .map(|(marker, _)| *marker)
-            .max_by_key(|marker| marker.len())
-        else {
-            break;
-        };
         inner = inner[marker.len()..].trim_end_matches('>').trim();
         peeled = true;
     }
@@ -3696,16 +3693,13 @@ fn function_prop_value(comp_name: &str, field: &PropField, handler: &str) -> Str
 fn wrap_by_declared_type(ty: &str, body: String) -> String {
     let mut ctors: Vec<&str> = Vec::new();
     let mut rest = ty.trim();
-    loop {
+    while let Some((marker, ctor)) = PROP_TYPE_WRAPPERS
+        .iter()
+        .filter(|(marker, _)| rest.starts_with(marker))
+        .max_by_key(|(marker, _)| marker.len())
+    {
         // The LONGEST matching marker wins, so `std::rc::Rc<` is peeled as
         // itself rather than as the `Rc<` that its tail also starts with.
-        let Some((marker, ctor)) = PROP_TYPE_WRAPPERS
-            .iter()
-            .filter(|(marker, _)| rest.starts_with(marker))
-            .max_by_key(|(marker, _)| marker.len())
-        else {
-            break;
-        };
         ctors.push(ctor);
         rest = &rest[marker.len()..];
     }

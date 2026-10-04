@@ -4621,7 +4621,7 @@ pub fn compute_layout(node: &VNode, viewport_w: i32, viewport_h: i32) -> LayoutN
                             };
                             let keep_w = child_avail_w as i32;
                             let keep_h = child_avail_h as i32;
-                            let probe = (main_size as i32)
+                            let probe = main_size
                                 .saturating_mul(4)
                                 .max(4096)
                                 .saturating_add(inset)
@@ -4645,7 +4645,7 @@ pub fn compute_layout(node: &VNode, viewport_w: i32, viewport_h: i32) -> LayoutN
                                 my_font_size,
                             );
                             let target = max_content_width(&probe_layout)
-                                .min(main_size as i32)
+                                .min(main_size)
                                 .saturating_add(inset)
                                 .max(0);
                             at(
@@ -5139,13 +5139,7 @@ pub fn compute_layout(node: &VNode, viewport_w: i32, viewport_h: i32) -> LayoutN
                                     0.0
                                 }
                             }
-                            "space-evenly" => {
-                                if n > 0 {
-                                    extra_space / (n as f32 + 1.0)
-                                } else {
-                                    0.0
-                                }
-                            }
+                            "space-evenly" if n > 0 => extra_space / (n as f32 + 1.0),
                             _ => 0.0,
                         };
                         #[allow(unused_assignments)]
@@ -5279,27 +5273,22 @@ pub fn compute_layout(node: &VNode, viewport_w: i32, viewport_h: i32) -> LayoutN
                                 cross_start = cross_extra_per_gap;
                             }
                         }
-                        "stretch" => {
-                            if has_definite_cross_size && n_lines > 1 && free_cross > 0.0 {
-                                cross_line_extra = free_cross / n_lines as f32;
-                                for line in &mut lines {
-                                    line.cross_size += cross_line_extra;
-                                }
-                                // Re-stretch items that were stretch to new line size
-                                if align_items.eq_ignore_ascii_case("stretch") {
-                                    for line in &lines {
-                                        for &(item_idx, _) in &line.main_positions {
-                                            if items[item_idx]
-                                                .align_self
-                                                .eq_ignore_ascii_case("auto")
-                                                && let Some(ref mut ln) =
-                                                    items[item_idx].layout_node
-                                            {
-                                                if !is_column {
-                                                    ln.rect.h = line.cross_size as i32;
-                                                } else {
-                                                    ln.rect.w = line.cross_size as i32;
-                                                }
+                        "stretch" if has_definite_cross_size && n_lines > 1 && free_cross > 0.0 => {
+                            cross_line_extra = free_cross / n_lines as f32;
+                            for line in &mut lines {
+                                line.cross_size += cross_line_extra;
+                            }
+                            // Re-stretch items that were stretch to new line size
+                            if align_items.eq_ignore_ascii_case("stretch") {
+                                for line in &lines {
+                                    for &(item_idx, _) in &line.main_positions {
+                                        if items[item_idx].align_self.eq_ignore_ascii_case("auto")
+                                            && let Some(ref mut ln) = items[item_idx].layout_node
+                                        {
+                                            if !is_column {
+                                                ln.rect.h = line.cross_size as i32;
+                                            } else {
+                                                ln.rect.w = line.cross_size as i32;
                                             }
                                         }
                                     }
