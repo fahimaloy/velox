@@ -2,7 +2,7 @@
 name = "velox-renderer"
 version = "0.1.1"
 edition = "2024"
-license = "MIT"
+license = "MIT OR Apache-2.0"
 description = "Rendering backends (Skia) for the Velox UI framework"
 readme = "README.md"
 authors = ["fahimaloy"]
@@ -84,9 +84,8 @@ velox-style = { path = "../velox-style" }
 velox-sfc = { path = "../velox-sfc" }
 skia-safe = { version = "0.91.1", features = ["gl", "egl"] }
 # `criterion` is a dev-dependency of `velox-renderer` for
-# `benches/skia_render_bench.rs` and nothing else; the crate is
-# `publish = false`, so neither it nor criterion can reach anything a user
-# builds.
+# `benches/skia_render_bench.rs` and nothing else; it is a dev-dependency, so
+# neither it nor criterion can reach anything a user builds.
 #
 # WAIVED ADVISORY: RUSTSEC-2026-0204 (crossbeam-epoch 0.9.18). Its only path is
 #   crossbeam-epoch <- crossbeam-deque <- rayon-core <- rayon <- criterion

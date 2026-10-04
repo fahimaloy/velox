@@ -63,3 +63,12 @@ temp-velox/test_app/
 # (separate remote, separate history) nested inside this one; ignoring it here
 # keeps `git status` in the framework repo clean.
 /velox_web/
+
+# Deepwork session state (git-local, not for VCS)
+.slim/deepwork/
+
+# QA gate artifacts (screenshots/logs from review gates) — machine-generated, not source
+gates/
+
+# mdbook build output
+docs/book/

@@ -1,5 +1,0 @@
-   Compiling velox-cli v0.1.0 (/home/fahimaloy/Projects/personal/velox/velox-cli)
-   Compiling velox-example-todo v0.1.0 (/home/fahimaloy/Projects/personal/velox/examples/todo)
-   Compiling velox-example-showcase v0.1.0 (/home/fahimaloy/Projects/personal/velox/examples/showcase)
-   Compiling velox-example-counter v0.1.0 (/home/fahimaloy/Projects/personal/velox/examples/counter)
-    Finished `dev` profile [unoptimized + debuginfo] target(s) in 1.97s

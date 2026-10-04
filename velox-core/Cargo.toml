@@ -2,7 +2,7 @@
 name = "velox-core"
 version = "0.1.1"
 edition = "2024"
-license = "MIT"
+license = "MIT OR Apache-2.0"
 description = "Core reactive primitives for the Velox UI framework"
 readme = "README.md"
 authors = ["fahimaloy"]
@@ -14,8 +14,8 @@ log = "0.4"
 
 [dev-dependencies]
 # `criterion` is a dev-dependency of `velox-core` for `benches/signal_read.rs`
-# and nothing else: the crate is `publish = false`, so neither it nor criterion
-# can reach anything a user builds.
+# and nothing else: it is a dev-dependency, so neither it nor criterion can
+# reach anything a user builds.
 #
 # WAIVED ADVISORY: RUSTSEC-2026-0204 (crossbeam-epoch 0.9.18, `fmt::Pointer` on
 # an invalid pointer) reaches this crate only as

@@ -1,0 +1,84 @@
+name: Bug Report
+description: Report a bug in Velox
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to report a bug. Please fill out the fields below so the issue can be reproduced and fixed quickly.
+
+        **Security vulnerabilities must NOT be reported here** — see [SECURITY.md](https://github.com/fahimaloy/velox/blob/main/SECURITY.md) for private reporting.
+
+  - type: textarea
+    id: description
+    attributes:
+      label: Description
+      description: A clear description of the bug. What happened, and what did you expect to happen?
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction steps
+      description: Step-by-step instructions, or a minimal code sample (`.vx` component or Rust snippet) that triggers the bug.
+      placeholder: |
+        1. Create a `.vx` component with ...
+        2. Run `veloxc build` ...
+        3. Observe ...
+    validations:
+      required: true
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Affected area
+      description: Which part of Velox is affected?
+      options:
+        - velox-core (reactive primitives)
+        - velox-sfc (single-file components)
+        - velox-dom (DOM types)
+        - velox-renderer (Skia rendering)
+        - velox-style (CSS / styles)
+        - veloxc (CLI)
+        - examples
+        - build / CI / tooling
+        - other / not sure
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: Version / commit
+      description: The release version or commit hash you tested against.
+      placeholder: "0.1.1 or main @ abc1234"
+    validations:
+      required: true
+
+  - type: input
+    id: platform
+    attributes:
+      label: Platform
+      description: OS and toolchain version.
+      placeholder: "Linux x86_64, Rust 1.91.1"
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant output / logs
+      description: Compiler errors, panics, or logs. Paste the exact text.
+      render: shell
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Checks
+      options:
+        - label: I searched existing issues and could not find this bug reported.
+          required: true
+        - label: This is not a security vulnerability (those are reported privately per SECURITY.md).
+          required: true

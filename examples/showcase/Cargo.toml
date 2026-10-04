@@ -2,7 +2,7 @@
 name = "velox-example-showcase"
 version = "0.1.0"
 edition = "2024"
-license = "MIT"
+license = "MIT OR Apache-2.0"
 repository = "https://github.com/fahimaloy/velox"
 description = "Layout showcase example: spacing, flex, centering, scrolling, text alignment and wrapping for the Velox UI framework"
 

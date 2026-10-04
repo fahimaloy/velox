@@ -1,4 +1,0 @@
-   Compiling velox-cli v0.1.0 (/home/fahimaloy/Projects/personal/velox/velox-cli)
-   Compiling velox-sfc v0.1.0 (/home/fahimaloy/Projects/personal/velox/velox-sfc)
-   Compiling t8app v0.1.0 (/home/fahimaloy/Projects/personal/velox/t8app)
-    Finished `dev` profile [unoptimized + debuginfo] target(s) in 1.49s

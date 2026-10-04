@@ -1,0 +1,57 @@
+name: Feature Request
+description: Suggest an idea or improvement for Velox
+title: "[Feature]: "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for suggesting a feature. Please describe the problem you are trying to solve and the outcome you would like.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem / motivation
+      description: What are you trying to do, and what stands in the way? A concrete use case helps.
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      description: What would you like to happen? Sketch the API, CLI behavior, or workflow if you can.
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Other approaches you considered, and why they fall short.
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Affected area
+      description: Which part of Velox would this touch?
+      options:
+        - velox-core (reactive primitives)
+        - velox-sfc (single-file components)
+        - velox-dom (DOM types)
+        - velox-renderer (Skia rendering)
+        - velox-style (CSS / styles)
+        - veloxc (CLI)
+        - examples
+        - build / CI / tooling
+        - other / not sure
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Checks
+      options:
+        - label: I searched existing issues and discussions before opening this request.
+          required: true

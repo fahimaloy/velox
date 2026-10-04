@@ -168,9 +168,10 @@ jobs:
       #     `#[test] #[ignore]`. Removing criterion would not touch that gate.
       #     So the justification for keeping it rests on the two `benches/`
       #     harnesses, not on the 400 us budget.
-      #   * Nothing ships. All six crates in this workspace are `publish =
-      #     false`, so there is no published artifact for this dependency to
-      #     reach, and `criterion` is a dev-dependency besides. Deleting the
+      #   * Nothing ships to users. The six workspace crates are published to
+      #     crates.io (dual MIT OR Apache-2.0), but `criterion` is a
+      #     dev-dependency, so published artifacts never include it and no
+      #     advisory reaches a user build. Deleting the
       #     measurement apparatus to silence an advisory that can never be
       #     delivered to a user is the wrong trade; this records that as a
       #     decision with a re-check trigger instead — if criterion ever

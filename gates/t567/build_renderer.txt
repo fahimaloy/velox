@@ -1,2 +1,0 @@
-   Compiling velox-renderer v0.1.0 (/home/fahimaloy/Projects/personal/velox/velox-renderer)
-    Finished `dev` profile [unoptimized + debuginfo] target(s) in 1.25s
