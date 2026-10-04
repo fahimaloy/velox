@@ -40,7 +40,7 @@ svg = ["dep:resvg"]
 velox-core = { version = "0.1.2", path = "../velox-core" }
 # Optional backends (do NOT compile unless feature enabled)
 winit = { version = "0.28", optional = true }
-skia-safe = { version = "0.91.1", features = ["gl", "egl"], optional = true }
+skia-safe = { version = "0.153.3", features = ["gl", "egl"], optional = true }
 # raw-window-handle helps obtain native window handles from winit
 raw-window-handle = { version = "0.5", optional = true }
 # egl bindings for creating contexts on Linux
@@ -82,7 +82,7 @@ resvg = { version = "0.48", default-features = false, features = ["raster-images
 velox-core = { path = "../velox-core" }
 velox-style = { path = "../velox-style" }
 velox-sfc = { path = "../velox-sfc" }
-skia-safe = { version = "0.91.1", features = ["gl", "egl"] }
+skia-safe = { version = "0.153.3", features = ["gl", "egl"] }
 # `criterion` is a dev-dependency of `velox-renderer` for
 # `benches/skia_render_bench.rs` and nothing else; it is a dev-dependency, so
 # neither it nor criterion can reach anything a user builds.
