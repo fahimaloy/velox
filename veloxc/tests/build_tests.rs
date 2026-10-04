@@ -19,10 +19,7 @@ fn init_toml_pins_version_and_rev() {
     let dir = std::env::temp_dir().join(format!("velox-pin-{}", std::process::id()));
     let toml = veloxc::commands::init::generate_cargo_toml_for_test("demo", &dir);
     let expected = format!(r#"version = "{}""#, env!("CARGO_PKG_VERSION"));
-    assert!(
-        toml.contains(&expected),
-        "must bind version:\n{toml}"
-    );
+    assert!(toml.contains(&expected), "must bind version:\n{toml}");
 }
 
 #[test]
@@ -34,8 +31,7 @@ fn cli_build_emits_stub_file() {
         .join("../target/velox-cli-tests")
         .join(format!("{}-stub", std::process::id()));
 
-    veloxc::build_cmd(&input, Some(out_dir.as_path()), veloxc::EmitMode::Stub)
-        .expect("build stub");
+    veloxc::build_cmd(&input, Some(out_dir.as_path()), veloxc::EmitMode::Stub).expect("build stub");
 
     let out_file = out_dir.join("app.rs");
     let content = fs::read_to_string(&out_file).expect("read stub output");

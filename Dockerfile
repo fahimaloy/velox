@@ -18,6 +18,24 @@ COPY velox-sfc/Cargo.toml velox-sfc/Cargo.toml
 COPY velox-style/Cargo.toml velox-style/Cargo.toml
 COPY velox-renderer/Cargo.toml velox-renderer/Cargo.toml
 COPY veloxc/Cargo.toml veloxc/Cargo.toml
+# Every workspace member listed in the root manifest needs its own manifest
+# here, including the examples — otherwise `cargo fetch` stops at the first
+# member it cannot load.
+COPY examples/counter/Cargo.toml examples/counter/Cargo.toml
+COPY examples/todo/Cargo.toml examples/todo/Cargo.toml
+COPY examples/showcase/Cargo.toml examples/showcase/Cargo.toml
+
+# A member whose manifest declares a target whose source file is absent fails
+# with "no targets specified in the manifest". The empty placeholders below
+# satisfy that check for dependency resolution only; the real sources land in
+# this image with `COPY . .` in the builder and test stages.
+RUN for crate in velox-core velox-dom velox-sfc velox-style velox-renderer; do \
+      mkdir -p "$crate/src" && touch "$crate/src/lib.rs"; \
+    done \
+ && mkdir -p veloxc/src/bin && touch veloxc/src/lib.rs veloxc/src/bin/main.rs \
+ && for example in counter todo showcase; do \
+      mkdir -p "examples/$example/src" && touch "examples/$example/src/main.rs"; \
+    done
 
 RUN cargo fetch
 
