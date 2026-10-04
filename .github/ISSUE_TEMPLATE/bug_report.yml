@@ -53,7 +53,7 @@ body:
     attributes:
       label: Version / commit
       description: The release version or commit hash you tested against.
-      placeholder: "0.1.1 or main @ abc1234"
+      placeholder: "0.1.2 or main @ abc1234"
     validations:
       required: true
 

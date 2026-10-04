@@ -5,9 +5,9 @@ edition = "2024"
 license = "MIT OR Apache-2.0"
 description = "Virtual DOM and layout engine for the Velox UI framework"
 readme = "README.md"
-authors = ["fahimaloy"]
+authors = ["FAHIM AHMED <fahimaloy@tutamail.com>"]
 repository = "https://github.com/fahimaloy/velox"
-documentation = "https://velox.dev/docs/dom"
+documentation = "https://fahimaloy.github.io/velox/tutorials/showcase.html"
 keywords = ["virtual-dom", "layout", "flexbox", "ui", "framework"]
 categories = ["gui"]
 
@@ -16,6 +16,18 @@ categories = ["gui"]
 # Skia backend, which is heavy, so they stay behind a feature and are opt-in:
 #   cargo test -p velox-dom --features skia-native
 # Everything else in `tests/` runs by default with no features.
+#
+# NOTE: velox-dom declares no `skia-native` feature of its own — it cannot
+# enable a renderer feature without creating a dependency cycle (velox-renderer
+# depends on velox-dom), and Cargo has no optional dev-dependencies. The two
+# pixel tests therefore gate on the VALUE with `cfg(feature = "skia-native")`
+# and stay compiled out in every build, default or not. The declaration below
+# is what rustc's `unexpected_cfgs` lint needs to accept that deliberate value;
+# without it `-D warnings` in CI fails on the two pixel test targets.
+
+[lints.rust]
+# The pixel tests gate on a feature value velox-dom cannot declare (see above).
+unexpected_cfgs = { level = "allow", check-cfg = ['cfg(feature, values("skia-native"))'] }
 
 [dependencies]
 

@@ -5,9 +5,9 @@ edition = "2024"
 license = "MIT OR Apache-2.0"
 description = "Rendering backends (Skia) for the Velox UI framework"
 readme = "README.md"
-authors = ["fahimaloy"]
+authors = ["FAHIM AHMED <fahimaloy@tutamail.com>"]
 repository = "https://github.com/fahimaloy/velox"
-documentation = "https://velox.dev/docs/renderer"
+documentation = "https://fahimaloy.github.io/velox/features/renderer.html"
 keywords = ["rendering", "skia", "graphics", "ui", "framework"]
 categories = ["gui", "graphics"]
 

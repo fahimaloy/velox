@@ -63,7 +63,7 @@ Velox is a workspace of six published crates. This crate is marked **(this crate
 
 ## Status
 
-Published on [crates.io](https://crates.io/crates/velox-dom) at **0.1.1**.
+Published on [crates.io](https://crates.io/crates/velox-dom) — the badge above tracks the latest release.
 
 Working today: block layout, flex layout, `static`/`relative`/`absolute`/`fixed`/`sticky` positioning, z-index, overflow clipping, keyed diffing, and text wrapping. Two notes worth knowing before you rely on them:
 

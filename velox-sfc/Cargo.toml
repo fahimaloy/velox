@@ -5,11 +5,11 @@ edition = "2024"
 license = "MIT OR Apache-2.0"
 description = "Single-file component compiler for the Velox UI framework"
 readme = "README.md"
-authors = ["fahimaloy"]
+authors = ["FAHIM AHMED <fahimaloy@tutamail.com>"]
 repository = "https://github.com/fahimaloy/velox"
 categories = ["gui"]
 keywords = ["compiler", "sfc", "component", "template", "velox"]
-documentation = "https://velox.dev/docs/sfc"
+documentation = "https://fahimaloy.github.io/velox/features/template-syntax.html"
 
 [dependencies]
 pest         = "2.8"

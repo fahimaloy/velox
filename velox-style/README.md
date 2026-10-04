@@ -70,7 +70,7 @@ Velox is a workspace of six published crates. This crate is marked **(this crate
 
 ## Status
 
-Published on [crates.io](https://crates.io/crates/velox-style) at **0.1.1**.
+Published on [crates.io](https://crates.io/crates/velox-style) — the badge above tracks the latest release.
 
 Working today: selectors, the cascade, the UA sheet, and `:hover`/`::placeholder` handling. Inline `style` attributes always win over author rules.
 

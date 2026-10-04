@@ -5,11 +5,11 @@ edition = "2024"
 license = "MIT OR Apache-2.0"
 description = "CSS parsing and styling for the Velox UI framework"
 readme = "README.md"
-authors = ["fahimaloy"]
+authors = ["FAHIM AHMED <fahimaloy@tutamail.com>"]
 repository = "https://github.com/fahimaloy/velox"
 categories = ["gui", "text-processing"]
 keywords = ["css", "styling", "parsing", "selectors", "velox"]
-documentation = "https://velox.dev/docs/style"
+documentation = "https://fahimaloy.github.io/velox/features/styling.html"
 
 [dependencies]
 cssparser = "0.29"

@@ -84,7 +84,7 @@ Velox is a workspace of six published crates. This crate is marked **(this crate
 
 ## Status
 
-Published on [crates.io](https://crates.io/crates/velox-sfc) at **0.1.1**.
+Published on [crates.io](https://crates.io/crates/velox-sfc) — the badge above tracks the latest release.
 
 Working today: `.vx` parsing, `{{ expr }}` interpolation, `v-if`/`v-else-if`/`v-else`, and component imports. `parse_template_to_ast` preserves its historical behaviour of printing warnings to stderr; prefer `parse_template`, which returns them in a `TemplateDiag`. The crate is pure-parser at runtime — `velox-core`, `velox-dom` and `velox-renderer` are dev-dependencies used only by the tests that execute generated code.
 

@@ -57,7 +57,7 @@ veloxc build --release      # optimized build
 
 ```text
 [velox] HMR dev server listening on 127.0.0.1:31313
-  ⚡ Velox dev server v0.1.1
+  ⚡ Velox dev server v0.1.2
   ➤ Project: my-app
   ➤ Watching: ./src
   ➤ Watching: ./assets
@@ -91,7 +91,7 @@ Velox is a workspace of six published crates. This crate is marked **(this crate
 
 ## Status
 
-Published on [crates.io](https://crates.io/crates/veloxc) at **0.1.1**.
+Published on [crates.io](https://crates.io/crates/veloxc) — the badge above tracks the latest release.
 
 All seven subcommands work: `init`, `build`, `run`, `dev`, `lint`, `add component`, `version`. Known limitations, stated plainly:
 

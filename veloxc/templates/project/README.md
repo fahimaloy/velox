@@ -79,7 +79,7 @@ style block lists its light rules first and its `.dark` overrides last.
 
 ## Documentation
 
-For full documentation, visit: https://velox.dev/docs
+For full documentation, visit: https://fahimaloy.github.io/velox/
 
 ## License
 

@@ -88,7 +88,7 @@ The port is fixed — there is no `--hmr-port` flag yet — so a stray listener 
 
 ```text
 
-  ⚡ Velox dev server  v0.1.1
+  ⚡ Velox dev server  v0.1.2
   ➤ Project: counter
   ➤ Watching: /home/you/counter/src
   ➤ Watching: /home/you/counter/assets

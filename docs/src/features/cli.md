@@ -188,7 +188,7 @@ velox version
 ```
 
 ```text
-velox 0.1.1
+velox 0.1.2
 Edition: 2021
 Platform: Linux
 ```

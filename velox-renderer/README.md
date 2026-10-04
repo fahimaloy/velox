@@ -72,7 +72,7 @@ Velox is a workspace of six published crates. This crate is marked **(this crate
 
 ## Status
 
-Published on [crates.io](https://crates.io/crates/velox-renderer) at **0.1.1**.
+Published on [crates.io](https://crates.io/crates/velox-renderer) — the badge above tracks the latest release.
 
 Working today: Skia immediate-mode paint, event hit-testing, the `skia-native` windowed backend, offscreen RGBA/PNG rendering, and accessibility trees. Notes:
 

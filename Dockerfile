@@ -35,7 +35,9 @@ RUN for crate in velox-core velox-dom velox-sfc velox-style velox-renderer; do \
  && mkdir -p veloxc/src/bin && touch veloxc/src/lib.rs veloxc/src/bin/main.rs \
  && for example in counter todo showcase; do \
       mkdir -p "examples/$example/src" && touch "examples/$example/src/main.rs"; \
-    done
+    done \
+ && mkdir -p velox-core/benches velox-renderer/benches \
+ && touch velox-core/benches/signal_read.rs velox-renderer/benches/skia_render_bench.rs
 
 RUN cargo fetch
 

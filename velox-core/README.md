@@ -78,7 +78,7 @@ Velox is a workspace of six published crates. This crate is marked **(this crate
 
 ## Status
 
-Published on [crates.io](https://crates.io/crates/velox-core) at **0.1.1**.
+Published on [crates.io](https://crates.io/crates/velox-core) — the badge above tracks the latest release.
 
 The reactive core is complete and in production use across the stack: signals, effects, computed values, watchers, lifecycle hooks, provide/inject and `next_tick` all work today. `emit`/`emit_void` are intentional no-op placeholders until codegen supplies a real event sink. Everything is deliberately `!Send` — the crate is single-threaded by design, and its doctests enforce that with `compile_fail` guards.
 

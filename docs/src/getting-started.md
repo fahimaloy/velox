@@ -101,7 +101,7 @@ veloxc dev
 The first run compiles the project (a full cargo build — it takes a minute), prints a banner, and opens the app window:
 
 ```text
-  ⚡ Velox dev server v0.1.1
+  ⚡ Velox dev server v0.1.2
   ➤ Project: my-app
   ➤ Watching: /home/you/my-app/src
   ➤ Watching: /home/you/my-app/assets
