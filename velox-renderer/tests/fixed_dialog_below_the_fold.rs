@@ -840,6 +840,11 @@ fn every_clickable_vnode_is_visited_exactly_once() {
 
 /// The user-visible symptom, measured rather than argued about: before the fix
 /// the open-dialog frame was BYTE-IDENTICAL to the closed one.
+///
+/// Needs the Skia raster path, so it only exists with `skia-native`. Without the
+/// gate this test target fails to compile under `--features skia` alone, which is
+/// exactly how the `renderer-features` job runs it.
+#[cfg(feature = "skia-native")]
 #[test]
 fn opening_a_dialog_changes_the_frame() {
     let sheet = real_sheet();
