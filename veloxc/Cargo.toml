@@ -37,7 +37,7 @@ velox-renderer = { version = "0.1.2", path = "../velox-renderer" }
 # `fs.inotify.max_user_watches` / `max_user_instances` makes `watcher.watch()`
 # fail with "No space left on device". The dev server surfaces that error and
 # keeps running rather than going silently blind — see `DirWatcher`.
-notify = "6"
+notify = "8"
 
 [lib]
 name = "veloxc"
