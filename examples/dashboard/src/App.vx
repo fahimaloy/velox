@@ -1,0 +1,32 @@
+<template>
+  <div style="display:flex;height:100vh;background:#0B0E14;color:#E8EAEF;font-family:system-ui,sans-serif;">
+    <aside style="width:240px;padding:32px 20px;border-right:1px solid #1A1F2B;">
+      <h1 style="font-size:22px;font-weight:800;margin:0 0 28px;">Dashboard</h1>
+      <nav style="display:flex;flex-direction:column;gap:6px;">
+        <a href="#" style="padding:10px 14px;border-radius:10px;text-decoration:none;color:#8A929C;">Overview</a>
+        <a href="#" style="padding:10px 14px;border-radius:10px;text-decoration:none;color:#8A929C;">Analytics</a>
+      </nav>
+    </aside>
+    <main style="flex:1;padding:36px 48px;">
+      <h1 style="font-size:36px;font-weight:800;margin:0 0 8px;letter-spacing:-0.03em;">Analytics</h1>
+      <p style="margin:0;color:#8A929C;font-size:15px;">Traffic overview</p>
+      <section style="margin-top:32px;display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:16px;">
+        <article style="background:#141922;border:1px solid #1A1F2B;border-radius:16px;padding:24px;">
+          <div style="font-size:13px;color:#8A929C;margin-bottom:8px;">Users</div>
+          <div style="font-size:36px;font-weight:800;">842</div>
+        </article>
+        <article style="background:#141922;border:1px solid #1A1F2B;border-radius:16px;padding:24px;">
+          <div style="font-size:13px;color:#8A929C;margin-bottom:8px;">Revenue</div>
+          <div style="font-size:36px;font-weight:800;">$12,800</div>
+        </article>
+      </section>
+    </main>
+  </div>
+</template>
+<script setup>
+pub struct State {}
+impl State {
+  pub fn new() -> Self { Self {} }
+  pub fn title(&self) -> String { String::from("Analytics Dashboard") }
+}
+</script>

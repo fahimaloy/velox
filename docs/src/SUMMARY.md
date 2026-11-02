@@ -5,9 +5,11 @@
 
 # Tutorials
 
-- [Counter](tutorials/counter.md)
-- [Todo App](tutorials/todo.md)
-- [Showcase](tutorials/showcase.md)
+- [Veloxc Init Default](tutorials/veloxc-init-default.md)
+- [Dashboard](tutorials/dashboard.md)
+- [Markdown Editor](tutorials/markdown-editor.md)
+- [Task Board](tutorials/task-board.md)
+- [Settings Panel](tutorials/settings-panel.md)
 
 # Features
 

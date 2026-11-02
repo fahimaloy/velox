@@ -1,0 +1,25 @@
+<template>
+  <div style="display:flex;flex-direction:column;height:100vh;background:#0B0E14;color:#E8EAEF;">
+    <header style="padding:20px 32px;border-bottom:1px solid #1A1F2B;display:flex;align-items:center;gap:16px;">
+      <h1 style="font-size:22px;font-weight:800;margin:0;">Markdown Editor</h1>
+    </header>
+    <div style="display:flex;flex:1;overflow:hidden;">
+      <textarea style="flex:1;padding:28px;background:#0D1018;border:none;color:#E8EAEF;font-family:monospace;font-size:16px;outline:none;resize:none;" placeholder="Write markdown here...">
+# Hello Velox
+
+This is a **live preview**.
+</textarea>
+      <aside style="flex:1;padding:28px;background:#0B0E14;border-left:1px solid #1A1F2B;overflow-y:auto;">
+        <h2 style="font-size:20px;font-weight:700;margin:0 0 16px;">Preview</h2>
+        <div style="color:#D0D4DA;line-height:1.75;">Hello Velox — this is a preview.</div>
+      </aside>
+    </div>
+  </div>
+</template>
+<script setup>
+pub struct State {}
+impl State {
+  pub fn new() -> Self { Self {} }
+  pub fn title(&self) -> String { String::from("Markdown Editor") }
+}
+</script>

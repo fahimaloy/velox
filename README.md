@@ -8,7 +8,7 @@
 
 **Reactive signals · Single-file components · Flexbox layout · Skia rendering**
 
-<img src="./docs/src/assets/showcase-window.png" width="880" alt="Velox Layout Showcase — a .vx single-file component laid out and painted by velox-renderer">
+<img src="./velox-logo.svg" width="880" alt="Velox Layout Showcase — a .vx single-file component laid out and painted by velox-renderer">
 
 <br>
 
@@ -21,7 +21,7 @@
 
 <br>
 
-[Quick start](#quick-start) · [Documentation](https://fahimaloy.github.io/velox/) · [Tutorials](https://fahimaloy.github.io/velox/tutorials/counter.html) · [CLI reference](#cli-reference) · [Architecture](#architecture) · [Template syntax](#template-syntax) · [Feature status](#feature-status) · [Guides](#guides-and-documentation)
+[Quick start](#quick-start) · [Documentation](https://fahimaloy.github.io/velox/) · [Tutorials](https://fahimaloy.github.io/velox/tutorials/dashboard.md) · [CLI reference](#cli-reference) · [Architecture](#architecture) · [Template syntax](#template-syntax) · [Feature status](#feature-status) · [Guides](#guides-and-documentation)
 
 </div>
 
@@ -96,7 +96,7 @@ veloxc run
 `veloxc dev` watches the project, rebuilds on save, and re-launches the app —
 hot reload means the running window updates as soon as the build lands:
 
-<img src="./docs/src/assets/counter-hmr.gif" width="720" alt="Counter example hot-reloading a style change">
+<img src="./docs/src/assets/veloxc-init-default-window.png" width="720" alt="Counter example hot-reloading a style change">
 
 A quick `veloxc lint src/App.vx` checks the generated component before you edit
 anything.
@@ -114,13 +114,7 @@ source tree.</sub>
 > | `veloxc init --local <path>` | the same, pinned to the checkout you name |
 > | `cargo install veloxc` (crates.io) | `git = "https://github.com/fahimaloy/velox"` pinned to the commit the binary was built from |
 >
-> The crates.io binary is built outside a repository, so that pin falls back to
-> `rev = "unknown"` and Cargo fails with ``revspec 'unknown' not found``. Until
-> the fallback is fixed, either scaffold from a clone
-> (`git clone https://github.com/fahimaloy/velox && cargo install --path veloxc`),
-> pass `--local <path>`, or open the generated `Cargo.toml` and drop the
-> `git = …` / `rev = …` keys from every `velox-*` line, leaving `version = …`
-> — all six crates are published on crates.io.
+> A crates.io-installed `veloxc` has no git metadata; `generate_cargo_toml` detects `rev == "unknown"` (the `VELOX_GIT_REV_FALLBACK` sentinel) and emits plain `version` dependencies, so the scaffold is always resolvable. See CLI Reference.
 
 ### What `veloxc init` generates
 
@@ -332,7 +326,7 @@ graph TD
     end
 
     subgraph apps["Example apps"]
-        ex["counter · todo · showcase"]
+        ex["veloxc-init-default · dashboard · task-board"]
     end
 
     cli --> sfc
@@ -500,20 +494,15 @@ Full decision record: [`docs/internal/RECONCILER.md`](docs/internal/RECONCILER.m
 
 ## Examples
 
-Three example apps ship in `examples/`:
+Five example apps ship in `examples/`:
 
-| App | What it demonstrates | Run |
+| App | What it demonstrates | Screenshot |
 |:---|:---|:---|
-| `examples/counter` | Signals, event handlers, immediate reactivity | `cargo run -p velox-example-counter` |
-| `examples/todo` | Components, `v-for`, computed filters, scrolling lists | `cargo run -p velox-example-todo` |
-| `examples/showcase` | Layout gallery: spacing, flex, centering, wrapping | `cargo run -p velox-example-showcase` |
-
-They also go through the CLI:
-
-```bash
-veloxc build examples/counter/src/App.vx
-cargo run -p velox-example-counter
-```
+| `veloxc-init-default` | Default scaffold: components, theme, dialogs, `v-for` | ![init-default](docs/src/assets/veloxc-init-default-window.png) |
+| `dashboard` | Analytics dashboard: grid, charts, sidebar, real-time updates, dark mode | ![dashboard](docs/src/assets/dashboard-window.png) |
+| `markdown-editor` | Split-pane Markdown editor with live preview, toolbar, resize handle | ![markdown-editor](docs/src/assets/markdown-editor-window.png) |
+| `task-board` | Kanban board: drag-to-reorder columns, localStorage persistence, modal forms | ![task-board](docs/src/assets/task-board-window.png) |
+| `settings-panel` | System settings UI: forms, toggles, tabs, validation, accordion, toasts | ![settings-panel](docs/src/assets/settings-panel-window.png) |
 
 <sub>A display or compositor is required to see a window.</sub>
 

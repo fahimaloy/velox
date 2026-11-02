@@ -66,7 +66,7 @@ An unscoped `<style>` block passes through unchanged and applies globally. Insid
 
 ## Supported properties
 
-The table below lists every property the style engine parses and which rendering reader honors it. The live path has three readers — the flexbox/table layout pass, the box painter, and the text painter — and a property is honest only if at least one of them looks it up. Properties marked *parsed only* survive the cascade but are then dropped; `velox lint` reports them.
+The table below lists every property the style engine parses and which rendering reader honors it. The live path has three readers — the flexbox/table layout pass, the box painter, and the text painter — and a property is honest only if at least one of them looks it up. Properties marked *parsed only* survive the cascade but are then dropped; `veloxc lint` reports them.
 
 ### Layout and box model
 
@@ -140,7 +140,7 @@ The table below lists every property the style engine parses and which rendering
 | `box-shadow` | `2px 2px 4px rgba(0,0,0,0.5)` form | *Parsed only* |
 | `transition` | Comma-separated `<property> <duration> <timing>` | *Parsed only* — no reader plays a transition |
 
-> Tip: `velox lint` reports exactly the *parsed only* properties above, by file and rule index. Unknown declarations are filtered out silently by the cascade, so lint deliberately does not flag them — vendor prefixes and custom properties stay quiet.
+> Tip: `veloxc lint` reports exactly the *parsed only* properties above, by file and rule index. Unknown declarations are filtered out silently by the cascade, so lint deliberately does not flag them — vendor prefixes and custom properties stay quiet.
 
 > Tip: to hide an element use `display: none` (or `v-show` in templates), not `visibility: hidden`. To round corners use `border-radius`, and give depth with `border` — not `box-shadow`.
 

@@ -16,10 +16,10 @@ A Velox application — a Rust GUI framework with Vue-like single-file component
 cargo build
 
 # Run the app (dev hot-reload)
-velox dev
+veloxc dev
 
 # Build for production
-velox build --release
+veloxc build --release
 ```
 
 ### Project Structure

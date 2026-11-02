@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 
 /// The version every scaffolded manifest pins.
 ///
-/// Derived from veloxc's own version so `velox init` cannot emit a dependency
+/// Derived from veloxc's own version so `veloxc init` cannot emit a dependency
 /// version that was never published: the tests assert the scaffold matches
 /// `CARGO_PKG_VERSION`, and a hardcoded literal silently breaks the moment a
 /// release is cut.
@@ -31,7 +31,7 @@ pub(crate) fn find_velox_workspace() -> Option<PathBuf> {
 ///
 /// `find_velox_workspace` walks up from the CWD, which fails the moment `velox
 /// init` is run from anywhere outside a checkout — which is the normal case,
-/// since the usual command is `velox init myapp` from a scratch directory. The
+/// since the usual command is `veloxc init myapp` from a scratch directory. The
 /// walk then fails, the caller falls back to git dependencies, and those are
 /// pinned to `velox_git_rev()`: the commit the CLI was BUILT at. On any
 /// locally-built binary that commit is on an unpushed branch, so the scaffold
@@ -63,7 +63,7 @@ pub fn find_velox_workspace_for_test() -> Option<std::path::PathBuf> {
     find_velox_workspace()
 }
 
-/// The static assets every `velox init` writes into `assets/`.
+/// The static assets every `veloxc init` writes into `assets/`.
 ///
 /// A table rather than two `write` calls because the set is the thing the
 /// template depends on: `App.vx` points `src` at `velox-logo.svg` and
@@ -178,7 +178,7 @@ pub fn init_project(name: &str) -> Result<PathBuf> {
         fs::write(project_dir.join("assets").join(name), bytes)?;
     }
 
-    // Write files from the shipped project template so `velox init` and the
+    // Write files from the shipped project template so `veloxc init` and the
     // checked-in template cannot drift into different event contracts.
     let cargo_toml = generate_cargo_toml(&package_name, &project_dir);
     fs::write(project_dir.join("Cargo.toml"), cargo_toml)?;
@@ -221,14 +221,14 @@ pub fn init_project(name: &str) -> Result<PathBuf> {
     println!("✅ Created Velox project: {}", project_dir.display());
     println!("📦 To get started:");
     println!("   cd {}", project_dir.display());
-    println!("   velox dev");
-    println!("   velox build");
-    println!("   velox run");
+    println!("   veloxc dev");
+    println!("   veloxc build");
+    println!("   veloxc run");
 
     Ok(project_dir)
 }
 
-/// Compatibility shim for the drifted `velox init --template` CLI (Task 3 will flesh out template handling).
+/// Compatibility shim for the drifted `veloxc init --template` CLI (Task 3 will flesh out template handling).
 pub fn init_project_with_template(name: &str, _template: &str) -> Result<PathBuf> {
     init_project(name)
 }
@@ -402,13 +402,48 @@ veloxc = {{ path = "{}", version = "{v}" }}
             v = SCAFFOLD_VERSION
         )
     } else {
-        // No workspace found — fall back to git dependencies
         let rev = crate::velox_git_rev();
-        format!(
-            "[package]\nname = \"{name}\"\nversion = \"{v}\"\nedition = \"2021\"\n\n[workspace]\n\n[dependencies]\nvelox-core = {{ git = \"https://github.com/fahimaloy/velox\", rev = \"{rev}\", version = \"{v}\" }}\nvelox-dom = {{ git = \"https://github.com/fahimaloy/velox\", rev = \"{rev}\", version = \"{v}\" }}\nvelox-style = {{ git = \"https://github.com/fahimaloy/velox\", rev = \"{rev}\", version = \"{v}\" }}\nvelox-renderer = {{ git = \"https://github.com/fahimaloy/velox\", rev = \"{rev}\", version = \"{v}\", features = [\"skia-native\"] }}\nserde_json = \"1.0\"\n\n[build-dependencies]\nveloxc = {{ git = \"https://github.com/fahimaloy/velox\", rev = \"{rev}\", version = \"{v}\" }}\n",
-            v = SCAFFOLD_VERSION
-        )
+        if rev == crate::VELOX_GIT_REV_FALLBACK {
+            cargo_toml_from_crates_io(name)
+        } else {
+            cargo_toml_from_git(name, rev)
+        }
     }
+}
+
+/// The dependency block for a scaffold resolved from **crates.io**.
+///
+/// A `cargo install`ed `veloxc` has no git metadata: `veloxc/build.rs` only runs
+/// `git rev-parse` when a `.git` checkout is in reach, so an installed binary
+/// gets the [`crate::VELOX_GIT_REV_FALLBACK`] sentinel. Pinning every dependency
+/// at `rev = "unknown"` is rejected by cargo outright —
+/// ``revspec 'unknown' not found`` — and, unlike the path branch above, there is
+/// no workspace on the machine to point at either. Every crate here is published
+/// at [`SCAFFOLD_VERSION`], so plain `version` dependencies resolve.
+fn cargo_toml_from_crates_io(name: &str) -> String {
+    format!(
+        "[package]\nname = \"{name}\"\nversion = \"{v}\"\nedition = \"2021\"\n\n[workspace]\n\n[dependencies]\nvelox-core = {{ version = \"{v}\" }}\nvelox-dom = {{ version = \"{v}\" }}\nvelox-style = {{ version = \"{v}\" }}\nvelox-renderer = {{ version = \"{v}\", features = [\"skia-native\"] }}\nserde_json = \"1.0\"\n\n[build-dependencies]\nveloxc = {{ version = \"{v}\" }}\n",
+        v = SCAFFOLD_VERSION
+    )
+}
+
+/// The dependency block for a scaffold resolved from **git**, pinned to the
+/// commit this binary was built at. Only reachable for a binary built inside a
+/// checkout whose own commit is known, so `rev` is a real revspec.
+fn cargo_toml_from_git(name: &str, rev: &str) -> String {
+    format!(
+        "[package]\nname = \"{name}\"\nversion = \"{v}\"\nedition = \"2021\"\n\n[workspace]\n\n[dependencies]\nvelox-core = {{ git = \"https://github.com/fahimaloy/velox\", rev = \"{rev}\", version = \"{v}\" }}\nvelox-dom = {{ git = \"https://github.com/fahimaloy/velox\", rev = \"{rev}\", version = \"{v}\" }}\nvelox-style = {{ git = \"https://github.com/fahimaloy/velox\", rev = \"{rev}\", version = \"{v}\" }}\nvelox-renderer = {{ git = \"https://github.com/fahimaloy/velox\", rev = \"{rev}\", version = \"{v}\", features = [\"skia-native\"] }}\nserde_json = \"1.0\"\n\n[build-dependencies]\nveloxc = {{ git = \"https://github.com/fahimaloy/velox\", rev = \"{rev}\", version = \"{v}\" }}\n",
+        v = SCAFFOLD_VERSION
+    )
+}
+
+/// The crates.io manifest, exposed so a test can prove the installed-CLI branch
+/// emits a pin cargo accepts. The branch itself is unreachable from inside the
+/// workspace (`compiled_in_workspace()` always wins there), so the only way to
+/// check its output is to render it directly.
+#[doc(hidden)]
+pub fn generate_cargo_toml_from_crates_io_for_test(name: &str) -> String {
+    cargo_toml_from_crates_io(name)
 }
 
 fn generate_main_rs() -> String {
@@ -441,7 +476,7 @@ fn generate_todo_item_vx() -> String {
 
 /// `App.vx` imports and renders `<Confirm>` and `<Modal>`, so `init` must write
 /// them. Omitting them made every scaffolded app fail to compile with E0433
-/// "could not find `confirm`/`modal` in `super`". `velox add` cannot supply
+/// "could not find `confirm`/`modal` in `super`". `veloxc add` cannot supply
 /// them either — that is plan task B2, still unimplemented — and the
 /// `ComponentResolver::with_builtin` fallback (B6) is deferred, so an explicit
 /// import is the only route these two components currently have.

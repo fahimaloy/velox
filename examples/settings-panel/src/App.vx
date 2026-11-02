@@ -1,0 +1,29 @@
+<template>
+  <div style="display:flex;min-height:100vh;background:#0B0E14;color:#E8EAEF;font-family:system-ui,sans-serif;">
+    <aside style="width:260px;padding:36px 28px;border-right:1px solid #1A1F2B;">
+      <h1 style="font-size:24px;font-weight:800;margin:0 0 28px;">Settings</h1>
+      <nav style="display:flex;flex-direction:column;gap:6px;">
+        <a href="#" style="padding:10px 14px;border-radius:10px;text-decoration:none;color:#8A929C;">General</a>
+        <a href="#" style="padding:10px 14px;border-radius:10px;text-decoration:none;color:#8A929C;">Appearance</a>
+        <a href="#" style="padding:10px 14px;border-radius:10px;text-decoration:none;color:#8A929C;">Privacy</a>
+      </nav>
+    </aside>
+    <main style="flex:1;padding:36px 48px;max-width:800px;">
+      <section aria-label="General settings">
+        <h2 style="font-size:28px;font-weight:800;margin:0 0 28px;">General</h2>
+        <div style="padding:16px 0;border-bottom:1px solid #1A1F2B;display:flex;justify-content:space-between;"><label>Language</label><span>English</span></div>
+      </section>
+      <section aria-label="Appearance settings" style="margin-top:24px;">
+        <h2 style="font-size:28px;font-weight:800;margin:0 0 28px;">Appearance</h2>
+        <div style="padding:16px 0;border-bottom:1px solid #1A1F2B;display:flex;justify-content:space-between;"><label>Theme</label><span>Dark</span></div>
+      </section>
+    </main>
+  </div>
+</template>
+<script setup>
+pub struct State {}
+impl State {
+  pub fn new() -> Self { Self {} }
+  pub fn title(&self) -> String { String::from("System Settings") }
+}
+</script>

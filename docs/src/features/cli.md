@@ -6,19 +6,19 @@
 
 | Command | Purpose |
 |:---|:---|
-| `velox init <name>` | Create a new Velox project with scaffolding |
-| `velox build [input]` | Build the current project, or compile a `.vx` component to Rust |
-| `velox run` | Build and run the current project |
-| `velox dev` | Start the dev server with file watching and hot reload |
-| `velox lint [target]` | Check `.vx` files for issues |
-| `velox add component <name>` | Generate a new component `.vx` file |
-| `velox version` | Show version and system info |
+| `veloxc init <name>` | Create a new Velox project with scaffolding |
+| `veloxc build [input]` | Build the current project, or compile a `.vx` component to Rust |
+| `veloxc run` | Build and run the current project |
+| `veloxc dev` | Start the dev server with file watching and hot reload |
+| `veloxc lint [target]` | Check `.vx` files for issues |
+| `veloxc add component <name>` | Generate a new component `.vx` file |
+| `veloxc version` | Show version and system info |
 
 ---
 
-## `velox init <name>`
+## `veloxc init <name>`
 
-Creates a complete, working project — not a stub. The scaffold is a todo list app with components, assets, and a build script, so everything is on screen from the first `velox dev`.
+Creates a complete, working project — not a stub. The scaffold is a todo list app with components, assets, and a build script, so everything is on screen from the first `veloxc dev`.
 
 | Flag | Short | Default | Meaning |
 |:---|:---|:---|:---|
@@ -46,37 +46,35 @@ The scaffold writes:
 Dependency resolution, in order: `--local <path>` wins; otherwise the CLI walks up from the current directory looking for a Velox workspace (a `velox-core/Cargo.toml`), or uses the checkout the CLI itself was built in — either way the scaffold gets relative **path** dependencies. When no workspace is found it falls back to **git** dependencies pinned to the commit the CLI was built at, so a scaffold always compiles against tested code.
 
 ```bash
-velox init counter
+veloxc init counter
 ```
 
 ```text
 ✅ Created Velox project: counter
 📦 To get started:
    cd counter
-   velox dev
-   velox build
-   velox run
+   veloxc dev
+   veloxc build
+   veloxc run
 ✅ Created Velox project at: counter
 
 📖 Next steps:
    cd counter
-   velox dev
+   veloxc dev
 ```
-
-> Note: the scaffold's printed next steps say `velox dev`, but the binary on your `PATH` is `veloxc` — type `veloxc dev` unless you have aliased it.
-
-> Warning: the git-pinned fallback assumes the CLI knows its own commit. A **crates.io-installed** `veloxc` does not — it falls back to `"unknown"` and writes `rev = "unknown"`, which Cargo rejects with ``revspec 'unknown' not found``. Scaffold from a clone (`cargo install --path veloxc`), pass `--local <path>`, or drop the `git = …` / `rev = …` keys from every `velox-*` line in the generated `Cargo.toml`.
+> The scaffold writes `veloxc` commands in its next-steps banner (line 21 of its `README.md`). The CLI and the scaffold are consistent.
+> The installed-CLI case (`cargo install veloxc`) is covered by the `version = "..."` dependency branch: `generate_cargo_toml` detects `rev == "unknown"` (the `VELOX_GIT_REV_FALLBACK` sentinel) and emits plain version pins instead of an unresolvable `rev = "unknown"`, which cargo rejects (`revspec 'unknown' not found`).
 
 ---
 
-## `velox build [input]`
+## `veloxc build [input]`
 
 Two modes, chosen by whether a positional `input` is given:
 
 | Mode | Invocation | Behavior |
 |:---|:---|:---|
-| Project build | `velox build` | `cargo build` for the current project |
-| Component compile | `velox build src/App.vx` | Compile the `.vx` file **and all imported components** to Rust source |
+| Project build | `veloxc build` | `cargo build` for the current project |
+| Component compile | `veloxc build src/App.vx` | Compile the `.vx` file **and all imported components** to Rust source |
 
 | Flag | Short | Meaning |
 |:---|:---|:---|
@@ -86,7 +84,7 @@ Two modes, chosen by whether a positional `input` is given:
 The component compile is recursive: every component imported from `<script setup>` is parsed and compiled, one `.rs` file per component in the output directory. The root component is wrapped in a `pub mod` block (so `include!` in `main.rs` works), imported components are declared with `#[path]` attributes, and child-component styles are merged into the root stylesheet — scoped ones stay scoped. When run from a build script, `cargo:rerun-if-changed` directives are emitted for every `.vx` file read, so Cargo re-runs the build script when a component changes.
 
 ```bash
-velox build src/App.vx -o target/velox-gen
+veloxc build src/App.vx -o target/velox-gen
 ```
 
 ```text
@@ -96,7 +94,7 @@ velox build src/App.vx -o target/velox-gen
 
 ---
 
-## `velox run`
+## `veloxc run`
 
 Builds first when `--release` is passed, then runs the project. The app inherits your terminal.
 
@@ -105,13 +103,13 @@ Builds first when `--release` is passed, then runs the project. The app inherits
 | `--release` | Build in release mode before running |
 
 ```bash
-velox run            # debug build (existing binary is reused by cargo)
-velox run --release  # builds in release mode first, then runs
+veloxc run            # debug build (existing binary is reused by cargo)
+veloxc run --release  # builds in release mode first, then runs
 ```
 
 ---
 
-## `velox dev`
+## `veloxc dev`
 
 Starts the dev server: file watching, rebuild on save, and the HMR channel that tells the running app to restart itself.
 
@@ -123,14 +121,14 @@ Starts the dev server: file watching, rebuild on save, and the HMR channel that 
 There is no positional directory argument — the watch root is passed with `--watch`/`-w`. The server watches `src/` and `assets/` (roots that do not exist are skipped), binds `127.0.0.1:31313` for hot reload, and serves keyboard commands on stdin.
 
 ```bash
-velox dev
+veloxc dev
 ```
 
 The full workflow — what updates live, what restarts, the banner, the shortcuts, and inotify troubleshooting — is on [Dev Workflow & HMR](hmr-dev-workflow.md).
 
 ---
 
-## `velox lint [target] [--fix]`
+## `veloxc lint [target] [--fix]`
 
 Checks `.vx` files for issues. Three kinds of findings:
 
@@ -145,9 +143,9 @@ The target defaults to `src` and may be a single `.vx` file or a directory (walk
 `--fix` applies the two auto-fixes — trailing whitespace on every line, and exactly one final newline. Parse errors are **not** auto-fixable: non-parseable files are reported as errors and left untouched.
 
 ```bash
-velox lint src/App.vx
-velox lint            # every .vx under src/
-velox lint --fix      # …and fix whitespace issues
+veloxc lint src/App.vx
+veloxc lint            # every .vx under src/
+veloxc lint --fix      # …and fix whitespace issues
 ```
 
 ```text
@@ -156,7 +154,7 @@ velox lint --fix      # …and fix whitespace issues
 
 ---
 
-## `velox add component <name>`
+## `veloxc add component <name>`
 
 Generates a new, self-contained component `.vx` file in `src/components/`. The name is normalized: `my-counter`, `side_bar`, and `My Component` all produce a PascalCase struct (`SideBar`), a matching PascalCase filename (`SideBar.vx`), and a kebab-case CSS class (`side-bar`). The name must start with a letter, and the file is never overwritten.
 
@@ -167,7 +165,7 @@ Generates a new, self-contained component `.vx` file in `src/components/`. The n
 Slot names are folded to the form the SFC parser registers — `footerBar` and `main_content` are scaffolded as `footer-bar` and `main-content` — and `default` cannot be requested explicitly.
 
 ```bash
-velox add component side-bar --slots header,footer
+veloxc add component side-bar --slots header,footer
 ```
 
 ```text
@@ -181,10 +179,10 @@ velox add component side-bar --slots header,footer
 
 ---
 
-## `velox version`
+## `veloxc version`
 
 ```bash
-velox version
+veloxc version
 ```
 
 ```text
@@ -205,7 +203,7 @@ Platform: Linux
 | `1` | Any command failure: `cargo build`/`run` failure, SFC parse errors, lint findings (`Lint failed with N errors`), missing project, invalid names |
 | `2` | Invalid usage (unknown flag, missing subcommand) — standard clap behavior |
 
-A failing `velox lint` exits non-zero, so it drops straight into CI: `velox lint src/` as a step fails the pipeline on the first parse error.
+A failing `veloxc lint` exits non-zero, so it drops straight into CI: `veloxc lint src/` as a step fails the pipeline on the first parse error.
 
 ---
 
@@ -213,15 +211,15 @@ A failing `velox lint` exits non-zero, so it drops straight into CI: `velox lint
 
 | Variable | Set by | Read by | Meaning |
 |:---|:---|:---|:---|
-| `VELOX_PATH` | `velox init --local` | `velox init` | Workspace to link as path dependencies |
-| `VELOX_HMR` | `velox dev` (spawn) | the running app | `1` enables the HMR client; `0` disables it |
-| `VELOX_HMR_PORT` | `velox dev` (spawn) | the running app | Port of the dev server's HMR listener (default `31313`) |
+| `VELOX_PATH` | `veloxc init --local` | `veloxc init` | Workspace to link as path dependencies |
+| `VELOX_HMR` | `veloxc dev` (spawn) | the running app | `1` enables the HMR client; `0` disables it |
+| `VELOX_HMR_PORT` | `veloxc dev` (spawn) | the running app | Port of the dev server's HMR listener (default `31313`) |
 | `VELOX_HEADLESS` | you | the renderer | `1` forces offscreen rendering (no presentation) |
 
 ---
 
 ## See also
 
-- [Dev Workflow & HMR](hmr-dev-workflow.md) — `velox dev` end to end.
+- [Dev Workflow & HMR](hmr-dev-workflow.md) — `veloxc dev` end to end.
 - [Renderer](renderer.md) — the HMR channel and rendering backends the CLI wires up.
-- [Template Syntax](template-syntax.md) — what `velox lint` checks and what `velox build` compiles.
+- [Template Syntax](template-syntax.md) — what `veloxc lint` checks and what `veloxc build` compiles.

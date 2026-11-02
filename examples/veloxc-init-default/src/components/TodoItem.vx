@@ -1,0 +1,274 @@
+<template>
+  <div class="row" :class="{ dark: dark }">
+    <div class="todo-item" :class="{ completed: completed }">
+      <button class="check" @click="on_toggle" :click-payload="index">
+        <span class="check-mark" v-if="completed">✓</span>
+      </button>
+      <div class="todo-text">{{ text }}</div>
+      <button class="remove" @click="on_remove" :click-payload="index">×</button>
+    </div>
+  </div>
+</template>
+
+<script setup>
+// One row of the list. `Todos` owns the data and the actions; this component
+// owns the row's appearance and nothing else.
+//
+// A note on the two wrappers above, since this parser has no comment syntax of
+// its own and every comment in this file lives here or in the style block.
+//
+// `.row` holds the THEME class and has to be an ancestor rather than the card
+// itself: the cascade matches a selector's leftmost part only against a STRICT
+// ancestor (velox-style/src/lib.rs `match_prefix` starts one level above the
+// target), and it has no way to say an element has two classes —
+// `parse_selector_part` reads `.todo-item.dark` as one class literally called
+// "todo-item.dark". So an element that HOLDS `.dark` can never be the element a
+// `.dark …` rule styles, which is why the theme carrier is unstyled and the
+// surface sits one level below it.
+//
+// `.todo-item` holds the STATE class one level further in, and that second
+// level is what makes the combination expressible at all: `.dark .completed
+// .check` needs a `.dark` ancestor of a `.completed` ancestor of the box. Both
+// carriers are elements this file renders, so every compound in that selector
+// gets this component's own scope id and the whole chain matches.
+//
+// `.todo-text` is a block rather than a bare span because it is the element the
+// text sits DIRECTLY in: the text painter wraps at its PARENT's content width
+// (velox-renderer/src/skia_render.rs `container_rect`), so a long task has to be
+// a direct child of the box that was sized for it, or it wraps at the row's
+// width and runs under the remove button.
+//
+// The check and the remove control are `<button>`s rather than an
+// `<input type="checkbox">` because Velox draws that at a fixed 18px with a
+// hard-coded tick colour (velox-renderer/src/skia_render.rs:2313), which cannot
+// be themed — and because `:hover` only reaches a `<button>`, an element
+// carrying `on:click`, or an element whose class is literally `btn`
+// (velox-renderer/src/events.rs:150). Both of these need hover.
+//
+// The ✓ and × above are literal characters, not character references: nothing in
+// Velox decodes `&#10003;`. Which of them actually render is a HOST-FONT
+// question and only ONE of the two is safe everywhere: × U+00D7 is Latin-1
+// Supplement and is in every candidate face, but ✓ U+2713 is NOT in Noto Sans.
+// Velox has one face and no glyph fallback, so a missing codepoint paints as
+// glyph 0 — a tofu box. `load_default_typeface` therefore prefers DejaVu Sans,
+// which has both, and the same face is bundled under
+// `velox-renderer/assets/`; the full coverage table is in `App.vx`'s script
+// block. Check a new symbol against that table before using it here.
+pub struct Props {
+    pub todo: String,
+    pub completed: bool,
+    pub index: String,
+    pub dark: bool,
+}
+
+pub struct State {
+    pub props: Props,
+}
+
+impl State {
+    pub fn new() -> Self {
+        Self {
+            props: Props {
+                todo: String::new(),
+                completed: false,
+                index: String::new(),
+                dark: false,
+            },
+        }
+    }
+
+    pub fn text(&self) -> String {
+        self.props.todo.clone()
+    }
+
+    pub fn completed(&self) -> bool {
+        self.props.completed
+    }
+
+    pub fn index(&self) -> String {
+        self.props.index.clone()
+    }
+
+    pub fn dark(&self) -> bool {
+        self.props.dark
+    }
+
+    // Row events bubble to the owning (Todos) State via the root dispatcher;
+    // these no-ops keep the generated per-component dispatcher well formed. The
+    // `click-payload` carries the row index the parent needs.
+    pub fn on_toggle(&self) {}
+    pub fn on_remove(&self) {}
+}
+</script>
+
+<style scoped>
+/* The row's own defaults, so the component stands on its own. The two wrappers
+   are unstyled: `.row` is a plain block that the list's `gap` spaces, and
+   `.todo-item` below is what fills it. */
+/* The row's own defaults, so the component stands on its own. The two wrappers
+   are unstyled: `.row` is a plain block that the list's `gap` spaces, and
+   `.todo-item` below is what fills it. The scales — type, space, surface, ink,
+   radius — are declared once, at the top of App.vx. */
+.row {
+    display: block;
+    width: 100%;
+    font-family: "Inter", "Noto Sans", "DejaVu Sans", sans-serif;
+    font-size: 15px;
+    line-height: 1.45;
+}
+/* A card, so the fill carries the layer and the edge only separates. `#DFDBD2`
+   is the decorative token, one step lighter than the `#D8D4CB` it replaces: at
+   1.38:1 on the fill it draws a line without drawing a BOX. */
+.todo-item {
+    display: flex;
+    flex-direction: row;
+    align-items: flex-start;
+    gap: 12px;
+    width: 100%;
+    padding: 12px;
+    border: 1px solid #DFDBD2;
+    border-radius: 12px;
+    background: #ffffff;
+}
+
+/* `align-items: flex-start` above is what keeps a two-line task aligned with
+   the top of its check instead of drifting to the vertical middle. 20px is the
+   smallest step on the control ladder, and at 12px of padding the row's rhythm
+   holds whatever the text does. */
+.check {
+    flex: 0 0 auto;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 20px;
+    height: 20px;
+    padding: 0;
+    border: 1px solid #868D92;
+    border-radius: 999px;
+    background: #ffffff;
+    color: #ffffff;
+}
+.check:hover {
+    border: 1px solid #0d6e66;
+}
+/* U+2713 CHECK MARK, verified present in the bundled face. 12px inside a 20px
+   circle is the proportion a check has to have to read as a check. */
+.check-mark {
+    display: block;
+    font-size: 12px;
+    font-weight: 700;
+    line-height: 1;
+    color: #ffffff;
+}
+/* `padding-top: 1px` is optical, not rhythm: a 15px glyph's cap height sits a
+   pixel below the box top, and without it the text reads low against the
+   check's circle. */
+.todo-text {
+    flex: 1 1 auto;
+    min-width: 0;
+    padding-top: 1px;
+    font-size: 15px;
+    line-height: 1.45;
+    color: #14181b;
+}
+.remove {
+    flex: 0 0 auto;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 28px;
+    height: 28px;
+    padding: 0;
+    border: 1px solid transparent;
+    border-radius: 8px;
+    background: #ffffff;
+    color: #5F6A70;
+    font-size: 16px;
+    line-height: 1;
+    /* Its ONLY child is a bare text node — the × — not an element. `justify-
+       content` positions flex ITEMS, and a text node is not one, so the × ignores
+       the `center` above and sits at the padding edge. `text-align` is what the
+       painter actually reads for a text node, and the sibling `.ghost` /
+       `.cancel` rules already carry it for the same reason. Without this the ×
+       is visibly off-centre in its button. */
+    text-align: center;
+}
+/* The destructive hover is the danger token at full strength, which is the only
+   place on the page a row's own chrome turns red. */
+.remove:hover {
+    border: 1px solid #a3342c;
+    background: #a3342c;
+    color: #ffffff;
+}
+
+/* Completed rows.
+
+   `text-decoration` is INHERITABLE (velox-style/src/lib.rs:761), so the
+   declaration on this box reaches the text node inside it, and the painter
+   reads it there — `line-through` is drawn as its own band above the baseline
+   (velox-renderer/src/skia_render.rs `draw_text_decorations`).
+
+   The state class is on the card and the text is reached as a DESCENDANT of it
+   rather than as `.todo-item.completed`: the selector parser takes everything
+   after a leading `.` as ONE class name (velox-style/src/lib.rs:382), so
+   `.todo-item.completed` looks for a class called "todo-item.completed" and
+   matches nothing. */
+.completed .check {
+    border: 1px solid #0d6e66;
+    background: #0d6e66;
+}
+/* Still a live control when the row is done, so it keeps a hover — just a
+   quieter one. */
+.completed .check:hover {
+    border: 1px solid #0a5750;
+    background: #0a5750;
+}
+/* The muted ink role, so a finished row steps down rather than disappearing. */
+.completed .todo-text {
+    color: #5F6A70;
+    text-decoration: line-through;
+}
+
+/* Dark overrides — source order decides the winner (velox-style/src/lib.rs:786
+   `apply_styles_with_hover`, cascade loop at :840), so they come last. The `.dark .completed …` pair
+   has to come after BOTH `.completed …` and `.dark …` to beat them. */
+.dark .todo-item {
+    border: 1px solid #313B42;
+    background: #141A1E;
+}
+.dark .check {
+    border: 1px solid #64727B;
+    background: #141A1E;
+    color: #04211D;
+}
+.dark .check:hover {
+    border: 1px solid #2DD4BF;
+}
+.dark .check-mark {
+    color: #04211D;
+}
+.dark .todo-text {
+    color: #EDF2F3;
+}
+.dark .remove {
+    border: 1px solid transparent;
+    background: #141A1E;
+    color: #849299;
+}
+.dark .remove:hover {
+    border: 1px solid #FF8A80;
+    background: #FF8A80;
+    color: #2B0704;
+}
+.dark .completed .check {
+    border: 1px solid #2DD4BF;
+    background: #2DD4BF;
+}
+.dark .completed .check:hover {
+    border: 1px solid #5EEAD4;
+    background: #5EEAD4;
+}
+.dark .completed .todo-text {
+    color: #849299;
+}
+</style>

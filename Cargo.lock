@@ -2742,7 +2742,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "velox-example-counter"
+name = "velox-example-dashboard"
 version = "0.1.0"
 dependencies = [
  "velox-core",
@@ -2753,7 +2753,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "velox-example-showcase"
+name = "velox-example-markdown-editor"
 version = "0.1.0"
 dependencies = [
  "velox-core",
@@ -2764,7 +2764,29 @@ dependencies = [
 ]
 
 [[package]]
-name = "velox-example-todo"
+name = "velox-example-settings-panel"
+version = "0.1.0"
+dependencies = [
+ "velox-core",
+ "velox-dom",
+ "velox-renderer",
+ "velox-style",
+ "veloxc",
+]
+
+[[package]]
+name = "velox-example-task-board"
+version = "0.1.0"
+dependencies = [
+ "velox-core",
+ "velox-dom",
+ "velox-renderer",
+ "velox-style",
+ "veloxc",
+]
+
+[[package]]
+name = "velox-example-veloxc-init-default"
 version = "0.1.0"
 dependencies = [
  "velox-core",

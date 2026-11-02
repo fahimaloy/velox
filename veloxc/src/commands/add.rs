@@ -5,7 +5,7 @@ use std::path::PathBuf;
 
 /// Walk up from the current directory looking for a Velox project root, defined
 /// as the first ancestor directory containing a `src/App.vx` entry point (the
-/// conventional project layout produced by `velox init`).
+/// conventional project layout produced by `veloxc init`).
 fn find_project_root() -> Option<PathBuf> {
     let cwd = std::env::current_dir().ok()?;
     let mut current = cwd.as_path();
@@ -173,7 +173,7 @@ fn resolve_slots(requested: Option<&str>) -> Result<Vec<String>> {
 pub fn add_component(name: &str, slots: Option<&str>) -> Result<PathBuf> {
     let root = find_project_root().ok_or_else(|| {
         anyhow::anyhow!(
-            "not inside a Velox project (no src/App.vx found). Run `velox init <name>` first."
+            "not inside a Velox project (no src/App.vx found). Run `veloxc init <name>` first."
         )
     })?;
 

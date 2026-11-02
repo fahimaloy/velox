@@ -35,7 +35,7 @@ veloxc version
 
 This prints the version, the edition, and the platform.
 
-> Note: the installed binary is `veloxc`; the CLI's own help text says `velox`, so every `velox …` command in this guide is written as `veloxc …` to make copy-paste work.
+> Note: the CLI binary and all its subcommand help now read `veloxc`, consistent with the installed package name.
 
 ### From source
 
@@ -84,7 +84,7 @@ my-app/
 | `src/components/*.vx` | The list, the input, a single row, and two reusable dialogs |
 | `assets/` | Static assets; `<img src="…">` paths resolve against the project root |
 
-> Warning: a **crates.io-installed** `veloxc` has no git revision recorded — it falls back to `"unknown"` and the generated `Cargo.toml` gets `rev = "unknown"`, which Cargo rejects with ``revspec 'unknown' not found``. Until that fallback is fixed, scaffold from a clone (`git clone https://github.com/fahimaloy/velox && cargo install --path veloxc`), pass `veloxc init my-app --local <path>`, or drop the `git = …` / `rev = …` keys from every `velox-*` line in the generated `Cargo.toml` and keep the `version` key.
+> Note: `veloxc init` writes path dependencies when a workspace is found; otherwise it uses published `version` dependencies (`SCAFFOLD_VERSION`) for crates.io installs, so the generated manifest is always resolvable. See CLI Reference for details.
 
 > Note: `veloxc init` writes **path** dependencies when it can find a Velox workspace — the `VELOX_PATH` environment variable, a workspace above the current directory, or the checkout the CLI itself was built in. Otherwise it writes **git** dependencies pinned to the commit the CLI was built at, so a scaffold always compiles against tested code.
 
@@ -172,8 +172,10 @@ To persist it, write those two lines to a file in `/etc/sysctl.d/` and run `sudo
 
 | Tutorial | You build |
 | --- | --- |
-| [Counter](tutorials/counter.md) | A reactive counter — state, events, `v-model`, and the dev loop |
-| [Todo App](tutorials/todo.md) | Component composition, computed state, list rendering, and events |
-| [Showcase](tutorials/showcase.md) | A guided tour of the layout engine — centering, flex, scroll, and wrap |
+| [Veloxc Init Default](tutorials/veloxc-init-default.md) | The default scaffold: components, theme, dialogs, `v-for` |
+| [Dashboard](tutorials/dashboard.md) | Analytics dashboard: grid, charts, sidebar, real-time updates |
+| [Markdown Editor](tutorials/markdown-editor.md) | Split-pane editor with live preview, toolbar, resize handle |
+| [Task Board](tutorials/task-board.md) | Kanban board: drag-to-reorder, persistence, modal forms |
+| [Settings Panel](tutorials/settings-panel.md) | System settings UI: forms, tabs, accordion, toasts |
 
 For the full command surface — `lint`, `add component`, and every flag — see the [CLI Reference](features/cli.md).

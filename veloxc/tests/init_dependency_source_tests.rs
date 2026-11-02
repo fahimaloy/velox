@@ -41,6 +41,8 @@ enum Pin {
     Path(String),
     /// `git = "…"`, `rev = "…"`.
     Git { url: String, rev: String },
+    /// `version = "…"` with no path or git source — the crates.io form.
+    Version,
 }
 
 impl Pin {
@@ -83,6 +85,8 @@ fn velox_pins(cargo_toml: &str) -> Vec<(String, Pin)> {
         } else if let Some(url) = field("git") {
             let rev = field("rev").unwrap_or_default();
             Pin::Git { url, rev }
+        } else if field("version").is_some() {
+            Pin::Version
         } else {
             continue;
         };
@@ -190,6 +194,50 @@ fn git_remote_refs_resolve(rev: &str) -> Result<bool, String> {
     Ok(refs.lines().any(|l| !l.trim().is_empty()))
 }
 
+/// The `cargo install veloxc` case: no checkout anywhere on the machine, and no
+/// git revision baked into the binary.
+///
+/// `veloxc/build.rs` only records `VELOX_GIT_REV` when `git rev-parse` can run
+/// against a checkout, so a published binary carries the `"unknown"` sentinel.
+/// `generate_cargo_toml` used to emit `rev = "unknown"` for that case, which
+/// cargo rejects with ``revspec 'unknown' not found`` — on the very first thing
+/// a crates.io user does. The branch is unreachable from inside the workspace
+/// (`compiled_in_workspace()` short-circuits it), so the output is rendered
+/// directly here rather than through a spawned `veloxc init`.
+#[test]
+fn installed_cli_scaffold_pins_published_versions_not_an_unknown_rev() {
+    let toml = veloxc::commands::init::generate_cargo_toml_from_crates_io_for_test("myapp");
+
+    assert!(
+        !toml.contains("unknown"),
+        "the installed-CLI manifest must not carry the `unknown` sentinel:\n{toml}"
+    );
+    assert!(
+        !toml.contains("git = "),
+        "an installed CLI has no revision to pin a git dependency to:\n{toml}"
+    );
+
+    let pins = velox_pins(&toml);
+    assert!(
+        pins.len() >= 5,
+        "expected all five velox dependency crates, found {} in:\n{}",
+        pins.len(),
+        toml
+    );
+    let version = env!("CARGO_PKG_VERSION");
+    for (name, pin) in &pins {
+        assert!(
+            matches!(pin, Pin::Version),
+            "{name} must be a plain version pin, got {pin:?}:\n{toml}"
+        );
+    }
+    let expected = format!("veloxc = {{ version = \"{version}\" }}");
+    assert!(
+        toml.contains(&expected),
+        "the build dependency must pin the published veloxc version `{version}`:\n{toml}"
+    );
+}
+
 /// The reproduction. Run from outside the checkout so the git-rev branch of
 /// `generate_cargo_toml` is the one under test.
 #[test]
@@ -243,6 +291,11 @@ fn scaffolded_velox_dependencies_are_resolvable() {
                 )),
                 Err(e) => panic!("{e}"),
             },
+            Pin::Version => unresolvable.push(format!(
+                "{name}: a plain `version` pin inside the checkout. `velox init` run with a \
+                 velox workspace in reach (here: the one it was built in) must use `path` \
+                 pins, so a version pin means workspace detection regressed."
+            )),
         }
     }
 

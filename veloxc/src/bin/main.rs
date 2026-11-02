@@ -3,7 +3,7 @@ use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 
 #[derive(Parser)]
-#[command(name = "velox")]
+#[command(name = "veloxc")]
 #[command(version = env!("CARGO_PKG_VERSION"))]
 #[command(author = "fahimaloy")]
 #[command(about = "🚀 Velox - A modern UI framework for Rust", long_about = None)]
@@ -132,7 +132,7 @@ fn main() -> Result<()> {
             println!("✅ Created Velox project at: {}", path.display());
             println!("\n📖 Next steps:");
             println!("   cd {}", path.display());
-            println!("   velox dev");
+            println!("   veloxc dev");
         }
 
         Commands::Build {
@@ -192,7 +192,7 @@ fn main() -> Result<()> {
         },
 
         Commands::Version => {
-            println!("velox {}", env!("CARGO_PKG_VERSION"));
+            println!("veloxc {}", env!("CARGO_PKG_VERSION"));
             println!("Edition: 2021");
             #[cfg(target_os = "linux")]
             println!("Platform: Linux");

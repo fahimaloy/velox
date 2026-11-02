@@ -48,7 +48,7 @@ Velox is for Rust developers who want to build desktop UIs without reaching for 
 
 ## Next steps
 
-Head to [Getting Started](getting-started.md) to install the CLI and build your first component, then follow the [Counter tutorial](tutorials/counter.md) for a guided tour.
+Head to [Getting Started](getting-started.md) to install the CLI and build your first component, then follow the [Dashboard tutorial](tutorials/dashboard.md) for a guided tour.
 
 ---
 

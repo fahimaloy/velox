@@ -9,9 +9,9 @@
 ## The dev loop
 
 ```bash
-velox dev                # watch the current directory
-velox dev -w path/to/app # watch a specific project root
-velox dev --release      # rebuild and relaunch in release mode
+veloxc dev                # watch the current directory
+veloxc dev -w path/to/app # watch a specific project root
+veloxc dev --release      # rebuild and relaunch in release mode
 ```
 
 There is no positional directory argument — the watch root is passed with `--watch`/`-w` and defaults to `.`.
@@ -151,5 +151,5 @@ To persist the limit across reboots, write those two lines to a file in `/etc/sy
 ## See also
 
 - [Renderer](renderer.md) — the HMR channel protocol and what `FullReload` does on the app side.
-- [CLI Reference](cli.md) — every command and flag, including `velox dev`.
+- [CLI Reference](cli.md) — every command and flag, including `veloxc dev`.
 - [Template Syntax](template-syntax.md) — the blocks the classifier inspects.

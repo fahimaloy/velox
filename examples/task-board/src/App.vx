@@ -1,0 +1,50 @@
+<template>
+  <div class="board-app">
+    <header class="board-header">
+      <h1>Task Board</h1>
+      <button @click="add_card" aria-label="Add new card">+ New</button>
+    </header>
+    <div class="columns">
+      <section class="col" aria-label="Backlog column">
+        <h2>Backlog</h2>
+        <article class="card"><h3>Design System</h3><p>Update color tokens</p></article>
+        <article class="card"><h3>API Integration</h3><p>Connect dashboard endpoints</p></article>
+      </section>
+      <section class="col" aria-label="In progress column">
+        <h2>In Progress</h2>
+        <article class="card"><h3>Markdown Editor</h3><p>Live preview mode</p></article>
+        <article class="card"><h3>Dashboard Charts</h3><p>Real-time updates</p></article>
+      </section>
+      <section class="col" aria-label="Done column">
+        <h2>Done</h2>
+        <article class="card"><h3>Initial Scaffold</h3><p>Project setup complete</p></article>
+        <article class="card"><h3>Theme Toggle</h3><p>Dark mode support</p></article>
+      </section>
+    </div>
+  </div>
+</template>
+
+<script setup>
+use velox_core::signal::Signal;
+pub struct State {}
+impl State {
+  pub fn new() -> Self { Self {} }
+  pub fn title(&self) -> String { String::from("Task Board") }
+  pub fn add_card(&self) {}
+}
+</script>
+
+<style scoped>
+.board-app { background:#0B0E14; min-height:100vh; color:#E8EAEF; font-family:system-ui,sans-serif; padding:32px; }
+.board-header { display:flex; align-items:center; justify-content:space-between; margin-bottom:32px; }
+.board-header h1 { margin:0; font-size:28px; font-weight:800; letter-spacing:-0.03em; }
+.board-header button { padding:10px 24px; border-radius:999px; background:#2DD4BF; color:#0B0E14; font-weight:700; border:none; cursor:pointer; font-size:14px; }
+.columns { display:grid; grid-template-columns:repeat(auto-fit,minmax(300px,1fr)); gap:24px; }
+.col { background:#141922; border:1px solid #1E2636; border-radius:16px; padding:20px; }
+.col h2 { margin:0 0 16px; font-size:18px; font-weight:700; color:#2DD4BF; }
+.card { background:#1A212E; border-radius:12px; padding:16px; margin-bottom:12px; border:1px solid #232B3A; transition:transform .12s; }
+.card:hover { transform:translateY(-2px); box-shadow:0 8px 24px rgba(0,0,0,.3); }
+.card h3 { margin:0 0 6px; font-size:16px; font-weight:600; }
+.card p { margin:0; color:#8A929C; font-size:14px; }
+@media (max-width:768px) { .columns { grid-template-columns:1fr; } }
+</style>

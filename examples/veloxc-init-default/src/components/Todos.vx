@@ -1,0 +1,301 @@
+<template>
+  <div class="todos" :class="{ dark: is_dark }">
+    <div class="composer">
+      <TodoInput
+        :value="new_todo"
+        :placeholder="placeholder"
+        :dark="is_dark"
+        @input="on_input"
+      />
+      <button class="add" @click="add_todo">
+        <span class="btn-icon">+</span>
+        <span class="btn-label">Add</span>
+      </button>
+    </div>
+
+    <div class="list">
+      <TodoItem
+        v-for="(todo, idx) in todos"
+        :todo="todo.text"
+        :completed="todo.completed"
+        :index="idx"
+        :dark="is_dark"
+        @toggle="on_toggle"
+        @remove="on_remove"
+      />
+      <p class="empty" v-if="empty_message">{{ empty_message }}</p>
+    </div>
+  </div>
+</template>
+
+<script setup>
+import TodoInput from './TodoInput.vx'
+import TodoItem from './TodoItem.vx'
+use velox_core::signal::Signal;
+
+// `.todos` holds the theme class and styles nothing themed itself, so the
+// `.dark …` rules in the style block below — which can only match a STRICT
+// descendant, see the note in TodoItem.vx — have something to reach. Comments
+// live here and in the style block because this template parser has no comment
+// syntax of its own: a `<!-- … -->` inside `<template>` is read as an opening
+// tag with an empty name that never closes.
+
+#[derive(Clone)]
+pub struct Todo {
+    pub text: String,
+    pub completed: bool,
+}
+
+// This component is created ONCE by `App` and held there as a field, so the
+// list survives every re-render — and so it is the only component in the app
+// whose handlers the root dispatcher reaches as `state.todos.<method>()`
+// (velox-sfc/src/template_codegen.rs `collect_tree_handlers_inner`). The theme
+// flag lives here for the same reason: `App` can read it, and every child this
+// component renders can be handed the answer as a prop.
+//
+// The children are reached through those handlers rather than through props,
+// which is why `@input`, `@toggle` and `@remove` are bound here: those are the
+// NAMES the root dispatcher looks for when it walks into a child's template, and
+// the methods they resolve to are the ones on THIS State.
+pub struct State {
+    pub todos: Signal<Vec<Todo>>,
+    pub new_todo: Signal<String>,
+    pub dark: Signal<bool>,
+}
+
+impl State {
+    pub fn new() -> Self {
+        Self {
+            todos: Signal::new(vec![
+                Todo {
+                    text: String::from("Read the Velox guide"),
+                    completed: false,
+                },
+                Todo {
+                    text: String::from("Try the theme switch, top right"),
+                    completed: false,
+                },
+                Todo {
+                    text: String::from("Ship something small"),
+                    completed: true,
+                },
+            ]),
+            new_todo: Signal::new(String::new()),
+            dark: Signal::new(false),
+        }
+    }
+
+    pub fn is_dark(&self) -> String {
+        if self.dark.get() {
+            String::from("true")
+        } else {
+            String::from("false")
+        }
+    }
+
+    // v-for reads `state.todos.get()`; Signal<Vec<T>> returns an owned clone
+    // that is iterated to render one TodoItem per entry.
+    pub fn new_todo(&self) -> String {
+        self.new_todo.get()
+    }
+
+    // TodoInput declares `placeholder` as a required prop, so this parent has
+    // to supply it. A `Props` field the parent leaves unbound is a
+    // `compile_error!` naming the field, not a silent default
+    // (velox-sfc/src/template_codegen.rs `component_props_arg`), so the API here
+    // is deliberately small and complete rather than partially optional.
+    pub fn placeholder(&self) -> String {
+        String::from("What needs to be done?")
+    }
+
+    pub fn on_input(&self, payload: &str) {
+        self.new_todo.set(payload.to_string());
+    }
+
+    pub fn add_todo(&self) {
+        let text = self.new_todo.get().trim().to_string();
+        if text.is_empty() {
+            return;
+        }
+        self.todos.update(|mut list| {
+            list.push(Todo {
+                text,
+                completed: false,
+            });
+            list
+        });
+        self.new_todo.set(String::new());
+    }
+
+    // The index travels as a string, because `:click-payload` is the only way a
+    // row can say WHICH row it is. It arrives as the prop `index`, and the root
+    // dispatcher hands it back here verbatim.
+    pub fn on_toggle(&self, payload: &str) {
+        if let Ok(idx) = payload.trim().parse::<usize>() {
+            self.todos.update(|mut list| {
+                if idx < list.len() {
+                    list[idx].completed = !list[idx].completed;
+                }
+                list
+            });
+        }
+    }
+
+    pub fn on_remove(&self, payload: &str) {
+        if let Ok(idx) = payload.trim().parse::<usize>() {
+            self.todos.update(|mut list| {
+                if idx < list.len() {
+                    list.remove(idx);
+                }
+                list
+            });
+        }
+    }
+
+    // Counts are exposed rather than rendered here so `App` — which owns the
+    // chrome above this component — can put them in its own header.
+    pub fn total(&self) -> usize {
+        self.todos.get().len()
+    }
+
+    pub fn done_count(&self) -> usize {
+        self.todos.get().iter().filter(|todo| todo.completed).count()
+    }
+
+    pub fn can_clear(&self) -> bool {
+        self.done_count() > 0
+    }
+
+    pub fn remove_completed(&self) {
+        self.todos.update(|mut list| {
+            list.retain(|todo| !todo.completed);
+            list
+        });
+    }
+
+    pub fn empty_message(&self) -> String {
+        if self.todos.get().is_empty() {
+            String::from("Nothing left to do. Add the next thing.")
+        } else {
+            String::new()
+        }
+    }
+}
+</script>
+
+<style scoped>
+/* `font-family` / `font-size` / `line-height` are declared on the ROOT of every
+   component in this template, so each one is self-contained and readable on its
+   own; everything below inherits from here (velox-style/src/lib.rs:761). */
+/* `font-family` / `font-size` / `line-height` are declared on the ROOT of every
+   component in this template, so each one is self-contained and readable on its
+   own; everything below inherits from here (velox-style/src/lib.rs:761). The
+   scales themselves — type, space, surface, ink, radius — are declared once, at
+   the top of App.vx. */
+.todos {
+    display: flex;
+    flex-direction: column;
+    font-family: "Inter", "Noto Sans", "DejaVu Sans", sans-serif;
+    font-size: 15px;
+    line-height: 1.45;
+    color: #14181b;
+}
+
+/* The composer is an ENTRY BAR, not a container with three boxes in it: one
+   rounded plane with a single edge, the field flush inside it with no edge of
+   its own, and the one filled button on the right. The old version put a second
+   rounded box inside the first, which is what made the whole page read as a
+   form. The field's inset is the field's own `padding`, so the bar can sit at
+   `padding: 0` and be exactly as tall as the control inside it.
+
+   Its edge is the `#868D92` control token rather than the `#DFDBD2` decorative
+   one, because this is the one place on the page where an edge is a hit target
+   rather than a separation. */
+.composer {
+    display: flex;
+    flex-direction: row;
+    align-items: center;
+    gap: 8px;
+    padding: 0;
+    border: 1px solid #868D92;
+    border-radius: 12px;
+    background: #ffffff;
+}
+/* The one filled button on the page, and the accent's only other appearance
+   besides `.eyebrow`. A pill, because a filled control and an outlined one have
+   to be different SHAPES as well as different weights — at 40px tall next to a
+   32px outlined ghost the height alone already does that, and the pill says it
+   a second time. */
+.add {
+    flex: 0 0 auto;
+    display: flex;
+    flex-direction: row;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    height: 40px;
+    padding: 0 16px;
+    border: 1px solid #0d6e66;
+    border-radius: 999px;
+    background: #0d6e66;
+    color: #ffffff;
+    font-size: 15px;
+    font-weight: 700;
+    line-height: 1.35;
+}
+.add:hover {
+    border: 1px solid #0a5750;
+    background: #0a5750;
+}
+/* U+002B PLUS SIGN, verified present in the bundled face. It carries no ink of
+   its own — the button's `color` reaches it through the cascade — so it needs
+   no role of its own. */
+.btn-icon {
+    font-size: 16px;
+    line-height: 1;
+}
+.btn-label {
+    white-space: nowrap;
+}
+.list {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    margin-top: 16px;
+}
+/* An empty list is a RECESS, not a card: there is nothing to raise, so it is
+   filled with the inset token and edged with the decorative one. */
+.empty {
+    display: block;
+    margin: 0;
+    padding: 32px 24px;
+    border: 1px solid #DFDBD2;
+    border-radius: 12px;
+    background: #EFEDE8;
+    color: #4A555B;
+    font-size: 15px;
+    line-height: 1.5;
+    text-align: center;
+}
+
+/* ---- Dark: the same ladder, re-stated in dark tones. ---------------------- */
+
+.dark .composer {
+    border: 1px solid #64727B;
+    background: #141A1E;
+}
+.dark .add {
+    border: 1px solid #2DD4BF;
+    background: #2DD4BF;
+    color: #04211D;
+}
+.dark .add:hover {
+    border: 1px solid #5EEAD4;
+    background: #5EEAD4;
+}
+.dark .empty {
+    border: 1px solid #313B42;
+    background: #20282D;
+    color: #A8B4B9;
+}
+</style>

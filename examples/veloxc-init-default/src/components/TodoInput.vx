@@ -1,0 +1,141 @@
+<template>
+  <div class="field" :class="{ dark: dark }">
+    <input
+      type="text"
+      class="input"
+      :value="value"
+      :placeholder="placeholder"
+      @input="on_input"
+    />
+  </div>
+</template>
+
+<script setup>
+// The composer field. It owns how the field LOOKS and nothing else: the text
+// belongs to `Todos`, and so does the decision of what happens when the user
+// types.
+//
+// `.field` exists only to hold the theme class, and it cannot be styled by a
+// `.dark …` rule in this same block: the cascade matches a selector's leftmost
+// part only against a STRICT ancestor (velox-style/src/lib.rs `match_prefix`),
+// and the element carrying the class is never its own ancestor. So the carrier
+// is a wrapper and the surface lives one level down.
+//
+// The field's own defaults are declared here rather than inherited from the
+// page, so the component is usable on its own. `dark` is a prop because of the
+// wrapper note in the template above.
+//
+// The author's `padding`, `background` and `border` on an `<input>` are honoured
+// by the renderer, and `::placeholder` is a real pseudo-class: the cascade keeps
+// those declarations on a SEPARATE `style:placeholder` attribute
+// (velox-style/src/lib.rs:786, `PLACEHOLDER_STYLE_ATTR`) so they cannot repaint
+// the value, and the box painter reads them when the value is empty
+// (velox-renderer/src/skia_render.rs `placeholder_color`). A placeholder's
+// colour is otherwise DERIVED from the field's own text colour, so the one below
+// is a decision rather than an absence.
+pub struct Props {
+    pub value: String,
+    pub placeholder: String,
+    pub dark: bool,
+}
+
+pub struct State {
+    pub props: Props,
+}
+
+impl State {
+    pub fn new() -> Self {
+        Self {
+            props: Props {
+                value: String::new(),
+                placeholder: String::from("What needs to be done?"),
+                dark: false,
+            },
+        }
+    }
+
+    pub fn value(&self) -> String {
+        self.props.value.clone()
+    }
+
+    pub fn placeholder(&self) -> String {
+        self.props.placeholder.clone()
+    }
+
+    pub fn dark(&self) -> bool {
+        self.props.dark
+    }
+
+    // The root dispatcher routes a typed event to the owning `Todos` state, so
+    // this signature exists only to keep the generated component handler well
+    // formed. `Todos::on_input` is where the text actually lands.
+    pub fn on_input(&self) {}
+}
+</script>
+
+<style scoped>
+/* The field is the composer's INSET, not a box inside it: it has no edge and no
+   fill of its own, and its inset is its own `padding`. The one edge on this
+   control is the bar's, in Todos.vx — two nested rounded boxes is what made the
+   old page read as a form. The scales are declared once, at the top of App.vx. */
+.field {
+    display: flex;
+    flex: 1 1 auto;
+    min-width: 0;
+    font-family: "Inter", "Noto Sans", "DejaVu Sans", sans-serif;
+    font-size: 15px;
+    line-height: 1.45;
+}
+
+/* 40px tall, with the text 12px from the plane's inner edge: the two numbers
+   that decide whether a text field feels like a control or like a line in a
+   paragraph. It matches `.add`, so the bar is exactly as tall as the two
+   controls inside it. The `#ffffff` is not decoration — the renderer paints a
+   WHITE fallback fill on any `<input>` that declares no background
+   (velox-style/src/ua.css), so saying it out loud is the only way to reach the
+   card fill the bar already has. `min-width: 0` is what lets the field shrink
+   inside the composer's flex row instead of refusing to.
+
+   `border: 1px solid transparent` is how "no edge of its own" is spelled here,
+   and it is load-bearing rather than a no-op. An `<input>` that declares NO
+   author border is not left unpainted: the box painter falls back to a hard 1px
+   `#c8c8c8` outline centred on the field's own edge
+   (velox-renderer/src/skia_render.rs, `field_radius` fallback). Against the
+   composer's plane that grey line read as a SECOND, square-cornered box inside
+   the bar — a bright vertical edge a few pixels left of `.add`, which is the
+   "the Add button is overlapping the input box" report. `border: 0` is not the
+   way out: the same painter forces `stroke_width = 1.0` whenever an author
+   border exists at all, so `0` still draws a 1px line. An author border of a
+   zero-alpha colour is what actually suppresses it, and `transparent` is
+   understood by both the cascade (velox-dom/src/style.rs) and the painter.
+
+   The 1px is a real border box, so the side padding is 11px to keep the text
+   12px from the plane's inner edge — exactly where it was before this border
+   existed — and `box-sizing: border-box` (velox-style/src/ua.css `*`) keeps the
+   field 40px tall. */
+.input {
+    flex: 1 1 auto;
+    width: 100%;
+    min-width: 0;
+    height: 40px;
+    padding: 0 11px;
+    border: 1px solid transparent;
+    background: #ffffff;
+    color: #14181b;
+    font-size: 15px;
+}
+/* The muted ink role — 4.75:1 on the inset fill, where the `#667076` this
+   replaces was 4.33:1 and failed 4.5 outright. */
+.input::placeholder {
+    color: #5F6A70;
+}
+
+/* Dark overrides — source order decides the winner, so they come last. */
+.dark .input {
+    background: #141A1E;
+    color: #EDF2F3;
+}
+.dark .input::placeholder {
+    color: #849299;
+}
+</style>

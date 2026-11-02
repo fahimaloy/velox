@@ -995,7 +995,7 @@ fn run_build(
     let _ = tx.send(DevCmd::Built(outcome));
 }
 
-/// Whether hot reload is actually available in this `velox dev` run.
+/// Whether hot reload is actually available in this `veloxc dev` run.
 ///
 /// This exists because the honest answer is not knowable from the port number.
 /// The listener used to bind on its own thread, so a failure arrived as an
@@ -1138,7 +1138,7 @@ impl Drop for HmrListener {
     }
 }
 
-/// The directories `velox dev` watches, and why there is more than one.
+/// The directories `veloxc dev` watches, and why there is more than one.
 ///
 /// Two roots, deliberately. `src/` is the template, and `assets/` holds the
 /// images `App.vx` and `Modal.vx` point their `<img src>` at — so replacing
@@ -1698,7 +1698,7 @@ mod tests {
     }
 
     /// A port nobody is holding, chosen by the kernel. Never hardcode one: a test
-    /// that binds 31313 collides with a real `velox dev` on the same machine.
+    /// that binds 31313 collides with a real `veloxc dev` on the same machine.
     fn a_free_port() -> u16 {
         let l = std::net::TcpListener::bind(("127.0.0.1", 0)).expect("bind an ephemeral port");
         l.local_addr().expect("a local addr").port()

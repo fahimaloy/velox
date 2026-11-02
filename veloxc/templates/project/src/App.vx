@@ -92,7 +92,7 @@
 // things a first `<img>` gets wrong are all visible here and all avoided:
 //
 //   * `src` is a PATH RESOLVED AGAINST THE PROCESS WORKING DIRECTORY
-//     (`std::fs::read` in velox-renderer), not against this file. `velox dev`
+//     (`std::fs::read` in velox-renderer), not against this file. `veloxc dev`
 //     and `cargo run` both set it to the project root, which is why
 //     `assets/velox-logo.svg` works and why `src="/…"` or a path relative to
 //     `src/` would not.
